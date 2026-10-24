@@ -14,7 +14,7 @@ brew install --cask belov38/yellowcode/yellowcode
 
 или `.dmg` со страницы выпуска. Обновление: `brew update && brew upgrade --cask belov38/yellowcode/yellowcode`.
 
-**Windows:** `Yellowcode-<версия>-windows-x64-setup.exe` со страницы выпуска.
+**Windows:** установщик `Yellowcode-<версия>-windows-x64-setup.exe` или без установки — `Yellowcode-<версия>-windows-x64-portable.zip` (распакуйте и запустите `yellowcode.exe`).
 
 ## Как начать
 
