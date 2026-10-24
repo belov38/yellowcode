@@ -1,50 +1,59 @@
 # Yellowcode
 
-Early alpha desktop viewer for 1C configurations, with a read-only query console for file databases.
-This repository contains release notes and binary downloads. Application source code is maintained separately.
+Предварительная (альфа) версия настольного просмотрщика конфигураций 1С с консолью запросов к файловым базам.
+Работает только на чтение. В этом репозитории лежат готовые сборки и описания выпусков; исходный код ведётся отдельно.
 
-## Install on macOS Apple Silicon
+Последний выпуск и файлы для скачивания — на странице [Releases](https://github.com/belov38/yellowcode/releases).
+
+## Установка на macOS (Apple Silicon)
+
+Через Homebrew:
 
 ```sh
 brew install --cask belov38/yellowcode/yellowcode
 open -a Yellowcode
 ```
 
-Apple Silicon Macs (M1 and later, including M4) only. The binary targets macOS 11 or later;
-older macOS versions have not been tested. Intel Macs, Windows and Linux are not supported by this release.
+Или вручную: скачайте `.dmg` со страницы выпуска, откройте его и перетащите Yellowcode в «Программы».
 
-Alternatively, download the ZIP from [Releases](https://github.com/belov38/yellowcode/releases), unzip it and move
-`Yellowcode.app` into Applications.
+Нужен Mac на Apple Silicon (M1 и новее) с macOS 11 или новее; на старых версиях macOS приложение не проверялось.
+Приложение подписано Developer ID и заверено Apple: Gatekeeper откроет его без дополнительных разрешений.
 
-### First launch
-
-This alpha is not Developer ID signed or notarized. macOS may block the downloaded application.
-After attempting to open it, go to **System Settings → Privacy & Security → Open Anyway**, verify that the
-application is Yellowcode, and confirm. Do not disable Gatekeeper globally.
-
-## What to try
-
-- Open a `.cf` or `.cfe` to browse metadata, object properties, modules, forms and templates.
-- Inspect data composition schemas: datasets, query text, fields, links, resources and parameters.
-- Open a copy of `1Cv8.1CD` to use the query console, result tables, parameters, history and query plans.
-- Explore syntax help and role permissions.
-
-No 1C installation or Rust toolchain is required. Supply your own configuration or database;
-no business data or sample configuration is included in the download. Use an offline copy of the database.
-
-## Alpha limitations
-
-Read-only preview, not a replacement for the 1C platform. Configuration editing, XML-directory import,
-the visual query builder and report generation through DCS are not part of this release. Query support
-is incomplete; some constructs, including virtual register slices, are not supported. Large configurations
-can take time and several GB of memory to open. Please include the app version and reproduction steps in bug reports,
-without attaching business data or credentials.
-
-## Updates
+Обновление:
 
 ```sh
 brew update
-brew upgrade --cask yellowcode
+brew upgrade --cask belov38/yellowcode/yellowcode
 ```
 
-Third-party notices and licenses are included in `Yellowcode.app/Contents/Resources/licenses/`.
+## Установка на Windows (x64)
+
+Скачайте со страницы выпуска файл `Yellowcode-<версия>-windows-x64-setup.exe` и запустите его. Права администратора
+не нужны: установка идёт для текущего пользователя. Установщик и программа подписаны издателем **BELOV.AI LIMITED**.
+Пока у нового приложения нет репутации, SmartScreen может показать предупреждение. Проверьте издателя, затем нажмите
+«Подробнее» → «Выполнить в любом случае».
+
+Нужен Microsoft Edge WebView2. В Windows 10/11 он обычно уже установлен; если его нет, установщик предложит его скачать.
+
+## Что попробовать
+
+- Открыть `.cf`, `.cfe` или `.dt` и посмотреть дерево метаданных, свойства объектов, модули, формы и макеты.
+- Посмотреть схемы компоновки данных: наборы, текст запроса, поля, связи, ресурсы, параметры и варианты.
+- Открыть копию `1Cv8.1CD` или папку файловой базы: окно «Данные», консоль запросов, результаты, параметры, конструктор запросов.
+- Сконвертировать базу: «Файл → Конвертировать…» (DT → 1CD/CF, 1CD → DT/CF).
+- Синтаксис-помощник и права ролей.
+
+Устанавливать 1С или средства разработки не нужно. Конфигурации и базы используйте свои: в пакет не входят ни
+данные, ни примеры конфигураций. Работайте с копией базы, а не с рабочей.
+
+## Ограничения альфы
+
+Это предварительный просмотр, а не замена платформы 1С. Изменять конфигурацию и записывать данные в базу нельзя.
+Табличные документы пока не отображаются («В разработке»). Конструктор и язык запросов поддерживаются не полностью,
+отчёты СКД не выполняются, загрузки из XML нет. Крупные конфигурации могут открываться долго и занимать несколько ГБ памяти.
+
+В сообщениях об ошибках укажите версию приложения, систему и шаги для воспроизведения. Не прикладывайте рабочие
+базы, выгрузки и пароли.
+
+Сведения о сторонних компонентах и лицензии лежат внутри приложения: на macOS — `Yellowcode.app/Contents/Resources/licenses/`,
+на Windows — в папке `licenses` каталога установки.
