@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>onec cfg</title>
+<link id="skin-vars" rel="stylesheet" href="/skin/vars.css">
+<link rel="stylesheet" href="/front/app.css">
+<link rel="stylesheet" href="/front/x.css">
+<link rel="stylesheet" href="/front/editor.css">
+<script type="module" src="/front/js/main.js"></script>
+</head>
+<body>
+<header id="top">
+  <nav id="menubar" aria-label="menu"></nav>
+  <div id="searchbox">
+    <input id="search" type="search" autocomplete="off" spellcheck="false">
+    <label><input id="opt-names" type="checkbox"> <span id="lbl-names"></span></label>
+    <label><input id="opt-regex" type="checkbox"> <span id="lbl-regex"></span></label>
+    <ul id="results"></ul>
+  </div>
+  <h1 id="cfgname"></h1>
+  <span id="syn"></span>
+  <span id="stats"></span>
+</header>
+<div id="toolbars" aria-label="Панели инструментов"></div>
+<div id="banner" hidden><span id="banner-text"></span><button id="banner-x" type="button">×</button></div>
+<div id="layout">
+  <aside id="side" tabindex="-1">
+    <div class="dock-caption">Конфигурация <span class="dock-buttons" aria-hidden="true"><span class="chrome-box"><span class="chrome-glyph chrome-pin"></span></span><span class="chrome-box"><span class="chrome-glyph chrome-close"></span></span></span></div>
+    <div id="tree-actions" class="toolbar"><button type="button" disabled title="Не реализовано в Yellowcode">Действия ▾</button></div>
+    <div id="tree-search"><input id="tree-filter" type="search" placeholder="Поиск (Ctrl+Alt+M)" aria-label="Поиск в дереве"></div>
+    <div id="tree"></div>
+  </aside>
+  <div id="splitter" role="separator" aria-orientation="vertical"></div>
+  <section id="main">
+    <div id="window-caption" class="mdi-caption" hidden></div>
+    <div id="windows"><div id="empty" class="msg"></div></div>
+    <div id="tabbar" role="tablist"></div>
+  </section>
+  <div id="splitter-pal" role="separator" aria-orientation="vertical"></div>
+  <aside id="palette">
+    <div id="palette-title"></div>
+    <label id="pal-sort"><input id="opt-alpha" type="checkbox"> <span id="lbl-alpha"></span></label>
+    <div id="palette-body"></div>
+  </aside>
+</div>
+<footer id="statusbar"><span>Для получения подсказки нажмите F1</span><span>CAP　 NUM　 OVR　 Стр:　　 Кол:</span></footer>
+</body>
+</html>

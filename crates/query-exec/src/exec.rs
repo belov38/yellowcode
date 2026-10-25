@@ -1,0 +1,192 @@
+use bsl_prim::Number;
+use query_ir::{ExecError, QValue, StmtL};
+
+use crate::model::{VALUE_SIZE, rows_model, value_model, vec_block};
+use crate::ops::{Cx, rows_push_growth};
+use crate::plan::{PlanOptions, build, plan_temps};
+use crate::proxy::with_source;
+use crate::result::QueryResult;
+use crate::source::{DataSource, ExecEnv};
+use crate::temp::TempTables;
+
+pub fn execute(
+    stmt: &StmtL,
+    src: &dyn DataSource,
+    env: &ExecEnv<'_>,
+) -> Result<QueryResult, ExecError> {
+    execute_with(stmt, src, env, PlanOptions::default())
+}
+
+#[doc(hidden)]
+pub fn execute_with(
+    stmt: &StmtL,
+    src: &dyn DataSource,
+    env: &ExecEnv<'_>,
+    opts: PlanOptions,
+) -> Result<QueryResult, ExecError> {
+    execute_temps(stmt, src, env, None, opts)
+}
+
+#[doc(hidden)]
+pub fn execute_temps(
+    stmt: &StmtL,
+    src: &dyn DataSource,
+    env: &ExecEnv<'_>,
+    temps: Option<&TempTables>,
+    opts: PlanOptions,
+) -> Result<QueryResult, ExecError> {
+    with_source(stmt.max_depth, src, move |s| run(stmt, s, env, temps, opts))?
+}
+
+fn charge_sets(r: &query_ir::RelL, cx: &mut Cx<'_>) -> Result<(), ExecError> {
+    use query_ir::{PExpr, RelL};
+    fn expr(e: &PExpr, bytes: &mut u64) {
+        crate::plan::walk(e, &mut |x| match x {
+            PExpr::Set(s) => {
+                *bytes += vec_block(s.values.len(), VALUE_SIZE)
+                    + s.values.iter().map(value_model).sum::<u64>();
+            }
+            PExpr::InList { rhs, .. } => {
+                *bytes += rhs
+                    .iter()
+                    .filter_map(|y| match y {
+                        PExpr::Lit(v) => Some(value_model(v)),
+                        _ => None,
+                    })
+                    .sum::<u64>();
+            }
+            PExpr::InQuery { q, .. } => rel(q, bytes),
+            _ => {}
+        });
+    }
+    fn exprs<'e>(es: impl IntoIterator<Item = &'e PExpr>, bytes: &mut u64) {
+        for e in es {
+            expr(e, bytes);
+        }
+    }
+    fn rel(r: &RelL, b: &mut u64) {
+        match r {
+            RelL::Empty | RelL::Scan { .. } | RelL::TempScan { .. } | RelL::Values { .. } => {}
+            RelL::Join { l, r, on, eq, .. } => {
+                rel(l, b);
+                rel(r, b);
+                expr(on, b);
+                for (x, y) in eq {
+                    expr(x, b);
+                    expr(y, b);
+                }
+            }
+            RelL::Filter { input, pred } => {
+                rel(input, b);
+                expr(pred, b);
+            }
+            RelL::Project { input, exprs: es } => {
+                rel(input, b);
+                exprs(es, b);
+            }
+            RelL::Aggregate {
+                input, keys, aggs, ..
+            } => {
+                rel(input, b);
+                exprs(keys, b);
+                exprs(aggs.iter().filter_map(|a| a.arg.as_ref()), b);
+            }
+            RelL::Distinct(input) | RelL::Top { input, .. } => rel(input, b),
+            RelL::Sort { input, keys } | RelL::HierarchyOrder { input, keys, .. } => {
+                rel(input, b);
+                exprs(keys.iter().map(|(k, _)| k), b);
+            }
+            RelL::Union { parts, .. } => parts.iter().for_each(|p| rel(p, b)),
+            RelL::HierarchyClosure { seeds, .. } => match seeds {
+                query_ir::HierSeeds::Values(v) => exprs(v, b),
+                query_ir::HierSeeds::Rel(r) => rel(r, b),
+            },
+            RelL::SemiJoin { input, l, q, .. } => {
+                rel(input, b);
+                exprs(l, b);
+                rel(q, b);
+            }
+        }
+    }
+    let mut bytes = 0u64;
+    rel(r, &mut bytes);
+    cx.mem.grow(bytes)
+}
+
+fn run(
+    stmt: &StmtL,
+    src: &dyn DataSource,
+    env: &ExecEnv<'_>,
+    temps: Option<&TempTables>,
+    opts: PlanOptions,
+) -> Result<QueryResult, ExecError> {
+    let plan = plan_temps(stmt, src, temps, opts)?;
+    let mut op = build(&plan);
+    let mut cx = Cx::new(env, src);
+    cx.temps = temps;
+    cx.week_start = stmt.week_start;
+    cx.plan_options(opts);
+    charge_sets(&stmt.root, &mut cx)?;
+    let width = if stmt.totals.is_some() {
+        usize::MAX
+    } else {
+        stmt.columns.len()
+    };
+    let mut rows = Vec::new();
+    let mut shared = crate::model::Payloads::default();
+    while let Some(mut row) = op.next(&mut cx)? {
+        row.truncate(width);
+        let release = rows_push_growth(&rows, &cx, rows.capacity())?;
+        let mem = &cx.mem;
+        let (bytes, old_table) =
+            crate::model::row_cap_model_shared(&row, &mut shared, &mut |n| mem.grow(n))?;
+        cx.mem.grow(bytes)?;
+        rows.push(row);
+        cx.mem.shrink(release + old_table);
+    }
+    cx.mem.shrink(shared.table());
+    drop(shared);
+    op.close(&mut cx);
+    drop(op);
+    cx.mem.release_scratch();
+    crate::ops::nested::stitch(stmt, &mut rows, &mut cx, temps, opts)?;
+    if let Some(c) = stmt.auto_number {
+        for (i, row) in rows.iter_mut().enumerate() {
+            if let Some(v) = row.get_mut(usize::from(c)) {
+                *v = QValue::Number(Number::from_u64(i as u64 + 1));
+            }
+        }
+    }
+    cx.mem.release_held();
+    cx.mem.release_scratch();
+    let totals = match &stmt.totals {
+        Some(spec) => Some(crate::totals::build(
+            spec.clone(),
+            &rows,
+            src,
+            env,
+            &cx.mem,
+        )?),
+        None => None,
+    };
+    let columns = stmt.columns.clone();
+    cx.mem.grow(crate::model::columns_model(&columns))?;
+    cx.mem.reconcile(
+        rows_model(&rows)
+            + crate::model::columns_model(&columns)
+            + totals.as_ref().map_or(0, crate::totals::TotalsTree::model),
+    );
+    Ok(QueryResult {
+        columns,
+        rows,
+        totals,
+    })
+}
+
+pub fn result_model(r: &QueryResult) -> u64 {
+    crate::model::columns_model(&r.columns)
+        + rows_model(&r.rows)
+        + r.totals
+            .as_ref()
+            .map_or(0, crate::totals::TotalsTree::model)
+}

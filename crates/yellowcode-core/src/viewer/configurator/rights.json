@@ -1,0 +1,478 @@
+{
+ "ActiveUsers": {
+  "id": "IDS_RIGHT_ACTIVEUSERS",
+  "ru": "Активные пользователи",
+  "en": "Active users",
+  "ru_hint": "Право на получение списка активных пользователей",
+  "en_hint": "Right to obtain the list of active users"
+ },
+ "Administration": {
+  "id": "IDS_RIGHT_ADMIN",
+  "ru": "Администрирование",
+  "en": "Administration",
+  "ru_hint": "Право на выполнение административных функций",
+  "en_hint": "Right to perform administrative operations"
+ },
+ "AnalyticsSystemClient": {
+  "id": "IDS_RIGHT_ANALYTICS_SYSTEM_CLIENT",
+  "ru": "Клиент системы аналитики",
+  "en": "Analytics system client",
+  "ru_hint": "Право запуска в режиме клиента системы аналитики",
+  "en_hint": "Right to run in analytics system client mode"
+ },
+ "Automation": {
+  "id": "IDS_RIGHT_OLEAUTOMATION",
+  "ru": "Automation",
+  "en": "Automation",
+  "ru_hint": "Право на использование Automation",
+  "en_hint": "Right to use Automation"
+ },
+ "CollaborationSystemInfoBaseRegistration": {
+  "id": "IDS_RIGHT_ECS_IBREGISTER",
+  "ru": "Регистрация системы взаимодействия",
+  "en": "Register collaboration system",
+  "ru_hint": "Право на регистрацию системы взаимодействия",
+  "en_hint": "Right to register the Collaboration System"
+ },
+ "ConfigurationExtensionsAdministration": {
+  "id": "IDS_RIGHT_CONFIGEXTENSIONSADMINISTRATION",
+  "ru": "Администрирование расширений конфигурации",
+  "en": "Configuration extension administration",
+  "ru_hint": "Право на администрирование расширений конфигурации",
+  "en_hint": "Right to perform administrative operations on configuration extensions"
+ },
+ "DataAdministration": {
+  "id": "IDS_RIGHT_DATAADMINISTRATION",
+  "ru": "Администрирование данных",
+  "en": "Data administration",
+  "ru_hint": "Право на администрирование данных",
+  "en_hint": "Right to administer data"
+ },
+ "Delete": {
+  "id": "IDS_RIGHT_DELETE",
+  "ru": "Удаление",
+  "en": "Delete",
+  "ru_hint": "Право на удаление ",
+  "en_hint": "Right to delete "
+ },
+ "Edit": {
+  "id": "IDS_RIGHT_EDIT",
+  "ru": "Редактирование",
+  "en": "Edit",
+  "ru_hint": "Право на редактирование",
+  "en_hint": "Right to edit"
+ },
+ "EditDataHistoryVersionComment": {
+  "id": "IDS_RIGHT_EDIT_COMMENT_DATAHISTORY",
+  "ru": "Редактирование комментария версии истории данных",
+  "en": "Edit data history version comment",
+  "ru_hint": "Право на редактирование комментария версии истории данных",
+  "en_hint": "Right to edit data history version comment"
+ },
+ "EventLog": {
+  "id": "IDS_RIGHT_EVENTLOG",
+  "ru": "Журнал регистрации",
+  "en": "Event log",
+  "ru_hint": "Право на просмотр журнала регистрации",
+  "en_hint": "Right to view the event log"
+ },
+ "ExclusiveMode": {
+  "id": "IDS_RIGHT_EXCLUSIVEMODE",
+  "ru": "Монопольный режим",
+  "en": "Exclusive mode",
+  "ru_hint": "Право на включение монопольного режима",
+  "en_hint": "Right to enable exclusive mode"
+ },
+ "Execute": {
+  "id": "IDS_RIGHT_BPTASKEXECUTE",
+  "ru": "Выполнение",
+  "en": "Execute",
+  "ru_hint": "Право на выполнение задачи",
+  "en_hint": "Right to perform a task"
+ },
+ "ExternalConnection": {
+  "id": "IDS_RIGHT_EXTERNALCONNECTION",
+  "ru": "Внешнее соединение",
+  "en": "External connection",
+  "ru_hint": "Право на использование внешнего соединения",
+  "en_hint": "Right to use external connection"
+ },
+ "Get": {
+  "id": "IDS_RIGHT_SESSIONPARAMGET",
+  "ru": "Получение",
+  "en": "Get",
+  "ru_hint": "Получение текущего значения",
+  "en_hint": "Get current value"
+ },
+ "InputByString": {
+  "id": "IDS_RIGHT_INPUTBYSTRING",
+  "ru": "Ввод по строке",
+  "en": "Autocomplete",
+  "ru_hint": "Ввод в поле ввода значения поиском по строке",
+  "en_hint": "Use autocomplete on input field"
+ },
+ "Insert": {
+  "id": "IDS_RIGHT_NEW",
+  "ru": "Добавление",
+  "en": "Insert",
+  "ru_hint": "Право на добавление",
+  "en_hint": "Right to insert"
+ },
+ "InteractiveChangeOfPosted": {
+  "id": "IDS_RIGHT_EDITPOSTED",
+  "ru": "Интерактивное изменение проведенных",
+  "en": "Interactive change of posted",
+  "ru_hint": "Право интерактивного изменения проведенных",
+  "en_hint": "Right for interactive change of posted"
+ },
+ "InteractiveClearDeletionMark": {
+  "id": "IDS_RIGHT_INTRDELETIONUNMARK",
+  "ru": "Интерактивное снятие пометки удаления",
+  "en": "Interactive unmark for deletion",
+  "ru_hint": "Право на интерактивное снятие пометки удаления",
+  "en_hint": "Right to interactively clear a deletion mark"
+ },
+ "InteractiveClearDeletionMarkPredefinedData": {
+  "id": "IDS_RIGHT_INTRDELETIONUNMARK_PREDEFINED",
+  "ru": "Интерактивное снятие пометки удаления предопределенных",
+  "en": "Interactive removal of deletion mark from predefined objects",
+  "ru_hint": "Право на интерактивное снятие пометки удаления предопределенных",
+  "en_hint": "Right to interactively remove deletion mark from predefined objects"
+ },
+ "InteractiveDelete": {
+  "id": "IDS_RIGHT_INTRDELETE",
+  "ru": "Интерактивное удаление",
+  "en": "Interactive delete",
+  "ru_hint": "Право на интерактивное удаление",
+  "en_hint": "Right to delete interactively"
+ },
+ "InteractiveDeleteMarked": {
+  "id": "IDS_RIGHT_INTRDELETEMARKED",
+  "ru": "Интерактивное удаление помеченных",
+  "en": "Interactive delete marked",
+  "ru_hint": "Право на интерактивное удаление помеченных",
+  "en_hint": "Right to delete marked items interactively"
+ },
+ "InteractiveDeleteMarkedPredefinedData": {
+  "id": "IDS_RIGHT_INTRDELETEMARKED_PREDEFINED",
+  "ru": "Интерактивное удаление помеченных предопределенных",
+  "en": "Interactive deletion of marked predefined objects",
+  "ru_hint": "Право на интерактивное удаление помеченных предопределенных",
+  "en_hint": "Right to perform interactive deletion of marked predefined objects"
+ },
+ "InteractiveDeletePredefinedData": {
+  "id": "IDS_RIGHT_INTRDELETE_PREDEFINED",
+  "ru": "Интерактивное удаление предопределенных",
+  "en": "Interactive deletion of predefined objects",
+  "ru_hint": "Право на интерактивное удаление предопределенных",
+  "en_hint": "Right to perform interactive deletion of predefined objects"
+ },
+ "InteractiveExecute": {
+  "id": "IDS_RIGHT_BPTASKINTERACTIVEEXECUTION",
+  "ru": "Интерактивное выполнение",
+  "en": "Interactive execute",
+  "ru_hint": "Право на интерактивное выполнение задачи",
+  "en_hint": "Right to perform task interactively"
+ },
+ "InteractiveInsert": {
+  "id": "IDS_RIGHT_INTRINSERT",
+  "ru": "Интерактивное добавление",
+  "en": "Interactive insert",
+  "ru_hint": "Право на интерактивное добавление",
+  "en_hint": "Right to insert interactively"
+ },
+ "InteractiveOpenExtDataProcessors": {
+  "id": "IDS_RIGHT_INTROPENEXTPROCESSINGS",
+  "ru": "Интерактивное открытие внешних обработок",
+  "en": "Open external data processors interactively",
+  "ru_hint": "Право на интерактивное открытие внешних обработок",
+  "en_hint": "Right to open external data processors interactively"
+ },
+ "InteractiveOpenExtReports": {
+  "id": "IDS_RIGHT_INTROPENEXTREPORTS",
+  "ru": "Интерактивное открытие внешних отчетов",
+  "en": "Open external reports interactively",
+  "ru_hint": "Право на интерактивное открытие внешних отчетов",
+  "en_hint": "Rights to open external reports interactively"
+ },
+ "InteractivePosting": {
+  "id": "IDS_RIGHT_INTRPOST",
+  "ru": "Интерактивное проведение",
+  "en": "Interactive posting",
+  "ru_hint": "Право на интерактивное проведение",
+  "en_hint": "Right to post interactively"
+ },
+ "InteractivePostingRegular": {
+  "id": "IDS_RIGHT_INTRPOSTNONOPERATIONAL",
+  "ru": "Интерактивное проведение неоперативное",
+  "en": "Interactive posting regular",
+  "ru_hint": "Право интерактивного проведения в неоперативном режиме",
+  "en_hint": "Right to interactively post with deferral"
+ },
+ "InteractiveSetDeletionMark": {
+  "id": "IDS_RIGHT_INTRDELETIONMARK",
+  "ru": "Интерактивная пометка на удаление",
+  "en": "Interactive mark for deletion",
+  "ru_hint": "Право на интерактивную установку пометки на удаление",
+  "en_hint": "Right to mark interactively for deletion"
+ },
+ "InteractiveSetDeletionMarkPredefinedData": {
+  "id": "IDS_RIGHT_INTRDELETIONMARK_PREDEFINED",
+  "ru": "Интерактивная пометка на удаление предопределенных",
+  "en": "Interactive deletion mark on predefined objects",
+  "ru_hint": "Право на интерактивную установку пометки на удаление предопределенных",
+  "en_hint": "Right to interactively set deletion mark on predefined objects"
+ },
+ "InteractiveStart": {
+  "id": "IDS_RIGHT_BPSTARTINTERACTIVE",
+  "ru": "Интерактивный старт",
+  "en": "Interactive start",
+  "ru_hint": "Право на интерактивный старт бизнес-процесса",
+  "en_hint": "Right to start business process interactively"
+ },
+ "InteractiveUndoPosting": {
+  "id": "IDS_RIGHT_INTRUNPOST",
+  "ru": "Интерактивная отмена проведения",
+  "en": "Interactive undo posting",
+  "ru_hint": "Право на интерактивную отмену проведения",
+  "en_hint": "Right to cancel posting interactively"
+ },
+ "MainWindowModeEmbeddedWorkplace": {
+  "id": "IDS_RIGHT_MAINWINDOWMODEEMBEDDEDWORKPLACE",
+  "ru": "Режим основного окна \"Встроенное рабочее место\"",
+  "en": "Main window mode \"Embedded workspace\"",
+  "ru_hint": "Право на запуск клиентского приложения в режиме основного окна \"Встроенное рабочее место\"",
+  "en_hint": "Right to run the client application in main window mode \"Embedded workspace\""
+ },
+ "MainWindowModeFullscreenWorkplace": {
+  "id": "IDS_RIGHT_MAINWINDOWMODEFULLSCREENWORKPLACE",
+  "ru": "Режим основного окна \"Полноэкранное рабочее место\"",
+  "en": "Main window mode \"Full-screen workspace\"",
+  "ru_hint": "Право на запуск клиентского приложения в режиме основного окна \"Полноэкранное рабочее место\"",
+  "en_hint": "Right to run the client application in main window mode \"Full-screen workspace\""
+ },
+ "MainWindowModeKiosk": {
+  "id": "IDS_RIGHT_MAINWINDOWMODEKIOSK",
+  "ru": "Режим основного окна \"Киоск\"",
+  "en": "Main window mode \"Kiosk\"",
+  "ru_hint": "Право на запуск клиентского приложения в режиме основного окна \"Киоск\"",
+  "en_hint": "Right to run the client application in main window mode \"Kiosk\""
+ },
+ "MainWindowModeNormal": {
+  "id": "IDS_RIGHT_MAINWINDOWMODENORMAL",
+  "ru": "Режим основного окна \"Обычный\"",
+  "en": "Main window mode \"Normal\"",
+  "ru_hint": "Право на запуск клиентского приложения в режиме основного окна \"Обычный\"",
+  "en_hint": "Right to run the client application in main window mode \"Normal\""
+ },
+ "MainWindowModeWorkplace": {
+  "id": "IDS_RIGHT_MAINWINDOWMODEWORKPLACE",
+  "ru": "Режим основного окна \"Рабочее место\"",
+  "en": "Main window mode \"Workspace\"",
+  "ru_hint": "Право на запуск клиентского приложения в режиме основного окна \"Рабочее место\"",
+  "en_hint": "Right to run the client application in main window mode \"Workspace\""
+ },
+ "MobileClient": {
+  "id": "IDS_RIGHT_MOBILECLIENT",
+  "ru": "Мобильный клиент",
+  "en": "Mobile client",
+  "ru_hint": "Право запуска в режиме мобильного клиента",
+  "en_hint": "Right to run the application in mobile client mode"
+ },
+ "Output": {
+  "id": "IDS_RIGHT_INTROUTPUT",
+  "ru": "Вывод",
+  "en": "Output",
+  "ru_hint": "Вывод информации на печать, сохранение в файл, копирование в буфер обмена.",
+  "en_hint": "Print information, save it to file or copy to clipboard."
+ },
+ "Posting": {
+  "id": "IDS_RIGHT_POST",
+  "ru": "Проведение",
+  "en": "Posting",
+  "ru_hint": "Право на проведение",
+  "en_hint": "Right to post"
+ },
+ "Read": {
+  "id": "IDS_RIGHT_READING",
+  "ru": "Чтение",
+  "en": "Read",
+  "ru_hint": "Право на чтение",
+  "en_hint": "Right to read"
+ },
+ "ReadDataHistory": {
+  "id": "IDS_RIGHT_READ_DATAHISTORY",
+  "ru": "Чтение истории данных",
+  "en": "Read data history",
+  "ru_hint": "Право на чтение истории данных",
+  "en_hint": "Right to read data history"
+ },
+ "ReadDataHistoryOfMissingData": {
+  "id": "IDS_RIGHT_READ_MISSING_DATAHISTORY",
+  "ru": "Чтение истории данных отсутствующих данных",
+  "en": "Read history of missing data",
+  "ru_hint": "Право на чтение истории данных отсутствующих данных",
+  "en_hint": "Right to read history of missing data"
+ },
+ "SaveUserData": {
+  "id": "IDS_RIGHT_SAVEUSERDATA",
+  "ru": "Сохранение данных пользователя",
+  "en": "Save user data",
+  "ru_hint": "Право на сохранение данных пользователя",
+  "en_hint": "Right to save user data"
+ },
+ "Set": {
+  "id": "IDS_RIGHT_SESSIONPARAMSET",
+  "ru": "Установка",
+  "en": "Set",
+  "ru_hint": "Установка нового значения",
+  "en_hint": "Set new value"
+ },
+ "Start": {
+  "id": "IDS_RIGHT_BPSTART",
+  "ru": "Старт",
+  "en": "Start",
+  "ru_hint": "Право на старт бизнес-процесса",
+  "en_hint": "Right to start business process"
+ },
+ "SwitchToDataHistoryVersion": {
+  "id": "IDS_RIGHT_SWITCH_TO_VERSION_DATAHISTORY",
+  "ru": "Переход на версию истории данных",
+  "en": "Revert to data history version",
+  "ru_hint": "Право перехода на версию истории данных",
+  "en_hint": "Right to revert to data history version"
+ },
+ "TechnicalSpecialistMode": {
+  "id": "IDS_RIGHT_ALLFUNCTIONSMODE",
+  "ru": "Режим технического специалиста",
+  "en": "Advanced tools",
+  "ru_hint": "Право на функции для технического специалиста",
+  "en_hint": "Right to use advanced tools"
+ },
+ "ThickClient": {
+  "id": "IDS_RIGHT_THICKCLIENT",
+  "ru": "Толстый клиент",
+  "en": "Thick client",
+  "ru_hint": "Право запуска в режиме толстого клиента",
+  "en_hint": "Right to run in thick client mode"
+ },
+ "ThinClient": {
+  "id": "IDS_RIGHT_THINCLIENT",
+  "ru": "Тонкий клиент",
+  "en": "Thin client",
+  "ru_hint": "Право запуска в режиме тонкого клиента",
+  "en_hint": "Right to run in thin client mode"
+ },
+ "TotalsControl": {
+  "id": "IDS_RIGHT_TOTALSCONTROL",
+  "ru": "Управление итогами",
+  "en": "Totals control",
+  "ru_hint": "Право на управление итогами",
+  "en_hint": "Right to manage totals"
+ },
+ "UndoPosting": {
+  "id": "IDS_RIGHT_UNPOST",
+  "ru": "Отмена проведения",
+  "en": "Undo posting",
+  "ru_hint": "Право на отмену проведения",
+  "en_hint": "Right to undo posting"
+ },
+ "Update": {
+  "id": "IDS_RIGHT_UPDATE",
+  "ru": "Изменение",
+  "en": "Update",
+  "ru_hint": "Право на изменение",
+  "en_hint": "Right to update"
+ },
+ "UpdateDataBaseConfiguration": {
+  "id": "IDS_RIGHT_UPDATEDBCONFIG",
+  "ru": "Обновление конфигурации базы данных",
+  "en": "Update database configuration",
+  "ru_hint": "Право на выполнение обновления конфигурации базы данных",
+  "en_hint": "Right to update database configuration"
+ },
+ "UpdateDataHistory": {
+  "id": "IDS_RIGHT_UPDATE_DATAHISTORY",
+  "ru": "Изменение истории данных",
+  "en": "Update data history",
+  "ru_hint": "Право на изменение истории данных",
+  "en_hint": "Right to update data history"
+ },
+ "UpdateDataHistoryOfMissingData": {
+  "id": "IDS_RIGHT_UPDATE_MISSING_DATAHISTORY",
+  "ru": "Изменение истории данных отсутствующих данных",
+  "en": "Update history of missing data",
+  "ru_hint": "Право на изменение истории данных отсутствующих данных",
+  "en_hint": "Right to update history of missing data"
+ },
+ "UpdateDataHistorySettings": {
+  "id": "IDS_RIGHT_UPDATE_SETTINGS_DATAHISTORY",
+  "ru": "Изменение настроек истории данных",
+  "en": "Update data history settings",
+  "ru_hint": "Право на изменение настроек истории данных",
+  "en_hint": "Right to update data history settings"
+ },
+ "UpdateDataHistoryVersionComment": {
+  "id": "IDS_RIGHT_UPDATE_COMMENT_DATAHISTORY",
+  "ru": "Изменение комментария версии истории данных",
+  "en": "Update data history version comment",
+  "ru_hint": "Право на изменение комментария версии истории данных",
+  "en_hint": "Right to update data history version comment"
+ },
+ "Use": {
+  "id": "IDS_RIGHT_USAGE",
+  "ru": "Использование",
+  "en": "Use",
+  "ru_hint": "Право на использование",
+  "en_hint": "Right to use"
+ },
+ "View": {
+  "id": "IDS_RIGHT_VIEW",
+  "ru": "Просмотр",
+  "en": "View",
+  "ru_hint": "Право на просмотр",
+  "en_hint": "Right to view"
+ },
+ "ViewDataHistory": {
+  "id": "IDS_RIGHT_VIEW_DATAHISTORY",
+  "ru": "Просмотр истории данных",
+  "en": "View data history",
+  "ru_hint": "Право на просмотр истории данных",
+  "en_hint": "Right to view data history"
+ },
+ "WebClient": {
+  "id": "IDS_RIGHT_WEBCLIENT",
+  "ru": "Веб-клиент",
+  "en": "Web client",
+  "ru_hint": "Право запуска в режиме веб-клиента",
+  "en_hint": "Right to run in web client mode"
+ },
+ "ExclusiveModeTerminationAtSessionStart": {
+  "id": "IDS_RIGHT_EXCLUSIVEMODETERMINATION",
+  "ru": "Завершение монопольного режима при начале сеанса",
+  "en": "Exit exclusive mode upon session start",
+  "ru_hint": "Право на принудительное завершение сеанса, установившего монопольный режим, при начале нового сеанса",
+  "en_hint": "Right to force termination of a session that has enabled exclusive mode when starting a new session"
+ },
+ "StandardAuthenticationChange": {
+  "id": "IDS_RIGHT_STANDARDAUTHENTICATIONCHANGE",
+  "ru": "Изменение стандартной аутентификации текущего пользователя",
+  "en": "Changing standard authentication for current user",
+  "ru_hint": "Изменение стандартной аутентификации текущего пользователя",
+  "en_hint": "Changing standard authentication for current user"
+ },
+ "SessionStandardAuthenticationChange": {
+  "id": "IDS_RIGHT_SESSIONSTANDARDAUTHENTICATIONCHANGE",
+  "ru": "Изменение стандартной аутентификации сеанса",
+  "en": "Changing standard session authentication",
+  "ru_hint": "Изменение стандартной аутентификации сеанса",
+  "en_hint": "Changing standard session authentication"
+ },
+ "SessionOSAuthenticationChange": {
+  "id": "IDS_RIGHT_SESSIONOSAUTHENTICATIONCHANGE",
+  "ru": "Изменение аутентификации операционной системы сеанса",
+  "en": "Changing operating system authentication of the session",
+  "ru_hint": "Изменение аутентификации операционной системы сеанса",
+  "en_hint": "Changing operating system authentication of the session"
+ }
+}

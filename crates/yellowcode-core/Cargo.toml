@@ -1,0 +1,56 @@
+[package]
+name = "yellowcode-core"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99.1"
+license = "MIT OR Apache-2.0"
+publish = false
+autotests = false
+autoexamples = false
+autobenches = false
+
+[features]
+clap = ["dep:clap"]
+testing = []
+
+[dependencies]
+thiserror = "2"
+unicode-normalization = "0.1"
+base64 = "0.22"
+regex = "1"
+sha2 = "0.10"
+tempfile = "3"
+v8users = { path = "../v8users" }
+brace = { path = "../brace" }
+bsl-compiler = { path = "../bsl-compiler" }
+bsl-prim = { path = "../bsl-prim", default-features = false }
+bsl-syntax = { path = "../bsl-syntax" }
+bsl-testhost = { path = "../bsl-testhost" }
+dtfile = { path = "../dtfile" }
+form-layout = { path = "../form-layout" }
+form-model = { path = "../form-model", features = ["mdconf"] }
+ibschema = { path = "../ibschema" }
+infobase = { path = "../infobase" }
+mdconf = { path = "../mdconf" }
+memory-budget = { path = "../memory-budget" }
+query-console = { path = "../query-console" }
+onecd = { path = "../onecd", default-features = false }
+platform-catalog = { path = "../platform-catalog" }
+ui-style = { path = "../ui-style", features = ["font-files", "skin", "packages"] }
+v8cont = { path = "../v8cont" }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+clap = { version = "4", features = ["derive"], optional = true }
+
+[build-dependencies]
+serde_json = "1"
+
+[target."cfg(target_os = \"linux\")".dependencies]
+libc = "0.2"
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+undocumented_unsafe_blocks = "warn"
+unused_result_ok = "warn"

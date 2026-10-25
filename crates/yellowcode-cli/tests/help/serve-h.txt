@@ -1,0 +1,27 @@
+exit 0
+--- stdout
+Serve read-only queries and paged stored tables over HTTP
+
+Usage: yellowcode serve [OPTIONS] <BASE>
+
+Arguments:
+  <BASE>  Immutable infobase copy: directory or its 1Cv8.1CD file, opened once read-only
+
+Options:
+      --memory-limit <MEMORY_LIMIT>
+          Managed memory budget: auto or integer bytes with B/KiB/MiB/GiB suffix. Without a container limit the fixed fallback is 1GiB; UNF-class configurations need --memory-limit >= 1792MiB, ERP-class about 3GiB
+      --platform-build <BUILD>
+          Exact emulated platform build (not the configuration compatibility mode) [default: 8.5.1.1529]
+      --cache-limit <CACHE_LIMIT>
+          Clean cache category cap; 0 disables caching
+      --query-memory-limit <QUERY_MEMORY_LIMIT>
+          Execution, compilation, batch and temporary-table cap
+      --result-memory-limit <RESULT_MEMORY_LIMIT>
+          Retained canonical result cap shared by all statements
+      --response-limit <RESPONSE_LIMIT>
+          Complete serialized output cap, including escaping and schema
+      --listen <LISTEN>
+          HTTP address (infrastructure owns access control and TLS) [default: 127.0.0.1:8080]
+  -h, --help
+          Print help
+--- stderr

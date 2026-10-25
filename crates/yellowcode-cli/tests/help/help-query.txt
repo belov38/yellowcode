@@ -1,0 +1,41 @@
+exit 0
+--- stdout
+Execute a read-only query against an infobase
+
+Usage: yellowcode query [OPTIONS] <--text <TEXT>|--file <FILE>|--stdin> <BASE>
+
+Arguments:
+  <BASE>  Infobase directory or its 1Cv8.1CD file (opened read-only)
+
+Options:
+      --memory-limit <MEMORY_LIMIT>
+          Managed memory budget: auto or integer bytes with B/KiB/MiB/GiB suffix. Without a container limit the fixed fallback is 1GiB; UNF-class configurations need --memory-limit >= 1792MiB, ERP-class about 3GiB
+      --platform-build <BUILD>
+          Exact emulated platform build (not the configuration compatibility mode) [default: 8.5.1.1529]
+      --cache-limit <CACHE_LIMIT>
+          Clean cache category cap; 0 disables caching
+      --query-memory-limit <QUERY_MEMORY_LIMIT>
+          Execution, compilation, batch and temporary-table cap
+      --result-memory-limit <RESULT_MEMORY_LIMIT>
+          Retained canonical result cap shared by all statements
+      --response-limit <RESPONSE_LIMIT>
+          Complete serialized output cap, including escaping and schema
+      --text <TEXT>
+          
+      --file <FILE>
+          UTF-8 query file; an initial UTF-8 BOM is accepted
+      --stdin
+          
+      --param <NAME=REPR>
+          Canonical parameter representation; repeat for additional parameters
+      --params-file <PARAMS_FILE>
+          UTF-8 JSON array of {"name": "P", "repr": "42"} objects
+      --format <FORMAT>
+          Defaults to table on a terminal and JSON when redirected [possible values: table, json, csv]
+      --timeout <TIMEOUT>
+          Cooperative execution timeout in seconds; opening the base is outside this limit [default: 60]
+      --max-rows <MAX_ROWS>
+          Output rows per result; engine memory and row limits still apply [default: 10000]
+  -h, --help
+          Print help
+--- stderr

@@ -1,0 +1,3826 @@
+[
+ {
+  "en": "AccountingRegister",
+  "format": "png",
+  "h": 16,
+  "id": "20175a6d-7510-46a8-9077-75a5d0d97802",
+  "len": 479,
+  "offset": 0,
+  "ru": [
+   "РегистрБухгалтерии"
+  ],
+  "variant": "_paperTDouble_100.png",
+  "w": 16
+ },
+ {
+  "en": "AccumulationRegister",
+  "format": "png",
+  "h": 16,
+  "id": "70f51581-87b6-41cb-a21b-c9dcdcc7fa93",
+  "len": 791,
+  "offset": 479,
+  "ru": [
+   "РегистрНакопления"
+  ],
+  "variant": "_paperBarrels.png",
+  "w": 16
+ },
+ {
+  "en": "ActivateTask",
+  "format": "png",
+  "h": 16,
+  "id": "093dd4ed-e03c-4fc6-a95a-01f51379cccf",
+  "len": 713,
+  "offset": 1270,
+  "ru": [
+   "АктивироватьЗадачу"
+  ],
+  "variant": "_tabletWindow_100.png",
+  "w": 16
+ },
+ {
+  "en": "ActiveUsers",
+  "format": "png",
+  "h": 16,
+  "id": "47f01799-7968-4f44-9acc-fe1bdde8beb2",
+  "len": 799,
+  "offset": 1983,
+  "ru": [
+   "АктивныеПользователи"
+  ],
+  "variant": "_userMonitor_100.png",
+  "w": 16
+ },
+ {
+  "en": "AddToFavorites",
+  "format": "png",
+  "h": 16,
+  "id": "1001ae3e-9289-4303-9699-3c0c17e20e61",
+  "len": 382,
+  "offset": 2782,
+  "ru": [
+   "ДобавитьВИзбранное"
+  ],
+  "variant": "AddToFavoritesCommand_100.png",
+  "w": 16
+ },
+ {
+  "en": "AppearanceBoxesEmpty",
+  "format": "png",
+  "h": 16,
+  "id": "879ca050-8650-4135-b799-f3ef9e00a65a",
+  "len": 433,
+  "offset": 3164,
+  "ru": [
+   "ОформлениеКвадратыПустые"
+  ],
+  "variant": "100.png",
+  "w": 16
+ },
+ {
+  "en": "AppearanceBoxesFilled",
+  "format": "png",
+  "h": 16,
+  "id": "ba592483-bc90-4e26-ba4d-2126359c6529",
+  "len": 417,
+  "offset": 3597,
+  "ru": [
+   "ОформлениеКвадратыЗаполненные"
+  ],
+  "variant": "100.png",
+  "w": 16
+ },
+ {
+  "en": "AppearanceBoxesOneFilled",
+  "format": "png",
+  "h": 16,
+  "id": "7026a8e6-f973-4fab-88f3-1047734d787f",
+  "len": 448,
+  "offset": 4014,
+  "ru": [
+   "ОформлениеКвадратыЗаполненныеОдин"
+  ],
+  "variant": "100.png",
+  "w": 16
+ },
+ {
+  "en": "AppearanceBoxesThreeFilled",
+  "format": "png",
+  "h": 16,
+  "id": "8c18ce73-0840-4f64-b76c-89d2356b1a41",
+  "len": 455,
+  "offset": 4462,
+  "ru": [
+   "ОформлениеКвадратыЗаполненныеТри"
+  ],
+  "variant": "100.png",
+  "w": 16
+ },
+ {
+  "en": "AppearanceBoxesTwoFilled",
+  "format": "png",
+  "h": 16,
+  "id": "f164fa2a-0a20-48df-9816-e2d6cbe0aee9",
+  "len": 464,
+  "offset": 4917,
+  "ru": [
+   "ОформлениеКвадратыЗаполненныеДва"
+  ],
+  "variant": "100.png",
+  "w": 16
+ },
+ {
+  "en": "AppearanceCheckBox",
+  "format": "png",
+  "h": 16,
+  "id": "7a9cd2fd-6372-4342-9a9e-3ebbd754fd83",
+  "len": 793,
+  "offset": 5381,
+  "ru": [
+   "ОформлениеФлажок"
+  ],
+  "variant": "100.png",
+  "w": 16
+ },
+ {
+  "en": "AppearanceCheckIcon",
+  "format": "png",
+  "h": 16,
+  "id": "85998f14-805b-4e2b-ba19-9d79b0464042",
+  "len": 829,
+  "offset": 6174,
+  "ru": [
+   "ОформлениеЗнакФлажок"
+  ],
+  "variant": "100.png",
+  "w": 16
+ },
+ {
+  "en": "AppearanceCircleBlack",
+  "format": "png",
+  "h": 16,
+  "id": "cf10e497-9779-44a7-82d8-811b88193215",
+  "len": 611,
+  "offset": 7003,
+  "ru": [
+   "ОформлениеКругЧерный"
+  ],
+  "variant": "100.png",
+  "w": 16
+ },
+ {
+  "en": "AppearanceCircleEmpty",
+  "format": "png",
+  "h": 16,
+  "id": "2721abfb-fbff-4a3a-98ac-b7c9eb29cd85",
+  "len": 697,
+  "offset": 7614,
+  "ru": [
+   "ОформлениеКругПустой"
+  ],
+  "variant": "100.png",
+  "w": 16
+ },
+ {
+  "en": "AppearanceCircleFilled",
+  "format": "png",
+  "h": 16,
+  "id": "788667db-61c9-45f3-9c4f-5f660ecdf3e1",
+  "len": 702,
+  "offset": 8311,
+  "ru": [
+   "ОформлениеКругЗаполненный"
+  ],
+  "variant": "100.png",
+  "w": 16
+ },
+ {
+  "en": "AppearanceCircleGreen",
+  "format": "png",
+  "h": 16,
+  "id": "71cbcb5c-f3f0-4ffd-a4d0-19b802b5ed6b",
+  "len": 674,
+  "offset": 9013,
+  "ru": [
+   "ОформлениеКругЗеленый"
+  ],
+  "variant": "100.png",
+  "w": 16
+ },
+ {
+  "en": "AppearanceCircleOneFourthFilled",
+  "format": "png",
+  "h": 16,
+  "id": "fc058833-e57f-4f93-ba7a-803992a65c3e",
+  "len": 779,
+  "offset": 9687,
+  "ru": [
+   "ОформлениеКругЗаполненныйНаОднуЧетверть"
+  ],
+  "variant": "100.png",
+  "w": 16
+ },
+ {
+  "en": "AppearanceCircleRed",
+  "format": "png",
+  "h": 16,
+  "id": "c1a61df2-f280-49d0-a8b3-7e5fc6f56ff7",
+  "len": 696,
+  "offset": 10466,
+  "ru": [
+   "ОформлениеКругКрасный"
+  ],
+  "variant": "100.png",
+  "w": 16
+ },
+ {
+  "en": "AppearanceCircleThreeFourthFilled",
+  "format": "png",
+  "h": 16,
+  "id": "08a03482-420e-4faa-af9d-e0138c53bfff",
+  "len": 775,
+  "offset": 11162,
+  "ru": [
+   "ОформлениеКругЗаполненныйНаТриЧетверти"
+  ],
+  "variant": "100.png",
+  "w": 16
+ },
+ {
+  "en": "AppearanceCircleTwoFourthFilled",
+  "format": "png",
+  "h": 16,
+  "id": "dc9b46a9-905b-4baa-9e53-4d824e291a5b",
+  "len": 761,
+  "offset": 11937,
+  "ru": [
+   "ОформлениеКругЗаполненныйНаДвеЧетверти"
+  ],
+  "variant": "100.png",
+  "w": 16
+ },
+ {
+  "en": "AppearanceCircleYellow",
+  "format": "png",
+  "h": 16,
+  "id": "8d7e5026-9c1c-4542-bec0-2b729c84e139",
+  "len": 691,
+  "offset": 12698,
+  "ru": [
+   "ОформлениеКругЖелтый"
+  ],
+  "variant": "100.png",
+  "w": 16
+ },
+ {
+  "en": "AppearanceCross",
+  "format": "png",
+  "h": 16,
+  "id": "b2202798-23e0-4165-9982-24878f432488",
+  "len": 704,
+  "offset": 13389,
+  "ru": [
+   "ОформлениеКрест"
+  ],
+  "variant": "100.png",
+  "w": 16
+ },
+ {
+  "en": "AppearanceCrossIcon",
+  "format": "png",
+  "h": 16,
+  "id": "9ef73565-2250-4a35-9fb3-470bd19ca9ca",
+  "len": 917,
+  "offset": 14093,
+  "ru": [
+   "ОформлениеЗнакКрест"
+  ],
+  "variant": "100.png",
+  "w": 16
+ },
+ {
+  "en": "AppearanceDashYellow",
+  "format": "png",
+  "h": 16,
+  "id": "e0ad5543-df7f-423c-8f59-8caf200cca0a",
+  "len": 419,
+  "offset": 15010,
+  "ru": [
+   "ОформлениеДефисЖелтый"
+  ],
+  "variant": "100.png",
+  "w": 16
+ },
+ {
+  "en": "AppearanceDownArrowGray",
+  "format": "png",
+  "h": 16,
+  "id": "e3b29b1d-4694-4f56-8d55-922f83afed7a",
+  "len": 757,
+  "offset": 15429,
+  "ru": [
+   "ОформлениеСтрелкаВнизСерая"
+  ],
+  "variant": "100.png",
+  "w": 16
+ },
+ {
+  "en": "AppearanceDownArrowRed",
+  "format": "png",
+  "h": 16,
+  "id": "0880808c-5146-42b2-87a3-e5a9693ad256",
+  "len": 762,
+  "offset": 16186,
+  "ru": [
+   "ОформлениеСтрелкаВнизКрасная"
+  ],
+  "variant": "100.png",
+  "w": 16
+ },
+ {
+  "en": "AppearanceDownInclineArrowGray",
+  "format": "png",
+  "h": 16,
+  "id": "a30ab2ef-6076-457d-9293-44edc7c6767e",
+  "len": 726,
+  "offset": 16948,
+  "ru": [
+   "ОформлениеСтрелкаНаклоннаяВнизСерая"
+  ],
+  "variant": "100.png",
+  "w": 16
+ },
+ {
+  "en": "AppearanceDownInclineArrowRed",
+  "format": "png",
+  "h": 16,
+  "id": "80a31eac-8df6-49c0-ba84-b53c4631d09f",
+  "len": 752,
+  "offset": 17674,
+  "ru": [
+   "ОформлениеСтрелкаНаклоннаяВнизКрасная"
+  ],
+  "variant": "100.png",
+  "w": 16
+ },
+ {
+  "en": "AppearanceDownInclineArrowYellow",
+  "format": "png",
+  "h": 16,
+  "id": "ce1c3d6b-7825-4cac-a58c-58bac18cefc9",
+  "len": 731,
+  "offset": 18426,
+  "ru": [
+   "ОформлениеСтрелкаНаклоннаяВнизЖелтая"
+  ],
+  "variant": "100.png",
+  "w": 16
+ },
+ {
+  "en": "AppearanceDownTriangleRed",
+  "format": "png",
+  "h": 16,
+  "id": "7a2a6f5c-7677-45e1-a2d3-ce2444d99a63",
+  "len": 640,
+  "offset": 19157,
+  "ru": [
+   "ОформлениеТреугольникВнизКрасный"
+  ],
+  "variant": "100.png",
+  "w": 16
+ },
+ {
+  "en": "AppearanceExclamationMark",
+  "format": "png",
+  "h": 16,
+  "id": "501b8c1d-8062-408e-bde8-b6549324713e",
+  "len": 411,
+  "offset": 19797,
+  "ru": [
+   "ОформлениеВоcклицательныйЗнак",
+   "ОформлениеВосклицательныйЗнак"
+  ],
+  "variant": "100.png",
+  "w": 16
+ },
+ {
+  "en": "AppearanceExclamationMarkIcon",
+  "format": "png",
+  "h": 16,
+  "id": "b39aa431-a32f-4447-984a-45606474c82d",
+  "len": 782,
+  "offset": 20208,
+  "ru": [
+   "ОформлениеЗнакВоcклицательныйЗнак",
+   "ОформлениеЗнакВосклицательныйЗнак"
+  ],
+  "variant": "100.png",
+  "w": 16
+ },
+ {
+  "en": "AppearanceFlagGreen",
+  "format": "png",
+  "h": 16,
+  "id": "bbd37b6b-2742-48f3-9efa-d7c245f125b0",
+  "len": 856,
+  "offset": 20990,
+  "ru": [
+   "ОформлениеФлагЗеленый"
+  ],
+  "variant": "100.png",
+  "w": 16
+ },
+ {
+  "en": "AppearanceFlagRed",
+  "format": "png",
+  "h": 16,
+  "id": "b0dd988f-2d9f-4364-b1f4-a4d5f45ffb78",
+  "len": 869,
+  "offset": 21846,
+  "ru": [
+   "ОформлениеФлагКрасный"
+  ],
+  "variant": "100.png",
+  "w": 16
+ },
+ {
+  "en": "AppearanceFlagYellow",
+  "format": "png",
+  "h": 16,
+  "id": "16e4a14a-f38b-453d-908a-41fb9479c3f6",
+  "len": 865,
+  "offset": 22715,
+  "ru": [
+   "ОформлениеФлагЖелтый"
+  ],
+  "variant": "100.png",
+  "w": 16
+ },
+ {
+  "en": "AppearanceRightArrowGray",
+  "format": "png",
+  "h": 16,
+  "id": "20b82e97-5fcc-4c68-8e0d-d01060847520",
+  "len": 711,
+  "offset": 23580,
+  "ru": [
+   "ОформлениеСтрелкаВправоСерая"
+  ],
+  "variant": "100.png",
+  "w": 16
+ },
+ {
+  "en": "AppearanceRightArrowYellow",
+  "format": "png",
+  "h": 16,
+  "id": "697e00c5-4a1d-4367-90e8-ddb734069ad5",
+  "len": 691,
+  "offset": 24291,
+  "ru": [
+   "ОформлениеСтрелкаВправоЖелтая"
+  ],
+  "variant": "100.png",
+  "w": 16
+ },
+ {
+  "en": "AppearanceStarEmpty",
+  "format": "png",
+  "h": 16,
+  "id": "f8d11b3a-a72b-4ee3-ad44-d401472e4b7c",
+  "len": 764,
+  "offset": 24982,
+  "ru": [
+   "ОформлениеЗвездаПустая"
+  ],
+  "variant": "100.png",
+  "w": 16
+ },
+ {
+  "en": "AppearanceStarFilled",
+  "format": "png",
+  "h": 16,
+  "id": "3689585c-a3e2-45d0-a302-caeb31b78835",
+  "len": 765,
+  "offset": 25746,
+  "ru": [
+   "ОформлениеЗвездаЗаполненная"
+  ],
+  "variant": "100.png",
+  "w": 16
+ },
+ {
+  "en": "AppearanceStarHalfFilled",
+  "format": "png",
+  "h": 16,
+  "id": "26abd244-8dd5-417e-aed0-247a573394ca",
+  "len": 839,
+  "offset": 26511,
+  "ru": [
+   "ОформлениеЗвездаЗаполненнаяНаполовину"
+  ],
+  "variant": "100.png",
+  "w": 16
+ },
+ {
+  "en": "AppearanceUpArrowGray",
+  "format": "png",
+  "h": 16,
+  "id": "a5d108f7-17d6-42dc-a789-45d71fb50ecd",
+  "len": 740,
+  "offset": 27350,
+  "ru": [
+   "ОформлениеСтрелкаВверхСерая"
+  ],
+  "variant": "100.png",
+  "w": 16
+ },
+ {
+  "en": "AppearanceUpArrowGreen",
+  "format": "png",
+  "h": 16,
+  "id": "87d032df-0956-47e9-bead-4e15330f1983",
+  "len": 784,
+  "offset": 28090,
+  "ru": [
+   "ОформлениеСтрелкаВверхЗеленая"
+  ],
+  "variant": "100.png",
+  "w": 16
+ },
+ {
+  "en": "AppearanceUpInclineArrowGray",
+  "format": "png",
+  "h": 16,
+  "id": "92e24ce1-3917-4ee4-bbde-adce48b6c96b",
+  "len": 657,
+  "offset": 28874,
+  "ru": [
+   "ОформлениеСтрелкаНаклоннаяВверхСерая"
+  ],
+  "variant": "100.png",
+  "w": 16
+ },
+ {
+  "en": "AppearanceUpInclineArrowGreen",
+  "format": "png",
+  "h": 16,
+  "id": "0a688f53-2f13-4833-b340-c604cb1d3eb1",
+  "len": 682,
+  "offset": 29531,
+  "ru": [
+   "ОформлениеСтрелкаНаклоннаяВверхЗеленая"
+  ],
+  "variant": "100.png",
+  "w": 16
+ },
+ {
+  "en": "AppearanceUpInclineArrowYellow",
+  "format": "png",
+  "h": 16,
+  "id": "09547c21-3f15-4a6d-ba87-e5f289dc1a6d",
+  "len": 666,
+  "offset": 30213,
+  "ru": [
+   "ОформлениеСтрелкаНаклоннаяВверхЖелтая"
+  ],
+  "variant": "100.png",
+  "w": 16
+ },
+ {
+  "en": "AppearanceUpTriangleGreen",
+  "format": "png",
+  "h": 16,
+  "id": "8da615a0-65a5-4511-a8d4-00dc156478fb",
+  "len": 643,
+  "offset": 30879,
+  "ru": [
+   "ОформлениеТреугольникВверхЗеленый"
+  ],
+  "variant": "100.png",
+  "w": 16
+ },
+ {
+  "en": "Attach",
+  "format": "svg",
+  "h": 16,
+  "id": "f6e88116-03d8-4400-9d88-791895d7031a",
+  "len": 2479,
+  "offset": 31522,
+  "ru": [
+   "Прикрепить"
+  ],
+  "variant": "attach.svg",
+  "w": 16
+ },
+ {
+  "en": "Attribute",
+  "format": "png",
+  "h": 16,
+  "id": "0c1f7756-6143-4903-a94c-8f22c85e44de",
+  "len": 426,
+  "offset": 34001,
+  "ru": [
+   "Реквизит"
+  ],
+  "variant": "_item_100.png",
+  "w": 16
+ },
+ {
+  "en": "Back",
+  "format": "png",
+  "h": 16,
+  "id": "3c904ff7-1195-4a7c-9a38-7b1f6ca49cce",
+  "len": 696,
+  "offset": 34427,
+  "ru": [
+   "Назад"
+  ],
+  "variant": "_windowArrowPrev_100.png",
+  "w": 16
+ },
+ {
+  "en": "BusinessProcess",
+  "format": "png",
+  "h": 16,
+  "id": "509c4a7f-6406-4388-bb8c-bc81fb5131aa",
+  "len": 815,
+  "offset": 35123,
+  "ru": [
+   "БизнесПроцесс"
+  ],
+  "variant": "_bp_100.png",
+  "w": 16
+ },
+ {
+  "en": "BusinessProcessObject",
+  "format": "png",
+  "h": 16,
+  "id": "a24cff7f-a1a5-4403-af82-a7b31852cde9",
+  "len": 815,
+  "offset": 35938,
+  "ru": [
+   "БизнесПроцессОбъект"
+  ],
+  "variant": "_bp_100.png",
+  "w": 16
+ },
+ {
+  "en": "BusinessProcessStart",
+  "format": "png",
+  "h": 16,
+  "id": "9fecbaff-2a05-4da6-9ef1-807e754b928d",
+  "len": 500,
+  "offset": 36753,
+  "ru": [
+   "СтартБизнесПроцесса"
+  ],
+  "variant": "_arrowNext_100.png",
+  "w": 16
+ },
+ {
+  "en": "CalculationRegister",
+  "format": "png",
+  "h": 16,
+  "id": "f3b8f300-5a54-4eea-8136-5798413a479c",
+  "len": 733,
+  "offset": 37253,
+  "ru": [
+   "РегистрРасчета"
+  ],
+  "variant": "_paperRhomb_100.png",
+  "w": 16
+ },
+ {
+  "en": "CalculationType",
+  "format": "png",
+  "h": 16,
+  "id": "80837aab-ad67-4811-9d83-88344439c721",
+  "len": 850,
+  "offset": 37986,
+  "ru": [
+   "ВидРасчета"
+  ],
+  "variant": "_rhombDouble_100.png",
+  "w": 16
+ },
+ {
+  "en": "Calculator",
+  "format": "svg",
+  "h": 16,
+  "id": "fada8a16-8b14-4151-87a9-775099f37832",
+  "len": 1412,
+  "offset": 38836,
+  "ru": [
+   "Калькулятор"
+  ],
+  "variant": "calculator.svg",
+  "w": 16
+ },
+ {
+  "en": "Calendar",
+  "format": "svg",
+  "h": 16,
+  "id": "97c5a6d5-47ed-43f9-8c8c-10e9903c23d2",
+  "len": 1139,
+  "offset": 40248,
+  "ru": [
+   "Календарь"
+  ],
+  "variant": "calendar.svg",
+  "w": 16
+ },
+ {
+  "en": "CancelSearch",
+  "format": "png",
+  "h": 16,
+  "id": "9e808d29-787b-4825-863a-13c6844ce91d",
+  "len": 1747,
+  "offset": 41387,
+  "ru": [
+   "ОтменитьПоиск"
+  ],
+  "variant": "_searchClose_100_ltr.png",
+  "w": 16
+ },
+ {
+  "en": "Catalog",
+  "format": "png",
+  "h": 16,
+  "id": "069b8324-7c51-4c73-a6a8-c06d4fc383b5",
+  "len": 542,
+  "offset": 43134,
+  "ru": [
+   "Справочник"
+  ],
+  "variant": "_grid_100.png",
+  "w": 16
+ },
+ {
+  "en": "CatalogObject",
+  "format": "png",
+  "h": 16,
+  "id": "d971ec77-85e4-4e8d-a20a-8b130eedeb29",
+  "len": 542,
+  "offset": 43676,
+  "ru": [
+   "СправочникОбъект"
+  ],
+  "variant": "_grid_100.png",
+  "w": 16
+ },
+ {
+  "en": "Change",
+  "format": "png",
+  "h": 16,
+  "id": "97b2cc97-d5c6-45fb-9824-9d6d73db21fe",
+  "len": 571,
+  "offset": 44218,
+  "ru": [
+   "Изменить"
+  ],
+  "variant": "_pencil_100.png",
+  "w": 16
+ },
+ {
+  "en": "Char",
+  "format": "png",
+  "h": 16,
+  "id": "4781692b-60eb-47e4-acfb-2caf0f49e977",
+  "len": 243,
+  "offset": 44789,
+  "ru": [
+   "Символ"
+  ],
+  "variant": "omega_100.png",
+  "w": 16
+ },
+ {
+  "en": "Chart",
+  "format": "png",
+  "h": 16,
+  "id": "f3c1376a-d2ee-46c4-9e44-aa2f7dae31c4",
+  "len": 595,
+  "offset": 45032,
+  "ru": [
+   "Диаграмма"
+  ],
+  "variant": "_diagram_100.png",
+  "w": 16
+ },
+ {
+  "en": "ChartOfAccounts",
+  "format": "png",
+  "h": 16,
+  "id": "ccb3d8f7-6da2-4c65-aba6-17b2ffbba78c",
+  "len": 423,
+  "offset": 45627,
+  "ru": [
+   "ПланСчетов"
+  ],
+  "variant": "_tDouble_100.png",
+  "w": 16
+ },
+ {
+  "en": "ChartOfAccountsObject",
+  "format": "png",
+  "h": 16,
+  "id": "6d4277ee-b29b-4790-8c3c-c4f868311c96",
+  "len": 403,
+  "offset": 46050,
+  "ru": [
+   "ПланСчетовОбъект"
+  ],
+  "variant": "_T_100.png",
+  "w": 16
+ },
+ {
+  "en": "ChartOfCalculationTypes",
+  "format": "png",
+  "h": 16,
+  "id": "b58ea40e-819b-4d07-bd9f-5fbf42e01f55",
+  "len": 850,
+  "offset": 46453,
+  "ru": [
+   "ПланВидовРасчета"
+  ],
+  "variant": "_rhombDouble_100.png",
+  "w": 16
+ },
+ {
+  "en": "ChartOfCalculationTypesObject",
+  "format": "png",
+  "h": 16,
+  "id": "64400154-ca4c-4a05-8028-83434fda5bef",
+  "len": 513,
+  "offset": 47303,
+  "ru": [
+   "ПланВидовРасчетаОбъект"
+  ],
+  "variant": "_rhomb_100.png",
+  "w": 16
+ },
+ {
+  "en": "ChartOfCharacteristicTypes",
+  "format": "png",
+  "h": 16,
+  "id": "2bfafd1e-6d07-4609-8010-6c1c605cefd2",
+  "len": 740,
+  "offset": 47816,
+  "ru": [
+   "ПланВидовХарактеристик"
+  ],
+  "variant": "_windowDots_100.png",
+  "w": 16
+ },
+ {
+  "en": "ChartOfCharacteristicTypesObject",
+  "format": "png",
+  "h": 16,
+  "id": "45921467-71f2-4176-97e8-7df1d31d9e87",
+  "len": 740,
+  "offset": 48556,
+  "ru": [
+   "ПланВидовХарактеристикОбъект"
+  ],
+  "variant": "_windowDots_100.png",
+  "w": 16
+ },
+ {
+  "en": "CheckAll",
+  "format": "png",
+  "h": 16,
+  "id": "-10",
+  "len": 542,
+  "offset": 49296,
+  "ru": [
+   "УстановитьФлажки"
+  ],
+  "variant": "checked_100.png",
+  "w": 16
+ },
+ {
+  "en": "CheckSyntax",
+  "format": "png",
+  "h": 16,
+  "id": "dcd23a32-5c7c-43f2-9021-80d98128556f",
+  "len": 775,
+  "offset": 49838,
+  "ru": [
+   "СинтаксическийКонтроль"
+  ],
+  "variant": "_documentCheck_100.png",
+  "w": 16
+ },
+ {
+  "en": "ChooseTopLevel",
+  "format": "png",
+  "h": 16,
+  "id": "38a5a658-ec2b-4ddf-8088-c6d2169d3181",
+  "len": 748,
+  "offset": 50613,
+  "ru": [
+   "ВыбратьВерхнийУровень"
+  ],
+  "variant": "_contentCursor_100.png",
+  "w": 16
+ },
+ {
+  "en": "ChooseType",
+  "format": "png",
+  "h": 16,
+  "id": "-1400",
+  "len": 232,
+  "offset": 51361,
+  "ru": [
+   "ВыбратьТип"
+  ],
+  "variant": "_editType100.png",
+  "w": 16
+ },
+ {
+  "en": "ChooseValue",
+  "format": "png",
+  "h": 16,
+  "id": "2f130057-bb2a-4e22-bba5-e108fac26940",
+  "len": 831,
+  "offset": 51593,
+  "ru": [
+   "ВыбратьЗначение"
+  ],
+  "variant": "_arrowSelect_100.png",
+  "w": 16
+ },
+ {
+  "en": "Clear",
+  "format": "png",
+  "h": 16,
+  "id": "-200",
+  "len": 248,
+  "offset": 52424,
+  "ru": [
+   "Очистить"
+  ],
+  "variant": "_editClear100.png",
+  "w": 16
+ },
+ {
+  "en": "ClearFilter",
+  "format": "png",
+  "h": 16,
+  "id": "479470e0-ea0f-4266-8549-e2b1e8c06534",
+  "len": 868,
+  "offset": 52672,
+  "ru": [
+   "ОтключитьОтбор"
+  ],
+  "variant": "_funnelClose_100.png",
+  "w": 16
+ },
+ {
+  "en": "CloneListItem",
+  "format": "png",
+  "h": 16,
+  "id": "448d6f55-d885-496c-870d-d1bd78374745",
+  "len": 826,
+  "offset": 53540,
+  "ru": [
+   "СкопироватьЭлементСписка"
+  ],
+  "variant": "_paperDoublePlus_100.png",
+  "w": 16
+ },
+ {
+  "en": "CloneObject",
+  "format": "png",
+  "h": 16,
+  "id": "f6532868-30b9-44ab-803c-78f0f0b06b02",
+  "len": 910,
+  "offset": 54366,
+  "ru": [
+   "СкопироватьОбъект"
+  ],
+  "variant": "_documentDoublePlus_100.png",
+  "w": 16
+ },
+ {
+  "en": "Close",
+  "format": "png",
+  "h": 16,
+  "id": "1377931c-5744-4948-bade-cb35117b5f63",
+  "len": 443,
+  "offset": 55276,
+  "ru": [
+   "Закрыть"
+  ],
+  "variant": "_close_100.png",
+  "w": 16
+ },
+ {
+  "en": "CollaborationSystemExternalUser",
+  "format": "svg",
+  "h": 16,
+  "id": "66c18df5-d7a6-465e-92b5-bcc6c1032504",
+  "len": 1689,
+  "offset": 55719,
+  "ru": [
+   "ВнешнийПользовательСистемыВзаимодействия"
+  ],
+  "variant": "image.svg",
+  "w": 16
+ },
+ {
+  "en": "CollaborationSystemIntegrationUser",
+  "format": "svg",
+  "h": 16,
+  "id": "05b8ccd1-f644-4e2e-87de-9683410c7038",
+  "len": 3436,
+  "offset": 57408,
+  "ru": [
+   "ПользовательИнтеграцииСистемыВзаимодействия"
+  ],
+  "variant": "image.svg",
+  "w": 16
+ },
+ {
+  "en": "CollaborationSystemUser",
+  "format": "svg",
+  "h": 16,
+  "id": "a722bc14-4edb-4eed-84b9-5d9b2b443e04",
+  "len": 2348,
+  "offset": 60844,
+  "ru": [
+   "ПользовательСистемыВзаимодействия"
+  ],
+  "variant": "user.svg",
+  "w": 16
+ },
+ {
+  "en": "CollapseAll",
+  "format": "png",
+  "h": 16,
+  "id": "27ee3053-952c-49e5-8261-9215098e0e9c",
+  "len": 1350,
+  "offset": 63192,
+  "ru": [
+   "СвернутьВсе"
+  ],
+  "variant": "_arrowFold_100_ltr.png",
+  "w": 16
+ },
+ {
+  "en": "Constant",
+  "format": "png",
+  "h": 16,
+  "id": "e93f538e-dfaf-4a91-a9b6-c053555bcf60",
+  "len": 450,
+  "offset": 64542,
+  "ru": [
+   "Константа"
+  ],
+  "variant": "_constant_100.png",
+  "w": 16
+ },
+ {
+  "en": "Conversations",
+  "format": "png",
+  "h": 16,
+  "id": "6a248caf-0a7b-46ad-a595-74890ea202f7",
+  "len": 251,
+  "offset": 64992,
+  "ru": [
+   "Обсуждения"
+  ],
+  "variant": "bubbleDouble_100.png",
+  "w": 16
+ },
+ {
+  "en": "CreateFolder",
+  "format": "png",
+  "h": 16,
+  "id": "4ab0e87f-7d9b-4aa8-ac4b-680a78522da8",
+  "len": 612,
+  "offset": 65243,
+  "ru": [
+   "СоздатьГруппу"
+  ],
+  "variant": "_folderPlus_100.png",
+  "w": 16
+ },
+ {
+  "en": "CreateInitialImage",
+  "format": "png",
+  "h": 16,
+  "id": "4d2570b5-205f-413c-b4cc-b2097f61684f",
+  "len": 652,
+  "offset": 65855,
+  "ru": [
+   "СоздатьНачальныйОбраз"
+  ],
+  "variant": "_barrelDoubleArrowDown_100.png",
+  "w": 16
+ },
+ {
+  "en": "CreateListItem",
+  "format": "png",
+  "h": 16,
+  "id": "977e831a-0e73-4d60-af51-091a6fa8612e",
+  "len": 762,
+  "offset": 66507,
+  "ru": [
+   "СоздатьЭлементСписка"
+  ],
+  "variant": "_circleFillPlus_100.png",
+  "w": 16
+ },
+ {
+  "en": "Credit",
+  "format": "png",
+  "h": 16,
+  "id": "55bc1099-a7df-4d0a-b332-a45f0473b368",
+  "len": 506,
+  "offset": 67269,
+  "ru": [
+   "Кредит"
+  ],
+  "variant": "_CtRed_100.png",
+  "w": 16
+ },
+ {
+  "en": "CustomExpression",
+  "format": "png",
+  "h": 16,
+  "id": "f695666a-bad9-49f6-ab7c-5198d7ea4739",
+  "len": 543,
+  "offset": 67775,
+  "ru": [
+   "ПроизвольноеВыражение"
+  ],
+  "variant": "_function_100.png",
+  "w": 16
+ },
+ {
+  "en": "CustomizeForm",
+  "format": "png",
+  "h": 16,
+  "id": "6511326b-20c3-4bf8-8503-c2c2c9072c6c",
+  "len": 902,
+  "offset": 68318,
+  "ru": [
+   "ИзменитьФорму"
+  ],
+  "variant": "_formSettings_100.png",
+  "w": 16
+ },
+ {
+  "en": "CustomizeList",
+  "format": "png",
+  "h": 16,
+  "id": "f04794cb-c198-4172-86c3-649386013c85",
+  "len": 819,
+  "offset": 69220,
+  "ru": [
+   "НастроитьСписок"
+  ],
+  "variant": "_listFunnel_100.png",
+  "w": 16
+ },
+ {
+  "en": "DataCompositionConditionalAppearance",
+  "format": "png",
+  "h": 16,
+  "id": "984b0a3e-daa2-4a9e-b75c-1f230a6e592a",
+  "len": 950,
+  "offset": 70039,
+  "ru": [
+   "УсловноеОформлениеКомпоновкиДанных"
+  ],
+  "variant": "_gridBrush_100.png",
+  "w": 16
+ },
+ {
+  "en": "DataCompositionConditionalAppearanceDisabled",
+  "format": "png",
+  "h": 16,
+  "id": "5ff5bf50-1f3c-46b6-b4ef-a4973dd610aa",
+  "len": 908,
+  "offset": 70989,
+  "ru": [
+   "УсловноеОформлениеКомпоновкиДанныхНедоступное"
+  ],
+  "variant": "_gridBrushGrey_100.png",
+  "w": 16
+ },
+ {
+  "en": "DataCompositionDataParameters",
+  "format": "png",
+  "h": 16,
+  "id": "a075c3ef-bc4e-4c96-bdad-2245ec09c28e",
+  "len": 856,
+  "offset": 71897,
+  "ru": [
+   "ПараметрыДанныхКомпоновкиДанных"
+  ],
+  "variant": "_gridArrowPrevNext_100.png",
+  "w": 16
+ },
+ {
+  "en": "DataCompositionFilter",
+  "format": "png",
+  "h": 16,
+  "id": "d90a7482-9a1d-4d3d-ae96-6db440214d96",
+  "len": 931,
+  "offset": 72753,
+  "ru": [
+   "ОтборКомпоновкиДанных"
+  ],
+  "variant": "_gridFunnel_100.png",
+  "w": 16
+ },
+ {
+  "en": "DataCompositionFilterDisabled",
+  "format": "png",
+  "h": 16,
+  "id": "d35bd799-1cc3-44d1-8ae3-09755a09d44b",
+  "len": 870,
+  "offset": 73684,
+  "ru": [
+   "ОтборКомпоновкиДанныхНедоступный"
+  ],
+  "variant": "_gridFunnelGrey_100.png",
+  "w": 16
+ },
+ {
+  "en": "DataCompositionGroupFields",
+  "format": "png",
+  "h": 16,
+  "id": "ad8cb448-a6bb-43b4-886a-7d6a8367eef2",
+  "len": 894,
+  "offset": 74554,
+  "ru": [
+   "ПоляГруппировкиКомпоновкиДанных"
+  ],
+  "variant": "_gridItemsH_100.png",
+  "w": 16
+ },
+ {
+  "en": "DataCompositionGroupFieldsDisabled",
+  "format": "png",
+  "h": 16,
+  "id": "afbaed82-4b8e-4970-8ac6-97a3bff796d3",
+  "len": 846,
+  "offset": 75448,
+  "ru": [
+   "ПоляГруппировкиКомпоновкиДанныхНедоступные"
+  ],
+  "variant": "_tableItemsGrey_100.png",
+  "w": 16
+ },
+ {
+  "en": "DataCompositionNewChart",
+  "format": "png",
+  "h": 16,
+  "id": "732f9dd3-5baf-47ff-af7b-edfe16dac2a1",
+  "len": 516,
+  "offset": 76294,
+  "ru": [
+   "НоваяДиаграммаКомпоновкиДанных"
+  ],
+  "variant": "_chartPlus_100.png",
+  "w": 16
+ },
+ {
+  "en": "DataCompositionNewGroup",
+  "format": "png",
+  "h": 16,
+  "id": "77180b5e-8faa-4712-a788-e9f8903e3419",
+  "len": 570,
+  "offset": 76810,
+  "ru": [
+   "НоваяГруппировкаКомпоновкиДанных"
+  ],
+  "variant": "_itemsPlus_100.png",
+  "w": 16
+ },
+ {
+  "en": "DataCompositionNewNestedScheme",
+  "format": "png",
+  "h": 16,
+  "id": "8ac19694-383a-457a-b050-0a3ee937f5f3",
+  "len": 649,
+  "offset": 77380,
+  "ru": [
+   "НоваяВложеннаяСхемаКомпоновкиДанных"
+  ],
+  "variant": "_documentFoldedDoublePlus_100.png",
+  "w": 16
+ },
+ {
+  "en": "DataCompositionNewTable",
+  "format": "png",
+  "h": 16,
+  "id": "6c2759b1-2b63-4fa5-8d13-75786c7e1e89",
+  "len": 726,
+  "offset": 78029,
+  "ru": [
+   "НоваяТаблицаКомпоновкиДанных"
+  ],
+  "variant": "_tablePlus_100.png",
+  "w": 16
+ },
+ {
+  "en": "DataCompositionOrder",
+  "format": "png",
+  "h": 16,
+  "id": "efda7350-6cd7-4416-b188-f5ca9baf66c2",
+  "len": 847,
+  "offset": 78755,
+  "ru": [
+   "ПорядокКомпоновкиДанных"
+  ],
+  "variant": "_gridArrowDown_100.png",
+  "w": 16
+ },
+ {
+  "en": "DataCompositionOrderDisabled",
+  "format": "png",
+  "h": 16,
+  "id": "c8923bc1-6ea9-456b-829f-3f979dc98420",
+  "len": 793,
+  "offset": 79602,
+  "ru": [
+   "ПорядокКомпоновкиДанныхНедоступный"
+  ],
+  "variant": "_gridArrowDownGrey_100.png",
+  "w": 16
+ },
+ {
+  "en": "DataCompositionOutputParameters",
+  "format": "png",
+  "h": 16,
+  "id": "ee7c4a5b-2d9b-4087-ae3e-947792085f09",
+  "len": 982,
+  "offset": 80395,
+  "ru": [
+   "ПараметрыВыводаКомпоновкиДанных"
+  ],
+  "variant": "_gridSettings_100.png",
+  "w": 16
+ },
+ {
+  "en": "DataCompositionOutputParametersDisabled",
+  "format": "png",
+  "h": 16,
+  "id": "1522a72e-11d1-41e3-ba0e-e0780c4ba543",
+  "len": 931,
+  "offset": 81377,
+  "ru": [
+   "ПараметрыВыводаКомпоновкиДанныхНедоступные"
+  ],
+  "variant": "_gridSettingsGrey_100.png",
+  "w": 16
+ },
+ {
+  "en": "DataCompositionSelection",
+  "format": "png",
+  "h": 16,
+  "id": "2c732bfa-f734-48bc-a18b-7554db8a3888",
+  "len": 910,
+  "offset": 82308,
+  "ru": [
+   "ВыборКомпоновкиДанных"
+  ],
+  "variant": "_gridItemsV_100.png",
+  "w": 16
+ },
+ {
+  "en": "DataCompositionSelectionDisabled",
+  "format": "png",
+  "h": 16,
+  "id": "a0b879df-db58-4cba-b76e-9bbc4391f3d9",
+  "len": 878,
+  "offset": 83218,
+  "ru": [
+   "ВыборКомпоновкиДанныхНедоступный"
+  ],
+  "variant": "_gridItemsVGrey_100.png",
+  "w": 16
+ },
+ {
+  "en": "DataCompositionSettingsWizard",
+  "format": "png",
+  "h": 16,
+  "id": "affb1617-24bc-4170-9c84-0902cc3ef206",
+  "len": 940,
+  "offset": 84096,
+  "ru": [
+   "КонструкторНастроекКомпоновкиДанных"
+  ],
+  "variant": "_paperMagic_100.png",
+  "w": 16
+ },
+ {
+  "en": "DataCompositionStandardSettings",
+  "format": "png",
+  "h": 16,
+  "id": "251aaa98-0127-44c3-a163-6f5ab4367ee2",
+  "len": 1014,
+  "offset": 85036,
+  "ru": [
+   "СтандартнаяНастройкаКомпоновкиДанных"
+  ],
+  "variant": "_documentTriangleArrowUp_100.png",
+  "w": 16
+ },
+ {
+  "en": "DataCompositionUserFields",
+  "format": "png",
+  "h": 16,
+  "id": "b68eb29c-2372-46e1-b84e-13843899ccf6",
+  "len": 895,
+  "offset": 86050,
+  "ru": [
+   "ПользовательскиеПоляКомпоновкиДанных"
+  ],
+  "variant": "_gridFunction_100.png",
+  "w": 16
+ },
+ {
+  "en": "DataHistory",
+  "format": "png",
+  "h": 16,
+  "id": "e8a49985-fef7-45a9-b6bb-ddd2b9028172",
+  "len": 421,
+  "offset": 86945,
+  "ru": [
+   "ИсторияДанных"
+  ],
+  "variant": "ChangeHistory.png",
+  "w": 16
+ },
+ {
+  "en": "DataProcessor",
+  "format": "png",
+  "h": 16,
+  "id": "a6cbfd77-fcf0-40f4-a8de-ee0d3e580fe6",
+  "len": 794,
+  "offset": 87366,
+  "ru": [
+   "Обработка"
+  ],
+  "variant": "_processScheme_100.png",
+  "w": 16
+ },
+ {
+  "en": "DataSearch",
+  "format": "svg",
+  "h": 16,
+  "id": "35bc8caa-f7ce-4158-87da-d9bf785afa39",
+  "len": 458,
+  "offset": 88160,
+  "ru": [
+   "ПоискДанных"
+  ],
+  "variant": "search.svg",
+  "w": 16
+ },
+ {
+  "en": "Debit",
+  "format": "png",
+  "h": 16,
+  "id": "196622f7-0941-435b-992b-722f3082adf4",
+  "len": 525,
+  "offset": 88618,
+  "ru": [
+   "Дебет"
+  ],
+  "variant": "_DtBlue_100.png",
+  "w": 16
+ },
+ {
+  "en": "DebitCredit",
+  "format": "png",
+  "h": 16,
+  "id": "ed067d76-b144-4d00-bb36-d1833dd1350c",
+  "len": 590,
+  "offset": 89143,
+  "ru": [
+   "ДебетКредит"
+  ],
+  "variant": "_DtCtBlueRed_100.png",
+  "w": 16
+ },
+ {
+  "en": "Delete",
+  "format": "png",
+  "h": 16,
+  "id": "08a45a70-c221-4339-b3b1-9f11cb22147d",
+  "len": 799,
+  "offset": 89733,
+  "ru": [
+   "Удалить"
+  ],
+  "variant": "_trashClose_100.png",
+  "w": 16
+ },
+ {
+  "en": "DeleteDirectly",
+  "format": "png",
+  "h": 16,
+  "id": "60643198-e4b2-4c39-9de1-53cca3fff382",
+  "len": 468,
+  "offset": 90532,
+  "ru": [
+   "УдалитьНепосредственно"
+  ],
+  "variant": "GridDeleteCmd_100.png",
+  "w": 16
+ },
+ {
+  "en": "Dendrogram",
+  "format": "png",
+  "h": 16,
+  "id": "4bf9fbb5-53c5-4b09-bab2-d69bbfab945b",
+  "len": 624,
+  "offset": 91000,
+  "ru": [
+   "Дендрограмма"
+  ],
+  "variant": "_dendrogram_100.png",
+  "w": 16
+ },
+ {
+  "en": "DialogExclamation",
+  "format": "svg",
+  "h": 16,
+  "id": "5289d9a4-b012-4d54-9bce-50473fe29b57",
+  "len": 706,
+  "offset": 91624,
+  "ru": [
+   "ДиалогВосклицание"
+  ],
+  "variant": "_messageExlaim.svg",
+  "w": 16
+ },
+ {
+  "en": "DialogInformation",
+  "format": "svg",
+  "h": 16,
+  "id": "8bdf1079-8fad-4d21-ad7f-4b2e4ecdce3d",
+  "len": 686,
+  "offset": 92330,
+  "ru": [
+   "ДиалогИнформация"
+  ],
+  "variant": "messageInform.svg",
+  "w": 16
+ },
+ {
+  "en": "DialogQuestion",
+  "format": "svg",
+  "h": 16,
+  "id": "ef27ae9e-7040-4374-b93c-0d276de2ea23",
+  "len": 1509,
+  "offset": 93016,
+  "ru": [
+   "ДиалогВопрос"
+  ],
+  "variant": "_messageQuest.svg",
+  "w": 16
+ },
+ {
+  "en": "DialogStop",
+  "format": "svg",
+  "h": 16,
+  "id": "83db1f8a-41bd-4016-bdb2-a28e3a8d6dcc",
+  "len": 554,
+  "offset": 94525,
+  "ru": [
+   "ДиалогСтоп"
+  ],
+  "variant": "messageStop.svg",
+  "w": 16
+ },
+ {
+  "en": "Dimension",
+  "format": "png",
+  "h": 16,
+  "id": "c78c9f3d-e92c-4f38-bb72-d8bd7fa5dbe3",
+  "len": 603,
+  "offset": 95079,
+  "ru": [
+   "Измерение"
+  ],
+  "variant": "_arrowsUpNext_100.png",
+  "w": 16
+ },
+ {
+  "en": "Document",
+  "format": "png",
+  "h": 16,
+  "id": "894afc03-9904-465d-b671-f555ffb9b21c",
+  "len": 651,
+  "offset": 95682,
+  "ru": [
+   "Документ"
+  ],
+  "variant": "_documentFolded_100.png",
+  "w": 16
+ },
+ {
+  "en": "DocumentJournal",
+  "format": "png",
+  "h": 16,
+  "id": "e51185a4-d915-45b8-b201-1c46cc2d8104",
+  "len": 1042,
+  "offset": 96333,
+  "ru": [
+   "ЖурналДокументов"
+  ],
+  "variant": "_journal_100.png",
+  "w": 16
+ },
+ {
+  "en": "DocumentObject",
+  "format": "png",
+  "h": 16,
+  "id": "2209b937-6f41-4153-b1ac-ef7e170ad3a7",
+  "len": 651,
+  "offset": 97375,
+  "ru": [
+   "ДокументОбъект"
+  ],
+  "variant": "_documentFolded_100.png",
+  "w": 16
+ },
+ {
+  "en": "DontDisturb",
+  "format": "png",
+  "h": 16,
+  "id": "a55455d6-be06-4da3-9a4f-62fbefd1aded",
+  "len": 448,
+  "offset": 98026,
+  "ru": [
+   "НеБеспокоить"
+  ],
+  "variant": "notifyClose_100.png",
+  "w": 16
+ },
+ {
+  "en": "DontNotify",
+  "format": "png",
+  "h": 16,
+  "id": "517ed1af-55eb-42da-a1d4-a9960ef7c1f3",
+  "len": 442,
+  "offset": 98474,
+  "ru": [
+   "НеОповещать"
+  ],
+  "variant": "notifyCrossed_100.png",
+  "w": 16
+ },
+ {
+  "en": "EditInDialog",
+  "format": "png",
+  "h": 16,
+  "id": "021c20a0-071b-4a60-8e44-12487adde0c8",
+  "len": 854,
+  "offset": 98916,
+  "ru": [
+   "РедактироватьВДиалоге"
+  ],
+  "variant": "_windowCrossed_100.png",
+  "w": 16
+ },
+ {
+  "en": "EndEdit",
+  "format": "png",
+  "h": 16,
+  "id": "ed0bec43-4633-416c-8c08-0384ca444e32",
+  "len": 771,
+  "offset": 99770,
+  "ru": [
+   "ЗакончитьРедактирование"
+  ],
+  "variant": "_floppyOK_100.png",
+  "w": 16
+ },
+ {
+  "en": "Enum",
+  "format": "png",
+  "h": 16,
+  "id": "80d1a756-13a8-4281-86cc-eaaf84da4cf9",
+  "len": 549,
+  "offset": 100541,
+  "ru": [
+   "Перечисление"
+  ],
+  "variant": "_braces.png",
+  "w": 16
+ },
+ {
+  "en": "EventLog",
+  "format": "png",
+  "h": 16,
+  "id": "723765ab-0b92-4745-a621-1ba0f77c92c9",
+  "len": 709,
+  "offset": 101090,
+  "ru": [
+   "ЖурналРегистрации"
+  ],
+  "variant": "_cassette_100.png",
+  "w": 16
+ },
+ {
+  "en": "EventLogByUser",
+  "format": "png",
+  "h": 16,
+  "id": "4fddea39-5129-4b4c-83fe-4e443cd61940",
+  "len": 884,
+  "offset": 101799,
+  "ru": [
+   "ЖурналРегистрацииПоПользователю"
+  ],
+  "variant": "_userCassette_100.png",
+  "w": 16
+ },
+ {
+  "en": "ExchangePlan",
+  "format": "png",
+  "h": 16,
+  "id": "544fdbe8-5956-4512-bc62-93b4c022d291",
+  "len": 1756,
+  "offset": 102683,
+  "ru": [
+   "ПланОбмена"
+  ],
+  "variant": "_arrowTriangle_100.png",
+  "w": 16
+ },
+ {
+  "en": "ExchangePlanObject",
+  "format": "png",
+  "h": 16,
+  "id": "743cc773-12e6-4ee6-9c57-5f5800bac427",
+  "len": 679,
+  "offset": 104439,
+  "ru": [
+   "ПланОбменаОбъект"
+  ],
+  "variant": "_barrelBlueArrows_100.png",
+  "w": 16
+ },
+ {
+  "en": "ExecuteTask",
+  "format": "png",
+  "h": 16,
+  "id": "003024ed-fa25-42ac-9f53-f5014e383801",
+  "len": 797,
+  "offset": 105118,
+  "ru": [
+   "ВыполнитьЗадачу"
+  ],
+  "variant": "_tabletCheck_100.png",
+  "w": 16
+ },
+ {
+  "en": "ExpandAll",
+  "format": "png",
+  "h": 16,
+  "id": "fb7e9fb5-110b-41cb-adc6-753969ae1c81",
+  "len": 1362,
+  "offset": 105915,
+  "ru": [
+   "РазвернутьВсе"
+  ],
+  "variant": "_arrowUnfold_100_ltr.png",
+  "w": 16
+ },
+ {
+  "en": "ExternalDataSource",
+  "format": "png",
+  "h": 16,
+  "id": "3a32aa35-c679-4c5b-91bd-72ae038e5bb4",
+  "len": 796,
+  "offset": 107277,
+  "ru": [
+   "ВнешнийИсточникДанных"
+  ],
+  "variant": "_barrelsDots_100.png",
+  "w": 16
+ },
+ {
+  "en": "ExternalDataSourceCube",
+  "format": "png",
+  "h": 16,
+  "id": "fad46a2b-2e56-47cc-b90c-3c2d4b061937",
+  "len": 896,
+  "offset": 108073,
+  "ru": [
+   "ВнешнийИсточникДанныхКуб"
+  ],
+  "variant": "_cube_100.png",
+  "w": 16
+ },
+ {
+  "en": "ExternalDataSourceCubeDimensionTable",
+  "format": "png",
+  "h": 16,
+  "id": "32b63e58-c1fa-4f59-b874-bf4a077f816e",
+  "len": 590,
+  "offset": 108969,
+  "ru": [
+   "ВнешнийИсточникДанныхКубТаблицаИзмерения"
+  ],
+  "variant": "_dotArrowsUpNextGrid_100.png",
+  "w": 16
+ },
+ {
+  "en": "ExternalDataSourceFunction",
+  "format": "png",
+  "h": 16,
+  "id": "2954e819-f3fc-40de-9769-292efce9a355",
+  "len": 463,
+  "offset": 109559,
+  "ru": [
+   "ВнешнийИсточникДанныхФункция"
+  ],
+  "variant": "_contentExternal_100.png",
+  "w": 16
+ },
+ {
+  "en": "ExternalDataSourceTable",
+  "format": "png",
+  "h": 16,
+  "id": "5b612c21-e223-4997-9e61-86f7a67ec945",
+  "len": 493,
+  "offset": 110022,
+  "ru": [
+   "ВнешнийИсточникДанныхТаблица"
+  ],
+  "variant": "_griDots_100.png",
+  "w": 16
+ },
+ {
+  "en": "Favorites",
+  "format": "svg",
+  "h": 16,
+  "id": "c38cc4cf-111d-4bc8-8dcb-4464e2ddfb25",
+  "len": 483,
+  "offset": 110515,
+  "ru": [
+   "Избранное"
+  ],
+  "variant": "_favoriteOld.svg",
+  "w": 16
+ },
+ {
+  "en": "FilterAndSort",
+  "format": "png",
+  "h": 16,
+  "id": "73af51dd-6cda-48be-a093-5a7161c60c77",
+  "len": 1096,
+  "offset": 110998,
+  "ru": [
+   "ОтборИСортировка"
+  ],
+  "variant": "_gridFunnelArrowDown_100.png",
+  "w": 16
+ },
+ {
+  "en": "FilterByCurrentValue",
+  "format": "png",
+  "h": 16,
+  "id": "b1406535-6cc2-4410-95ea-753556e8460f",
+  "len": 855,
+  "offset": 112094,
+  "ru": [
+   "ОтборПоТекущемуЗначению"
+  ],
+  "variant": "_funnelCheck_100.png",
+  "w": 16
+ },
+ {
+  "en": "FilterByType",
+  "format": "png",
+  "h": 16,
+  "id": "0bac63da-5b4e-48af-b593-7c5d29663e83",
+  "len": 544,
+  "offset": 112949,
+  "ru": [
+   "ОтборПоВиду"
+  ],
+  "variant": "_contentBrace_100.png",
+  "w": 16
+ },
+ {
+  "en": "FilterCriterion",
+  "format": "png",
+  "h": 16,
+  "id": "2ef82795-06fe-4365-bd0c-44b486264620",
+  "len": 1837,
+  "offset": 113493,
+  "ru": [
+   "КритерийОтбора"
+  ],
+  "variant": "_documentFunnel_100.png",
+  "w": 16
+ },
+ {
+  "en": "FilterHistory",
+  "format": "png",
+  "h": 16,
+  "id": "8729a534-9f88-47b0-8d6b-ec213689580d",
+  "len": 934,
+  "offset": 115330,
+  "ru": [
+   "ИсторияОтборов"
+  ],
+  "variant": "_gridFunnelSpace_100.png",
+  "w": 16
+ },
+ {
+  "en": "Find",
+  "format": "png",
+  "h": 16,
+  "id": "ffab30f1-da11-44b5-b34c-24da22badcf4",
+  "len": 1584,
+  "offset": 116264,
+  "ru": [
+   "Найти"
+  ],
+  "variant": "_search_100_ltr.png",
+  "w": 16
+ },
+ {
+  "en": "FindByNumber",
+  "format": "png",
+  "h": 16,
+  "id": "4eb938cb-7d69-4f3d-ac17-1f20f1212d49",
+  "len": 645,
+  "offset": 117848,
+  "ru": [
+   "НайтиПоНомеру"
+  ],
+  "variant": "_searchN_100.png",
+  "w": 16
+ },
+ {
+  "en": "FindInList",
+  "format": "png",
+  "h": 16,
+  "id": "c7cdd3c0-3879-436a-b145-5e2615e9b3e1",
+  "len": 740,
+  "offset": 118493,
+  "ru": [
+   "НайтиВСписке"
+  ],
+  "variant": "_listArrowPrev_100.png",
+  "w": 16
+ },
+ {
+  "en": "FindInTree",
+  "format": "png",
+  "h": 16,
+  "id": "38bbcebe-e456-461b-8457-07c9a72344a3",
+  "len": 645,
+  "offset": 119233,
+  "ru": [
+   "НайтиВДереве"
+  ],
+  "variant": "_searchN_100.png",
+  "w": 16
+ },
+ {
+  "en": "FindNext",
+  "format": "png",
+  "h": 16,
+  "id": "05612131-3e11-49c0-9592-07e6d9318ef7",
+  "len": 1563,
+  "offset": 119878,
+  "ru": [
+   "НайтиСледующий"
+  ],
+  "variant": "_searchArrowNext_100_ltr.png",
+  "w": 16
+ },
+ {
+  "en": "FindPrevious",
+  "format": "png",
+  "h": 16,
+  "id": "e3b38083-0191-4a10-8f5b-51571f2419b4",
+  "len": 1577,
+  "offset": 121441,
+  "ru": [
+   "НайтиПредыдущий"
+  ],
+  "variant": "_searchArrowPrev_100_ltr.png",
+  "w": 16
+ },
+ {
+  "en": "FixTable",
+  "format": "png",
+  "h": 16,
+  "id": "5182f57f-e834-4d11-9c9f-4aedc002b6e9",
+  "len": 540,
+  "offset": 123018,
+  "ru": [
+   "ЗафиксироватьТаблицу"
+  ],
+  "variant": "_tableFixed_100.png",
+  "w": 16
+ },
+ {
+  "en": "Form",
+  "format": "png",
+  "h": 16,
+  "id": "fc34a694-e99b-4d1c-a526-63f5571bdb09",
+  "len": 1726,
+  "offset": 123558,
+  "ru": [
+   "Форма"
+  ],
+  "variant": "_windowContent_100.png",
+  "w": 16
+ },
+ {
+  "en": "FormHelp",
+  "format": "png",
+  "h": 16,
+  "id": "b7c81c62-d6ad-4eae-9cea-0e203182db67",
+  "len": 185,
+  "offset": 125284,
+  "ru": [
+   "СправкаФормы"
+  ],
+  "variant": "tbglhelp_new_100.png",
+  "w": 16
+ },
+ {
+  "en": "FormattedString",
+  "format": "png",
+  "h": 16,
+  "id": "a636287d-8d6f-4ef3-94bb-a8f986ab52bb",
+  "len": 421,
+  "offset": 125469,
+  "ru": [
+   "ФорматированнаяСтрока"
+  ],
+  "variant": "SwitchFmtSimpleStr.png",
+  "w": 16
+ },
+ {
+  "en": "Forward",
+  "format": "png",
+  "h": 16,
+  "id": "f874b0cc-db1d-4577-8c77-d4ba206eb05d",
+  "len": 705,
+  "offset": 125890,
+  "ru": [
+   "Вперед"
+  ],
+  "variant": "_windowArrowNext_100.png",
+  "w": 16
+ },
+ {
+  "en": "FunctionMenuCommand",
+  "format": "svg",
+  "h": 16,
+  "id": "dfcd2d21-24ea-4b27-ab9a-6bf754577536",
+  "len": 275,
+  "offset": 126595,
+  "ru": [
+   "КомандаМенюФункций"
+  ],
+  "variant": "_moreThemes.svg",
+  "w": 16
+ },
+ {
+  "en": "GanttChart",
+  "format": "png",
+  "h": 16,
+  "id": "fa67cb81-8d56-4534-90bd-b62fb0dbf5f0",
+  "len": 779,
+  "offset": 126870,
+  "ru": [
+   "ДиаграммаГанта"
+  ],
+  "variant": "_diagramGantt_100.png",
+  "w": 16
+ },
+ {
+  "en": "GenerateReport",
+  "format": "png",
+  "h": 16,
+  "id": "0ce78048-0196-4f80-a781-9829cdb7f43e",
+  "len": 301,
+  "offset": 127649,
+  "ru": [
+   "СформироватьОтчет"
+  ],
+  "variant": "executeReport_100.png",
+  "w": 16
+ },
+ {
+  "en": "GeographicalSchema",
+  "format": "png",
+  "h": 16,
+  "id": "a9152be7-62cf-4523-be34-a23f018f497e",
+  "len": 882,
+  "offset": 127950,
+  "ru": [
+   "ГеографическаяСхема"
+  ],
+  "variant": "_globe_100.png",
+  "w": 16
+ },
+ {
+  "en": "GetURL",
+  "format": "svg",
+  "h": 16,
+  "id": "1a4342a5-fa06-4556-8a85-e8738fc25821",
+  "len": 1332,
+  "offset": 128832,
+  "ru": [
+   "ПолучитьНавигационнуюСсылку"
+  ],
+  "variant": "_link.svg",
+  "w": 16
+ },
+ {
+  "en": "GoBack",
+  "format": "png",
+  "h": 16,
+  "id": "892196a9-c94f-4e50-8224-3c0cea4ea6b8",
+  "len": 513,
+  "offset": 130164,
+  "ru": [
+   "ПерейтиНазад"
+  ],
+  "variant": "_chevronPrev_100.png",
+  "w": 16
+ },
+ {
+  "en": "GoForward",
+  "format": "png",
+  "h": 16,
+  "id": "7562cef7-0e57-4f63-a754-b61128a4f3ae",
+  "len": 495,
+  "offset": 130677,
+  "ru": [
+   "ПерейтиВперед"
+  ],
+  "variant": "_chevronNext_100.png",
+  "w": 16
+ },
+ {
+  "en": "GoToBegin",
+  "format": "png",
+  "h": 16,
+  "id": "85cc7dd0-44fc-41aa-967f-f52f202ee2e6",
+  "len": 511,
+  "offset": 131172,
+  "ru": [
+   "ПерейтиКНачалу"
+  ],
+  "variant": "_pageFirst_100.png",
+  "w": 16
+ },
+ {
+  "en": "GoToEnd",
+  "format": "png",
+  "h": 16,
+  "id": "14b24498-e49c-4713-be64-75101d0abfb9",
+  "len": 513,
+  "offset": 131683,
+  "ru": [
+   "ПерейтиККонцу"
+  ],
+  "variant": "_pageLast_100.png",
+  "w": 16
+ },
+ {
+  "en": "GotoExternalURL",
+  "format": "svg",
+  "h": 16,
+  "id": "31bf709f-3b50-4137-9b51-ebc7fb802a7c",
+  "len": 1956,
+  "offset": 132196,
+  "ru": [
+   "ПерейтиПоВнешнейНавигационнойСсылке"
+  ],
+  "variant": "globeArrow.svg",
+  "w": 16
+ },
+ {
+  "en": "GotoURL",
+  "format": "svg",
+  "h": 16,
+  "id": "3b2a508b-f36e-4e0b-9dc0-70b2b56276a9",
+  "len": 1197,
+  "offset": 134152,
+  "ru": [
+   "ПерейтиПоНавигационнойСсылке"
+  ],
+  "variant": "linkArrow.svg",
+  "w": 16
+ },
+ {
+  "en": "GraphicalSchema",
+  "format": "png",
+  "h": 16,
+  "id": "e96de06b-fa83-48cf-b033-190a249855c9",
+  "len": 356,
+  "offset": 135349,
+  "ru": [
+   "ГрафическаяСхема"
+  ],
+  "variant": "schemedocicon_100.png",
+  "w": 16
+ },
+ {
+  "en": "GrayedAll",
+  "format": "png",
+  "h": 16,
+  "id": "-12",
+  "len": 350,
+  "offset": 135705,
+  "ru": [
+   "ЗатенитьФлажки"
+  ],
+  "variant": "discheck_100.png",
+  "w": 16
+ },
+ {
+  "en": "GroupConversation",
+  "format": "svg",
+  "h": 16,
+  "id": "2a7e58e2-a6c5-4387-a459-5249c441947a",
+  "len": 3058,
+  "offset": 136055,
+  "ru": [
+   "ГрупповоеОбсуждение"
+  ],
+  "variant": "userDouble.svg",
+  "w": 16
+ },
+ {
+  "en": "Help",
+  "format": "svg",
+  "h": 16,
+  "id": "6ecee038-9722-4d80-bb91-7ee7046ec4c7",
+  "len": 1699,
+  "offset": 139113,
+  "ru": [
+   "Справка"
+  ],
+  "variant": "_help.svg",
+  "w": 16
+ },
+ {
+  "en": "HidePassword",
+  "format": "svg",
+  "h": 16,
+  "id": "0e2da390-5c04-46a2-a74b-1b7e13a40f2b",
+  "len": 3085,
+  "offset": 140812,
+  "ru": [
+   "СкрытьПароль"
+  ],
+  "variant": "eyeCloseTaxi.svg",
+  "w": 16
+ },
+ {
+  "en": "HierarchicalView",
+  "format": "png",
+  "h": 16,
+  "id": "a119150f-6c0c-4a94-97b0-5f08d7ebd6f5",
+  "len": 523,
+  "offset": 143897,
+  "ru": [
+   "ИерархическийПросмотр"
+  ],
+  "variant": "_lineItemFolderFill_100.png",
+  "w": 16
+ },
+ {
+  "en": "History",
+  "format": "png",
+  "h": 16,
+  "id": "c283cd1c-3187-451d-8ef2-7df55daeef06",
+  "len": 287,
+  "offset": 144420,
+  "ru": [
+   "История"
+  ],
+  "variant": "history_100.png",
+  "w": 16
+ },
+ {
+  "en": "Information",
+  "format": "svg",
+  "h": 16,
+  "id": "4b54770b-d069-4c0e-9b17-5cc2a01134d9",
+  "len": 1681,
+  "offset": 144707,
+  "ru": [
+   "Информация"
+  ],
+  "variant": "_about.svg",
+  "w": 16
+ },
+ {
+  "en": "InformationRegister",
+  "format": "png",
+  "h": 16,
+  "id": "5b87ad1b-d8cc-43c1-b5c4-dc43613c518c",
+  "len": 694,
+  "offset": 146388,
+  "ru": [
+   "РегистрСведений"
+  ],
+  "variant": "_gridCellFill.png",
+  "w": 16
+ },
+ {
+  "en": "InformationRegisterRecord",
+  "format": "png",
+  "h": 16,
+  "id": "4128e6b6-e4ef-48d4-a523-99dc6b613054",
+  "len": 607,
+  "offset": 147082,
+  "ru": [
+   "РегистрСведенийЗапись"
+  ],
+  "variant": "_trendFill_100.png",
+  "w": 16
+ },
+ {
+  "en": "InputFieldCalculator",
+  "format": "png",
+  "h": 16,
+  "id": "-6",
+  "len": 234,
+  "offset": 147689,
+  "ru": [
+   "ПолеВводаКалькулятор"
+  ],
+  "variant": "_editCalc100.png",
+  "w": 16
+ },
+ {
+  "en": "InputFieldCalendar",
+  "format": "png",
+  "h": 16,
+  "id": "-5",
+  "len": 212,
+  "offset": 147923,
+  "ru": [
+   "ПолеВводаКалендарь"
+  ],
+  "variant": "_editCalendar100.png",
+  "w": 16
+ },
+ {
+  "en": "InputFieldChooseType",
+  "format": "png",
+  "h": 16,
+  "id": "-14",
+  "len": 232,
+  "offset": 148135,
+  "ru": [
+   "ПолеВводаВыбратьТип"
+  ],
+  "variant": "_editType100.png",
+  "w": 16
+ },
+ {
+  "en": "InputFieldClear",
+  "format": "png",
+  "h": 16,
+  "id": "-2",
+  "len": 248,
+  "offset": 148367,
+  "ru": [
+   "ПолеВводаОчистить"
+  ],
+  "variant": "_editClear100.png",
+  "w": 16
+ },
+ {
+  "en": "InputFieldOpen",
+  "format": "png",
+  "h": 16,
+  "id": "-7",
+  "len": 192,
+  "offset": 148615,
+  "ru": [
+   "ПолеВводаОткрыть"
+  ],
+  "variant": "_editOpen100.png",
+  "w": 16
+ },
+ {
+  "en": "InputFieldSelect",
+  "format": "png",
+  "h": 16,
+  "id": "-1",
+  "len": 150,
+  "offset": 148807,
+  "ru": [
+   "ПолеВводаВыбрать"
+  ],
+  "variant": "_editSelect100.png",
+  "w": 16
+ },
+ {
+  "en": "InputOnBasis",
+  "format": "png",
+  "h": 16,
+  "id": "01ec9d9a-7497-4d88-b93f-066c633a4866",
+  "len": 862,
+  "offset": 148957,
+  "ru": [
+   "ВводНаОсновании"
+  ],
+  "variant": "derivedTo.png",
+  "w": 16
+ },
+ {
+  "en": "LevelDown",
+  "format": "png",
+  "h": 16,
+  "id": "01743054-d102-4e7c-bf15-5ed7fd84441b",
+  "len": 662,
+  "offset": 149819,
+  "ru": [
+   "УровеньВниз"
+  ],
+  "variant": "_folderTriangleDown_100.png",
+  "w": 16
+ },
+ {
+  "en": "LevelUp",
+  "format": "png",
+  "h": 16,
+  "id": "cb34c423-3d6a-4202-a809-3b3f45fb14ab",
+  "len": 643,
+  "offset": 150481,
+  "ru": [
+   "УровеньВверх"
+  ],
+  "variant": "_folderTriangleUp_100.png",
+  "w": 16
+ },
+ {
+  "en": "ListSettings",
+  "format": "png",
+  "h": 16,
+  "id": "31b93f03-0ba2-4631-a171-0d3a3d2ecc48",
+  "len": 929,
+  "offset": 151124,
+  "ru": [
+   "НастройкаСписка"
+  ],
+  "variant": "_listSettings_100.png",
+  "w": 16
+ },
+ {
+  "en": "ListViewMode",
+  "format": "png",
+  "h": 16,
+  "id": "549a2c45-4fce-493f-94ee-9a3a4f426551",
+  "len": 523,
+  "offset": 152053,
+  "ru": [
+   "РежимПросмотраСписка"
+  ],
+  "variant": "_lineItemFolderFill_100.png",
+  "w": 16
+ },
+ {
+  "en": "ListViewModeHierarchicalList",
+  "format": "png",
+  "h": 16,
+  "id": "3d4ad3b1-17de-4cf1-a2e4-0c2c83a5b5c2",
+  "len": 556,
+  "offset": 152576,
+  "ru": [
+   "РежимПросмотраСпискаИерархическийСписок"
+  ],
+  "variant": "_formatListHierarchical_100.png",
+  "w": 16
+ },
+ {
+  "en": "ListViewModeList",
+  "format": "png",
+  "h": 16,
+  "id": "c757209d-a87f-4410-b1a3-76000178f1f0",
+  "len": 630,
+  "offset": 153132,
+  "ru": [
+   "РежимПросмотраСпискаСписок"
+  ],
+  "variant": "_formatList_100.png",
+  "w": 16
+ },
+ {
+  "en": "ListViewModeTree",
+  "format": "png",
+  "h": 16,
+  "id": "da9ac044-0ff7-4bcf-a441-3187bd1d951f",
+  "len": 578,
+  "offset": 153762,
+  "ru": [
+   "РежимПросмотраСпискаДерево"
+  ],
+  "variant": "_formatListTree_100.png",
+  "w": 16
+ },
+ {
+  "en": "LoadReportSettings",
+  "format": "png",
+  "h": 16,
+  "id": "283ecabd-aaed-41d1-ad46-6cca91c29120",
+  "len": 1186,
+  "offset": 154340,
+  "ru": [
+   "ЗагрузитьНастройкиОтчета"
+  ],
+  "variant": "_folderSettings_100.png",
+  "w": 16
+ },
+ {
+  "en": "Magnifier",
+  "format": "png",
+  "h": 16,
+  "id": "-700",
+  "len": 192,
+  "offset": 155526,
+  "ru": [
+   "Лупа"
+  ],
+  "variant": "_editOpen100.png",
+  "w": 16
+ },
+ {
+  "en": "MarkToDelete",
+  "format": "png",
+  "h": 16,
+  "id": "18492a87-2fe4-44af-b218-304897fed020",
+  "len": 846,
+  "offset": 155718,
+  "ru": [
+   "ПометитьНаУдаление"
+  ],
+  "variant": "_trash_100.png",
+  "w": 16
+ },
+ {
+  "en": "Message",
+  "format": "svg",
+  "h": 16,
+  "id": "78da2c47-172f-4d57-ab52-a06e40548136",
+  "len": 826,
+  "offset": 156564,
+  "ru": [
+   "Сообщение"
+  ],
+  "variant": "bubble.svg",
+  "w": 16
+ },
+ {
+  "en": "MessageHistory",
+  "format": "svg",
+  "h": 16,
+  "id": "d08abfb8-44b6-4b0f-bad2-e235c6a718c3",
+  "len": 959,
+  "offset": 157390,
+  "ru": [
+   "ИсторияСообщений"
+  ],
+  "variant": "_bubbleHistory.svg",
+  "w": 16
+ },
+ {
+  "en": "MoveDown",
+  "format": "png",
+  "h": 16,
+  "id": "-4",
+  "len": 284,
+  "offset": 158349,
+  "ru": [
+   "ПереместитьВниз"
+  ],
+  "variant": "movedown_100.png",
+  "w": 16
+ },
+ {
+  "en": "MoveItem",
+  "format": "png",
+  "h": 16,
+  "id": "37e91e77-93ce-4c3b-8d30-a9d8cfd3d3b0",
+  "len": 785,
+  "offset": 158633,
+  "ru": [
+   "ПеренестиЭлемент"
+  ],
+  "variant": "_folderArrowNext_100.png",
+  "w": 16
+ },
+ {
+  "en": "MoveLeft",
+  "format": "png",
+  "h": 16,
+  "id": "-8",
+  "len": 268,
+  "offset": 159418,
+  "ru": [
+   "ПереместитьВлево"
+  ],
+  "variant": "moveleft_100.png",
+  "w": 16
+ },
+ {
+  "en": "MoveRight",
+  "format": "png",
+  "h": 16,
+  "id": "-9",
+  "len": 278,
+  "offset": 159686,
+  "ru": [
+   "ПереместитьВправо"
+  ],
+  "variant": "moveright_100.png",
+  "w": 16
+ },
+ {
+  "en": "MoveUp",
+  "format": "png",
+  "h": 16,
+  "id": "-3",
+  "len": 282,
+  "offset": 159964,
+  "ru": [
+   "ПереместитьВверх"
+  ],
+  "variant": "moveup_100.png",
+  "w": 16
+ },
+ {
+  "en": "NestedTable",
+  "format": "png",
+  "h": 16,
+  "id": "52b637e5-f95f-4c70-9a72-2a4b5a9df449",
+  "len": 1576,
+  "offset": 160246,
+  "ru": [
+   "ВложеннаяТаблица"
+  ],
+  "variant": "_gridContent_100.png",
+  "w": 16
+ },
+ {
+  "en": "NewConversation",
+  "format": "svg",
+  "h": 16,
+  "id": "9c7f3c8c-a4b4-4a0a-84c8-d60d9feeca16",
+  "len": 771,
+  "offset": 161822,
+  "ru": [
+   "НовоеОбсуждение"
+  ],
+  "variant": "_bubblePlus.svg",
+  "w": 16
+ },
+ {
+  "en": "NewWindow",
+  "format": "png",
+  "h": 16,
+  "id": "eb47324b-85f9-4172-9315-bba8015d9970",
+  "len": 650,
+  "offset": 162593,
+  "ru": [
+   "НовоеОкно"
+  ],
+  "variant": "_windowPlus_100.png",
+  "w": 16
+ },
+ {
+  "en": "Next",
+  "format": "png",
+  "h": 16,
+  "id": "9cf611dc-2370-4357-910d-a2b49c7a1ec6",
+  "len": 738,
+  "offset": 163243,
+  "ru": [
+   "Следующий"
+  ],
+  "variant": "_windowArrowDown_100.png",
+  "w": 16
+ },
+ {
+  "en": "Notifications",
+  "format": "svg",
+  "h": 16,
+  "id": "928075d1-b90b-416c-b0b2-c3104cf084aa",
+  "len": 1298,
+  "offset": 163981,
+  "ru": [
+   "Оповещения"
+  ],
+  "variant": "notify.svg",
+  "w": 16
+ },
+ {
+  "en": "Notify",
+  "format": "svg",
+  "h": 16,
+  "id": "d66b6f73-53b8-49b9-8efc-33c54aa06e3f",
+  "len": 1424,
+  "offset": 165279,
+  "ru": [
+   "Оповещать"
+  ],
+  "variant": "notify.svg",
+  "w": 16
+ },
+ {
+  "en": "OpenFile",
+  "format": "png",
+  "h": 16,
+  "id": "785362cb-3756-48ed-87d2-292ded17054a",
+  "len": 648,
+  "offset": 166703,
+  "ru": [
+   "ОткрытьФайл"
+  ],
+  "variant": "_folderArrowUp_100.png",
+  "w": 16
+ },
+ {
+  "en": "OpenFromMainServer",
+  "format": "png",
+  "h": 16,
+  "id": "b4ea245b-70ce-4777-a321-c7eb09839643",
+  "len": 504,
+  "offset": 167351,
+  "ru": [
+   "ОткрытьСОсновногоСервера"
+  ],
+  "variant": "def.png",
+  "w": 16
+ },
+ {
+  "en": "OpenFromStandaloneServer",
+  "format": "png",
+  "h": 16,
+  "id": "3bf7bd14-2232-4f53-b3b3-59a8c683f9b0",
+  "len": 525,
+  "offset": 167855,
+  "ru": [
+   "ОткрытьСАвтономногоСервера"
+  ],
+  "variant": "def.png",
+  "w": 16
+ },
+ {
+  "en": "OutputList",
+  "format": "png",
+  "h": 16,
+  "id": "c2e2d966-5b7f-4699-903b-28a6f50d5471",
+  "len": 857,
+  "offset": 168380,
+  "ru": [
+   "ВывестиСписок"
+  ],
+  "variant": "_listPrint_100.png",
+  "w": 16
+ },
+ {
+  "en": "Parameters",
+  "format": "svg",
+  "h": 16,
+  "id": "835db646-1531-494b-b7c1-3239b0080bcb",
+  "len": 1218,
+  "offset": 169237,
+  "ru": [
+   "Параметры"
+  ],
+  "variant": "_parameters.svg",
+  "w": 16
+ },
+ {
+  "en": "Picture",
+  "format": "png",
+  "h": 16,
+  "id": "64837726-d2a2-4682-a788-737423e80013",
+  "len": 636,
+  "offset": 170455,
+  "ru": [
+   "Картинка"
+  ],
+  "variant": "_picture_100.png",
+  "w": 16
+ },
+ {
+  "en": "PivotChart",
+  "format": "png",
+  "h": 16,
+  "id": "79bf535f-2256-4ebb-bb8d-c26f3dd1a3de",
+  "len": 599,
+  "offset": 171091,
+  "ru": [
+   "СводнаяДиаграмма"
+  ],
+  "variant": "_diagramPivot_100.png",
+  "w": 16
+ },
+ {
+  "en": "Post",
+  "format": "png",
+  "h": 16,
+  "id": "20ebc47b-f4d9-439c-acd3-fdc624fbac2a",
+  "len": 998,
+  "offset": 171690,
+  "ru": [
+   "Провести"
+  ],
+  "variant": "_documentBarrelArrowDown_100.png",
+  "w": 16
+ },
+ {
+  "en": "Previous",
+  "format": "png",
+  "h": 16,
+  "id": "584b470d-ba34-4b25-9620-8de4066ffeaa",
+  "len": 713,
+  "offset": 172688,
+  "ru": [
+   "Предыдущий"
+  ],
+  "variant": "_windowArrowUp_100.png",
+  "w": 16
+ },
+ {
+  "en": "Print",
+  "format": "png",
+  "h": 16,
+  "id": "-13",
+  "len": 665,
+  "offset": 173401,
+  "ru": [
+   "Печать"
+  ],
+  "variant": "_print1_100.png",
+  "w": 16
+ },
+ {
+  "en": "PrintImmediately",
+  "format": "svg",
+  "h": 16,
+  "id": "0abdab67-5c90-4296-8168-239d22024d11",
+  "len": 694,
+  "offset": 174066,
+  "ru": [
+   "ПечатьСразу"
+  ],
+  "variant": "printCheck.svg",
+  "w": 16
+ },
+ {
+  "en": "Properties",
+  "format": "png",
+  "h": 16,
+  "id": "b4c7ab2c-bcda-4468-a28f-5fee93838c4e",
+  "len": 1702,
+  "offset": 174760,
+  "ru": [
+   "Свойства"
+  ],
+  "variant": "_documentHand_100_ltr.png",
+  "w": 16
+ },
+ {
+  "en": "QueryWizard",
+  "format": "png",
+  "h": 16,
+  "id": "1f046bc2-d6c5-46a3-a459-b2c0508f86fb",
+  "len": 915,
+  "offset": 176462,
+  "ru": [
+   "КонструкторЗапроса"
+  ],
+  "variant": "_paperDoubleMagic_100.png",
+  "w": 16
+ },
+ {
+  "en": "QueryWizardCreateNestedQuery",
+  "format": "png",
+  "h": 16,
+  "id": "18bca3d7-a7a5-41df-a180-4dff9c217f43",
+  "len": 921,
+  "offset": 177377,
+  "ru": [
+   "КонструкторЗапросаСоздатьВложенныйЗапрос"
+  ],
+  "variant": "_gridBigDoublePlus_100.png",
+  "w": 16
+ },
+ {
+  "en": "QueryWizardCreateTempTableDescription",
+  "format": "png",
+  "h": 16,
+  "id": "7604cff7-5cc6-4f88-8d16-504f01b92a3c",
+  "len": 1100,
+  "offset": 178298,
+  "ru": [
+   "КонструкторЗапросаСоздатьОписаниеВременнойТаблицы"
+  ],
+  "variant": "_gridBigRhombsPlus_100.png",
+  "w": 16
+ },
+ {
+  "en": "QueryWizardCreateTempTableDropQuery",
+  "format": "png",
+  "h": 16,
+  "id": "7df3febb-2640-41b7-ad8b-7a23b7ad4aec",
+  "len": 818,
+  "offset": 179398,
+  "ru": [
+   "КонструкторЗапросаСоздатьЗапросУничтоженияВременнойТаблицы"
+  ],
+  "variant": "_gridBigClose_100.png",
+  "w": 16
+ },
+ {
+  "en": "QueryWizardNestedQuery",
+  "format": "png",
+  "h": 16,
+  "id": "c5501b77-0070-46e3-8ebd-f04a61eb9a73",
+  "len": 937,
+  "offset": 180216,
+  "ru": [
+   "КонструкторЗапросаВложенныйЗапрос"
+  ],
+  "variant": "_gridBigDouble_100.png",
+  "w": 16
+ },
+ {
+  "en": "QueryWizardReplaceTable",
+  "format": "png",
+  "h": 16,
+  "id": "a9481ba4-dc85-4112-9c50-f9f340a61298",
+  "len": 888,
+  "offset": 181153,
+  "ru": [
+   "КонструкторЗапросаЗаменитьТаблицу"
+  ],
+  "variant": "_gridDoubleCheckClose_100.png",
+  "w": 16
+ },
+ {
+  "en": "QueryWizardShowChangesTables",
+  "format": "png",
+  "h": 16,
+  "id": "270de5f0-f2df-4845-9fde-30b1ec486217",
+  "len": 1127,
+  "offset": 182041,
+  "ru": [
+   "КонструкторЗапросаОтображатьТаблицыИзменений"
+  ],
+  "variant": "_arrowTrianglePencil_100.png",
+  "w": 16
+ },
+ {
+  "en": "QueryWizardTableParameters",
+  "format": "png",
+  "h": 16,
+  "id": "fe740df0-d828-4241-a12f-7414e12302e8",
+  "len": 989,
+  "offset": 183168,
+  "ru": [
+   "КонструкторЗапросаПараметрыТаблицы"
+  ],
+  "variant": "_gridSettings_100.png",
+  "w": 16
+ },
+ {
+  "en": "QueryWizardTempTable",
+  "format": "png",
+  "h": 16,
+  "id": "64ca52ee-f1a3-468f-8055-311935077515",
+  "len": 597,
+  "offset": 184157,
+  "ru": [
+   "КонструкторЗапросаВременнаяТаблица"
+  ],
+  "variant": "_gridBigDotted_100.png",
+  "w": 16
+ },
+ {
+  "en": "QueryWizardTempTableDescription",
+  "format": "png",
+  "h": 16,
+  "id": "6b322d7c-3fa2-437d-b311-fd70c4c7ed46",
+  "len": 941,
+  "offset": 184754,
+  "ru": [
+   "КонструкторЗапросаОписаниеВременнойТаблицы"
+  ],
+  "variant": "_gridBigRhombs_100.png",
+  "w": 16
+ },
+ {
+  "en": "QueryWizardTempTablesGroup",
+  "format": "png",
+  "h": 16,
+  "id": "49369551-39dc-4adb-8795-5ab619c6c2bd",
+  "len": 859,
+  "offset": 185695,
+  "ru": [
+   "КонструкторЗапросаГруппаВременныхТаблиц"
+  ],
+  "variant": "_gridBigFolder_100.png",
+  "w": 16
+ },
+ {
+  "en": "ReadChanges",
+  "format": "png",
+  "h": 16,
+  "id": "83c8f18d-8701-41f3-bef4-53f88adbb868",
+  "len": 766,
+  "offset": 186554,
+  "ru": [
+   "ПрочитатьИзменения"
+  ],
+  "variant": "_barrelLetterArrowUp_100.png",
+  "w": 16
+ },
+ {
+  "en": "Refresh",
+  "format": "png",
+  "h": 16,
+  "id": "fc4f29e0-d168-4fe0-8e64-e982fabf2595",
+  "len": 658,
+  "offset": 187320,
+  "ru": [
+   "Обновить"
+  ],
+  "variant": "_arrowRound_100.png",
+  "w": 16
+ },
+ {
+  "en": "Rename",
+  "format": "png",
+  "h": 16,
+  "id": "c8a269ff-5b6d-4f42-9fa6-369d7b492aa7",
+  "len": 129,
+  "offset": 187978,
+  "ru": [
+   "Переименовать"
+  ],
+  "variant": "rename_100.png",
+  "w": 16
+ },
+ {
+  "en": "Replace",
+  "format": "png",
+  "h": 16,
+  "id": "6cb69e7f-fe19-4f64-bfb5-1a4fad6c2ef9",
+  "len": 1543,
+  "offset": 188107,
+  "ru": [
+   "Заменить"
+  ],
+  "variant": "_searchAB_100_ltr.png",
+  "w": 16
+ },
+ {
+  "en": "Report",
+  "format": "png",
+  "h": 16,
+  "id": "db817ee1-fd28-4e7f-bb4a-53686b2b153c",
+  "len": 799,
+  "offset": 189650,
+  "ru": [
+   "Отчет"
+  ],
+  "variant": "_paperClockSegment_100.png",
+  "w": 16
+ },
+ {
+  "en": "ReportSettings",
+  "format": "png",
+  "h": 16,
+  "id": "942e0303-a3ec-4fe8-887c-5aea8516d424",
+  "len": 1025,
+  "offset": 190449,
+  "ru": [
+   "НастройкиОтчета"
+  ],
+  "variant": "_tableSettings_100.png",
+  "w": 16
+ },
+ {
+  "en": "Reread",
+  "format": "png",
+  "h": 16,
+  "id": "8f29e0e2-d5e6-41e8-a34d-9a0288156322",
+  "len": 658,
+  "offset": 191474,
+  "ru": [
+   "Перечитать"
+  ],
+  "variant": "_arrowRound1_100.png",
+  "w": 16
+ },
+ {
+  "en": "Resource",
+  "format": "png",
+  "h": 16,
+  "id": "d6eefec0-792a-4720-8933-e2a57f9e312c",
+  "len": 619,
+  "offset": 192132,
+  "ru": [
+   "Ресурс"
+  ],
+  "variant": "_cubeTall_100.png",
+  "w": 16
+ },
+ {
+  "en": "RestoreValues",
+  "format": "png",
+  "h": 16,
+  "id": "a7707ed1-39b0-418f-974d-4d500d27a9c6",
+  "len": 904,
+  "offset": 192751,
+  "ru": [
+   "ВосстановитьЗначения"
+  ],
+  "variant": "_documentTriangleArrowUp_100.png",
+  "w": 16
+ },
+ {
+  "en": "RotateClockwise",
+  "format": "svg",
+  "h": 16,
+  "id": "c7f70aa3-b944-4efe-97e3-0fa3bda3cd88",
+  "len": 730,
+  "offset": 193655,
+  "ru": [
+   "ПовернутьПоЧасовойСтрелке"
+  ],
+  "variant": "_rotateClockwise.svg",
+  "w": 16
+ },
+ {
+  "en": "RotateCounterclockwise",
+  "format": "svg",
+  "h": 16,
+  "id": "a43fcd1b-ad8d-4318-9d55-fd1ba086e65b",
+  "len": 729,
+  "offset": 194385,
+  "ru": [
+   "ПовернутьПротивЧасовойСтрелки"
+  ],
+  "variant": "_rotateCounterClockwise.svg",
+  "w": 16
+ },
+ {
+  "en": "SaveFile",
+  "format": "png",
+  "h": 16,
+  "id": "818ab7d0-4654-4542-bd5e-fd9d1352b5a1",
+  "len": 554,
+  "offset": 195114,
+  "ru": [
+   "СохранитьФайл"
+  ],
+  "variant": "_floppy_100.png",
+  "w": 16
+ },
+ {
+  "en": "SaveReportSettings",
+  "format": "png",
+  "h": 16,
+  "id": "b5a0aaba-3a83-4a71-b6f9-24aae1574681",
+  "len": 1171,
+  "offset": 195668,
+  "ru": [
+   "СохранитьНастройкиОтчета"
+  ],
+  "variant": "_floppySettings_100.png",
+  "w": 16
+ },
+ {
+  "en": "SaveValues",
+  "format": "png",
+  "h": 16,
+  "id": "23f940bf-7381-4c2b-85a1-e541ed428042",
+  "len": 963,
+  "offset": 196839,
+  "ru": [
+   "СохранитьЗначения"
+  ],
+  "variant": "_documentTriangleArrowDown_100.png",
+  "w": 16
+ },
+ {
+  "en": "ScheduledJob",
+  "format": "png",
+  "h": 16,
+  "id": "1970a480-9b38-405e-9d9e-8209f3fad5f1",
+  "len": 1867,
+  "offset": 197802,
+  "ru": [
+   "РегламентноеЗадание"
+  ],
+  "variant": "_clockSegment_100.png",
+  "w": 16
+ },
+ {
+  "en": "ScheduledJobs",
+  "format": "png",
+  "h": 16,
+  "id": "6206a729-16e5-4e32-b53c-122de4e30c8d",
+  "len": 1867,
+  "offset": 199669,
+  "ru": [
+   "РегламентныеЗадания"
+  ],
+  "variant": "_clockSegment_100.png",
+  "w": 16
+ },
+ {
+  "en": "SearchControl",
+  "format": "png",
+  "h": 16,
+  "id": "fc6a06a8-1308-4385-b1b2-9d302d2054ed",
+  "len": 1584,
+  "offset": 201536,
+  "ru": [
+   "УправлениеПоиском"
+  ],
+  "variant": "_search_100_ltr.png",
+  "w": 16
+ },
+ {
+  "en": "Select",
+  "format": "png",
+  "h": 16,
+  "id": "-100",
+  "len": 150,
+  "offset": 203120,
+  "ru": [
+   "Выбрать"
+  ],
+  "variant": "_editSelect100.png",
+  "w": 16
+ },
+ {
+  "en": "SendMessage",
+  "format": "svg",
+  "h": 16,
+  "id": "be23a908-fe1b-44df-be94-d0f6e8353abe",
+  "len": 2273,
+  "offset": 203270,
+  "ru": [
+   "ОтправитьСообщение"
+  ],
+  "variant": "send.svg",
+  "w": 16
+ },
+ {
+  "en": "SetDateInterval",
+  "format": "png",
+  "h": 16,
+  "id": "58174855-39be-462e-8723-cb2d95182146",
+  "len": 604,
+  "offset": 205543,
+  "ru": [
+   "УстановитьИнтервал"
+  ],
+  "variant": "_arrowsHorizontal_100.png",
+  "w": 16
+ },
+ {
+  "en": "SetTime",
+  "format": "png",
+  "h": 16,
+  "id": "55ef0776-5ee4-4daf-9a9b-70d63643ab8d",
+  "len": 894,
+  "offset": 206147,
+  "ru": [
+   "УстановитьВремя"
+  ],
+  "variant": "_clock_100.png",
+  "w": 16
+ },
+ {
+  "en": "Setting",
+  "format": "svg",
+  "h": 16,
+  "id": "caf2e58b-ca3d-4b63-82c9-f21f1c9bc9eb",
+  "len": 1881,
+  "offset": 207041,
+  "ru": [
+   "Настройка"
+  ],
+  "variant": "settings.svg",
+  "w": 16
+ },
+ {
+  "en": "SettingsStorage",
+  "format": "png",
+  "h": 16,
+  "id": "6b909f65-95a4-4697-8ca0-c8f331227b9a",
+  "len": 2001,
+  "offset": 208922,
+  "ru": [
+   "ХранилищеНастроек"
+  ],
+  "variant": "_barrelsSettings_100.png",
+  "w": 16
+ },
+ {
+  "en": "ShowData",
+  "format": "png",
+  "h": 16,
+  "id": "a064544f-6037-48ca-b19f-8ad63e43af23",
+  "len": 857,
+  "offset": 210923,
+  "ru": [
+   "ПоказатьДанные"
+  ],
+  "variant": "_searchDocument_100.png",
+  "w": 16
+ },
+ {
+  "en": "ShowInList",
+  "format": "png",
+  "h": 16,
+  "id": "9c96aa25-d656-4b3d-ab3e-81d9718da238",
+  "len": 313,
+  "offset": 211780,
+  "ru": [
+   "ПоказатьВСписке"
+  ],
+  "variant": "ShowInList_100.png",
+  "w": 16
+ },
+ {
+  "en": "ShowPassword",
+  "format": "svg",
+  "h": 16,
+  "id": "97f87955-b88a-4225-a0d8-03af981ecd86",
+  "len": 1854,
+  "offset": 212093,
+  "ru": [
+   "ПоказатьПароль"
+  ],
+  "variant": "eyeOpenTaxi.svg",
+  "w": 16
+ },
+ {
+  "en": "Sort",
+  "format": "png",
+  "h": 16,
+  "id": "a594c8a1-7218-420a-860f-7b493c5e65c4",
+  "len": 454,
+  "offset": 213947,
+  "ru": [
+   "Сортировка"
+  ],
+  "variant": "frntendBands.png",
+  "w": 32
+ },
+ {
+  "en": "SortList",
+  "format": "png",
+  "h": 16,
+  "id": "fafe4c1f-c265-4220-a0e1-8f82af26b72e",
+  "len": 675,
+  "offset": 214401,
+  "ru": [
+   "СортироватьСписок"
+  ],
+  "variant": "_listArrowDown_100.png",
+  "w": 16
+ },
+ {
+  "en": "SortListAsc",
+  "format": "png",
+  "h": 16,
+  "id": "91022b99-b610-48ad-954e-a297848081ce",
+  "len": 581,
+  "offset": 215076,
+  "ru": [
+   "СортироватьСписокПоВозрастанию"
+  ],
+  "variant": "_letterSortAscending_100.png",
+  "w": 16
+ },
+ {
+  "en": "SortListDesc",
+  "format": "png",
+  "h": 16,
+  "id": "1fa32fdb-a180-418f-a6eb-db7516b7a30b",
+  "len": 580,
+  "offset": 215657,
+  "ru": [
+   "СортироватьСписокПоУбыванию"
+  ],
+  "variant": "_letterSortDescending_100.png",
+  "w": 16
+ },
+ {
+  "en": "SortedAsc",
+  "format": "svg",
+  "h": 16,
+  "id": "e4c49dfb-ef8e-4f4a-9d01-9536ba61f944",
+  "len": 164,
+  "offset": 216237,
+  "ru": [
+   "ОтсортированоПоВозрастанию"
+  ],
+  "variant": "_arrowDownBlue.svg",
+  "w": 16
+ },
+ {
+  "en": "SortedDesc",
+  "format": "svg",
+  "h": 16,
+  "id": "34c981c1-f0bd-43e0-a0cf-c2a9cd648b91",
+  "len": 185,
+  "offset": 216401,
+  "ru": [
+   "ОтсортированоПоУбыванию"
+  ],
+  "variant": "_arrowUpBlue.svg",
+  "w": 16
+ },
+ {
+  "en": "SpreadsheetDeleteComment",
+  "format": "png",
+  "h": 16,
+  "id": "7c75b1df-1fdc-471f-aae6-6b7870318cd4",
+  "len": 951,
+  "offset": 216586,
+  "ru": [
+   "ТабличныйДокументУдалитьПримечание"
+  ],
+  "variant": "_noteMinus_100.png",
+  "w": 16
+ },
+ {
+  "en": "SpreadsheetDeletePageBreak",
+  "format": "png",
+  "h": 16,
+  "id": "aa96f4bb-cf28-4dad-bc42-5ed53de95c0c",
+  "len": 804,
+  "offset": 217537,
+  "ru": [
+   "ТабличныйДокументУдалитьРазрывСтраницы"
+  ],
+  "variant": "_paperFillPageBreakRemove_100.png",
+  "w": 16
+ },
+ {
+  "en": "SpreadsheetInsertComment",
+  "format": "png",
+  "h": 16,
+  "id": "03665ff1-3a05-41d1-96d3-04bda2d8ede3",
+  "len": 743,
+  "offset": 218341,
+  "ru": [
+   "ТабличныйДокументВставитьПримечание"
+  ],
+  "variant": "_notePlus_100.png",
+  "w": 16
+ },
+ {
+  "en": "SpreadsheetInsertPageBreak",
+  "format": "png",
+  "h": 16,
+  "id": "26518e18-e364-475a-8026-e41134658b2a",
+  "len": 528,
+  "offset": 219084,
+  "ru": [
+   "ТабличныйДокументВставитьРазрывСтраницы"
+  ],
+  "variant": "_paperFillPageBreak_100.png",
+  "w": 16
+ },
+ {
+  "en": "SpreadsheetReadOnly",
+  "format": "png",
+  "h": 16,
+  "id": "2846af8d-af84-47e3-82b9-01b01f960426",
+  "len": 911,
+  "offset": 219612,
+  "ru": [
+   "ТабличныйДокументТолькоПросмотр"
+  ],
+  "variant": "_tablePencil_100.png",
+  "w": 16
+ },
+ {
+  "en": "SpreadsheetShowComments",
+  "format": "png",
+  "h": 16,
+  "id": "bc61d1e7-2d40-4e93-8630-cce840bdcf99",
+  "len": 615,
+  "offset": 220523,
+  "ru": [
+   "ТабличныйДокументОтображатьПримечания"
+  ],
+  "variant": "_tableNotice_100.png",
+  "w": 16
+ },
+ {
+  "en": "SpreadsheetShowGrid",
+  "format": "png",
+  "h": 16,
+  "id": "3646acb9-a91e-4163-bbe1-2006041cd65d",
+  "len": 468,
+  "offset": 221138,
+  "ru": [
+   "ТабличныйДокументОтображатьСетку"
+  ],
+  "variant": "_tableGrid_100.png",
+  "w": 16
+ },
+ {
+  "en": "SpreadsheetShowGroups",
+  "format": "png",
+  "h": 16,
+  "id": "702a9e16-0bb6-4efb-af11-10faf1e6ee87",
+  "len": 629,
+  "offset": 221606,
+  "ru": [
+   "ТабличныйДокументОтображатьГруппировки"
+  ],
+  "variant": "_groupGap_100.png",
+  "w": 16
+ },
+ {
+  "en": "SpreadsheetShowHeaders",
+  "format": "png",
+  "h": 16,
+  "id": "46598f81-5f95-4485-9b33-bfe4fd1276d0",
+  "len": 594,
+  "offset": 222235,
+  "ru": [
+   "ТабличныйДокументОтображатьЗаголовки"
+  ],
+  "variant": "_tableHeaders_100.png",
+  "w": 16
+ },
+ {
+  "en": "StartVideoconference",
+  "format": "svg",
+  "h": 16,
+  "id": "e7f605f9-53d4-4e07-b56a-4715dc3a3e50",
+  "len": 600,
+  "offset": 222829,
+  "ru": [
+   "НачатьВидеоконференцию"
+  ],
+  "variant": "camera.svg",
+  "w": 16
+ },
+ {
+  "en": "Stop",
+  "format": "png",
+  "h": 16,
+  "id": "1cd7b762-ec6a-4e92-ac9a-1832be228ec3",
+  "len": 975,
+  "offset": 223429,
+  "ru": [
+   "Остановить"
+  ],
+  "variant": "_roundDelete_100.png",
+  "w": 16
+ },
+ {
+  "en": "SwitchActivity",
+  "format": "png",
+  "h": 16,
+  "id": "6e3687cf-a8d1-446a-833a-bfaf38516353",
+  "len": 513,
+  "offset": 224404,
+  "ru": [
+   "ПереключитьАктивность"
+  ],
+  "variant": "_razor_100.png",
+  "w": 16
+ },
+ {
+  "en": "SyncContents",
+  "format": "png",
+  "h": 16,
+  "id": "3bdc16c8-6a96-4467-9442-a8e4804b3fa2",
+  "len": 740,
+  "offset": 224917,
+  "ru": [
+   "НайтиВСодержании"
+  ],
+  "variant": "_contentSearch_100.png",
+  "w": 16
+ },
+ {
+  "en": "Task",
+  "format": "png",
+  "h": 16,
+  "id": "37cf7cc0-abad-4385-b597-6fd2d8dc085a",
+  "len": 688,
+  "offset": 225657,
+  "ru": [
+   "Задача"
+  ],
+  "variant": "_documentFoldedContentDotted_100.png",
+  "w": 16
+ },
+ {
+  "en": "TaskObject",
+  "format": "png",
+  "h": 16,
+  "id": "b9e2dae2-b205-4442-aee5-802cd82f5199",
+  "len": 688,
+  "offset": 226345,
+  "ru": [
+   "ЗадачаОбъект"
+  ],
+  "variant": "_documentFoldedContentDotted_100.png",
+  "w": 16
+ },
+ {
+  "en": "Today",
+  "format": "png",
+  "h": 16,
+  "id": "6ca1af75-2aa5-48a6-820d-efa0ccb8f4f1",
+  "len": 597,
+  "offset": 227033,
+  "ru": [
+   "Сегодня"
+  ],
+  "variant": "_calendarEvent_100.png",
+  "w": 16
+ },
+ {
+  "en": "UncheckAll",
+  "format": "png",
+  "h": 16,
+  "id": "-11",
+  "len": 217,
+  "offset": 227630,
+  "ru": [
+   "СнятьФлажки"
+  ],
+  "variant": "unchecked_100.png",
+  "w": 16
+ },
+ {
+  "en": "UndoPosting",
+  "format": "png",
+  "h": 16,
+  "id": "8ca4ea33-603d-4992-8a41-c7924b5bd40b",
+  "len": 987,
+  "offset": 227847,
+  "ru": [
+   "ОтменаПроведения"
+  ],
+  "variant": "_documentBarrelArrowUp_100.png",
+  "w": 16
+ },
+ {
+  "en": "User",
+  "format": "png",
+  "h": 16,
+  "id": "6ff3ddbd-56e3-4ddf-a5bf-048c1e2dfb2f",
+  "len": 670,
+  "offset": 228834,
+  "ru": [
+   "Пользователь"
+  ],
+  "variant": "_user_100.png",
+  "w": 16
+ },
+ {
+  "en": "UserWithAuthentication",
+  "format": "png",
+  "h": 16,
+  "id": "75a40cc4-c719-4c3f-91ea-fc5787bc34ca",
+  "len": 793,
+  "offset": 229504,
+  "ru": [
+   "ПользовательСАутентификацией"
+  ],
+  "variant": "_userLock_100.png",
+  "w": 16
+ },
+ {
+  "en": "UserWithoutNecessaryProperties",
+  "format": "png",
+  "h": 16,
+  "id": "f16ab927-3ac6-4cdd-bcf1-d8acf005a255",
+  "len": 738,
+  "offset": 230297,
+  "ru": [
+   "ПользовательБезНеобходимыхСвойств"
+  ],
+  "variant": "_userHelp_100.png",
+  "w": 16
+ },
+ {
+  "en": "ViewByOwner",
+  "format": "png",
+  "h": 16,
+  "id": "683fc04f-e189-49b7-92a9-f835c36f5fb2",
+  "len": 440,
+  "offset": 231035,
+  "ru": [
+   "ПросмотрПоВладельцу"
+  ],
+  "variant": "_itemLineItemDouble_100.png",
+  "w": 16
+ },
+ {
+  "en": "Write",
+  "format": "png",
+  "h": 16,
+  "id": "894cf65b-4109-4533-a1d7-c87b1fcc80a3",
+  "len": 554,
+  "offset": 231475,
+  "ru": [
+   "Записать"
+  ],
+  "variant": "_floppy_100.png",
+  "w": 16
+ },
+ {
+  "en": "WriteAndClose",
+  "format": "png",
+  "h": 16,
+  "id": "e6fc55a0-3d58-4b15-bdd3-717453929598",
+  "len": 766,
+  "offset": 232029,
+  "ru": [
+   "ЗаписатьИЗакрыть"
+  ],
+  "variant": "_check_100.png",
+  "w": 16
+ },
+ {
+  "en": "WriteChanges",
+  "format": "png",
+  "h": 16,
+  "id": "f62488ee-f90c-47f7-929d-f42ec11a1e63",
+  "len": 754,
+  "offset": 232795,
+  "ru": [
+   "ЗаписатьИзменения"
+  ],
+  "variant": "_barrelLetterArrowDown_100.png",
+  "w": 16
+ },
+ {
+  "en": "Zoom",
+  "format": "svg",
+  "h": 16,
+  "id": "b9cb1339-815d-4e11-84d3-aebfa5a58459",
+  "len": 590,
+  "offset": 233549,
+  "ru": [
+   "ИзменитьМасштаб"
+  ],
+  "variant": "FormScale.svg",
+  "w": 16
+ },
+ {
+  "en": "ZoomIn",
+  "format": "png",
+  "h": 16,
+  "id": "-16",
+  "len": 777,
+  "offset": 234139,
+  "ru": [
+   "УвеличитьМасштаб"
+  ],
+  "variant": "_searchPlus_100.png",
+  "w": 16
+ },
+ {
+  "en": "ZoomOut",
+  "format": "png",
+  "h": 16,
+  "id": "-15",
+  "len": 756,
+  "offset": 234916,
+  "ru": [
+   "УменьшитьМасштаб"
+  ],
+  "variant": "_searchMinus_100.png",
+  "w": 16
+ }
+]

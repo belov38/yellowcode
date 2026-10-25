@@ -1,0 +1,9 @@
+exit 2
+--- stdout
+--- stderr
+error: the following required arguments were not provided:
+  --output <OUTPUT>
+
+Usage: yellowcode convert --to <TO> --output <OUTPUT> <SOURCE>
+
+For more information, try '--help'.

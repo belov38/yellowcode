@@ -1,0 +1,8 @@
+exit 2
+--- stdout
+--- stderr
+error: the argument '--lt <VALUE>' cannot be used with '--lte <VALUE>'
+
+Usage: yellowcode table --index <INDEX> --lt <VALUE> <BASE> <KIND> <NAME>
+
+For more information, try '--help'.

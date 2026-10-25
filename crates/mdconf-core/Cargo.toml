@@ -1,0 +1,37 @@
+[package]
+name = "mdconf-core"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99.1"
+license = "MIT OR Apache-2.0"
+publish = false
+autotests = false
+autoexamples = false
+autobenches = false
+
+[features]
+testing = []
+
+[dependencies]
+thiserror = "2"
+tempfile = "3"
+base64 = "0.22"
+quick-xml = "0.37"
+regex = "1"
+unicode-normalization = "0.1"
+caseless = "0.2.2"
+sha1 = "0.10"
+brace = { path = "../brace" }
+v8cont = { path = "../v8cont" }
+zraw = { path = "../zraw" }
+mdschema = { path = "../mdschema" }
+md-model = { path = "../md-model" }
+md-xmlout = { path = "../md-xmlout" }
+memory-budget = { path = "../memory-budget" }
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+undocumented_unsafe_blocks = "warn"
+unused_result_ok = "warn"

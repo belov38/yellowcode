@@ -1,0 +1,27 @@
+[package]
+name = "ibschema"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99.1"
+license = "MIT OR Apache-2.0"
+autotests = false
+autoexamples = false
+autobenches = false
+
+[features]
+testing = []
+
+[dependencies]
+thiserror = "2"
+memory-budget = { path = "../memory-budget" }
+serde_json = { version = "1", features = ["preserve_order"] }
+onecd = { path = "../onecd", default-features = false }
+brace = { path = "../brace" }
+md-model = { path = "../md-model" }
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+undocumented_unsafe_blocks = "warn"
+unused_result_ok = "warn"

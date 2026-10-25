@@ -1,0 +1,49 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Yellowcode",
+  "mainBinaryName": "yellowcode",
+  "version": "0.1.0-alpha.8",
+  "identifier": "nz.belov.yellowcode",
+  "build": {
+    "frontendDist": "dist"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": []
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "app",
+      "dmg"
+    ],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "resources": {
+      "../crates/yellowcode-http/src/viewer/front/vendor/LICENSE-CODEMIRROR": "licenses/LICENSE-CODEMIRROR",
+      "../NOTICE": "licenses/NOTICE",
+      "../LICENSE-MIT": "licenses/LICENSE-MIT",
+      "../LICENSE-APACHE": "licenses/LICENSE-APACHE",
+      "../vendor/icu-4.6.1/license.html": "licenses/ICU.html",
+      "../crates/bsl-lib/data/LICENSE-UNICODE": "licenses/LICENSE-UNICODE",
+      "../crates/ui-style/fonts/LICENSE": "licenses/LICENSE-FONTS",
+      "../crates/platform-catalog/data/catalog.bin": "resources/platform/8.5.1.1529/catalog.bin",
+      "../crates/platform-catalog/data/messages.tsv": "resources/platform/8.5.1.1529/messages.tsv",
+      "../crates/platform-catalog/data/categories.tsv": "resources/platform/8.5.1.1529/categories.tsv",
+      "../resources/platform/8.3.27.1859/catalog.bin": "resources/platform/8.3.27.1859/catalog.bin",
+      "../resources/platform/8.3.27.1859/messages.tsv": "resources/platform/8.3.27.1859/messages.tsv",
+      "../resources/platform/8.3.27.1859/categories.tsv": "resources/platform/8.3.27.1859/categories.tsv"
+    },
+    "macOS": {
+      "minimumSystemVersion": "11.0",
+      "bundleVersion": "8",
+      "signingIdentity": "Developer ID Application: Ilia Belov (KR47N9QMVY)",
+      "hardenedRuntime": true
+    }
+  }
+}

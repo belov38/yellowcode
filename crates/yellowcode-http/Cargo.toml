@@ -1,0 +1,29 @@
+[package]
+name = "yellowcode-http"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99.1"
+license = "MIT OR Apache-2.0"
+publish = false
+autotests = false
+autoexamples = false
+autobenches = false
+
+[dependencies]
+serde_json = "1"
+yellowcode-server = { path = "../yellowcode-server" }
+yellowcode-core = { path = "../yellowcode-core" }
+memory-budget = { path = "../memory-budget" }
+mdconf = { path = "../mdconf" }
+form-layout = { path = "../form-layout" }
+ui-style = { path = "../ui-style", features = ["font-files", "skin", "packages"] }
+x-qbuilder = { path = "../x-qbuilder" }
+query-console = { path = "../query-console" }
+serde = { version = "1", features = ["derive"] }
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+undocumented_unsafe_blocks = "warn"
+unused_result_ok = "warn"

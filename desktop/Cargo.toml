@@ -1,0 +1,52 @@
+[package]
+name = "onec-desktop"
+version = "0.1.0-alpha.8"
+edition = "2024"
+rust-version = "1.99.1"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+name = "onec_desktop"
+path = "src/lib.rs"
+
+[dependencies]
+tauri-plugin-dialog = "2.8"
+serde_json = "1"
+sha2 = "0.10"
+dunce = "1"
+yellowcode-core = { path = "../crates/yellowcode-core" }
+yellowcode-http = { path = "../crates/yellowcode-http" }
+yellowcode-cli = { path = "../crates/yellowcode-cli" }
+tauri = { version = "2.12", features = [] }
+serde = { version = "1", features = ["derive"] }
+ui-style = { path = "../crates/ui-style", features = ["skin"] }
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls"] }
+
+[build-dependencies]
+tauri-build = { version = "2.7", features = [] }
+
+[dev-dependencies]
+tempfile = "3"
+yellowcode-testkit = { path = "../crates/yellowcode-testkit" }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+cf-fixtures = { path = "../crates/cf-fixtures" }
+
+[target."cfg(windows)".dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_Threading"] }
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+panic = "unwind"
+
+[workspace]
+
+[[bin]]
+name = "yellowcode"
+path = "src/main.rs"

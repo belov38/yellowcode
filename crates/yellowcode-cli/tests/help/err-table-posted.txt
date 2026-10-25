@@ -1,0 +1,6 @@
+exit 2
+--- stdout
+--- stderr
+error: invalid value 'maybe' for '--posted <true|false>': expected true or false
+
+For more information, try '--help'.

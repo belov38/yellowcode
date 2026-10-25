@@ -1,0 +1,16 @@
+exit 0
+--- stdout
+Open a configuration or infobase in the installed desktop application
+
+Usage: yellowcode open [OPTIONS] [SOURCE]
+
+Arguments:
+  [SOURCE]  Configuration or infobase source to open
+
+Options:
+      --lang <LANG>             [possible values: ru, en]
+      --platform-build <BUILD>  Exact emulated platform build (not the configuration compatibility mode) [default: 8.5.1.1529]
+      --names <NAMES>           
+      --smoke                   
+  -h, --help                    Print help
+--- stderr

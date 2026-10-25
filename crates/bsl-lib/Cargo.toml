@@ -1,0 +1,27 @@
+[package]
+name = "bsl-lib"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99.1"
+license = "MIT OR Apache-2.0"
+autotests = false
+autoexamples = false
+autobenches = false
+
+[dependencies]
+encoding_rs = "0.8"
+base64 = "0.22"
+md-5 = "0.10"
+sha1 = "0.10"
+sha2 = "0.10"
+crc32fast = "1"
+regex = "1"
+bsl-prim = { path = "../bsl-prim", default-features = false }
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+undocumented_unsafe_blocks = "warn"
+unused_result_ok = "warn"

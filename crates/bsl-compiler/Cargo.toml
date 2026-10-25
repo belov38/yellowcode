@@ -1,0 +1,21 @@
+[package]
+name = "bsl-compiler"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99.1"
+license = "MIT OR Apache-2.0"
+autotests = false
+autoexamples = false
+autobenches = false
+
+[dependencies]
+bsl-syntax = { path = "../bsl-syntax" }
+bsl-prim = { path = "../bsl-prim", default-features = false }
+platform-catalog = { path = "../platform-catalog" }
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+undocumented_unsafe_blocks = "warn"
+unused_result_ok = "warn"

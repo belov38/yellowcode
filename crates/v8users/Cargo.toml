@@ -1,0 +1,32 @@
+[package]
+name = "v8users"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99.1"
+license = "MIT OR Apache-2.0"
+autotests = false
+autoexamples = false
+autobenches = false
+
+[features]
+testdata = ["dep:onecd", "dep:serde_json", "dep:toml"]
+
+[dependencies]
+base64 = "0.22"
+rand = "0.9"
+sha1 = "0.10"
+sha2 = "0.10"
+thiserror = "2"
+brace = { path = "../brace" }
+bsl-prim = { path = "../bsl-prim", default-features = false }
+onecd = { path = "../onecd", optional = true }
+serde_json = { version = "1", optional = true }
+serde = { version = "1", features = ["derive"] }
+toml = { version = "0.9", features = ["preserve_order"], optional = true }
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+undocumented_unsafe_blocks = "warn"
+unused_result_ok = "warn"

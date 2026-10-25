@@ -1,0 +1,23 @@
+[package]
+name = "form-layout"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99.1"
+license = "MIT OR Apache-2.0"
+publish = false
+autotests = false
+autoexamples = false
+autobenches = false
+
+[dependencies]
+serde_json = "1"
+form-model = { path = "../form-model" }
+ui-style = { path = "../ui-style" }
+serde = { version = "1", features = ["derive"] }
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+undocumented_unsafe_blocks = "warn"
+unused_result_ok = "warn"

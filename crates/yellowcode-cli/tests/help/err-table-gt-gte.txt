@@ -1,0 +1,8 @@
+exit 2
+--- stdout
+--- stderr
+error: the argument '--gt <VALUE>' cannot be used with '--gte <VALUE>'
+
+Usage: yellowcode table --index <INDEX> --gt <VALUE> <BASE> <KIND> <NAME>
+
+For more information, try '--help'.

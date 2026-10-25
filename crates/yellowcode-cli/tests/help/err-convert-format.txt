@@ -1,0 +1,7 @@
+exit 2
+--- stdout
+--- stderr
+error: invalid value 'zip' for '--to <TO>'
+  [possible values: cf, dt, 1cd]
+
+For more information, try '--help'.

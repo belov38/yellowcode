@@ -1,0 +1,298 @@
+[
+ {
+  "en": "Save and close",
+  "hotkey": "Ctrl+Enter",
+  "id": "WriteAndClose",
+  "key": "mngbase:IDS_WRITEANDCLOSE",
+  "picture": "WriteAndClose",
+  "ru": "Записать и закрыть"
+ },
+ {
+  "en": "Post and close",
+  "hotkey": "Ctrl+Enter",
+  "id": "PostAndClose",
+  "key": "mngbase:IDS_POSTANDCLOSE",
+  "picture": null,
+  "ru": "Провести и закрыть"
+ },
+ {
+  "en": "Save",
+  "hotkey": "Ctrl+S",
+  "id": "Write",
+  "key": "mngbase:IDS_WRITE",
+  "picture": "Write",
+  "ru": "Записать"
+ },
+ {
+  "en": "Post",
+  "hotkey": null,
+  "id": "Post",
+  "key": "mngbase:IDS_GRIDCMD_POST",
+  "picture": "Post",
+  "ru": "Провести"
+ },
+ {
+  "en": "Cancel posting",
+  "hotkey": null,
+  "id": "UndoPosting",
+  "key": "mngbase:IDS_GRIDCMD_UNPOST",
+  "picture": "UndoPosting",
+  "ru": "Отменить проведение"
+ },
+ {
+  "en": "Reread",
+  "hotkey": null,
+  "id": "Reread",
+  "key": "mngbase:IDS_REREAD",
+  "picture": "Reread",
+  "ru": "Перечитать"
+ },
+ {
+  "en": "Copy",
+  "hotkey": null,
+  "id": "Copy",
+  "key": "mngbase:IDS_CLONE",
+  "picture": "CloneObject",
+  "ru": "Скопировать"
+ },
+ {
+  "en": "Copy",
+  "hotkey": "F9",
+  "id": "CopyItem",
+  "key": "mngbase:IDS_GRIDCMD_CREATECLONE",
+  "picture": "CloneListItem",
+  "ru": "Скопировать"
+ },
+ {
+  "en": "Toggle deletion mark",
+  "hotkey": "Del",
+  "id": "SetDeletionMark",
+  "key": "mngbase:IDS_GRIDCMD_MARKTODELETE",
+  "picture": "MarkToDelete",
+  "ru": "Пометить на удаление / Снять пометку"
+ },
+ {
+  "en": "Delete",
+  "hotkey": "Shift+Del",
+  "id": "Delete",
+  "key": "mngbase:IDS_GRIDCMD_DELETELINE",
+  "picture": "Delete",
+  "ru": "Удалить"
+ },
+ {
+  "en": "Show in list",
+  "hotkey": null,
+  "id": "ShowInList",
+  "key": "mngbase:IDS_SHOWINLIST",
+  "picture": "ShowInList",
+  "ru": "Показать в списке"
+ },
+ {
+  "en": "Customize form...",
+  "hotkey": null,
+  "id": "CustomizeForm",
+  "key": "mngbase:IDS_CUSTOMIZEFORM",
+  "picture": "CustomizeForm",
+  "ru": "Изменить форму..."
+ },
+ {
+  "en": "Help",
+  "hotkey": "F1",
+  "id": "Help",
+  "key": "mngbase:IDS_HELP",
+  "picture": "Help",
+  "ru": "Справка"
+ },
+ {
+  "en": "Create",
+  "hotkey": "Ins",
+  "id": "Create",
+  "key": "mngbase:IDS_CREATE",
+  "picture": "CreateListItem",
+  "ru": "Создать"
+ },
+ {
+  "en": "Create group",
+  "hotkey": "Ctrl+F9",
+  "id": "CreateFolder",
+  "key": "mngbase:IDS_GRIDCMD_CREATEADDGROUP",
+  "picture": "CreateFolder",
+  "ru": "Создать группу"
+ },
+ {
+  "en": "Edit",
+  "hotkey": "F2",
+  "id": "Change",
+  "key": "mngbase:IDS_GRIDCMD_OPEN",
+  "picture": "Change",
+  "ru": "Изменить"
+ },
+ {
+  "en": "Refresh",
+  "hotkey": "F5",
+  "id": "Refresh",
+  "key": "mngbase:IDS_GRIDCMD_REFRESH",
+  "picture": "Refresh",
+  "ru": "Обновить"
+ },
+ {
+  "en": "Find: <F> - <V>",
+  "hotkey": "Ctrl+Alt+F",
+  "id": "FindByCurrentValue",
+  "key": "mngcore:IDS_CMD_UL_ADD_TO_SEARCH",
+  "picture": null,
+  "ru": "Найти: <F> - <V>"
+ },
+ {
+  "en": "Advanced search",
+  "hotkey": "Alt+F",
+  "id": "AdvancedSearch",
+  "key": "mngbase:IDS_GRIDCMD_FIND_ADVANCED_FILTER",
+  "picture": null,
+  "ru": "Расширенный поиск"
+ },
+ {
+  "en": "Cancel search",
+  "hotkey": "Ctrl+Q",
+  "id": "CancelSearch",
+  "key": "mngbase:IDS_GRIDCMD_CLEAR_FIND_FILTER",
+  "picture": "CancelSearch",
+  "ru": "Отменить поиск"
+ },
+ {
+  "en": "Get link...",
+  "hotkey": null,
+  "id": "GetURL",
+  "key": "mngcore:IDS_CMD_NAVIGATOR_SHOW_URL",
+  "picture": "GetURL",
+  "ru": "Получить ссылку..."
+ },
+ {
+  "en": "Configure list...",
+  "hotkey": null,
+  "id": "ListSettings",
+  "key": "mngbase:IDS_UNIVERSALLISTCMD_SETUP_DATA",
+  "picture": "ListSettings",
+  "ru": "Настроить список..."
+ },
+ {
+  "en": "Select settings...",
+  "hotkey": null,
+  "id": "LoadSettings",
+  "key": "mngbase:IDS_UNIVERSALLISTCMD_LOADSETTING_TEXT",
+  "picture": null,
+  "ru": "Выбрать настройки..."
+ },
+ {
+  "en": "Save settings...",
+  "hotkey": null,
+  "id": "SaveSettings",
+  "key": "mngbase:IDS_UNIVERSALLISTCMD_SAVESETTING_TEXT",
+  "picture": null,
+  "ru": "Сохранить настройки..."
+ },
+ {
+  "en": "Restore default settings",
+  "hotkey": null,
+  "id": "StandardSettings",
+  "key": "mngbase:IDS_UNIVERSALLISTCMD_STANDARDSETTINGS_TEXT",
+  "picture": null,
+  "ru": "Установить стандартные настройки"
+ },
+ {
+  "en": "Output list...",
+  "hotkey": null,
+  "id": "OutputList",
+  "key": "mngbase:IDS_GRIDCMD_PRINTLIST",
+  "picture": "OutputList",
+  "ru": "Вывести список..."
+ },
+ {
+  "en": "Search management",
+  "hotkey": null,
+  "id": "SearchControl",
+  "key": "mngbase:IDS_LOGFORMELEMENTADDITIONKIND_SEARCHCONTROL",
+  "picture": "SearchControl",
+  "ru": "Управление поиском"
+ },
+ {
+  "en": "Set period...",
+  "hotkey": null,
+  "id": "SetDateInterval",
+  "key": "mngbase:IDS_GRIDCMD_SETDATES",
+  "picture": "SetDateInterval",
+  "ru": "Установить период..."
+ },
+ {
+  "en": "Add",
+  "hotkey": null,
+  "id": "Add",
+  "key": "mngbase:IDS_GRIDCMD_CREATEADD",
+  "picture": null,
+  "ru": "Добавить"
+ },
+ {
+  "en": "Move up",
+  "hotkey": null,
+  "id": "MoveUp",
+  "key": "mngbase:IDS_GRIDCMD_MOVEUP",
+  "picture": "MoveUp",
+  "ru": "Переместить вверх"
+ },
+ {
+  "en": "Move down",
+  "hotkey": null,
+  "id": "MoveDown",
+  "key": "mngbase:IDS_GRIDCMD_MOVEDOWN",
+  "picture": "MoveDown",
+  "ru": "Переместить вниз"
+ },
+ {
+  "en": "Select",
+  "hotkey": "Ctrl+Enter",
+  "id": "Choose",
+  "key": "mngbase:IDS_GRIDCMD_CHOOSE",
+  "picture": null,
+  "ru": "Выбрать"
+ },
+ {
+  "en": "More actions",
+  "hotkey": null,
+  "id": "More",
+  "key": "mngcore:IDS_ALLACTIONS_MORE",
+  "picture": null,
+  "ru": "Еще"
+ },
+ {
+  "en": "Move to group",
+  "hotkey": "Ctrl+Shift+M",
+  "id": "MoveItem",
+  "key": "mngbase:IDS_GRIDCMD_MOVEITEM",
+  "picture": "MoveItem",
+  "ru": "Переместить в группу"
+ },
+ {
+  "en": "Go one level down",
+  "hotkey": "Ctrl+Down",
+  "id": "LevelDown",
+  "key": "mngbase:IDS_GRIDCMD_LEVELDOWN",
+  "picture": "LevelDown",
+  "ru": "Перейти на уровень ниже"
+ },
+ {
+  "en": "Go one level up",
+  "hotkey": "Ctrl+Up",
+  "id": "LevelUp",
+  "key": "mngbase:IDS_GRIDCMD_LEVELUP",
+  "picture": "LevelUp",
+  "ru": "Перейти на уровень выше"
+ },
+ {
+  "en": "View mode",
+  "hotkey": null,
+  "id": "ViewModeSubmenu",
+  "key": "mngbase:IDS_GRIDCMD_REPRESENTATION_MODE_SUB_MENU",
+  "picture": null,
+  "ru": "Режим просмотра"
+ }
+]

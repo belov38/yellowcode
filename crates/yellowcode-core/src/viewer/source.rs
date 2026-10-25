@@ -1,0 +1,322 @@
+use mdconf::{CfFileExt, ConfigurationExt};
+use std::fs::File;
+use std::io::Read;
+use std::path::{Path, PathBuf};
+
+use infobase::raw::RawIb;
+use mdconf::{CfFile, Configuration, ConfigurationInspection, LoadOptions};
+
+use onecd::{Locking, OpenOptions};
+
+use crate::Result;
+
+mod dt;
+
+const SIG_1CD: &[u8; 8] = b"1CDBMSV8";
+
+const INFOBASE_FILE: &str = "1Cv8.1CD";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceKind {
+    Cf,
+    Dt,
+    Infobase,
+    XmlDir,
+}
+
+pub fn resolve(path: &Path) -> PathBuf {
+    infobase_file(path).unwrap_or_else(|| path.to_path_buf())
+}
+
+fn infobase_file(dir: &Path) -> Option<PathBuf> {
+    if !dir.is_dir() {
+        return None;
+    }
+    let exact = dir.join(INFOBASE_FILE);
+    if exact.is_file() {
+        return Some(exact);
+    }
+    std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .find(|e| {
+            e.file_name()
+                .to_str()
+                .is_some_and(|n| n.eq_ignore_ascii_case(INFOBASE_FILE))
+                && e.path().is_file()
+        })
+        .map(|e| e.path())
+}
+
+pub fn detect(path: &Path) -> Result<SourceKind> {
+    let meta = std::fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    if meta.is_dir() {
+        if let Some(file) = infobase_file(path) {
+            return detect(&file);
+        }
+        return if path.join("Configuration.xml").is_file() {
+            Ok(SourceKind::XmlDir)
+        } else {
+            Err(format!(
+                "{}: a directory with neither Configuration.xml nor {INFOBASE_FILE}",
+                path.display()
+            )
+            .into())
+        };
+    }
+    let mut f = File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut head = [0u8; 8];
+    let n = f
+        .read(&mut head)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    if head.get(..n) == Some(SIG_1CD.as_slice()) {
+        return Ok(SourceKind::Infobase);
+    }
+    if head.get(..n) == Some(dtfile::container::SIGNATURE.as_slice())
+        || head.get(..n) == Some(b"EVIBDmpF".as_slice())
+    {
+        return Ok(SourceKind::Dt);
+    }
+    match v8cont::detect(&f) {
+        Ok(Some(_)) => Ok(SourceKind::Cf),
+        _ => Err(format!(
+            "{}: neither a v8 container (.cf, .cfe) nor a DT dump nor an infobase (1Cv8.1CD) nor a directory with Configuration.xml",
+            path.display()
+        )
+        .into()),
+    }
+}
+
+pub fn open(path: &Path, opts: &LoadOptions) -> Result<Configuration> {
+    open_with_progress(path, opts, &mut |_| Ok(()))
+}
+
+pub fn open_with_progress(
+    path: &Path,
+    opts: &LoadOptions,
+    progress: &mut impl FnMut(&'static str) -> Result<()>,
+) -> Result<Configuration> {
+    let path = &resolve(path);
+    progress("container")?;
+    match detect(path)? {
+        SourceKind::Cf => {
+            let cf = CfFile::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+            progress("metadata")?;
+            Configuration::load(&cf, opts).map_err(|e| format!("{}: {e}", path.display()).into())
+        }
+        SourceKind::Dt => dt::open(path, opts, progress),
+        SourceKind::Infobase => {
+            progress("metadata")?;
+            open_infobase(path, opts)
+        }
+        SourceKind::XmlDir => Err("XML sources need stage C8 (load_xml)".into()),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Fingerprint {
+    File {
+        len: u64,
+        modified: Option<std::time::SystemTime>,
+    },
+    Config([u8; 32]),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OpenError {
+    Changed,
+    Transient(String),
+    Decode(String),
+}
+
+impl std::fmt::Display for OpenError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OpenError::Changed => f.write_str("the source changed since it was opened"),
+            OpenError::Transient(e) | OpenError::Decode(e) => f.write_str(e),
+        }
+    }
+}
+
+pub(crate) fn is_io(e: &(dyn std::error::Error + 'static)) -> bool {
+    let mut cur: Option<&(dyn std::error::Error + 'static)> = Some(e);
+    while let Some(c) = cur {
+        if c.downcast_ref::<std::io::Error>().is_some()
+            || matches!(
+                c.downcast_ref::<mdconf::Error>(),
+                Some(mdconf::Error::Io(_))
+            )
+        {
+            return true;
+        }
+        cur = c.source();
+    }
+    false
+}
+
+fn classify(path: &Path, e: &(dyn std::error::Error + 'static)) -> OpenError {
+    let text = format!("{}: {e}", path.display());
+    if is_io(e) {
+        OpenError::Transient(text)
+    } else {
+        OpenError::Decode(text)
+    }
+}
+
+fn file_fingerprint(path: &Path) -> std::result::Result<Fingerprint, OpenError> {
+    let meta = std::fs::metadata(path).map_err(|e| classify(path, &e))?;
+    Ok(Fingerprint::File {
+        len: meta.len(),
+        modified: meta.modified().ok(),
+    })
+}
+
+fn config_fingerprint(src: &dyn mdconf::EntrySource) -> mdconf::Result<Fingerprint> {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    for m in src.list()? {
+        h.update((m.name.len() as u64).to_le_bytes());
+        h.update(m.name.as_bytes());
+        h.update(m.ctime.0.to_le_bytes());
+        h.update(m.mtime.0.to_le_bytes());
+        h.update(m.attrs.to_le_bytes());
+    }
+    Ok(Fingerprint::Config(h.finalize().into()))
+}
+
+fn read_infobase(path: &Path) -> std::result::Result<infobase::config::ConfigSource, OpenError> {
+    let mut o = OpenOptions::read_only();
+    o.locking = Locking::None;
+    let ib = RawIb::open_with(path, o).map_err(|e| classify(path, &e))?;
+    let src =
+        infobase::config::ConfigSource::read(&ib, "CONFIG").map_err(|e| classify(path, &e))?;
+    if src.is_empty() {
+        return Err(OpenError::Decode(format!(
+            "{}: the infobase has no configuration",
+            path.display()
+        )));
+    }
+    Ok(src)
+}
+
+pub fn fingerprint(path: &Path) -> std::result::Result<Fingerprint, OpenError> {
+    let path = &resolve(path);
+    match detect(path).map_err(|e| match std::fs::metadata(path) {
+        Err(io) => classify(path, &io),
+        Ok(_) => OpenError::Decode(e.to_string()),
+    })? {
+        SourceKind::Infobase => {
+            let src = read_infobase(path)?;
+            config_fingerprint(&src).map_err(|e| classify(path, &e))
+        }
+        SourceKind::XmlDir => Err(OpenError::Decode(
+            "XML sources need stage C8 (load_xml)".into(),
+        )),
+        SourceKind::Cf | SourceKind::Dt => file_fingerprint(path),
+    }
+}
+
+pub fn open_snapshot(
+    path: &Path,
+    opts: &LoadOptions,
+    expect: Option<&Fingerprint>,
+    progress: &mut impl FnMut(&'static str) -> Result<()>,
+) -> std::result::Result<(Configuration, Fingerprint), OpenError> {
+    let path = &resolve(path);
+    let stop = |e: crate::Error| OpenError::Decode(e.to_string());
+    progress("container").map_err(stop)?;
+    let same = |f: &Fingerprint| expect.is_none_or(|x| x == f);
+    let kind = detect(path).map_err(|e| match std::fs::metadata(path) {
+        Err(io) => classify(path, &io),
+        Ok(_) => OpenError::Decode(e.to_string()),
+    })?;
+    match kind {
+        SourceKind::Cf => {
+            let fp = file_fingerprint(path)?;
+            if !same(&fp) {
+                return Err(OpenError::Changed);
+            }
+            let cf = CfFile::open(path).map_err(|e| classify(path, &e))?;
+            progress("metadata").map_err(stop)?;
+            let cfg = Configuration::load(&cf, opts).map_err(|e| classify(path, &e))?;
+            Ok((cfg, fp))
+        }
+        SourceKind::Dt => {
+            let fp = file_fingerprint(path)?;
+            if !same(&fp) {
+                return Err(OpenError::Changed);
+            }
+            let cfg = dt::open(path, opts, progress).map_err(|e| classify(path, &*e))?;
+            Ok((cfg, fp))
+        }
+        SourceKind::Infobase => {
+            let src = read_infobase(path)?;
+            let fp = config_fingerprint(&src).map_err(|e| classify(path, &e))?;
+            if !same(&fp) {
+                return Err(OpenError::Changed);
+            }
+            progress("metadata").map_err(stop)?;
+            let cfg = Configuration::load(&src, &infobase_options(opts))
+                .map_err(|e| classify(path, &e))?;
+            Ok((cfg, fp))
+        }
+        SourceKind::XmlDir => Err(OpenError::Decode(
+            "XML sources need stage C8 (load_xml)".into(),
+        )),
+    }
+}
+
+fn infobase_options(opts: &LoadOptions) -> LoadOptions {
+    LoadOptions {
+        keep_source: false,
+        profile: opts.profile,
+        extra_stages: opts.extra_stages,
+        ..LoadOptions::default()
+    }
+}
+
+pub fn inspect(path: &Path, opts: &LoadOptions) -> Result<ConfigurationInspection> {
+    if detect(path)? == SourceKind::Cf {
+        let cf = CfFile::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        cf.inspect_configuration(opts)
+            .map_err(|e| format!("{}: {e}", path.display()).into())
+    } else {
+        open(path, opts).map(|cfg| ConfigurationInspection::Configuration(Box::new(cfg)))
+    }
+}
+
+fn open_infobase(path: &Path, opts: &LoadOptions) -> Result<Configuration> {
+    let mut o = OpenOptions::read_only();
+    o.locking = Locking::None;
+    let ib = RawIb::open_with(path, o).map_err(|e| format!("{}: {e}", path.display()))?;
+    let src = infobase::config::ConfigSource::read(&ib, "CONFIG")
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    if src.is_empty() {
+        return Err(format!("{}: the infobase has no configuration", path.display()).into());
+    }
+    Configuration::load(&src, &infobase_options(opts)).map_err(|e| {
+        let e = infobase::Error::ConfigTable {
+            table: "CONFIG".to_string(),
+            source: e,
+        };
+        format!("{}: {e}", path.display()).into()
+    })
+}
+
+pub fn with_config_entries<T>(
+    path: &Path,
+    consume: impl FnOnce(&dyn mdconf::EntrySource) -> Result<T>,
+) -> Result<T> {
+    let path = &resolve(path);
+    match detect(path)? {
+        SourceKind::Cf => consume(&CfFile::open(path)?),
+        SourceKind::Dt => consume(&dt::extract(path, &mut |_| Ok(()))?),
+        SourceKind::Infobase => {
+            let mut opts = OpenOptions::read_only();
+            opts.locking = Locking::None;
+            let raw = RawIb::open_with(path, opts)?;
+            consume(&infobase::config::ConfigSource::read(&raw, "CONFIG")?)
+        }
+        SourceKind::XmlDir => Err("XML sources need stages C7/C8 (load_xml)".into()),
+    }
+}

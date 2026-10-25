@@ -1,0 +1,61 @@
+.codewrap { overflow: hidden; }
+.code.cm-host { height: 100%; min-height: 0; padding: 0; }
+.cm-host .cm-editor { height: 100%; background: var(--cfg-ed-bg, #fff); color: var(--ed-others, var(--cfg-ed-text, #000)); }
+.cm-host .cm-scroller { overflow: auto; font-family: var(--cfg-font-mono, "Courier New", Courier, monospace); font-size: var(--cfg-font-mono-size, 13px); line-height: var(--cfg-mono-line, 15px); }
+.cm-host .cm-content { caret-color: var(--cfg-text-field, #000); }
+.cm-host .cm-editor .cm-gutters { background: var(--cfg-surface-editor-margin, #e2dfca); color: var(--cfg-ed-fold-line, #747474); border-color: var(--cfg-border-control, #b3ac86); }
+.cm-host .cm-editor .cm-activeLine { background: var(--cfg-selection-hot, #c9e2ff); }
+.cm-host .cm-editor .cm-activeLineGutter { background: var(--cfg-selection-bg-unfocused, #6f98cf); color: var(--cfg-text-selected, #fff); }
+.cm-host .cm-editor .cm-selectionBackground { background: var(--cfg-selection-bg-unfocused, #6f98cf); }
+.cm-host .cm-editor.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground { background: var(--cfg-selection-bg, #536ac2); }
+.cm-host .cm-line::selection, .cm-host .cm-line ::selection { color: var(--cfg-text-selected, #fff); }
+.cm-host .cm-cursor { border-left-color: var(--cfg-text-field, #000); }
+.cm-host .kw { color: var(--ed-kw, var(--cfg-ed-keyword, #f00)); }
+.cm-host .str { color: var(--ed-str, var(--cfg-ed-text, #000)); }
+.cm-host .num { color: var(--ed-num, var(--cfg-ed-text, #000)); }
+.cm-host .com { color: var(--ed-com, var(--cfg-ed-comment, #008000)); font-style: normal; }
+.cm-host .pre, .cm-host .ann { color: var(--ed-pre, var(--cfg-ed-preprocessor, #963200)); }
+.cm-host .ident { color: var(--ed-ident, var(--cfg-ed-identifier, #00f)); }
+.cm-host .op { color: var(--ed-op, var(--cfg-ed-operator, #f00)); }
+.cm-host .date { color: var(--ed-date, var(--cfg-ed-text, #000)); }
+.cm-host .cm-foldGutter { color: var(--cfg-ed-fold-line, #747474); }
+.cm-host .cm-foldGutter span[title] { border: 1px solid var(--cfg-ed-fold-box, #c8c8c8); }
+.cm-host .cm-foldPlaceholder { background: var(--cfg-editor-pair, #e6e6e6); border-color: var(--cfg-folded-border, #b5b5b5); color: var(--cfg-ed-text, #000); }
+.cm-host .cm-editor .cm-searchMatch { background: var(--cfg-editor-search, #f3eed2); outline: 1px solid var(--cfg-search-border, #c9bf7a); }
+.cm-host .cm-editor .cm-searchMatch-selected { background: var(--cfg-search-current, #ffd54f); outline-color: var(--cfg-search-current-border, #b38600); }
+.cm-host .cm-editor .cm-panels { background: var(--cfg-surface-chrome, #f5f2dd); color: var(--cfg-text, #413003); border-color: var(--cfg-border-control, #b3ac86); font: var(--cfg-font-size, 11px) var(--cfg-font-ui, Arial, sans-serif); }
+.cm-host .cm-editor .cm-textfield { background: var(--cfg-surface-field, #fff); color: var(--cfg-text-field, #000); border: 1px solid var(--cfg-border-control, #b3ac86); border-radius: var(--cfg-radius, 3px); min-height: var(--cfg-field-h, 18px); }
+.cm-host .cm-editor .cm-button { background: var(--cfg-button-bg, #f5f2dd); color: var(--cfg-text-button, #594304); border: 1px solid var(--cfg-border-control, #b3ac86); border-radius: var(--cfg-radius, 3px); min-height: var(--cfg-button-h, 21px); font: inherit; }
+.cm-host .cm-button:hover { background: var(--cfg-tab-hot, #d7e9ff); }
+.cm-host .cm-button:active { background: var(--cfg-tab-pressed, #b2cce6); }
+.cm-host .cm-editor .cm-tooltip { background: var(--cfg-surface-tooltip, #fffade); color: var(--cfg-text-field, #000); border-color: var(--cfg-border-control, #b3ac86); }
+.cm-host .cm-diagnostic-error { border-left-color: var(--cfg-text-special, #f00); }
+.xq-ed.cm-host { display: block; position: relative; overflow: hidden; }
+.cm-host .cm-editor .cm-lintRange-error { background-image: none; text-decoration: underline wavy var(--cfg-text-special, #f00); text-underline-offset: 3px; }
+.cm-host .cm-editor .cm-lint-marker-error { content: none; border-radius: 50%; background: var(--cfg-text-special, #f00); }
+.cm-host .cm-editor .cm-lint-marker-error::after { content: "!"; display: block; color: var(--cfg-text-selected, #fff); font: bold 11px/1.2 sans-serif; text-align: center; }
+
+.cm-host .cm-editor .cm-activeLine { background: transparent; }
+.cm-host .cm-editor .cm-selectionBackground,
+.cm-host .cm-editor.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground { background: var(--cfg-ed-text, #000); }
+.cm-host .cm-line::selection, .cm-host .cm-line ::selection { background: var(--cfg-ed-text, #000); color: inherit; }
+.cm-host .cm-editor .cm-searchMatch { background: var(--cfg-editor-search, #f3eed2); outline: none; }
+.cm-host .cm-editor .cm-searchMatch-selected { background: #191919; }
+.cm-host .cm-foldPlaceholder { background: var(--cfg-ed-bg); border: 1px solid var(--cfg-ed-fold-line); border-radius: 0; padding: 0 3px; cursor: pointer; }
+.cm-host .cm-foldGutter .cm-gutterElement { padding: 0 1px; }
+.cm-host .cm-editor .cm-gutters { background: var(--cfg-ed-bg); border: 0; }
+
+.cm-host .cm-foldGutter span[title] { border: 0; font: 12px/15px Arial, sans-serif; }
+
+.cm-host .cm-inverted { color: var(--ed-inv-others, #fff); }
+.cm-host .cm-inverted .kw, .cm-host .kw .cm-inverted, .cm-host .kw.cm-inverted { color: var(--ed-inv-kw, #00ffff); }
+.cm-host .cm-inverted .ident, .cm-host .ident .cm-inverted, .cm-host .ident.cm-inverted { color: var(--ed-inv-ident, #ffff00); }
+.cm-host .cm-inverted .str, .cm-host .str .cm-inverted, .cm-host .str.cm-inverted { color: var(--ed-inv-str, #ffffff); }
+.cm-host .cm-inverted .num, .cm-host .num .cm-inverted, .cm-host .num.cm-inverted { color: var(--ed-inv-num, #ffffff); }
+.cm-host .cm-inverted .com, .cm-host .com .cm-inverted, .cm-host .com.cm-inverted { color: var(--ed-inv-com, #ff7fff); }
+.cm-host .cm-inverted .pre, .cm-host .pre .cm-inverted, .cm-host .pre.cm-inverted { color: var(--ed-inv-pre, #69cdff); }
+.cm-host .cm-inverted .ann, .cm-host .ann .cm-inverted, .cm-host .ann.cm-inverted { color: var(--ed-inv-pre, #69cdff); }
+.cm-host .cm-inverted .op, .cm-host .op .cm-inverted, .cm-host .op.cm-inverted { color: var(--ed-inv-op, #00ffff); }
+.cm-host .cm-inverted .date, .cm-host .date .cm-inverted, .cm-host .date.cm-inverted { color: var(--ed-inv-date, #ffffff); }
+
+.cm-host .cm-editor { border-left: 16px solid #dcd9c4; }

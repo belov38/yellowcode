@@ -1,0 +1,279 @@
+{
+  "root": [
+    "Common",
+    "Constant",
+    "Catalog",
+    "Document",
+    "DocumentJournal",
+    "Enum",
+    "Report",
+    "DataProcessor",
+    "ChartOfCharacteristicTypes",
+    "ChartOfAccounts",
+    "ChartOfCalculationTypes",
+    "InformationRegister",
+    "AccumulationRegister",
+    "AccountingRegister",
+    "CalculationRegister",
+    "BusinessProcess",
+    "Task",
+    "ExternalDataSource"
+  ],
+  "common": [
+    "Subsystem",
+    "CommonModule",
+    "SessionParameter",
+    "Role",
+    "CommonAttribute",
+    "ExchangePlan",
+    "FilterCriterion",
+    "EventSubscription",
+    "ScheduledJob",
+    "Bot",
+    "FunctionalOption",
+    "FunctionalOptionsParameter",
+    "DefinedType",
+    "SettingsStorage",
+    "CommonCommand",
+    "CommandGroup",
+    "CommonForm",
+    "Interface",
+    "CommonTemplate",
+    "CommonPicture",
+    "XDTOPackage",
+    "WebService",
+    "HTTPService",
+    "WSReference",
+    "WebSocketClient",
+    "IntegrationService",
+    "PaletteColor",
+    "StyleItem",
+    "Style",
+    "Language"
+  ],
+  "groups_inside": {
+    "Document": [
+      "DocumentNumerator",
+      "Sequence"
+    ]
+  },
+  "children": {
+    "AccountingRegister": [
+      "Dimension",
+      "Resource",
+      "Attribute",
+      "Form",
+      "Command",
+      "Template"
+    ],
+    "AccumulationRegister": [
+      "Dimension",
+      "Resource",
+      "Attribute",
+      "Form",
+      "Command",
+      "Template"
+    ],
+    "BusinessProcess": [
+      "Attribute",
+      "TabularSection",
+      "Form",
+      "Command",
+      "Template"
+    ],
+    "BusinessProcess.TabularSection": [
+      "Attribute"
+    ],
+    "CalculationRegister": [
+      "Dimension",
+      "Resource",
+      "Attribute",
+      "Recalculation",
+      "Form",
+      "Command",
+      "Template"
+    ],
+    "CalculationRegister.Recalculation": [
+      "Dimension"
+    ],
+    "Catalog": [
+      "Attribute",
+      "TabularSection",
+      "Form",
+      "Command",
+      "Template"
+    ],
+    "Catalog.TabularSection": [
+      "Attribute"
+    ],
+    "ChartOfAccounts": [
+      "Attribute",
+      "AccountingFlag",
+      "ExtDimensionAccountingFlag",
+      "TabularSection",
+      "Form",
+      "Command",
+      "Template"
+    ],
+    "ChartOfAccounts.TabularSection": [
+      "Attribute"
+    ],
+    "ChartOfCalculationTypes": [
+      "Attribute",
+      "TabularSection",
+      "Form",
+      "Command",
+      "Template"
+    ],
+    "ChartOfCalculationTypes.TabularSection": [
+      "Attribute"
+    ],
+    "ChartOfCharacteristicTypes": [
+      "Attribute",
+      "TabularSection",
+      "Form",
+      "Command",
+      "Template"
+    ],
+    "ChartOfCharacteristicTypes.TabularSection": [
+      "Attribute"
+    ],
+    "Cube.DimensionTable": [
+      "Field",
+      "Form",
+      "Command",
+      "Template"
+    ],
+    "DataProcessor": [
+      "Attribute",
+      "TabularSection",
+      "Form",
+      "Command",
+      "Template"
+    ],
+    "DataProcessor.TabularSection": [
+      "Attribute"
+    ],
+    "Document": [
+      "Attribute",
+      "TabularSection",
+      "Form",
+      "Command",
+      "Template"
+    ],
+    "Document.TabularSection": [
+      "Attribute"
+    ],
+    "DocumentJournal": [
+      "Column",
+      "Form",
+      "Command",
+      "Template"
+    ],
+    "Enum": [
+      "EnumValue",
+      "Form",
+      "Command",
+      "Template"
+    ],
+    "ExchangePlan": [
+      "Attribute",
+      "TabularSection",
+      "Form",
+      "Command",
+      "Template"
+    ],
+    "ExchangePlan.TabularSection": [
+      "Attribute"
+    ],
+    "ExternalDataProcessor": [
+      "Attribute",
+      "TabularSection",
+      "Form",
+      "Template"
+    ],
+    "ExternalDataSource": [
+      "Table",
+      "Cube",
+      "Function"
+    ],
+    "ExternalDataSource.Cube": [
+      "DimensionTable",
+      "Dimension",
+      "Resource",
+      "Form",
+      "Command",
+      "Template"
+    ],
+    "ExternalDataSource.Table": [
+      "Field",
+      "Form",
+      "Command",
+      "Template"
+    ],
+    "ExternalReport": [
+      "Attribute",
+      "TabularSection",
+      "Form",
+      "Template"
+    ],
+    "FilterCriterion": [
+      "Form",
+      "Command"
+    ],
+    "HTTPService": [
+      "URLTemplate"
+    ],
+    "HTTPService.URLTemplate": [
+      "Method"
+    ],
+    "InformationRegister": [
+      "Dimension",
+      "Resource",
+      "Attribute",
+      "Form",
+      "Command",
+      "Template"
+    ],
+    "IntegrationService": [
+      "IntegrationServiceChannel"
+    ],
+    "Report": [
+      "Attribute",
+      "TabularSection",
+      "Form",
+      "Command",
+      "Template"
+    ],
+    "Report.TabularSection": [
+      "Attribute"
+    ],
+    "Sequence": [
+      "Dimension"
+    ],
+    "SettingsStorage": [
+      "Form",
+      "Template"
+    ],
+    "Subsystem": [
+      "Subsystem"
+    ],
+    "Task": [
+      "AddressingAttribute",
+      "Attribute",
+      "TabularSection",
+      "Form",
+      "Command",
+      "Template"
+    ],
+    "Task.TabularSection": [
+      "Attribute"
+    ],
+    "WebService": [
+      "Operation"
+    ],
+    "WebService.Operation": [
+      "Parameter"
+    ]
+  }
+}

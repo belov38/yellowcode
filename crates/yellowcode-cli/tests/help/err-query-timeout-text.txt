@@ -1,0 +1,6 @@
+exit 2
+--- stdout
+--- stderr
+error: invalid value 'soon' for '--timeout <TIMEOUT>': timeout must be positive finite seconds
+
+For more information, try '--help'.

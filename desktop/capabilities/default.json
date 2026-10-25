@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Main window: events only (the page listens to load events; the open dialog is opened from Rust, commands are the app's own)",
+  "windows": ["main", "splash"],
+  "permissions": ["core:event:default"]
+}

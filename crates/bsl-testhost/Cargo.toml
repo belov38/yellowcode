@@ -1,0 +1,28 @@
+[package]
+name = "bsl-testhost"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99.1"
+license = "MIT OR Apache-2.0"
+publish = false
+autotests = false
+autoexamples = false
+autobenches = false
+
+[dependencies]
+quick-xml = "0.37"
+serde_json = "1"
+bsl-compiler = { path = "../bsl-compiler" }
+bsl-syntax = { path = "../bsl-syntax" }
+bsl-prim = { path = "../bsl-prim", default-features = false, features = ["icu"] }
+bsl-vm = { path = "../bsl-vm" }
+bsl-stdlib = { path = "../bsl-stdlib" }
+bsl-lib = { path = "../bsl-lib" }
+platform-catalog = { path = "../platform-catalog" }
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+undocumented_unsafe_blocks = "warn"
+unused_result_ok = "warn"

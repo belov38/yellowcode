@@ -1,0 +1,30 @@
+[package]
+name = "query-console"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99.1"
+license = "MIT OR Apache-2.0"
+publish = false
+autotests = false
+autoexamples = false
+autobenches = false
+
+[dependencies]
+base64 = "0.22"
+serde_json = "1"
+memory-budget = { path = "../memory-budget" }
+ibschema = { path = "../ibschema" }
+md-model = { path = "../md-model" }
+onecd = { path = "../onecd" }
+query-testhost = { path = "../query-testhost" }
+query-ir = { path = "../query-ir" }
+serde = { version = "1", features = ["derive"] }
+query-syntax = { path = "../query-syntax" }
+query-testkit = { path = "../query-testkit" }
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+undocumented_unsafe_blocks = "warn"
+unused_result_ok = "warn"

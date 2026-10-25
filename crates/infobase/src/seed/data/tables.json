@@ -1,0 +1,4425 @@
+[
+  {
+    "name": "IBVERSION",
+    "recordlock": false,
+    "fields": [
+      {
+        "name": "IBVERSION",
+        "ty": "N",
+        "length": 10,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "PLATFORMVERSIONREQ",
+        "ty": "N",
+        "length": 10,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      }
+    ],
+    "indexes": []
+  },
+  {
+    "name": "CONFIG",
+    "recordlock": false,
+    "fields": [
+      {
+        "name": "FILENAME",
+        "ty": "NVC",
+        "length": 128,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "CREATION",
+        "ty": "DT",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "MODIFIED",
+        "ty": "DT",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "ATTRIBUTES",
+        "ty": "N",
+        "length": 5,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "DATASIZE",
+        "ty": "N",
+        "length": 20,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "BINARYDATA",
+        "ty": "I",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "PARTNO",
+        "ty": "N",
+        "length": 10,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      }
+    ],
+    "indexes": [
+      {
+        "name": "BYNAMENO_CONFIG",
+        "unique": false,
+        "fields": [
+          [
+            "FILENAME",
+            128
+          ],
+          [
+            "PARTNO",
+            0
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "name": "CONFIGSAVE",
+    "recordlock": false,
+    "fields": [
+      {
+        "name": "FILENAME",
+        "ty": "NVC",
+        "length": 128,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "CREATION",
+        "ty": "DT",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "MODIFIED",
+        "ty": "DT",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "ATTRIBUTES",
+        "ty": "N",
+        "length": 5,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "DATASIZE",
+        "ty": "N",
+        "length": 20,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "BINARYDATA",
+        "ty": "I",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "PARTNO",
+        "ty": "N",
+        "length": 10,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      }
+    ],
+    "indexes": [
+      {
+        "name": "BYNAMENO_CONFIGSAVE",
+        "unique": false,
+        "fields": [
+          [
+            "FILENAME",
+            128
+          ],
+          [
+            "PARTNO",
+            0
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "name": "PARAMS",
+    "recordlock": false,
+    "fields": [
+      {
+        "name": "FILENAME",
+        "ty": "NVC",
+        "length": 128,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "CREATION",
+        "ty": "DT",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "MODIFIED",
+        "ty": "DT",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "ATTRIBUTES",
+        "ty": "N",
+        "length": 5,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "DATASIZE",
+        "ty": "N",
+        "length": 20,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "BINARYDATA",
+        "ty": "I",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "PARTNO",
+        "ty": "N",
+        "length": 10,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      }
+    ],
+    "indexes": [
+      {
+        "name": "BYNAMENO_PARAMS",
+        "unique": false,
+        "fields": [
+          [
+            "FILENAME",
+            128
+          ],
+          [
+            "PARTNO",
+            0
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "name": "FILES",
+    "recordlock": false,
+    "fields": [
+      {
+        "name": "FILENAME",
+        "ty": "NVC",
+        "length": 128,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "CREATION",
+        "ty": "DT",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "MODIFIED",
+        "ty": "DT",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "ATTRIBUTES",
+        "ty": "N",
+        "length": 5,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "DATASIZE",
+        "ty": "N",
+        "length": 20,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "BINARYDATA",
+        "ty": "I",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "PARTNO",
+        "ty": "N",
+        "length": 10,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      }
+    ],
+    "indexes": [
+      {
+        "name": "BYNAMENO_FILES",
+        "unique": false,
+        "fields": [
+          [
+            "FILENAME",
+            128
+          ],
+          [
+            "PARTNO",
+            0
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "name": "DEPOTFILES",
+    "recordlock": false,
+    "fields": [
+      {
+        "name": "FILENAME",
+        "ty": "NVC",
+        "length": 128,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "CREATION",
+        "ty": "DT",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "MODIFIED",
+        "ty": "DT",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "ATTRIBUTES",
+        "ty": "N",
+        "length": 5,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "DATASIZE",
+        "ty": "N",
+        "length": 20,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "BINARYDATA",
+        "ty": "I",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "PARTNO",
+        "ty": "N",
+        "length": 10,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      }
+    ],
+    "indexes": [
+      {
+        "name": "BYNAMENO_DEPOTFILES",
+        "unique": false,
+        "fields": [
+          [
+            "FILENAME",
+            128
+          ],
+          [
+            "PARTNO",
+            0
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "name": "CONFIGCAS",
+    "recordlock": false,
+    "fields": [
+      {
+        "name": "FILENAME",
+        "ty": "NVC",
+        "length": 128,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "CREATION",
+        "ty": "DT",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "MODIFIED",
+        "ty": "DT",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "ATTRIBUTES",
+        "ty": "N",
+        "length": 5,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "DATASIZE",
+        "ty": "N",
+        "length": 20,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "BINARYDATA",
+        "ty": "I",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "PARTNO",
+        "ty": "N",
+        "length": 10,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      }
+    ],
+    "indexes": [
+      {
+        "name": "BYNAMENO_CONFIGCAS",
+        "unique": false,
+        "fields": [
+          [
+            "FILENAME",
+            128
+          ],
+          [
+            "PARTNO",
+            0
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "name": "CONFIGCASSAVE",
+    "recordlock": false,
+    "fields": [
+      {
+        "name": "FILENAME",
+        "ty": "NVC",
+        "length": 128,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "CREATION",
+        "ty": "DT",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "MODIFIED",
+        "ty": "DT",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "ATTRIBUTES",
+        "ty": "N",
+        "length": 5,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "DATASIZE",
+        "ty": "N",
+        "length": 20,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "BINARYDATA",
+        "ty": "I",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "PARTNO",
+        "ty": "N",
+        "length": 10,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      }
+    ],
+    "indexes": [
+      {
+        "name": "BYNAMENO_CONFIGCASSAVE",
+        "unique": false,
+        "fields": [
+          [
+            "FILENAME",
+            128
+          ],
+          [
+            "PARTNO",
+            0
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "name": "DBSCHEMA",
+    "recordlock": false,
+    "fields": [
+      {
+        "name": "SERIALIZEDDATA",
+        "ty": "I",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      }
+    ],
+    "indexes": []
+  },
+  {
+    "name": "SCHEMASTORAGE",
+    "recordlock": false,
+    "fields": [
+      {
+        "name": "SCHEMAID",
+        "ty": "N",
+        "length": 10,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "STATUS",
+        "ty": "N",
+        "length": 10,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "CURRENTSCHEMA",
+        "ty": "I",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "NEWGENCREATED",
+        "ty": "I",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "NEWGENDROPPED",
+        "ty": "I",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      }
+    ],
+    "indexes": [
+      {
+        "name": "SCHEMAIDIDX",
+        "unique": true,
+        "fields": [
+          [
+            "SCHEMAID",
+            0
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "name": "_STTSETTINGS",
+    "recordlock": false,
+    "fields": [
+      {
+        "name": "_TOKEN",
+        "ty": "NVC",
+        "length": 100,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "_HOST",
+        "ty": "NVC",
+        "length": 100,
+        "precision": 0,
+        "nullable": true,
+        "cs": false
+      }
+    ],
+    "indexes": []
+  },
+  {
+    "name": "_STTGRAMMAR",
+    "recordlock": false,
+    "fields": [
+      {
+        "name": "_GRAMMAR",
+        "ty": "NVC",
+        "length": 100,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "_PHRASE",
+        "ty": "NVC",
+        "length": 100,
+        "precision": 0,
+        "nullable": true,
+        "cs": false
+      }
+    ],
+    "indexes": [
+      {
+        "name": "_STTGRAMMAR_BYKEY_S",
+        "unique": false,
+        "fields": [
+          [
+            "_GRAMMAR",
+            100
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "name": "_STTGRAMMARCHECKSUM",
+    "recordlock": false,
+    "fields": [
+      {
+        "name": "_GRAMMAR",
+        "ty": "NVC",
+        "length": 100,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "_CHECKSUM",
+        "ty": "N",
+        "length": 10,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      }
+    ],
+    "indexes": [
+      {
+        "name": "_STTGRAMMARCH_BYKEY_S",
+        "unique": true,
+        "fields": [
+          [
+            "_GRAMMAR",
+            100
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "name": "_STTMODELS",
+    "recordlock": false,
+    "fields": [
+      {
+        "name": "_IDRREF",
+        "ty": "B",
+        "length": 16,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_MODELID",
+        "ty": "B",
+        "length": 16,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_MODELCOMPATIBILITY",
+        "ty": "N",
+        "length": 5,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_ACOUSTIC",
+        "ty": "NVC",
+        "length": 100,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "_ACOUSTICRU",
+        "ty": "NVC",
+        "length": 100,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "_LANGUAGEMODEL",
+        "ty": "NVC",
+        "length": 100,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "_LANGUAGEMODELRU",
+        "ty": "NVC",
+        "length": 100,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "_VERSION",
+        "ty": "NVC",
+        "length": 100,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "_LANGUAGE",
+        "ty": "NVC",
+        "length": 2,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "_SAMPLERATE",
+        "ty": "N",
+        "length": 5,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      }
+    ],
+    "indexes": [
+      {
+        "name": "_IDRREFIDX",
+        "unique": true,
+        "fields": [
+          [
+            "_IDRREF",
+            16
+          ]
+        ]
+      },
+      {
+        "name": "_STTMODELS_BYMODELID_B",
+        "unique": true,
+        "fields": [
+          [
+            "_MODELID",
+            16
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "name": "_STTMODELSDESC",
+    "recordlock": false,
+    "fields": [
+      {
+        "name": "_IDRREF",
+        "ty": "B",
+        "length": 16,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_MODELRREF",
+        "ty": "B",
+        "length": 16,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      }
+    ],
+    "indexes": [
+      {
+        "name": "_IDRREFIDX",
+        "unique": true,
+        "fields": [
+          [
+            "_IDRREF",
+            16
+          ]
+        ]
+      },
+      {
+        "name": "_STTMODELSDES_BYMODEL_R",
+        "unique": true,
+        "fields": [
+          [
+            "_MODELRREF",
+            16
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "name": "_STTMODELSDESC_DESCR",
+    "recordlock": false,
+    "fields": [
+      {
+        "name": "_STTMODELSDESC_IDRREF",
+        "ty": "B",
+        "length": 16,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_KEYFIELD",
+        "ty": "B",
+        "length": 4,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_LANGUAGE",
+        "ty": "NC",
+        "length": 2,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "_DESCRIPTION",
+        "ty": "NT",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      }
+    ],
+    "indexes": [
+      {
+        "name": "_STTMODELSDES_DESCR_INTKEYIND",
+        "unique": true,
+        "fields": [
+          [
+            "_STTMODELSDESC_IDRREF",
+            16
+          ],
+          [
+            "_KEYFIELD",
+            4
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "name": "_STTMODELSDESC_ACOUSTIC",
+    "recordlock": false,
+    "fields": [
+      {
+        "name": "_STTMODELSDESC_IDRREF",
+        "ty": "B",
+        "length": 16,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_KEYFIELD",
+        "ty": "B",
+        "length": 4,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_LANGUAGE",
+        "ty": "NC",
+        "length": 2,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "_DESCRIPTION",
+        "ty": "NT",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      }
+    ],
+    "indexes": [
+      {
+        "name": "_STTMODELSDES_ACOUSTIC_INTKEYIND",
+        "unique": true,
+        "fields": [
+          [
+            "_STTMODELSDESC_IDRREF",
+            16
+          ],
+          [
+            "_KEYFIELD",
+            4
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "name": "_STTMODELSDESC_LANGMODEL",
+    "recordlock": false,
+    "fields": [
+      {
+        "name": "_STTMODELSDESC_IDRREF",
+        "ty": "B",
+        "length": 16,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_KEYFIELD",
+        "ty": "B",
+        "length": 4,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_LANGUAGE",
+        "ty": "NC",
+        "length": 2,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "_DESCRIPTION",
+        "ty": "NT",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      }
+    ],
+    "indexes": [
+      {
+        "name": "_STTMODELSDES_LANGMODEL_INTKEYIND",
+        "unique": true,
+        "fields": [
+          [
+            "_STTMODELSDESC_IDRREF",
+            16
+          ],
+          [
+            "_KEYFIELD",
+            4
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "name": "V8CMSDPWDS",
+    "recordlock": false,
+    "fields": [
+      {
+        "name": "PWDHASH",
+        "ty": "NVC",
+        "length": 256,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      }
+    ],
+    "indexes": [
+      {
+        "name": "PWDHASHIDX",
+        "unique": true,
+        "fields": [
+          [
+            "PWDHASH",
+            256
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "name": "_DBSEGMENTS",
+    "recordlock": false,
+    "fields": [
+      {
+        "name": "_SEGMENTID",
+        "ty": "B",
+        "length": 16,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_SEGMENTNAME",
+        "ty": "NVC",
+        "length": 256,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "_PATH",
+        "ty": "NVC",
+        "length": 256,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      }
+    ],
+    "indexes": [
+      {
+        "name": "_DBSEGMENTS_SEGMENTNAME_S",
+        "unique": false,
+        "fields": [
+          [
+            "_SEGMENTNAME",
+            256
+          ]
+        ]
+      },
+      {
+        "name": "_DBSEGMENTS_SEGMENTID_B",
+        "unique": false,
+        "fields": [
+          [
+            "_SEGMENTID",
+            16
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "name": "_DBSEGMENTSITEMS",
+    "recordlock": false,
+    "fields": [
+      {
+        "name": "_ITEMID",
+        "ty": "NVC",
+        "length": 256,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "_SEGMENTID",
+        "ty": "B",
+        "length": 16,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_FORINDEX",
+        "ty": "L",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_APPLIED",
+        "ty": "L",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      }
+    ],
+    "indexes": [
+      {
+        "name": "_DBSEGMENTSIT_ITEMIDSEGMENTNAME_SLL",
+        "unique": false,
+        "fields": [
+          [
+            "_ITEMID",
+            256
+          ],
+          [
+            "_FORINDEX",
+            0
+          ],
+          [
+            "_APPLIED",
+            0
+          ]
+        ]
+      },
+      {
+        "name": "_DBSEGMENTSIT_SEGMENTIDSEGMENTNAME_BL",
+        "unique": false,
+        "fields": [
+          [
+            "_SEGMENTID",
+            16
+          ],
+          [
+            "_FORINDEX",
+            0
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "name": "_WEBSOCKETCLIENTS",
+    "recordlock": false,
+    "fields": [
+      {
+        "name": "_ID",
+        "ty": "B",
+        "length": 16,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_WSCKEY",
+        "ty": "NVC",
+        "length": 100,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "_METADATAID",
+        "ty": "B",
+        "length": 16,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_SERVERURL",
+        "ty": "NVC",
+        "length": 255,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "_PREDEFINED",
+        "ty": "L",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_CONNECTIONPARAMETERS",
+        "ty": "I",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_IBUSERNAME",
+        "ty": "NVC",
+        "length": 100,
+        "precision": 0,
+        "nullable": true,
+        "cs": false
+      },
+      {
+        "name": "_AUTOCONNECT",
+        "ty": "L",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      }
+    ],
+    "indexes": []
+  },
+  {
+    "name": "_EXTENSIONSRESTRUCT",
+    "recordlock": false,
+    "fields": [
+      {
+        "name": "_EXTDATAID",
+        "ty": "B",
+        "length": 16,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_RESTRUCTDATA",
+        "ty": "I",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_RESTRUCTDATAINT",
+        "ty": "N",
+        "length": 9,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_RESTRUCTDATATYPE",
+        "ty": "N",
+        "length": 9,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      }
+    ],
+    "indexes": [
+      {
+        "name": "_EXTENSIONSRE_EXTENSIONSRESTRUCTMAININDEX_BN",
+        "unique": false,
+        "fields": [
+          [
+            "_EXTDATAID",
+            16
+          ],
+          [
+            "_RESTRUCTDATATYPE",
+            0
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "name": "_EXTENSIONSRESTRUCTNGS",
+    "recordlock": false,
+    "fields": [
+      {
+        "name": "_EXTDATAID",
+        "ty": "B",
+        "length": 16,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_RESTRUCTDATA",
+        "ty": "I",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_RESTRUCTDATAINT",
+        "ty": "N",
+        "length": 9,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_RESTRUCTDATATYPE",
+        "ty": "N",
+        "length": 9,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      }
+    ],
+    "indexes": [
+      {
+        "name": "_EXTENSIONSRE_EXTENSIONSRESTRUCTNGSMAININDEX_BN",
+        "unique": false,
+        "fields": [
+          [
+            "_EXTDATAID",
+            16
+          ],
+          [
+            "_RESTRUCTDATATYPE",
+            0
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "name": "_EXTENSIONSINFO",
+    "recordlock": false,
+    "fields": [
+      {
+        "name": "_IDRREF",
+        "ty": "B",
+        "length": 16,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_EXTENSIONORDER",
+        "ty": "N",
+        "length": 9,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_EXTNAME",
+        "ty": "NVC",
+        "length": 255,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "_UPDATETIME",
+        "ty": "DT",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_EXTENSIONUSEPURPOSE",
+        "ty": "N",
+        "length": 2,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_EXTENSIONSCOPE",
+        "ty": "N",
+        "length": 2,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_EXTENSIONZIPPEDINFO",
+        "ty": "I",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_MASTERNODE",
+        "ty": "NT",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "_USEDINDISTRIBUTEDINFOBASE",
+        "ty": "L",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_VERSION",
+        "ty": "RV",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      }
+    ],
+    "indexes": [
+      {
+        "name": "_IDRREFIDX",
+        "unique": true,
+        "fields": [
+          [
+            "_IDRREF",
+            16
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "name": "_EXTENSIONSINFONGS",
+    "recordlock": false,
+    "fields": [
+      {
+        "name": "_IDRREF",
+        "ty": "B",
+        "length": 16,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_EXTENSIONORDER",
+        "ty": "N",
+        "length": 9,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_EXTNAME",
+        "ty": "NVC",
+        "length": 255,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "_UPDATETIME",
+        "ty": "DT",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_EXTENSIONUSEPURPOSE",
+        "ty": "N",
+        "length": 2,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_EXTENSIONSCOPE",
+        "ty": "N",
+        "length": 2,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_EXTENSIONZIPPEDINFO",
+        "ty": "I",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_MASTERNODE",
+        "ty": "NT",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "_USEDINDISTRIBUTEDINFOBASE",
+        "ty": "L",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_VERSION",
+        "ty": "RV",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      }
+    ],
+    "indexes": [
+      {
+        "name": "_IDRREFIDX",
+        "unique": true,
+        "fields": [
+          [
+            "_IDRREF",
+            16
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "name": "_SYSTEMSETTINGS",
+    "recordlock": false,
+    "fields": [
+      {
+        "name": "_USERID",
+        "ty": "NT",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "_OBJECTKEY",
+        "ty": "NVC",
+        "length": 256,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "_SETTINGSKEY",
+        "ty": "NT",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "_VERSION",
+        "ty": "B",
+        "length": 16,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_SETTINGSPRESENTATION",
+        "ty": "NVC",
+        "length": 256,
+        "precision": 0,
+        "nullable": true,
+        "cs": false
+      },
+      {
+        "name": "_SETTINGSDATA",
+        "ty": "I",
+        "length": 0,
+        "precision": 0,
+        "nullable": true,
+        "cs": true
+      },
+      {
+        "name": "_CHANGEDATE",
+        "ty": "DT",
+        "length": 0,
+        "precision": 0,
+        "nullable": true,
+        "cs": true
+      },
+      {
+        "name": "_USERIDHASH",
+        "ty": "N",
+        "length": 10,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_SETTINGSKEYHASH",
+        "ty": "N",
+        "length": 10,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      }
+    ],
+    "indexes": [
+      {
+        "name": "_SYSTEMSETTIN_BYKEY_NSNB",
+        "unique": false,
+        "fields": [
+          [
+            "_USERIDHASH",
+            0
+          ],
+          [
+            "_OBJECTKEY",
+            256
+          ],
+          [
+            "_SETTINGSKEYHASH",
+            0
+          ],
+          [
+            "_VERSION",
+            16
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "name": "_COMMONSETTINGS",
+    "recordlock": false,
+    "fields": [
+      {
+        "name": "_USERID",
+        "ty": "NT",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "_OBJECTKEY",
+        "ty": "NVC",
+        "length": 256,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "_SETTINGSKEY",
+        "ty": "NT",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "_VERSION",
+        "ty": "B",
+        "length": 16,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_SETTINGSPRESENTATION",
+        "ty": "NVC",
+        "length": 256,
+        "precision": 0,
+        "nullable": true,
+        "cs": false
+      },
+      {
+        "name": "_SETTINGSDATA",
+        "ty": "I",
+        "length": 0,
+        "precision": 0,
+        "nullable": true,
+        "cs": true
+      },
+      {
+        "name": "_CHANGEDATE",
+        "ty": "DT",
+        "length": 0,
+        "precision": 0,
+        "nullable": true,
+        "cs": true
+      },
+      {
+        "name": "_USERIDHASH",
+        "ty": "N",
+        "length": 10,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_SETTINGSKEYHASH",
+        "ty": "N",
+        "length": 10,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      }
+    ],
+    "indexes": [
+      {
+        "name": "_COMMONSETTIN_BYKEY_NSNB",
+        "unique": false,
+        "fields": [
+          [
+            "_USERIDHASH",
+            0
+          ],
+          [
+            "_OBJECTKEY",
+            256
+          ],
+          [
+            "_SETTINGSKEYHASH",
+            0
+          ],
+          [
+            "_VERSION",
+            16
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "name": "_REPSETTINGS",
+    "recordlock": false,
+    "fields": [
+      {
+        "name": "_USERID",
+        "ty": "NT",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "_OBJECTKEY",
+        "ty": "NVC",
+        "length": 256,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "_SETTINGSKEY",
+        "ty": "NT",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "_VERSION",
+        "ty": "B",
+        "length": 16,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_SETTINGSPRESENTATION",
+        "ty": "NVC",
+        "length": 256,
+        "precision": 0,
+        "nullable": true,
+        "cs": false
+      },
+      {
+        "name": "_SETTINGSDATA",
+        "ty": "I",
+        "length": 0,
+        "precision": 0,
+        "nullable": true,
+        "cs": true
+      },
+      {
+        "name": "_CHANGEDATE",
+        "ty": "DT",
+        "length": 0,
+        "precision": 0,
+        "nullable": true,
+        "cs": true
+      },
+      {
+        "name": "_USERIDHASH",
+        "ty": "N",
+        "length": 10,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_SETTINGSKEYHASH",
+        "ty": "N",
+        "length": 10,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      }
+    ],
+    "indexes": [
+      {
+        "name": "_REPSETTINGS_BYKEY_NSNB",
+        "unique": false,
+        "fields": [
+          [
+            "_USERIDHASH",
+            0
+          ],
+          [
+            "_OBJECTKEY",
+            256
+          ],
+          [
+            "_SETTINGSKEYHASH",
+            0
+          ],
+          [
+            "_VERSION",
+            16
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "name": "_REPVARSETTINGS",
+    "recordlock": false,
+    "fields": [
+      {
+        "name": "_USERID",
+        "ty": "NT",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "_OBJECTKEY",
+        "ty": "NVC",
+        "length": 256,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "_SETTINGSKEY",
+        "ty": "NT",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "_VERSION",
+        "ty": "B",
+        "length": 16,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_SETTINGSPRESENTATION",
+        "ty": "NVC",
+        "length": 256,
+        "precision": 0,
+        "nullable": true,
+        "cs": false
+      },
+      {
+        "name": "_SETTINGSDATA",
+        "ty": "I",
+        "length": 0,
+        "precision": 0,
+        "nullable": true,
+        "cs": true
+      },
+      {
+        "name": "_CHANGEDATE",
+        "ty": "DT",
+        "length": 0,
+        "precision": 0,
+        "nullable": true,
+        "cs": true
+      },
+      {
+        "name": "_USERIDHASH",
+        "ty": "N",
+        "length": 10,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_SETTINGSKEYHASH",
+        "ty": "N",
+        "length": 10,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      }
+    ],
+    "indexes": [
+      {
+        "name": "_REPVARSETTIN_BYKEY_NSNB",
+        "unique": false,
+        "fields": [
+          [
+            "_USERIDHASH",
+            0
+          ],
+          [
+            "_OBJECTKEY",
+            256
+          ],
+          [
+            "_SETTINGSKEYHASH",
+            0
+          ],
+          [
+            "_VERSION",
+            16
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "name": "_FRMDTSETTINGS",
+    "recordlock": false,
+    "fields": [
+      {
+        "name": "_USERID",
+        "ty": "NT",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "_OBJECTKEY",
+        "ty": "NVC",
+        "length": 256,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "_SETTINGSKEY",
+        "ty": "NT",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "_VERSION",
+        "ty": "B",
+        "length": 16,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_SETTINGSPRESENTATION",
+        "ty": "NVC",
+        "length": 256,
+        "precision": 0,
+        "nullable": true,
+        "cs": false
+      },
+      {
+        "name": "_SETTINGSDATA",
+        "ty": "I",
+        "length": 0,
+        "precision": 0,
+        "nullable": true,
+        "cs": true
+      },
+      {
+        "name": "_CHANGEDATE",
+        "ty": "DT",
+        "length": 0,
+        "precision": 0,
+        "nullable": true,
+        "cs": true
+      },
+      {
+        "name": "_USERIDHASH",
+        "ty": "N",
+        "length": 10,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_SETTINGSKEYHASH",
+        "ty": "N",
+        "length": 10,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      }
+    ],
+    "indexes": [
+      {
+        "name": "_FRMDTSETTING_BYKEY_NSNB",
+        "unique": false,
+        "fields": [
+          [
+            "_USERIDHASH",
+            0
+          ],
+          [
+            "_OBJECTKEY",
+            256
+          ],
+          [
+            "_SETTINGSKEYHASH",
+            0
+          ],
+          [
+            "_VERSION",
+            16
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "name": "_DYNLISTSETTINGS",
+    "recordlock": false,
+    "fields": [
+      {
+        "name": "_USERID",
+        "ty": "NT",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "_OBJECTKEY",
+        "ty": "NVC",
+        "length": 256,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "_SETTINGSKEY",
+        "ty": "NT",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "_VERSION",
+        "ty": "B",
+        "length": 16,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_SETTINGSPRESENTATION",
+        "ty": "NVC",
+        "length": 256,
+        "precision": 0,
+        "nullable": true,
+        "cs": false
+      },
+      {
+        "name": "_SETTINGSDATA",
+        "ty": "I",
+        "length": 0,
+        "precision": 0,
+        "nullable": true,
+        "cs": true
+      },
+      {
+        "name": "_CHANGEDATE",
+        "ty": "DT",
+        "length": 0,
+        "precision": 0,
+        "nullable": true,
+        "cs": true
+      },
+      {
+        "name": "_USERIDHASH",
+        "ty": "N",
+        "length": 10,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_SETTINGSKEYHASH",
+        "ty": "N",
+        "length": 10,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      }
+    ],
+    "indexes": [
+      {
+        "name": "_DYNLISTSETTI_BYKEY_NSNB",
+        "unique": false,
+        "fields": [
+          [
+            "_USERIDHASH",
+            0
+          ],
+          [
+            "_OBJECTKEY",
+            256
+          ],
+          [
+            "_SETTINGSKEYHASH",
+            0
+          ],
+          [
+            "_VERSION",
+            16
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "name": "_ERRORPROCESSINGSETTINGS",
+    "recordlock": false,
+    "fields": [
+      {
+        "name": "_USERID",
+        "ty": "NT",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "_OBJECTKEY",
+        "ty": "NVC",
+        "length": 256,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "_SETTINGSKEY",
+        "ty": "NT",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "_VERSION",
+        "ty": "B",
+        "length": 16,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_SETTINGSPRESENTATION",
+        "ty": "NVC",
+        "length": 256,
+        "precision": 0,
+        "nullable": true,
+        "cs": false
+      },
+      {
+        "name": "_SETTINGSDATA",
+        "ty": "I",
+        "length": 0,
+        "precision": 0,
+        "nullable": true,
+        "cs": true
+      },
+      {
+        "name": "_CHANGEDATE",
+        "ty": "DT",
+        "length": 0,
+        "precision": 0,
+        "nullable": true,
+        "cs": true
+      },
+      {
+        "name": "_USERIDHASH",
+        "ty": "N",
+        "length": 10,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_SETTINGSKEYHASH",
+        "ty": "N",
+        "length": 10,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      }
+    ],
+    "indexes": [
+      {
+        "name": "_ERRORPROCESS_BYKEY_NSNB",
+        "unique": false,
+        "fields": [
+          [
+            "_USERIDHASH",
+            0
+          ],
+          [
+            "_OBJECTKEY",
+            256
+          ],
+          [
+            "_SETTINGSKEYHASH",
+            0
+          ],
+          [
+            "_VERSION",
+            16
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "name": "_URLEXTERNALDATA",
+    "recordlock": false,
+    "fields": [
+      {
+        "name": "_USERID",
+        "ty": "NT",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "_OBJECTKEY",
+        "ty": "NVC",
+        "length": 256,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "_SETTINGSKEY",
+        "ty": "NT",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "_VERSION",
+        "ty": "B",
+        "length": 16,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_SETTINGSPRESENTATION",
+        "ty": "NVC",
+        "length": 256,
+        "precision": 0,
+        "nullable": true,
+        "cs": false
+      },
+      {
+        "name": "_SETTINGSDATA",
+        "ty": "I",
+        "length": 0,
+        "precision": 0,
+        "nullable": true,
+        "cs": true
+      },
+      {
+        "name": "_CHANGEDATE",
+        "ty": "DT",
+        "length": 0,
+        "precision": 0,
+        "nullable": true,
+        "cs": true
+      },
+      {
+        "name": "_USERIDHASH",
+        "ty": "N",
+        "length": 10,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_SETTINGSKEYHASH",
+        "ty": "N",
+        "length": 10,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      }
+    ],
+    "indexes": [
+      {
+        "name": "_URLEXTERNALD_BYKEY_NSNB",
+        "unique": false,
+        "fields": [
+          [
+            "_USERIDHASH",
+            0
+          ],
+          [
+            "_OBJECTKEY",
+            256
+          ],
+          [
+            "_SETTINGSKEYHASH",
+            0
+          ],
+          [
+            "_VERSION",
+            16
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "name": "_INTERNALSETTINGS",
+    "recordlock": false,
+    "fields": [
+      {
+        "name": "_USERID",
+        "ty": "NT",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "_OBJECTKEY",
+        "ty": "NVC",
+        "length": 256,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "_SETTINGSKEY",
+        "ty": "NT",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "_VERSION",
+        "ty": "B",
+        "length": 16,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_SETTINGSPRESENTATION",
+        "ty": "NVC",
+        "length": 256,
+        "precision": 0,
+        "nullable": true,
+        "cs": false
+      },
+      {
+        "name": "_SETTINGSDATA",
+        "ty": "I",
+        "length": 0,
+        "precision": 0,
+        "nullable": true,
+        "cs": true
+      },
+      {
+        "name": "_CHANGEDATE",
+        "ty": "DT",
+        "length": 0,
+        "precision": 0,
+        "nullable": true,
+        "cs": true
+      },
+      {
+        "name": "_USERIDHASH",
+        "ty": "N",
+        "length": 10,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_SETTINGSKEYHASH",
+        "ty": "N",
+        "length": 10,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      }
+    ],
+    "indexes": [
+      {
+        "name": "_INTERNALSETT_BYKEY_NSNB",
+        "unique": false,
+        "fields": [
+          [
+            "_USERIDHASH",
+            0
+          ],
+          [
+            "_OBJECTKEY",
+            256
+          ],
+          [
+            "_SETTINGSKEYHASH",
+            0
+          ],
+          [
+            "_VERSION",
+            16
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "name": "_DEFAULTSYSTEMSETTINGS",
+    "recordlock": false,
+    "fields": [
+      {
+        "name": "_OBJECTKEY",
+        "ty": "NVC",
+        "length": 256,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "_VERSION",
+        "ty": "B",
+        "length": 16,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_SETTINGSDATA",
+        "ty": "I",
+        "length": 0,
+        "precision": 0,
+        "nullable": true,
+        "cs": true
+      },
+      {
+        "name": "_CHANGEDATE",
+        "ty": "DT",
+        "length": 0,
+        "precision": 0,
+        "nullable": true,
+        "cs": true
+      }
+    ],
+    "indexes": [
+      {
+        "name": "_DEFAULTSYSTE_BYKEY_S",
+        "unique": false,
+        "fields": [
+          [
+            "_OBJECTKEY",
+            256
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "name": "_DEFAULTINTERNALSETTINGS",
+    "recordlock": false,
+    "fields": [
+      {
+        "name": "_OBJECTKEY",
+        "ty": "NVC",
+        "length": 256,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "_VERSION",
+        "ty": "B",
+        "length": 16,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_SETTINGSDATA",
+        "ty": "I",
+        "length": 0,
+        "precision": 0,
+        "nullable": true,
+        "cs": true
+      },
+      {
+        "name": "_CHANGEDATE",
+        "ty": "DT",
+        "length": 0,
+        "precision": 0,
+        "nullable": true,
+        "cs": true
+      }
+    ],
+    "indexes": [
+      {
+        "name": "_DEFAULTINTER_BYKEY_S",
+        "unique": false,
+        "fields": [
+          [
+            "_OBJECTKEY",
+            256
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "name": "_DBCOPIESINFOBASEUSE",
+    "recordlock": false,
+    "fields": [
+      {
+        "name": "_ID",
+        "ty": "B",
+        "length": 16,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_DESCRIPTION",
+        "ty": "NVC",
+        "length": 256,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      }
+    ],
+    "indexes": []
+  },
+  {
+    "name": "_DBCOPIESUPDATETABLESTAT",
+    "recordlock": false,
+    "fields": [
+      {
+        "name": "_COPYID",
+        "ty": "B",
+        "length": 16,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_TABLENAME",
+        "ty": "NVC",
+        "length": 256,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "_UPDATETIME",
+        "ty": "DT",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_TRANSFERTIME",
+        "ty": "N",
+        "length": 10,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_ISPORTION",
+        "ty": "L",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      }
+    ],
+    "indexes": []
+  },
+  {
+    "name": "_DBCOPIESUPDATESTAT",
+    "recordlock": false,
+    "fields": [
+      {
+        "name": "_COPYID",
+        "ty": "B",
+        "length": 16,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_UPDATETIME",
+        "ty": "DT",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_TRANPERSEC",
+        "ty": "N",
+        "length": 16,
+        "precision": 4,
+        "nullable": false,
+        "cs": true
+      }
+    ],
+    "indexes": []
+  },
+  {
+    "name": "_DBCOPIES",
+    "recordlock": false,
+    "fields": [
+      {
+        "name": "_COPYID",
+        "ty": "B",
+        "length": 16,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_COPYNAME",
+        "ty": "NVC",
+        "length": 256,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "_USEINTACCELERATOR",
+        "ty": "L",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_REPLTYPE",
+        "ty": "N",
+        "length": 10,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_DBTYPE",
+        "ty": "N",
+        "length": 10,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_DBSERVER",
+        "ty": "NVC",
+        "length": 256,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "_DBNAME",
+        "ty": "NVC",
+        "length": 256,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "_DBUSER",
+        "ty": "NVC",
+        "length": 256,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "_DBPASSWORD",
+        "ty": "NVC",
+        "length": 256,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "_CREATEDB",
+        "ty": "L",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_VERSION",
+        "ty": "N",
+        "length": 9,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_STORAGEVARIANT",
+        "ty": "N",
+        "length": 1,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      }
+    ],
+    "indexes": [
+      {
+        "name": "_DBCOPIES_COPYIDCOPYNAME_BS",
+        "unique": true,
+        "fields": [
+          [
+            "_COPYID",
+            16
+          ],
+          [
+            "_COPYNAME",
+            256
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "name": "_DBCOPIESSETTINGS",
+    "recordlock": false,
+    "fields": [
+      {
+        "name": "_COPYID",
+        "ty": "B",
+        "length": 16,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_COPYCONTENT",
+        "ty": "I",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_COPYSCHEMA",
+        "ty": "I",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_VERSION",
+        "ty": "N",
+        "length": 9,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      }
+    ],
+    "indexes": [
+      {
+        "name": "_DBCOPIESSETT_COPYID_B",
+        "unique": false,
+        "fields": [
+          [
+            "_COPYID",
+            16
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "name": "_DBCOPIESTRLOGS",
+    "recordlock": false,
+    "fields": [
+      {
+        "name": "_TRNUM",
+        "ty": "N",
+        "length": 10,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_TRTIME",
+        "ty": "DT",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_TRID",
+        "ty": "B",
+        "length": 16,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_TRLOG",
+        "ty": "I",
+        "length": 0,
+        "precision": 0,
+        "nullable": true,
+        "cs": true
+      }
+    ],
+    "indexes": [
+      {
+        "name": "_DBCOPIESTRLO_TRNUM_N",
+        "unique": false,
+        "fields": [
+          [
+            "_TRNUM",
+            0
+          ]
+        ]
+      },
+      {
+        "name": "_DBCOPIESTRLO_TRID_B",
+        "unique": false,
+        "fields": [
+          [
+            "_TRID",
+            16
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "name": "_DBCOPIESTRTABLES",
+    "recordlock": false,
+    "fields": [
+      {
+        "name": "_TRNUM",
+        "ty": "N",
+        "length": 10,
+        "precision": 0,
+        "nullable": true,
+        "cs": true
+      },
+      {
+        "name": "_TRTIME",
+        "ty": "DT",
+        "length": 0,
+        "precision": 0,
+        "nullable": true,
+        "cs": true
+      },
+      {
+        "name": "_TABLENAME",
+        "ty": "NVC",
+        "length": 256,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      }
+    ],
+    "indexes": [
+      {
+        "name": "_DBCOPIESTRTA_TRNUMTABLENAME_SNT",
+        "unique": false,
+        "fields": [
+          [
+            "_TABLENAME",
+            256
+          ],
+          [
+            "_TRNUM",
+            0
+          ],
+          [
+            "_TRTIME",
+            0
+          ]
+        ]
+      },
+      {
+        "name": "_DBCOPIESTRTA_TABLENAME_N",
+        "unique": false,
+        "fields": [
+          [
+            "_TRNUM",
+            0
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "name": "_DBCOPIESUPDATES",
+    "recordlock": false,
+    "fields": [
+      {
+        "name": "_COPYID",
+        "ty": "B",
+        "length": 16,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_TRNUM",
+        "ty": "N",
+        "length": 10,
+        "precision": 0,
+        "nullable": true,
+        "cs": true
+      },
+      {
+        "name": "_TRTIME",
+        "ty": "DT",
+        "length": 0,
+        "precision": 0,
+        "nullable": true,
+        "cs": true
+      },
+      {
+        "name": "_UPDATEID",
+        "ty": "B",
+        "length": 16,
+        "precision": 0,
+        "nullable": true,
+        "cs": true
+      },
+      {
+        "name": "_LASTUPDATERESULT",
+        "ty": "N",
+        "length": 2,
+        "precision": 0,
+        "nullable": true,
+        "cs": true
+      },
+      {
+        "name": "_LASTUPDATEERROR",
+        "ty": "I",
+        "length": 0,
+        "precision": 0,
+        "nullable": true,
+        "cs": true
+      }
+    ],
+    "indexes": [
+      {
+        "name": "_DBCOPIESUPDA_COPYIDTRNUM_BN",
+        "unique": true,
+        "fields": [
+          [
+            "_COPYID",
+            16
+          ],
+          [
+            "_TRNUM",
+            0
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "name": "_DBCOPIESTABLESSTATES",
+    "recordlock": false,
+    "fields": [
+      {
+        "name": "_COPYID",
+        "ty": "B",
+        "length": 16,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_TABLENAME",
+        "ty": "NVC",
+        "length": 256,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "_TABLESTATE",
+        "ty": "N",
+        "length": 10,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_TRNUM",
+        "ty": "N",
+        "length": 10,
+        "precision": 0,
+        "nullable": true,
+        "cs": true
+      }
+    ],
+    "indexes": [
+      {
+        "name": "_DBCOPIESTABL_COPYIDTABLENAME_BS",
+        "unique": true,
+        "fields": [
+          [
+            "_COPYID",
+            16
+          ],
+          [
+            "_TABLENAME",
+            256
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "name": "_DBCOPIESINITIALLAST",
+    "recordlock": false,
+    "fields": [
+      {
+        "name": "_COPYID",
+        "ty": "B",
+        "length": 16,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_TABLENAME",
+        "ty": "NVC",
+        "length": 256,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "_BLOCKNUM",
+        "ty": "N",
+        "length": 10,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_FIRSTKEY",
+        "ty": "I",
+        "length": 0,
+        "precision": 0,
+        "nullable": true,
+        "cs": true
+      },
+      {
+        "name": "_LASTKEY",
+        "ty": "I",
+        "length": 0,
+        "precision": 0,
+        "nullable": true,
+        "cs": true
+      },
+      {
+        "name": "_BLOCKSTATE",
+        "ty": "N",
+        "length": 10,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      }
+    ],
+    "indexes": [
+      {
+        "name": "_DBCOPIESINIT_COPYIDTABLENAMEBLOCKNUM_BSN",
+        "unique": true,
+        "fields": [
+          [
+            "_COPYID",
+            16
+          ],
+          [
+            "_TABLENAME",
+            256
+          ],
+          [
+            "_BLOCKNUM",
+            0
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "name": "_DBCOPIESTRCHANGES",
+    "recordlock": false,
+    "fields": [
+      {
+        "name": "_COPYID",
+        "ty": "B",
+        "length": 16,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_TABLENAME",
+        "ty": "NVC",
+        "length": 256,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "_TRNUM",
+        "ty": "N",
+        "length": 10,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_CHID",
+        "ty": "B",
+        "length": 16,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      }
+    ],
+    "indexes": [
+      {
+        "name": "_DBCOPIESTRCH_COPYIDTABLENAME_BSN",
+        "unique": false,
+        "fields": [
+          [
+            "_COPYID",
+            16
+          ],
+          [
+            "_TABLENAME",
+            256
+          ],
+          [
+            "_TRNUM",
+            0
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "name": "_DBCOPIESTRCHOBJ",
+    "recordlock": false,
+    "fields": [
+      {
+        "name": "_CHID",
+        "ty": "B",
+        "length": 16,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_CHOBJ",
+        "ty": "I",
+        "length": 0,
+        "precision": 0,
+        "nullable": true,
+        "cs": true
+      }
+    ],
+    "indexes": [
+      {
+        "name": "_DBCOPIESTRCH_CHID_B",
+        "unique": true,
+        "fields": [
+          [
+            "_CHID",
+            16
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "name": "_MOBILECLIENTDATAEXCHANGE",
+    "recordlock": false,
+    "fields": [
+      {
+        "name": "_ID",
+        "ty": "B",
+        "length": 16,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_VERSION",
+        "ty": "N",
+        "length": 2,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_TYPE",
+        "ty": "N",
+        "length": 2,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_DATA",
+        "ty": "I",
+        "length": 0,
+        "precision": 0,
+        "nullable": true,
+        "cs": true
+      },
+      {
+        "name": "_DATE",
+        "ty": "DT",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      }
+    ],
+    "indexes": [
+      {
+        "name": "_MOBILECLIENT_ID_B",
+        "unique": false,
+        "fields": [
+          [
+            "_ID",
+            16
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "name": "_BOTS",
+    "recordlock": false,
+    "fields": [
+      {
+        "name": "_ID",
+        "ty": "B",
+        "length": 16,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_CLIENTID",
+        "ty": "NVC",
+        "length": 100,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "_ECSUSERID",
+        "ty": "NVC",
+        "length": 100,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "_MDBOTID",
+        "ty": "B",
+        "length": 16,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_IBUSERNAME",
+        "ty": "NVC",
+        "length": 100,
+        "precision": 0,
+        "nullable": true,
+        "cs": false
+      },
+      {
+        "name": "_PARAM",
+        "ty": "I",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_PREDEFINED",
+        "ty": "L",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_NEEDSUPDATE",
+        "ty": "L",
+        "length": 0,
+        "precision": 0,
+        "nullable": true,
+        "cs": true
+      }
+    ],
+    "indexes": []
+  },
+  {
+    "name": "_ODATASETTINGS",
+    "recordlock": false,
+    "fields": [
+      {
+        "name": "_METADATAOBJECTUUID",
+        "ty": "B",
+        "length": 16,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      }
+    ],
+    "indexes": []
+  },
+  {
+    "name": "_DATAHISTORYQUEUE0",
+    "recordlock": false,
+    "fields": [
+      {
+        "name": "_METADATAID",
+        "ty": "B",
+        "length": 16,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_DATAID",
+        "ty": "B",
+        "length": 20,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_POSITION",
+        "ty": "N",
+        "length": 9,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_CONTENT",
+        "ty": "I",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      }
+    ],
+    "indexes": [
+      {
+        "name": "_DATAHISTORY0_METADATAIDDATAIDPOSITION_BBN",
+        "unique": true,
+        "fields": [
+          [
+            "_METADATAID",
+            16
+          ],
+          [
+            "_DATAID",
+            20
+          ],
+          [
+            "_POSITION",
+            0
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "name": "_DATAHISTORYVERSIONS",
+    "recordlock": false,
+    "fields": [
+      {
+        "name": "_HISTORYDATAID",
+        "ty": "B",
+        "length": 16,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_VERSIONNUMBER",
+        "ty": "N",
+        "length": 9,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_METADATAVERSIONNUMBER",
+        "ty": "N",
+        "length": 9,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_DATE",
+        "ty": "DT",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_CHANGETYPE",
+        "ty": "N",
+        "length": 1,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_USERID",
+        "ty": "B",
+        "length": 16,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_USERNAME",
+        "ty": "NVC",
+        "length": 256,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "_USERFULLNAME",
+        "ty": "NVC",
+        "length": 256,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "_COMMENT",
+        "ty": "NVC",
+        "length": 1024,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "_TRANSACTION",
+        "ty": "B",
+        "length": 16,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_NODE_TYPE",
+        "ty": "B",
+        "length": 1,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_NODE_RTREF",
+        "ty": "B",
+        "length": 4,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_NODE_RRREF",
+        "ty": "B",
+        "length": 16,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_CONTENT",
+        "ty": "I",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      }
+    ],
+    "indexes": [
+      {
+        "name": "_DATAHISTORYV_HISTORYDATAIDVERSIONNUMBER_BN",
+        "unique": true,
+        "fields": [
+          [
+            "_HISTORYDATAID",
+            16
+          ],
+          [
+            "_VERSIONNUMBER",
+            0
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "name": "_DATAHISTORYLATESTVERSIONS",
+    "recordlock": false,
+    "fields": [
+      {
+        "name": "_METADATAID",
+        "ty": "B",
+        "length": 16,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_DATAID",
+        "ty": "B",
+        "length": 20,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_HISTORYDATAID",
+        "ty": "B",
+        "length": 16,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_VERSIONNUMBER",
+        "ty": "N",
+        "length": 9,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_CONTENT",
+        "ty": "I",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      }
+    ],
+    "indexes": [
+      {
+        "name": "_DATAHISTORYL_SEPARATORSMETADATAIDDATAID_BB",
+        "unique": false,
+        "fields": [
+          [
+            "_METADATAID",
+            16
+          ],
+          [
+            "_DATAID",
+            20
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "name": "_DATAHISTORYMETADATA",
+    "recordlock": false,
+    "fields": [
+      {
+        "name": "_METADATAID",
+        "ty": "B",
+        "length": 16,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_ISSETTINGS",
+        "ty": "L",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_ISACTUAL",
+        "ty": "L",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_METADATAVERSIONNUMBER",
+        "ty": "N",
+        "length": 9,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_CONTENT",
+        "ty": "I",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_ISEXTENSIONS",
+        "ty": "L",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_ACTIONONACCEPT",
+        "ty": "N",
+        "length": 1,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      }
+    ],
+    "indexes": [
+      {
+        "name": "_DATAHISTORYM_SEPARATORSIDISSETISACTNUMBER_BLLNL",
+        "unique": false,
+        "fields": [
+          [
+            "_METADATAID",
+            16
+          ],
+          [
+            "_ISSETTINGS",
+            0
+          ],
+          [
+            "_ISACTUAL",
+            0
+          ],
+          [
+            "_METADATAVERSIONNUMBER",
+            0
+          ],
+          [
+            "_ISEXTENSIONS",
+            0
+          ]
+        ]
+      },
+      {
+        "name": "_DATAHISTORYM_METADATAIDMETADATAVERSION_BN",
+        "unique": false,
+        "fields": [
+          [
+            "_METADATAID",
+            16
+          ],
+          [
+            "_METADATAVERSIONNUMBER",
+            0
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "name": "_DATAHISTORYSETTINGS",
+    "recordlock": false,
+    "fields": [
+      {
+        "name": "_METADATAID",
+        "ty": "B",
+        "length": 16,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_CONTENT",
+        "ty": "I",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      }
+    ],
+    "indexes": [
+      {
+        "name": "_DATAHISTORYS_SEPARATORSMETADATAID_B",
+        "unique": true,
+        "fields": [
+          [
+            "_METADATAID",
+            16
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "name": "_DATAHISTORYAFTERWRITEQUEUE",
+    "recordlock": false,
+    "fields": [
+      {
+        "name": "_METADATAID",
+        "ty": "B",
+        "length": 16,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_HISTORYDATAID",
+        "ty": "B",
+        "length": 16,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_VERSIONNUMBER",
+        "ty": "N",
+        "length": 9,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      }
+    ],
+    "indexes": [
+      {
+        "name": "_DATAHISTORYA_SEPARATORSMETADATAIDHISTORYDATAIDVERSIONNUMBER_BBN",
+        "unique": true,
+        "fields": [
+          [
+            "_METADATAID",
+            16
+          ],
+          [
+            "_HISTORYDATAID",
+            16
+          ],
+          [
+            "_VERSIONNUMBER",
+            0
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "name": "_REFOPT",
+    "recordlock": false,
+    "fields": [
+      {
+        "name": "_MDID",
+        "ty": "B",
+        "length": 16,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_EXTID",
+        "ty": "B",
+        "length": 16,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_PDUPDMODE",
+        "ty": "N",
+        "length": 1,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      }
+    ],
+    "indexes": [
+      {
+        "name": "_REFOPT_MDID_BB",
+        "unique": false,
+        "fields": [
+          [
+            "_MDID",
+            16
+          ],
+          [
+            "_EXTID",
+            16
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "name": "_CHRCOPT",
+    "recordlock": false,
+    "fields": [
+      {
+        "name": "_MDID",
+        "ty": "B",
+        "length": 16,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_EXTID",
+        "ty": "B",
+        "length": 16,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_PDUPDMODE",
+        "ty": "N",
+        "length": 1,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      }
+    ],
+    "indexes": [
+      {
+        "name": "_CHRCOPT_MDID_BB",
+        "unique": false,
+        "fields": [
+          [
+            "_MDID",
+            16
+          ],
+          [
+            "_EXTID",
+            16
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "name": "_ACCOPT",
+    "recordlock": false,
+    "fields": [
+      {
+        "name": "_MDID",
+        "ty": "B",
+        "length": 16,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_EXTID",
+        "ty": "B",
+        "length": 16,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_PDUPDMODE",
+        "ty": "N",
+        "length": 1,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      }
+    ],
+    "indexes": [
+      {
+        "name": "_ACCOPT_MDID_BB",
+        "unique": false,
+        "fields": [
+          [
+            "_MDID",
+            16
+          ],
+          [
+            "_EXTID",
+            16
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "name": "_CKINDSOPT",
+    "recordlock": false,
+    "fields": [
+      {
+        "name": "_MDID",
+        "ty": "B",
+        "length": 16,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_EXTID",
+        "ty": "B",
+        "length": 16,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_PDUPDMODE",
+        "ty": "N",
+        "length": 1,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      }
+    ],
+    "indexes": [
+      {
+        "name": "_CKINDSOPT_MDID_BB",
+        "unique": false,
+        "fields": [
+          [
+            "_MDID",
+            16
+          ],
+          [
+            "_EXTID",
+            16
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "name": "_USERSWORKHISTORY",
+    "recordlock": false,
+    "fields": [
+      {
+        "name": "_ID",
+        "ty": "B",
+        "length": 16,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_USERID",
+        "ty": "B",
+        "length": 16,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_URL",
+        "ty": "NT",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "_DATE",
+        "ty": "DT",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_URLHASH",
+        "ty": "N",
+        "length": 10,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "_ECSACTIVITY",
+        "ty": "L",
+        "length": 0,
+        "precision": 0,
+        "nullable": true,
+        "cs": true
+      }
+    ],
+    "indexes": [
+      {
+        "name": "_USERSWORKHIS_BYID_B",
+        "unique": false,
+        "fields": [
+          [
+            "_ID",
+            16
+          ]
+        ]
+      },
+      {
+        "name": "_USERSWORKHIS_BYUSERDATE_BT",
+        "unique": false,
+        "fields": [
+          [
+            "_USERID",
+            16
+          ],
+          [
+            "_DATE",
+            0
+          ]
+        ]
+      },
+      {
+        "name": "_USERSWORKHIS_BYUSERURLHASH_BNT",
+        "unique": false,
+        "fields": [
+          [
+            "_USERID",
+            16
+          ],
+          [
+            "_URLHASH",
+            0
+          ],
+          [
+            "_DATE",
+            0
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "name": "V8USERS",
+    "recordlock": false,
+    "fields": [
+      {
+        "name": "ID",
+        "ty": "B",
+        "length": 16,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "NAME",
+        "ty": "NVC",
+        "length": 64,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "DESCR",
+        "ty": "NVC",
+        "length": 128,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "OSNAME",
+        "ty": "NVC",
+        "length": 128,
+        "precision": 0,
+        "nullable": true,
+        "cs": false
+      },
+      {
+        "name": "CHANGED",
+        "ty": "DT",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "ROLESID",
+        "ty": "N",
+        "length": 10,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "SHOW",
+        "ty": "L",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "DATA",
+        "ty": "I",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "EAUTH",
+        "ty": "L",
+        "length": 0,
+        "precision": 0,
+        "nullable": true,
+        "cs": true
+      },
+      {
+        "name": "ADMROLE",
+        "ty": "L",
+        "length": 0,
+        "precision": 0,
+        "nullable": true,
+        "cs": true
+      },
+      {
+        "name": "USSPRH",
+        "ty": "N",
+        "length": 10,
+        "precision": 0,
+        "nullable": true,
+        "cs": true
+      },
+      {
+        "name": "EMAIL",
+        "ty": "NVC",
+        "length": 128,
+        "precision": 0,
+        "nullable": true,
+        "cs": false
+      }
+    ],
+    "indexes": [
+      {
+        "name": "IDIDX",
+        "unique": true,
+        "fields": [
+          [
+            "ID",
+            16
+          ]
+        ]
+      },
+      {
+        "name": "BYNAME",
+        "unique": true,
+        "fields": [
+          [
+            "NAME",
+            64
+          ]
+        ]
+      },
+      {
+        "name": "BYDESCR",
+        "unique": false,
+        "fields": [
+          [
+            "DESCR",
+            128
+          ]
+        ]
+      },
+      {
+        "name": "BYOSNAME",
+        "unique": false,
+        "fields": [
+          [
+            "OSNAME",
+            128
+          ]
+        ]
+      },
+      {
+        "name": "BYROLESID",
+        "unique": false,
+        "fields": [
+          [
+            "ROLESID",
+            0
+          ]
+        ]
+      },
+      {
+        "name": "BYSHOW",
+        "unique": false,
+        "fields": [
+          [
+            "SHOW",
+            0
+          ]
+        ]
+      },
+      {
+        "name": "BYEAUTH",
+        "unique": false,
+        "fields": [
+          [
+            "ADMROLE",
+            0
+          ],
+          [
+            "EAUTH",
+            0
+          ]
+        ]
+      },
+      {
+        "name": "BYEMAIL_V8USERS",
+        "unique": false,
+        "fields": [
+          [
+            "EMAIL",
+            128
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "name": "V8USERSMATKEYS",
+    "recordlock": false,
+    "fields": [
+      {
+        "name": "ID",
+        "ty": "B",
+        "length": 16,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      },
+      {
+        "name": "PROVIDERSH",
+        "ty": "NVC",
+        "length": 128,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "MATKEYSH",
+        "ty": "NVC",
+        "length": 128,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "DATA",
+        "ty": "I",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      }
+    ],
+    "indexes": [
+      {
+        "name": "BYMATKEY",
+        "unique": false,
+        "fields": [
+          [
+            "PROVIDERSH",
+            128
+          ],
+          [
+            "MATKEYSH",
+            128
+          ]
+        ]
+      },
+      {
+        "name": "BYID",
+        "unique": false,
+        "fields": [
+          [
+            "ID",
+            16
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "name": "V8USERPWDPLCS",
+    "recordlock": false,
+    "fields": [
+      {
+        "name": "NAME",
+        "ty": "NVC",
+        "length": 64,
+        "precision": 0,
+        "nullable": false,
+        "cs": false
+      },
+      {
+        "name": "DATA",
+        "ty": "I",
+        "length": 0,
+        "precision": 0,
+        "nullable": false,
+        "cs": true
+      }
+    ],
+    "indexes": [
+      {
+        "name": "BYNAME_V8USERPWDPLCS",
+        "unique": true,
+        "fields": [
+          [
+            "NAME",
+            64
+          ]
+        ]
+      }
+    ]
+  }
+]

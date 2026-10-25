@@ -1,0 +1,21 @@
+[package]
+name = "zraw"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99.1"
+license = "MIT OR Apache-2.0"
+autotests = false
+autoexamples = false
+autobenches = false
+
+[dependencies]
+thiserror = "2"
+memory-budget = { path = "../memory-budget" }
+libz-sys = { version = "1.1.25", default-features = false, features = ["static", "stock-zlib"] }
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+undocumented_unsafe_blocks = "warn"
+unused_result_ok = "warn"

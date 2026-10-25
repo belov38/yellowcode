@@ -1,0 +1,15 @@
+exit 0
+--- stdout
+Show the typed properties of a metadata object
+
+Usage: yellowcode metadata show [OPTIONS] <SOURCE> <OBJECT>
+
+Arguments:
+  <SOURCE>  
+  <OBJECT>  
+
+Options:
+      --format <FORMAT>         [default: json] [possible values: json, text]
+      --platform-build <BUILD>  Exact emulated platform build (not the configuration compatibility mode) [default: 8.5.1.1529]
+  -h, --help                    Print help
+--- stderr

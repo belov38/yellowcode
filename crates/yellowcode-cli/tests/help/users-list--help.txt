@@ -1,0 +1,14 @@
+exit 0
+--- stdout
+List infobase users without the service row or secrets
+
+Usage: yellowcode users list [OPTIONS] <BASE>
+
+Arguments:
+  <BASE>  Infobase directory or its 1Cv8.1CD file (opened read-only)
+
+Options:
+      --format <FORMAT>         Defaults to text on a terminal and JSON when redirected [possible values: text, json]
+      --platform-build <BUILD>  Exact emulated platform build (not the configuration compatibility mode) [default: 8.5.1.1529]
+  -h, --help                    Print help
+--- stderr

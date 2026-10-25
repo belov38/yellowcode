@@ -1,0 +1,51 @@
+exit 0
+--- stdout
+Read one page of a stored table, optionally through an index
+
+Usage: yellowcode table [OPTIONS] <BASE> <KIND> <NAME>
+
+Arguments:
+  <BASE>  Infobase directory or its 1Cv8.1CD file (opened read-only)
+  <KIND>  Metadata kind, for example Document or AccumulationRegister
+  <NAME>  Metadata object name, for example РеализацияТоваров
+
+Options:
+      --memory-limit <MEMORY_LIMIT>
+          Managed memory budget: auto or integer bytes with B/KiB/MiB/GiB suffix. Without a container limit the fixed fallback is 1GiB; UNF-class configurations need --memory-limit >= 1792MiB, ERP-class about 3GiB
+      --platform-build <BUILD>
+          Exact emulated platform build (not the configuration compatibility mode) [default: 8.5.1.1529]
+      --cache-limit <CACHE_LIMIT>
+          Clean cache category cap; 0 disables caching
+      --query-memory-limit <QUERY_MEMORY_LIMIT>
+          Execution, compilation, batch and temporary-table cap
+      --result-memory-limit <RESULT_MEMORY_LIMIT>
+          Retained canonical result cap shared by all statements
+      --response-limit <RESPONSE_LIMIT>
+          Complete serialized output cap, including escaping and schema
+      --index <INDEX>
+          Read through this index in key order; without it the table is scanned in storage order
+      --eq <VALUE>
+          Equality condition on the next index field; repeat in index field order
+      --gt <VALUE>
+          Lower bound (exclusive) on the index field after the equalities
+      --gte <VALUE>
+          Lower bound (inclusive) on the index field after the equalities
+      --lt <VALUE>
+          Upper bound (exclusive) on the index field after the equalities
+      --lte <VALUE>
+          Upper bound (inclusive) on the index field after the equalities
+      --order <ORDER>
+          Index key order (default asc) [possible values: asc, desc]
+      --posted <true|false>
+          Keep posted (true) or unposted (false) rows; documents and document journals
+      --deletion-mark <true|false>
+          Keep rows marked (true) or not marked (false) for deletion, folders and items alike
+      --limit <LIMIT>
+          Rows per page [default: 1000]
+      --cursor <CURSOR>
+          Continue after the page that reported this cursor; valid while the 1CD file is unchanged
+      --format <FORMAT>
+          Defaults to table on a terminal and JSON when redirected [possible values: table, json, csv]
+  -h, --help
+          Print help
+--- stderr

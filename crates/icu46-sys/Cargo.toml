@@ -1,0 +1,24 @@
+[package]
+name = "icu46-sys"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99.1"
+license = "(MIT OR Apache-2.0) AND ICU"
+publish = false
+links = "icu46"
+autotests = false
+autoexamples = false
+autobenches = false
+
+[features]
+regex = []
+
+[build-dependencies]
+cc = { version = "1", features = ["parallel"] }
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+undocumented_unsafe_blocks = "warn"
+unused_result_ok = "warn"

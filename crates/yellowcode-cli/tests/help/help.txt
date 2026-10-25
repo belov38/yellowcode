@@ -1,0 +1,21 @@
+exit 0
+--- stdout
+Yellowcode configuration and infobase tools
+
+Usage: yellowcode [OPTIONS] [COMMAND]
+
+Commands:
+  convert   Convert a configuration or export an infobase without changing the source
+  open      Open a configuration or infobase in the installed desktop application
+  query     Execute a read-only query against an infobase
+  serve     Serve read-only queries and paged stored tables over HTTP
+  table     Read one page of a stored table, optionally through an index
+  users     Read infobase users and their cards without secrets
+  metadata  Inspect configuration metadata
+  help      Print this message or the help of the given subcommand(s)
+
+Options:
+      --platform-build <BUILD>  Exact emulated platform build (not the configuration compatibility mode) [default: 8.5.1.1529]
+  -h, --help                    Print help
+  -V, --version                 Print version
+--- stderr

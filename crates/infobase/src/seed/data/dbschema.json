@@ -1,0 +1,7003 @@
+[
+  {
+    "name": "STTSettings",
+    "kind": "N",
+    "number": 1,
+    "parent": "",
+    "fields": [
+      {
+        "name": "Token",
+        "nullable": false,
+        "types": [
+          [
+            "S",
+            2147483748,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "Host",
+        "nullable": true,
+        "types": [
+          [
+            "S",
+            2147483748,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      }
+    ],
+    "nested": [],
+    "indexes": [],
+    "one": 1,
+    "key": "S",
+    "splitters": [
+      [],
+      []
+    ],
+    "tail": [
+      "",
+      0,
+      0
+    ]
+  },
+  {
+    "name": "STTGrammar",
+    "kind": "N",
+    "number": 2,
+    "parent": "",
+    "fields": [
+      {
+        "name": "Grammar",
+        "nullable": false,
+        "types": [
+          [
+            "S",
+            2147483748,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "Phrase",
+        "nullable": true,
+        "types": [
+          [
+            "S",
+            2147483748,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      }
+    ],
+    "nested": [],
+    "indexes": [
+      {
+        "name": "ByKey",
+        "unique": false,
+        "fields": [
+          "Grammar"
+        ],
+        "clustered": false,
+        "flag2": false,
+        "rest": [
+          0,
+          [
+            0
+          ],
+          0,
+          0
+        ]
+      }
+    ],
+    "one": 1,
+    "key": "S",
+    "splitters": [
+      [],
+      []
+    ],
+    "tail": [
+      "",
+      0,
+      0
+    ]
+  },
+  {
+    "name": "STTGrammarChecksum",
+    "kind": "N",
+    "number": 3,
+    "parent": "",
+    "fields": [
+      {
+        "name": "Grammar",
+        "nullable": false,
+        "types": [
+          [
+            "S",
+            2147483748,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "Checksum",
+        "nullable": false,
+        "types": [
+          [
+            "N",
+            10,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      }
+    ],
+    "nested": [],
+    "indexes": [
+      {
+        "name": "ByKey",
+        "unique": true,
+        "fields": [
+          "Grammar"
+        ],
+        "clustered": false,
+        "flag2": false,
+        "rest": [
+          0,
+          [
+            0
+          ],
+          0,
+          0
+        ]
+      }
+    ],
+    "one": 1,
+    "key": "S",
+    "splitters": [
+      [],
+      []
+    ],
+    "tail": [
+      "",
+      0,
+      0
+    ]
+  },
+  {
+    "name": "STTModels",
+    "kind": "N",
+    "number": 4,
+    "parent": "",
+    "fields": [
+      {
+        "name": "ID",
+        "nullable": false,
+        "types": [
+          [
+            "R",
+            0,
+            0,
+            "STTModels",
+            2,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "ModelID",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            16,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "ModelCompatibility",
+        "nullable": false,
+        "types": [
+          [
+            "N",
+            5,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "Acoustic",
+        "nullable": false,
+        "types": [
+          [
+            "S",
+            2147483748,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "AcousticRU",
+        "nullable": false,
+        "types": [
+          [
+            "S",
+            2147483748,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "LanguageModel",
+        "nullable": false,
+        "types": [
+          [
+            "S",
+            2147483748,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "LanguageModelRU",
+        "nullable": false,
+        "types": [
+          [
+            "S",
+            2147483748,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "Version",
+        "nullable": false,
+        "types": [
+          [
+            "S",
+            2147483748,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "Language",
+        "nullable": false,
+        "types": [
+          [
+            "S",
+            2147483650,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "SampleRate",
+        "nullable": false,
+        "types": [
+          [
+            "N",
+            5,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      }
+    ],
+    "nested": [],
+    "indexes": [
+      {
+        "name": "ByModelId",
+        "unique": true,
+        "fields": [
+          "ModelID"
+        ],
+        "clustered": false,
+        "flag2": false,
+        "rest": [
+          0,
+          [
+            0
+          ],
+          0,
+          0
+        ]
+      }
+    ],
+    "one": 1,
+    "key": "R",
+    "splitters": [
+      [],
+      []
+    ],
+    "tail": [
+      "",
+      0,
+      0
+    ]
+  },
+  {
+    "name": "STTModelsDesc",
+    "kind": "N",
+    "number": 5,
+    "parent": "",
+    "fields": [
+      {
+        "name": "ID",
+        "nullable": false,
+        "types": [
+          [
+            "R",
+            0,
+            0,
+            "STTModelsDesc",
+            2,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "Model",
+        "nullable": false,
+        "types": [
+          [
+            "R",
+            0,
+            0,
+            "STTModels",
+            3,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      }
+    ],
+    "nested": [
+      {
+        "name": "Descr",
+        "kind": "I",
+        "number": 0,
+        "parent": "STTModelsDesc",
+        "fields": [
+          {
+            "name": "Language",
+            "nullable": false,
+            "types": [
+              [
+                "S",
+                2,
+                0,
+                "",
+                0,
+                null
+              ]
+            ],
+            "tail": [
+              "",
+              0
+            ]
+          },
+          {
+            "name": "Description",
+            "nullable": false,
+            "types": [
+              [
+                "S",
+                2147483648,
+                0,
+                "",
+                0,
+                null
+              ]
+            ],
+            "tail": [
+              "",
+              0
+            ]
+          }
+        ],
+        "nested": [],
+        "indexes": [],
+        "one": 1,
+        "key": "S",
+        "splitters": [
+          [],
+          []
+        ],
+        "tail": [
+          "",
+          0,
+          0
+        ]
+      },
+      {
+        "name": "Acoustic",
+        "kind": "I",
+        "number": 0,
+        "parent": "STTModelsDesc",
+        "fields": [
+          {
+            "name": "Language",
+            "nullable": false,
+            "types": [
+              [
+                "S",
+                2,
+                0,
+                "",
+                0,
+                null
+              ]
+            ],
+            "tail": [
+              "",
+              0
+            ]
+          },
+          {
+            "name": "Description",
+            "nullable": false,
+            "types": [
+              [
+                "S",
+                2147483648,
+                0,
+                "",
+                0,
+                null
+              ]
+            ],
+            "tail": [
+              "",
+              0
+            ]
+          }
+        ],
+        "nested": [],
+        "indexes": [],
+        "one": 1,
+        "key": "S",
+        "splitters": [
+          [],
+          []
+        ],
+        "tail": [
+          "",
+          0,
+          0
+        ]
+      },
+      {
+        "name": "LangModel",
+        "kind": "I",
+        "number": 0,
+        "parent": "STTModelsDesc",
+        "fields": [
+          {
+            "name": "Language",
+            "nullable": false,
+            "types": [
+              [
+                "S",
+                2,
+                0,
+                "",
+                0,
+                null
+              ]
+            ],
+            "tail": [
+              "",
+              0
+            ]
+          },
+          {
+            "name": "Description",
+            "nullable": false,
+            "types": [
+              [
+                "S",
+                2147483648,
+                0,
+                "",
+                0,
+                null
+              ]
+            ],
+            "tail": [
+              "",
+              0
+            ]
+          }
+        ],
+        "nested": [],
+        "indexes": [],
+        "one": 1,
+        "key": "S",
+        "splitters": [
+          [],
+          []
+        ],
+        "tail": [
+          "",
+          0,
+          0
+        ]
+      }
+    ],
+    "indexes": [
+      {
+        "name": "ByModel",
+        "unique": true,
+        "fields": [
+          "Model"
+        ],
+        "clustered": false,
+        "flag2": false,
+        "rest": [
+          0,
+          [
+            0
+          ],
+          0,
+          0
+        ]
+      }
+    ],
+    "one": 1,
+    "key": "R",
+    "splitters": [
+      [],
+      []
+    ],
+    "tail": [
+      "",
+      0,
+      0
+    ]
+  },
+  {
+    "name": "DbSegments",
+    "kind": "N",
+    "number": 9,
+    "parent": "",
+    "fields": [
+      {
+        "name": "SegmentId",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            16,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "SegmentName",
+        "nullable": false,
+        "types": [
+          [
+            "S",
+            2147483904,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "Path",
+        "nullable": false,
+        "types": [
+          [
+            "S",
+            2147483904,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      }
+    ],
+    "nested": [],
+    "indexes": [
+      {
+        "name": "SegmentName",
+        "unique": true,
+        "fields": [
+          "SegmentName"
+        ],
+        "clustered": true,
+        "flag2": true,
+        "rest": [
+          0,
+          [
+            0
+          ],
+          0,
+          0
+        ]
+      },
+      {
+        "name": "SegmentId",
+        "unique": true,
+        "fields": [
+          "SegmentId"
+        ],
+        "clustered": false,
+        "flag2": false,
+        "rest": [
+          0,
+          [
+            0
+          ],
+          0,
+          0
+        ]
+      }
+    ],
+    "one": 1,
+    "key": "S",
+    "splitters": [
+      [],
+      []
+    ],
+    "tail": [
+      "",
+      0,
+      0
+    ]
+  },
+  {
+    "name": "DbSegmentsItems",
+    "kind": "N",
+    "number": 10,
+    "parent": "",
+    "fields": [
+      {
+        "name": "ItemId",
+        "nullable": false,
+        "types": [
+          [
+            "S",
+            2147483904,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "SegmentId",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            16,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "ForIndex",
+        "nullable": false,
+        "types": [
+          [
+            "L",
+            0,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "Applied",
+        "nullable": false,
+        "types": [
+          [
+            "L",
+            0,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      }
+    ],
+    "nested": [],
+    "indexes": [
+      {
+        "name": "ItemIdSegmentName",
+        "unique": true,
+        "fields": [
+          "ItemId",
+          "ForIndex",
+          "Applied"
+        ],
+        "clustered": true,
+        "flag2": false,
+        "rest": [
+          0,
+          [
+            0
+          ],
+          0,
+          0
+        ]
+      },
+      {
+        "name": "SegmentIdSegmentName",
+        "unique": false,
+        "fields": [
+          "SegmentId",
+          "ForIndex"
+        ],
+        "clustered": false,
+        "flag2": false,
+        "rest": [
+          0,
+          [
+            0
+          ],
+          0,
+          0
+        ]
+      }
+    ],
+    "one": 1,
+    "key": "S",
+    "splitters": [
+      [],
+      []
+    ],
+    "tail": [
+      "",
+      0,
+      0
+    ]
+  },
+  {
+    "name": "WebSocketClients",
+    "kind": "N",
+    "number": 11,
+    "parent": "",
+    "fields": [
+      {
+        "name": "ID",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            16,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "WSCKey",
+        "nullable": false,
+        "types": [
+          [
+            "S",
+            2147483748,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "MetadataID",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            16,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "ServerURL",
+        "nullable": false,
+        "types": [
+          [
+            "S",
+            2147483903,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "Predefined",
+        "nullable": false,
+        "types": [
+          [
+            "L",
+            0,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "ConnectionParameters",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            2147483648,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "IBUserName",
+        "nullable": true,
+        "types": [
+          [
+            "S",
+            2147483748,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "AutoConnect",
+        "nullable": false,
+        "types": [
+          [
+            "L",
+            0,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      }
+    ],
+    "nested": [],
+    "indexes": [],
+    "one": 1,
+    "key": "S",
+    "splitters": [
+      [],
+      []
+    ],
+    "tail": [
+      "",
+      0,
+      0
+    ]
+  },
+  {
+    "name": "ExtensionsRestruct",
+    "kind": "N",
+    "number": 12,
+    "parent": "",
+    "fields": [
+      {
+        "name": "ExtDataID",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            16,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "RestructData",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            2147483648,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "RestructDataInt",
+        "nullable": false,
+        "types": [
+          [
+            "N",
+            9,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "RestructDataType",
+        "nullable": false,
+        "types": [
+          [
+            "N",
+            9,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      }
+    ],
+    "nested": [],
+    "indexes": [
+      {
+        "name": "ExtensionsRestructSeparatedIndex",
+        "unique": false,
+        "fields": [
+          "ExtDataID"
+        ],
+        "clustered": false,
+        "flag2": false,
+        "rest": [
+          0,
+          [
+            0
+          ],
+          0,
+          0
+        ]
+      },
+      {
+        "name": "ExtensionsRestructMainIndex",
+        "unique": false,
+        "fields": [
+          "ExtDataID",
+          "RestructDataType"
+        ],
+        "clustered": false,
+        "flag2": false,
+        "rest": [
+          0,
+          [
+            0
+          ],
+          0,
+          0
+        ]
+      }
+    ],
+    "one": 1,
+    "key": "S",
+    "splitters": [
+      [],
+      []
+    ],
+    "tail": [
+      "",
+      0,
+      0
+    ]
+  },
+  {
+    "name": "ExtensionsRestructNGS",
+    "kind": "N",
+    "number": 13,
+    "parent": "",
+    "fields": [
+      {
+        "name": "ExtDataID",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            16,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "RestructData",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            2147483648,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "RestructDataInt",
+        "nullable": false,
+        "types": [
+          [
+            "N",
+            9,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "RestructDataType",
+        "nullable": false,
+        "types": [
+          [
+            "N",
+            9,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      }
+    ],
+    "nested": [],
+    "indexes": [
+      {
+        "name": "ExtensionsRestructNGSSeparatedIndex",
+        "unique": false,
+        "fields": [
+          "ExtDataID"
+        ],
+        "clustered": false,
+        "flag2": false,
+        "rest": [
+          0,
+          [
+            0
+          ],
+          0,
+          0
+        ]
+      },
+      {
+        "name": "ExtensionsRestructNGSMainIndex",
+        "unique": false,
+        "fields": [
+          "ExtDataID",
+          "RestructDataType"
+        ],
+        "clustered": false,
+        "flag2": false,
+        "rest": [
+          0,
+          [
+            0
+          ],
+          0,
+          0
+        ]
+      }
+    ],
+    "one": 1,
+    "key": "S",
+    "splitters": [
+      [],
+      []
+    ],
+    "tail": [
+      "",
+      0,
+      0
+    ]
+  },
+  {
+    "name": "ExtensionsInfo",
+    "kind": "N",
+    "number": 14,
+    "parent": "",
+    "fields": [
+      {
+        "name": "ID",
+        "nullable": false,
+        "types": [
+          [
+            "R",
+            0,
+            0,
+            "ExtensionsInfo",
+            2,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "ExtensionOrder",
+        "nullable": false,
+        "types": [
+          [
+            "N",
+            9,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "ExtName",
+        "nullable": false,
+        "types": [
+          [
+            "S",
+            2147483903,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "UpdateTime",
+        "nullable": false,
+        "types": [
+          [
+            "T",
+            0,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "ExtensionUsePurpose",
+        "nullable": false,
+        "types": [
+          [
+            "N",
+            2,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "ExtensionScope",
+        "nullable": false,
+        "types": [
+          [
+            "N",
+            2,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "ExtensionZippedInfo",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            2147483648,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "MasterNode",
+        "nullable": false,
+        "types": [
+          [
+            "S",
+            2147483648,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "UsedInDistributedInfoBase",
+        "nullable": false,
+        "types": [
+          [
+            "L",
+            0,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "Version",
+        "nullable": false,
+        "types": [
+          [
+            "V",
+            0,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      }
+    ],
+    "nested": [],
+    "indexes": [],
+    "one": 1,
+    "key": "R",
+    "splitters": [
+      [],
+      []
+    ],
+    "tail": [
+      "",
+      0,
+      0
+    ]
+  },
+  {
+    "name": "ExtensionsInfoNGS",
+    "kind": "N",
+    "number": 15,
+    "parent": "",
+    "fields": [
+      {
+        "name": "ID",
+        "nullable": false,
+        "types": [
+          [
+            "R",
+            0,
+            0,
+            "ExtensionsInfoNGS",
+            2,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "ExtensionOrder",
+        "nullable": false,
+        "types": [
+          [
+            "N",
+            9,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "ExtName",
+        "nullable": false,
+        "types": [
+          [
+            "S",
+            2147483903,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "UpdateTime",
+        "nullable": false,
+        "types": [
+          [
+            "T",
+            0,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "ExtensionUsePurpose",
+        "nullable": false,
+        "types": [
+          [
+            "N",
+            2,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "ExtensionScope",
+        "nullable": false,
+        "types": [
+          [
+            "N",
+            2,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "ExtensionZippedInfo",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            2147483648,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "MasterNode",
+        "nullable": false,
+        "types": [
+          [
+            "S",
+            2147483648,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "UsedInDistributedInfoBase",
+        "nullable": false,
+        "types": [
+          [
+            "L",
+            0,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "Version",
+        "nullable": false,
+        "types": [
+          [
+            "V",
+            0,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      }
+    ],
+    "nested": [],
+    "indexes": [],
+    "one": 1,
+    "key": "R",
+    "splitters": [
+      [],
+      []
+    ],
+    "tail": [
+      "",
+      0,
+      0
+    ]
+  },
+  {
+    "name": "SystemSettings",
+    "kind": "N",
+    "number": 16,
+    "parent": "",
+    "fields": [
+      {
+        "name": "UserId",
+        "nullable": false,
+        "types": [
+          [
+            "S",
+            2147483648,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "ObjectKey",
+        "nullable": false,
+        "types": [
+          [
+            "S",
+            2147483904,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "SettingsKey",
+        "nullable": false,
+        "types": [
+          [
+            "S",
+            2147483648,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "Version",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            16,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "SettingsPresentation",
+        "nullable": true,
+        "types": [
+          [
+            "S",
+            2147483904,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "SettingsData",
+        "nullable": true,
+        "types": [
+          [
+            "B",
+            2147483648,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "ChangeDate",
+        "nullable": true,
+        "types": [
+          [
+            "T",
+            0,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "UserIdHash",
+        "nullable": false,
+        "types": [
+          [
+            "N",
+            10,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "SettingsKeyHash",
+        "nullable": false,
+        "types": [
+          [
+            "N",
+            10,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      }
+    ],
+    "nested": [],
+    "indexes": [
+      {
+        "name": "ByKey",
+        "unique": false,
+        "fields": [
+          "UserIdHash",
+          "ObjectKey",
+          "SettingsKeyHash",
+          "Version"
+        ],
+        "clustered": true,
+        "flag2": false,
+        "rest": [
+          0,
+          [
+            0
+          ],
+          0,
+          0
+        ]
+      }
+    ],
+    "one": 1,
+    "key": "S",
+    "splitters": [
+      [],
+      []
+    ],
+    "tail": [
+      "",
+      0,
+      0
+    ]
+  },
+  {
+    "name": "CommonSettings",
+    "kind": "N",
+    "number": 17,
+    "parent": "",
+    "fields": [
+      {
+        "name": "UserId",
+        "nullable": false,
+        "types": [
+          [
+            "S",
+            2147483648,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "ObjectKey",
+        "nullable": false,
+        "types": [
+          [
+            "S",
+            2147483904,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "SettingsKey",
+        "nullable": false,
+        "types": [
+          [
+            "S",
+            2147483648,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "Version",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            16,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "SettingsPresentation",
+        "nullable": true,
+        "types": [
+          [
+            "S",
+            2147483904,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "SettingsData",
+        "nullable": true,
+        "types": [
+          [
+            "B",
+            2147483648,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "ChangeDate",
+        "nullable": true,
+        "types": [
+          [
+            "T",
+            0,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "UserIdHash",
+        "nullable": false,
+        "types": [
+          [
+            "N",
+            10,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "SettingsKeyHash",
+        "nullable": false,
+        "types": [
+          [
+            "N",
+            10,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      }
+    ],
+    "nested": [],
+    "indexes": [
+      {
+        "name": "ByKey",
+        "unique": false,
+        "fields": [
+          "UserIdHash",
+          "ObjectKey",
+          "SettingsKeyHash",
+          "Version"
+        ],
+        "clustered": true,
+        "flag2": false,
+        "rest": [
+          0,
+          [
+            0
+          ],
+          0,
+          0
+        ]
+      }
+    ],
+    "one": 1,
+    "key": "S",
+    "splitters": [
+      [],
+      []
+    ],
+    "tail": [
+      "",
+      0,
+      0
+    ]
+  },
+  {
+    "name": "RepSettings",
+    "kind": "N",
+    "number": 18,
+    "parent": "",
+    "fields": [
+      {
+        "name": "UserId",
+        "nullable": false,
+        "types": [
+          [
+            "S",
+            2147483648,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "ObjectKey",
+        "nullable": false,
+        "types": [
+          [
+            "S",
+            2147483904,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "SettingsKey",
+        "nullable": false,
+        "types": [
+          [
+            "S",
+            2147483648,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "Version",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            16,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "SettingsPresentation",
+        "nullable": true,
+        "types": [
+          [
+            "S",
+            2147483904,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "SettingsData",
+        "nullable": true,
+        "types": [
+          [
+            "B",
+            2147483648,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "ChangeDate",
+        "nullable": true,
+        "types": [
+          [
+            "T",
+            0,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "UserIdHash",
+        "nullable": false,
+        "types": [
+          [
+            "N",
+            10,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "SettingsKeyHash",
+        "nullable": false,
+        "types": [
+          [
+            "N",
+            10,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      }
+    ],
+    "nested": [],
+    "indexes": [
+      {
+        "name": "ByKey",
+        "unique": false,
+        "fields": [
+          "UserIdHash",
+          "ObjectKey",
+          "SettingsKeyHash",
+          "Version"
+        ],
+        "clustered": true,
+        "flag2": false,
+        "rest": [
+          0,
+          [
+            0
+          ],
+          0,
+          0
+        ]
+      }
+    ],
+    "one": 1,
+    "key": "S",
+    "splitters": [
+      [],
+      []
+    ],
+    "tail": [
+      "",
+      0,
+      0
+    ]
+  },
+  {
+    "name": "RepVarSettings",
+    "kind": "N",
+    "number": 19,
+    "parent": "",
+    "fields": [
+      {
+        "name": "UserId",
+        "nullable": false,
+        "types": [
+          [
+            "S",
+            2147483648,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "ObjectKey",
+        "nullable": false,
+        "types": [
+          [
+            "S",
+            2147483904,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "SettingsKey",
+        "nullable": false,
+        "types": [
+          [
+            "S",
+            2147483648,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "Version",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            16,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "SettingsPresentation",
+        "nullable": true,
+        "types": [
+          [
+            "S",
+            2147483904,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "SettingsData",
+        "nullable": true,
+        "types": [
+          [
+            "B",
+            2147483648,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "ChangeDate",
+        "nullable": true,
+        "types": [
+          [
+            "T",
+            0,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "UserIdHash",
+        "nullable": false,
+        "types": [
+          [
+            "N",
+            10,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "SettingsKeyHash",
+        "nullable": false,
+        "types": [
+          [
+            "N",
+            10,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      }
+    ],
+    "nested": [],
+    "indexes": [
+      {
+        "name": "ByKey",
+        "unique": false,
+        "fields": [
+          "UserIdHash",
+          "ObjectKey",
+          "SettingsKeyHash",
+          "Version"
+        ],
+        "clustered": true,
+        "flag2": false,
+        "rest": [
+          0,
+          [
+            0
+          ],
+          0,
+          0
+        ]
+      }
+    ],
+    "one": 1,
+    "key": "S",
+    "splitters": [
+      [],
+      []
+    ],
+    "tail": [
+      "",
+      0,
+      0
+    ]
+  },
+  {
+    "name": "FrmDtSettings",
+    "kind": "N",
+    "number": 20,
+    "parent": "",
+    "fields": [
+      {
+        "name": "UserId",
+        "nullable": false,
+        "types": [
+          [
+            "S",
+            2147483648,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "ObjectKey",
+        "nullable": false,
+        "types": [
+          [
+            "S",
+            2147483904,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "SettingsKey",
+        "nullable": false,
+        "types": [
+          [
+            "S",
+            2147483648,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "Version",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            16,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "SettingsPresentation",
+        "nullable": true,
+        "types": [
+          [
+            "S",
+            2147483904,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "SettingsData",
+        "nullable": true,
+        "types": [
+          [
+            "B",
+            2147483648,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "ChangeDate",
+        "nullable": true,
+        "types": [
+          [
+            "T",
+            0,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "UserIdHash",
+        "nullable": false,
+        "types": [
+          [
+            "N",
+            10,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "SettingsKeyHash",
+        "nullable": false,
+        "types": [
+          [
+            "N",
+            10,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      }
+    ],
+    "nested": [],
+    "indexes": [
+      {
+        "name": "ByKey",
+        "unique": false,
+        "fields": [
+          "UserIdHash",
+          "ObjectKey",
+          "SettingsKeyHash",
+          "Version"
+        ],
+        "clustered": true,
+        "flag2": false,
+        "rest": [
+          0,
+          [
+            0
+          ],
+          0,
+          0
+        ]
+      }
+    ],
+    "one": 1,
+    "key": "S",
+    "splitters": [
+      [],
+      []
+    ],
+    "tail": [
+      "",
+      0,
+      0
+    ]
+  },
+  {
+    "name": "DynListSettings",
+    "kind": "N",
+    "number": 21,
+    "parent": "",
+    "fields": [
+      {
+        "name": "UserId",
+        "nullable": false,
+        "types": [
+          [
+            "S",
+            2147483648,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "ObjectKey",
+        "nullable": false,
+        "types": [
+          [
+            "S",
+            2147483904,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "SettingsKey",
+        "nullable": false,
+        "types": [
+          [
+            "S",
+            2147483648,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "Version",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            16,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "SettingsPresentation",
+        "nullable": true,
+        "types": [
+          [
+            "S",
+            2147483904,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "SettingsData",
+        "nullable": true,
+        "types": [
+          [
+            "B",
+            2147483648,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "ChangeDate",
+        "nullable": true,
+        "types": [
+          [
+            "T",
+            0,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "UserIdHash",
+        "nullable": false,
+        "types": [
+          [
+            "N",
+            10,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "SettingsKeyHash",
+        "nullable": false,
+        "types": [
+          [
+            "N",
+            10,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      }
+    ],
+    "nested": [],
+    "indexes": [
+      {
+        "name": "ByKey",
+        "unique": false,
+        "fields": [
+          "UserIdHash",
+          "ObjectKey",
+          "SettingsKeyHash",
+          "Version"
+        ],
+        "clustered": true,
+        "flag2": false,
+        "rest": [
+          0,
+          [
+            0
+          ],
+          0,
+          0
+        ]
+      }
+    ],
+    "one": 1,
+    "key": "S",
+    "splitters": [
+      [],
+      []
+    ],
+    "tail": [
+      "",
+      0,
+      0
+    ]
+  },
+  {
+    "name": "ErrorProcessingSettings",
+    "kind": "N",
+    "number": 22,
+    "parent": "",
+    "fields": [
+      {
+        "name": "UserId",
+        "nullable": false,
+        "types": [
+          [
+            "S",
+            2147483648,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "ObjectKey",
+        "nullable": false,
+        "types": [
+          [
+            "S",
+            2147483904,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "SettingsKey",
+        "nullable": false,
+        "types": [
+          [
+            "S",
+            2147483648,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "Version",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            16,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "SettingsPresentation",
+        "nullable": true,
+        "types": [
+          [
+            "S",
+            2147483904,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "SettingsData",
+        "nullable": true,
+        "types": [
+          [
+            "B",
+            2147483648,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "ChangeDate",
+        "nullable": true,
+        "types": [
+          [
+            "T",
+            0,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "UserIdHash",
+        "nullable": false,
+        "types": [
+          [
+            "N",
+            10,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "SettingsKeyHash",
+        "nullable": false,
+        "types": [
+          [
+            "N",
+            10,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      }
+    ],
+    "nested": [],
+    "indexes": [
+      {
+        "name": "ByKey",
+        "unique": false,
+        "fields": [
+          "UserIdHash",
+          "ObjectKey",
+          "SettingsKeyHash",
+          "Version"
+        ],
+        "clustered": true,
+        "flag2": false,
+        "rest": [
+          0,
+          [
+            0
+          ],
+          0,
+          0
+        ]
+      }
+    ],
+    "one": 1,
+    "key": "S",
+    "splitters": [
+      [],
+      []
+    ],
+    "tail": [
+      "",
+      0,
+      0
+    ]
+  },
+  {
+    "name": "URLExternalData",
+    "kind": "N",
+    "number": 23,
+    "parent": "",
+    "fields": [
+      {
+        "name": "UserId",
+        "nullable": false,
+        "types": [
+          [
+            "S",
+            2147483648,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "ObjectKey",
+        "nullable": false,
+        "types": [
+          [
+            "S",
+            2147483904,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "SettingsKey",
+        "nullable": false,
+        "types": [
+          [
+            "S",
+            2147483648,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "Version",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            16,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "SettingsPresentation",
+        "nullable": true,
+        "types": [
+          [
+            "S",
+            2147483904,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "SettingsData",
+        "nullable": true,
+        "types": [
+          [
+            "B",
+            2147483648,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "ChangeDate",
+        "nullable": true,
+        "types": [
+          [
+            "T",
+            0,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "UserIdHash",
+        "nullable": false,
+        "types": [
+          [
+            "N",
+            10,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "SettingsKeyHash",
+        "nullable": false,
+        "types": [
+          [
+            "N",
+            10,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      }
+    ],
+    "nested": [],
+    "indexes": [
+      {
+        "name": "ByKey",
+        "unique": false,
+        "fields": [
+          "UserIdHash",
+          "ObjectKey",
+          "SettingsKeyHash",
+          "Version"
+        ],
+        "clustered": true,
+        "flag2": false,
+        "rest": [
+          0,
+          [
+            0
+          ],
+          0,
+          0
+        ]
+      }
+    ],
+    "one": 1,
+    "key": "S",
+    "splitters": [
+      [],
+      []
+    ],
+    "tail": [
+      "",
+      0,
+      0
+    ]
+  },
+  {
+    "name": "InternalSettings",
+    "kind": "N",
+    "number": 24,
+    "parent": "",
+    "fields": [
+      {
+        "name": "UserId",
+        "nullable": false,
+        "types": [
+          [
+            "S",
+            2147483648,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "ObjectKey",
+        "nullable": false,
+        "types": [
+          [
+            "S",
+            2147483904,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "SettingsKey",
+        "nullable": false,
+        "types": [
+          [
+            "S",
+            2147483648,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "Version",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            16,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "SettingsPresentation",
+        "nullable": true,
+        "types": [
+          [
+            "S",
+            2147483904,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "SettingsData",
+        "nullable": true,
+        "types": [
+          [
+            "B",
+            2147483648,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "ChangeDate",
+        "nullable": true,
+        "types": [
+          [
+            "T",
+            0,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "UserIdHash",
+        "nullable": false,
+        "types": [
+          [
+            "N",
+            10,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "SettingsKeyHash",
+        "nullable": false,
+        "types": [
+          [
+            "N",
+            10,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      }
+    ],
+    "nested": [],
+    "indexes": [
+      {
+        "name": "ByKey",
+        "unique": false,
+        "fields": [
+          "UserIdHash",
+          "ObjectKey",
+          "SettingsKeyHash",
+          "Version"
+        ],
+        "clustered": true,
+        "flag2": false,
+        "rest": [
+          0,
+          [
+            0
+          ],
+          0,
+          0
+        ]
+      }
+    ],
+    "one": 1,
+    "key": "S",
+    "splitters": [
+      [],
+      []
+    ],
+    "tail": [
+      "",
+      0,
+      0
+    ]
+  },
+  {
+    "name": "DefaultSystemSettings",
+    "kind": "N",
+    "number": 25,
+    "parent": "",
+    "fields": [
+      {
+        "name": "ObjectKey",
+        "nullable": false,
+        "types": [
+          [
+            "S",
+            2147483904,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "Version",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            16,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "SettingsData",
+        "nullable": true,
+        "types": [
+          [
+            "B",
+            2147483648,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "ChangeDate",
+        "nullable": true,
+        "types": [
+          [
+            "T",
+            0,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      }
+    ],
+    "nested": [],
+    "indexes": [
+      {
+        "name": "ByKey",
+        "unique": false,
+        "fields": [
+          "ObjectKey"
+        ],
+        "clustered": true,
+        "flag2": false,
+        "rest": [
+          0,
+          [
+            0
+          ],
+          0,
+          0
+        ]
+      }
+    ],
+    "one": 1,
+    "key": "S",
+    "splitters": [
+      [],
+      []
+    ],
+    "tail": [
+      "",
+      0,
+      0
+    ]
+  },
+  {
+    "name": "DefaultInternalSettings",
+    "kind": "N",
+    "number": 26,
+    "parent": "",
+    "fields": [
+      {
+        "name": "ObjectKey",
+        "nullable": false,
+        "types": [
+          [
+            "S",
+            2147483904,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "Version",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            16,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "SettingsData",
+        "nullable": true,
+        "types": [
+          [
+            "B",
+            2147483648,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "ChangeDate",
+        "nullable": true,
+        "types": [
+          [
+            "T",
+            0,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      }
+    ],
+    "nested": [],
+    "indexes": [
+      {
+        "name": "ByKey",
+        "unique": false,
+        "fields": [
+          "ObjectKey"
+        ],
+        "clustered": true,
+        "flag2": false,
+        "rest": [
+          0,
+          [
+            0
+          ],
+          0,
+          0
+        ]
+      }
+    ],
+    "one": 1,
+    "key": "S",
+    "splitters": [
+      [],
+      []
+    ],
+    "tail": [
+      "",
+      0,
+      0
+    ]
+  },
+  {
+    "name": "DbCopiesInfoBaseUse",
+    "kind": "N",
+    "number": 27,
+    "parent": "",
+    "fields": [
+      {
+        "name": "Id",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            16,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "Description",
+        "nullable": false,
+        "types": [
+          [
+            "S",
+            2147483904,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      }
+    ],
+    "nested": [],
+    "indexes": [],
+    "one": 1,
+    "key": "S",
+    "splitters": [
+      [],
+      []
+    ],
+    "tail": [
+      "",
+      0,
+      0
+    ]
+  },
+  {
+    "name": "DbCopiesUpdateTableStat",
+    "kind": "N",
+    "number": 28,
+    "parent": "",
+    "fields": [
+      {
+        "name": "CopyId",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            16,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "TableName",
+        "nullable": false,
+        "types": [
+          [
+            "S",
+            2147483904,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "UpdateTime",
+        "nullable": false,
+        "types": [
+          [
+            "T",
+            0,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "TransferTime",
+        "nullable": false,
+        "types": [
+          [
+            "N",
+            10,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "IsPortion",
+        "nullable": false,
+        "types": [
+          [
+            "L",
+            0,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      }
+    ],
+    "nested": [],
+    "indexes": [],
+    "one": 1,
+    "key": "S",
+    "splitters": [
+      [],
+      []
+    ],
+    "tail": [
+      "",
+      0,
+      0
+    ]
+  },
+  {
+    "name": "DbCopiesUpdateStat",
+    "kind": "N",
+    "number": 29,
+    "parent": "",
+    "fields": [
+      {
+        "name": "CopyId",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            16,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "UpdateTime",
+        "nullable": false,
+        "types": [
+          [
+            "T",
+            0,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "TranPerSec",
+        "nullable": false,
+        "types": [
+          [
+            "N",
+            16,
+            4,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      }
+    ],
+    "nested": [],
+    "indexes": [],
+    "one": 1,
+    "key": "S",
+    "splitters": [
+      [],
+      []
+    ],
+    "tail": [
+      "",
+      0,
+      0
+    ]
+  },
+  {
+    "name": "DbCopies",
+    "kind": "N",
+    "number": 30,
+    "parent": "",
+    "fields": [
+      {
+        "name": "CopyId",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            16,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "CopyName",
+        "nullable": false,
+        "types": [
+          [
+            "S",
+            2147483904,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "UseIntAccelerator",
+        "nullable": false,
+        "types": [
+          [
+            "L",
+            0,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "ReplType",
+        "nullable": false,
+        "types": [
+          [
+            "N",
+            10,
+            0,
+            "",
+            0,
+            1
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "DbType",
+        "nullable": false,
+        "types": [
+          [
+            "N",
+            10,
+            0,
+            "",
+            0,
+            1
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "DbServer",
+        "nullable": false,
+        "types": [
+          [
+            "S",
+            2147483904,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "DbName",
+        "nullable": false,
+        "types": [
+          [
+            "S",
+            2147483904,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "DbUser",
+        "nullable": false,
+        "types": [
+          [
+            "S",
+            2147483904,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "DbPassword",
+        "nullable": false,
+        "types": [
+          [
+            "S",
+            2147483904,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "CreateDb",
+        "nullable": false,
+        "types": [
+          [
+            "L",
+            0,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "Version",
+        "nullable": false,
+        "types": [
+          [
+            "N",
+            9,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "StorageVariant",
+        "nullable": false,
+        "types": [
+          [
+            "N",
+            1,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      }
+    ],
+    "nested": [],
+    "indexes": [
+      {
+        "name": "CopyIdCopyName",
+        "unique": true,
+        "fields": [
+          "CopyId",
+          "CopyName"
+        ],
+        "clustered": true,
+        "flag2": true,
+        "rest": [
+          0,
+          [
+            0
+          ],
+          0,
+          0
+        ]
+      }
+    ],
+    "one": 1,
+    "key": "S",
+    "splitters": [
+      [],
+      []
+    ],
+    "tail": [
+      "",
+      0,
+      0
+    ]
+  },
+  {
+    "name": "DbCopiesSettings",
+    "kind": "N",
+    "number": 31,
+    "parent": "",
+    "fields": [
+      {
+        "name": "CopyId",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            16,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "CopyContent",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            2147483648,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "CopySchema",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            2147483648,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "Version",
+        "nullable": false,
+        "types": [
+          [
+            "N",
+            9,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      }
+    ],
+    "nested": [],
+    "indexes": [
+      {
+        "name": "CopyId",
+        "unique": false,
+        "fields": [
+          "CopyId"
+        ],
+        "clustered": true,
+        "flag2": false,
+        "rest": [
+          0,
+          [
+            0
+          ],
+          0,
+          0
+        ]
+      }
+    ],
+    "one": 1,
+    "key": "S",
+    "splitters": [
+      [],
+      []
+    ],
+    "tail": [
+      "",
+      0,
+      0
+    ]
+  },
+  {
+    "name": "DbCopiesTrLogs",
+    "kind": "N",
+    "number": 32,
+    "parent": "",
+    "fields": [
+      {
+        "name": "TrNum",
+        "nullable": false,
+        "types": [
+          [
+            "N",
+            10,
+            0,
+            "",
+            0,
+            2
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "TrTime",
+        "nullable": false,
+        "types": [
+          [
+            "T",
+            0,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "TrId",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            16,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "TrLog",
+        "nullable": true,
+        "types": [
+          [
+            "B",
+            2147483648,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      }
+    ],
+    "nested": [],
+    "indexes": [
+      {
+        "name": "TrNum",
+        "unique": true,
+        "fields": [
+          "TrNum"
+        ],
+        "clustered": true,
+        "flag2": true,
+        "rest": [
+          0,
+          [
+            0
+          ],
+          0,
+          0
+        ]
+      },
+      {
+        "name": "TrId",
+        "unique": true,
+        "fields": [
+          "TrId"
+        ],
+        "clustered": false,
+        "flag2": false,
+        "rest": [
+          0,
+          [
+            0
+          ],
+          0,
+          0
+        ]
+      }
+    ],
+    "one": 1,
+    "key": "S",
+    "splitters": [
+      [],
+      []
+    ],
+    "tail": [
+      "",
+      0,
+      0
+    ]
+  },
+  {
+    "name": "DbCopiesTrTables",
+    "kind": "N",
+    "number": 33,
+    "parent": "",
+    "fields": [
+      {
+        "name": "TrNum",
+        "nullable": true,
+        "types": [
+          [
+            "N",
+            10,
+            0,
+            "",
+            0,
+            1
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "TrTime",
+        "nullable": true,
+        "types": [
+          [
+            "T",
+            0,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "TableName",
+        "nullable": false,
+        "types": [
+          [
+            "S",
+            2147483904,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      }
+    ],
+    "nested": [],
+    "indexes": [
+      {
+        "name": "TrNumTableName",
+        "unique": true,
+        "fields": [
+          "TableName",
+          "TrNum",
+          "TrTime"
+        ],
+        "clustered": true,
+        "flag2": true,
+        "rest": [
+          0,
+          [
+            0
+          ],
+          0,
+          0
+        ]
+      },
+      {
+        "name": "TableName",
+        "unique": false,
+        "fields": [
+          "TrNum"
+        ],
+        "clustered": false,
+        "flag2": false,
+        "rest": [
+          0,
+          [
+            0
+          ],
+          0,
+          0
+        ]
+      }
+    ],
+    "one": 1,
+    "key": "S",
+    "splitters": [
+      [],
+      []
+    ],
+    "tail": [
+      "",
+      0,
+      0
+    ]
+  },
+  {
+    "name": "DbCopiesUpdates",
+    "kind": "N",
+    "number": 34,
+    "parent": "",
+    "fields": [
+      {
+        "name": "CopyId",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            16,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "TrNum",
+        "nullable": true,
+        "types": [
+          [
+            "N",
+            10,
+            0,
+            "",
+            0,
+            1
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "TrTime",
+        "nullable": true,
+        "types": [
+          [
+            "T",
+            0,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "UpdateId",
+        "nullable": true,
+        "types": [
+          [
+            "B",
+            16,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "LastUpdateResult",
+        "nullable": true,
+        "types": [
+          [
+            "N",
+            2,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "LastUpdateError",
+        "nullable": true,
+        "types": [
+          [
+            "B",
+            2147483648,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      }
+    ],
+    "nested": [],
+    "indexes": [
+      {
+        "name": "CopyIdTrNum",
+        "unique": true,
+        "fields": [
+          "CopyId",
+          "TrNum"
+        ],
+        "clustered": true,
+        "flag2": true,
+        "rest": [
+          0,
+          [
+            0
+          ],
+          0,
+          0
+        ]
+      }
+    ],
+    "one": 1,
+    "key": "S",
+    "splitters": [
+      [],
+      []
+    ],
+    "tail": [
+      "",
+      0,
+      0
+    ]
+  },
+  {
+    "name": "DbCopiesTablesStates",
+    "kind": "N",
+    "number": 35,
+    "parent": "",
+    "fields": [
+      {
+        "name": "CopyId",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            16,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "TableName",
+        "nullable": false,
+        "types": [
+          [
+            "S",
+            2147483904,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "TableState",
+        "nullable": false,
+        "types": [
+          [
+            "N",
+            10,
+            0,
+            "",
+            0,
+            1
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "TrNum",
+        "nullable": true,
+        "types": [
+          [
+            "N",
+            10,
+            0,
+            "",
+            0,
+            1
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      }
+    ],
+    "nested": [],
+    "indexes": [
+      {
+        "name": "CopyIdTableName",
+        "unique": true,
+        "fields": [
+          "CopyId",
+          "TableName"
+        ],
+        "clustered": true,
+        "flag2": true,
+        "rest": [
+          0,
+          [
+            0
+          ],
+          0,
+          0
+        ]
+      }
+    ],
+    "one": 1,
+    "key": "S",
+    "splitters": [
+      [],
+      []
+    ],
+    "tail": [
+      "",
+      0,
+      0
+    ]
+  },
+  {
+    "name": "DbCopiesInitialLast",
+    "kind": "N",
+    "number": 36,
+    "parent": "",
+    "fields": [
+      {
+        "name": "CopyId",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            16,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "TableName",
+        "nullable": false,
+        "types": [
+          [
+            "S",
+            2147483904,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "BlockNum",
+        "nullable": false,
+        "types": [
+          [
+            "N",
+            10,
+            0,
+            "",
+            0,
+            2
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "FirstKey",
+        "nullable": true,
+        "types": [
+          [
+            "B",
+            2147483648,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "LastKey",
+        "nullable": true,
+        "types": [
+          [
+            "B",
+            2147483648,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "BlockState",
+        "nullable": false,
+        "types": [
+          [
+            "N",
+            10,
+            0,
+            "",
+            0,
+            1
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      }
+    ],
+    "nested": [],
+    "indexes": [
+      {
+        "name": "CopyIdTableNameBlockNum",
+        "unique": true,
+        "fields": [
+          "CopyId",
+          "TableName",
+          "BlockNum"
+        ],
+        "clustered": true,
+        "flag2": true,
+        "rest": [
+          0,
+          [
+            0
+          ],
+          0,
+          0
+        ]
+      }
+    ],
+    "one": 1,
+    "key": "S",
+    "splitters": [
+      [],
+      []
+    ],
+    "tail": [
+      "",
+      0,
+      0
+    ]
+  },
+  {
+    "name": "DbCopiesTrChanges",
+    "kind": "N",
+    "number": 37,
+    "parent": "",
+    "fields": [
+      {
+        "name": "CopyId",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            16,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "TableName",
+        "nullable": false,
+        "types": [
+          [
+            "S",
+            2147483904,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "TrNum",
+        "nullable": false,
+        "types": [
+          [
+            "N",
+            10,
+            0,
+            "",
+            0,
+            1
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "ChId",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            16,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      }
+    ],
+    "nested": [],
+    "indexes": [
+      {
+        "name": "CopyIdTableName",
+        "unique": false,
+        "fields": [
+          "CopyId",
+          "TableName",
+          "TrNum"
+        ],
+        "clustered": true,
+        "flag2": false,
+        "rest": [
+          0,
+          [
+            0
+          ],
+          0,
+          0
+        ]
+      }
+    ],
+    "one": 1,
+    "key": "S",
+    "splitters": [
+      [],
+      []
+    ],
+    "tail": [
+      "",
+      0,
+      0
+    ]
+  },
+  {
+    "name": "DbCopiesTrChObj",
+    "kind": "N",
+    "number": 38,
+    "parent": "",
+    "fields": [
+      {
+        "name": "ChId",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            16,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "ChObj",
+        "nullable": true,
+        "types": [
+          [
+            "B",
+            2147483648,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      }
+    ],
+    "nested": [],
+    "indexes": [
+      {
+        "name": "ChId",
+        "unique": true,
+        "fields": [
+          "ChId"
+        ],
+        "clustered": true,
+        "flag2": false,
+        "rest": [
+          0,
+          [
+            0
+          ],
+          0,
+          0
+        ]
+      }
+    ],
+    "one": 1,
+    "key": "S",
+    "splitters": [
+      [],
+      []
+    ],
+    "tail": [
+      "",
+      0,
+      0
+    ]
+  },
+  {
+    "name": "MobileClientDataExchange",
+    "kind": "N",
+    "number": 39,
+    "parent": "",
+    "fields": [
+      {
+        "name": "ID",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            16,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "Version",
+        "nullable": false,
+        "types": [
+          [
+            "N",
+            2,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "Type",
+        "nullable": false,
+        "types": [
+          [
+            "N",
+            2,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "Data",
+        "nullable": true,
+        "types": [
+          [
+            "B",
+            2147483648,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "Date",
+        "nullable": false,
+        "types": [
+          [
+            "T",
+            0,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      }
+    ],
+    "nested": [],
+    "indexes": [
+      {
+        "name": "ID",
+        "unique": false,
+        "fields": [
+          "ID"
+        ],
+        "clustered": false,
+        "flag2": false,
+        "rest": [
+          0,
+          [
+            0
+          ],
+          0,
+          0
+        ]
+      }
+    ],
+    "one": 1,
+    "key": "S",
+    "splitters": [
+      [],
+      []
+    ],
+    "tail": [
+      "",
+      0,
+      0
+    ]
+  },
+  {
+    "name": "Bots",
+    "kind": "N",
+    "number": 40,
+    "parent": "",
+    "fields": [
+      {
+        "name": "ID",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            16,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "ClientID",
+        "nullable": false,
+        "types": [
+          [
+            "S",
+            2147483748,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "ECSUserID",
+        "nullable": false,
+        "types": [
+          [
+            "S",
+            2147483748,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "MDBotID",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            16,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "IBUserName",
+        "nullable": true,
+        "types": [
+          [
+            "S",
+            2147483748,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "Param",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            2147483648,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "Predefined",
+        "nullable": false,
+        "types": [
+          [
+            "L",
+            0,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "NeedsUpdate",
+        "nullable": true,
+        "types": [
+          [
+            "L",
+            0,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      }
+    ],
+    "nested": [],
+    "indexes": [],
+    "one": 1,
+    "key": "S",
+    "splitters": [
+      [],
+      []
+    ],
+    "tail": [
+      "",
+      0,
+      0
+    ]
+  },
+  {
+    "name": "ODataSettings",
+    "kind": "N",
+    "number": 41,
+    "parent": "",
+    "fields": [
+      {
+        "name": "MetadataObjectUUID",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            16,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      }
+    ],
+    "nested": [],
+    "indexes": [],
+    "one": 1,
+    "key": "S",
+    "splitters": [
+      [],
+      []
+    ],
+    "tail": [
+      "",
+      0,
+      0
+    ]
+  },
+  {
+    "name": "DataHistoryQueue0",
+    "kind": "N",
+    "number": 42,
+    "parent": "",
+    "fields": [
+      {
+        "name": "MetadataId",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            16,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "DataId",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            20,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "Position",
+        "nullable": false,
+        "types": [
+          [
+            "N",
+            9,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "Content",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            2147483648,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      }
+    ],
+    "nested": [],
+    "indexes": [
+      {
+        "name": "MetadataIdDataIdPosition",
+        "unique": true,
+        "fields": [
+          "MetadataId",
+          "DataId",
+          "Position"
+        ],
+        "clustered": true,
+        "flag2": false,
+        "rest": [
+          0,
+          [
+            0
+          ],
+          0,
+          0
+        ]
+      }
+    ],
+    "one": 1,
+    "key": "S",
+    "splitters": [
+      [],
+      []
+    ],
+    "tail": [
+      "",
+      0,
+      0
+    ]
+  },
+  {
+    "name": "DataHistoryVersions",
+    "kind": "N",
+    "number": 43,
+    "parent": "",
+    "fields": [
+      {
+        "name": "HistoryDataId",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            16,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "VersionNumber",
+        "nullable": false,
+        "types": [
+          [
+            "N",
+            9,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "MetadataVersionNumber",
+        "nullable": false,
+        "types": [
+          [
+            "N",
+            9,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "Date",
+        "nullable": false,
+        "types": [
+          [
+            "T",
+            0,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "ChangeType",
+        "nullable": false,
+        "types": [
+          [
+            "N",
+            1,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "UserId",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            16,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "UserName",
+        "nullable": false,
+        "types": [
+          [
+            "S",
+            2147483904,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "UserFullName",
+        "nullable": false,
+        "types": [
+          [
+            "S",
+            2147483904,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "Comment",
+        "nullable": false,
+        "types": [
+          [
+            "S",
+            2147484672,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "Transaction",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            16,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "Node",
+        "nullable": false,
+        "types": [
+          [
+            "E",
+            0,
+            0,
+            "",
+            0,
+            null
+          ],
+          [
+            "R",
+            0,
+            0,
+            "",
+            4,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "Content",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            2147483648,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      }
+    ],
+    "nested": [],
+    "indexes": [
+      {
+        "name": "HistoryDataIdVersionNumber",
+        "unique": true,
+        "fields": [
+          "HistoryDataId",
+          "VersionNumber"
+        ],
+        "clustered": true,
+        "flag2": false,
+        "rest": [
+          0,
+          [
+            0
+          ],
+          0,
+          0
+        ]
+      }
+    ],
+    "one": 1,
+    "key": "S",
+    "splitters": [
+      [],
+      []
+    ],
+    "tail": [
+      "",
+      0,
+      0
+    ]
+  },
+  {
+    "name": "DataHistoryLatestVersions",
+    "kind": "N",
+    "number": 44,
+    "parent": "",
+    "fields": [
+      {
+        "name": "MetadataId",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            16,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "DataId",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            20,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "HistoryDataId",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            16,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "VersionNumber",
+        "nullable": false,
+        "types": [
+          [
+            "N",
+            9,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "Content",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            2147483648,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      }
+    ],
+    "nested": [],
+    "indexes": [
+      {
+        "name": "SeparatorsMetadataIdDataId",
+        "unique": false,
+        "fields": [
+          "MetadataId",
+          "DataId"
+        ],
+        "clustered": true,
+        "flag2": false,
+        "rest": [
+          0,
+          [
+            0
+          ],
+          0,
+          0
+        ]
+      }
+    ],
+    "one": 1,
+    "key": "S",
+    "splitters": [
+      [],
+      []
+    ],
+    "tail": [
+      "",
+      0,
+      0
+    ]
+  },
+  {
+    "name": "DataHistoryMetadata",
+    "kind": "N",
+    "number": 45,
+    "parent": "",
+    "fields": [
+      {
+        "name": "MetadataId",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            16,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "IsSettings",
+        "nullable": false,
+        "types": [
+          [
+            "L",
+            0,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "IsActual",
+        "nullable": false,
+        "types": [
+          [
+            "L",
+            0,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "MetadataVersionNumber",
+        "nullable": false,
+        "types": [
+          [
+            "N",
+            9,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "Content",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            2147483648,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "IsExtensions",
+        "nullable": false,
+        "types": [
+          [
+            "L",
+            0,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "ActionOnAccept",
+        "nullable": false,
+        "types": [
+          [
+            "N",
+            1,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      }
+    ],
+    "nested": [],
+    "indexes": [
+      {
+        "name": "SeparatorsIdIsSetIsActNumber",
+        "unique": true,
+        "fields": [
+          "MetadataId",
+          "IsSettings",
+          "IsActual",
+          "MetadataVersionNumber",
+          "IsExtensions"
+        ],
+        "clustered": true,
+        "flag2": false,
+        "rest": [
+          0,
+          [
+            0
+          ],
+          0,
+          0
+        ]
+      },
+      {
+        "name": "MetadataIdMetadataVersion",
+        "unique": true,
+        "fields": [
+          "MetadataId",
+          "MetadataVersionNumber"
+        ],
+        "clustered": false,
+        "flag2": false,
+        "rest": [
+          0,
+          [
+            0
+          ],
+          0,
+          0
+        ]
+      }
+    ],
+    "one": 1,
+    "key": "S",
+    "splitters": [
+      [],
+      []
+    ],
+    "tail": [
+      "",
+      0,
+      0
+    ]
+  },
+  {
+    "name": "DataHistorySettings",
+    "kind": "N",
+    "number": 46,
+    "parent": "",
+    "fields": [
+      {
+        "name": "MetadataId",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            16,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "Content",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            2147483648,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      }
+    ],
+    "nested": [],
+    "indexes": [
+      {
+        "name": "SeparatorsMetadataId",
+        "unique": true,
+        "fields": [
+          "MetadataId"
+        ],
+        "clustered": true,
+        "flag2": false,
+        "rest": [
+          0,
+          [
+            0
+          ],
+          0,
+          0
+        ]
+      }
+    ],
+    "one": 1,
+    "key": "S",
+    "splitters": [
+      [],
+      []
+    ],
+    "tail": [
+      "",
+      0,
+      0
+    ]
+  },
+  {
+    "name": "DataHistoryAfterWriteQueue",
+    "kind": "N",
+    "number": 47,
+    "parent": "",
+    "fields": [
+      {
+        "name": "MetadataId",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            16,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "HistoryDataId",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            16,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "VersionNumber",
+        "nullable": false,
+        "types": [
+          [
+            "N",
+            9,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      }
+    ],
+    "nested": [],
+    "indexes": [
+      {
+        "name": "SeparatorsMetadataIdHistoryDataIdVersionNumber",
+        "unique": true,
+        "fields": [
+          "MetadataId",
+          "HistoryDataId",
+          "VersionNumber"
+        ],
+        "clustered": true,
+        "flag2": false,
+        "rest": [
+          0,
+          [
+            0
+          ],
+          0,
+          0
+        ]
+      }
+    ],
+    "one": 1,
+    "key": "S",
+    "splitters": [
+      [],
+      []
+    ],
+    "tail": [
+      "",
+      0,
+      0
+    ]
+  },
+  {
+    "name": "RefOpt",
+    "kind": "N",
+    "number": 48,
+    "parent": "",
+    "fields": [
+      {
+        "name": "MDID",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            16,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "ExtID",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            16,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "PDUpdMode",
+        "nullable": false,
+        "types": [
+          [
+            "N",
+            1,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      }
+    ],
+    "nested": [],
+    "indexes": [
+      {
+        "name": "MDID",
+        "unique": false,
+        "fields": [
+          "MDID",
+          "ExtID"
+        ],
+        "clustered": false,
+        "flag2": false,
+        "rest": [
+          0,
+          [
+            0
+          ],
+          0,
+          0
+        ]
+      }
+    ],
+    "one": 1,
+    "key": "S",
+    "splitters": [
+      [],
+      []
+    ],
+    "tail": [
+      "",
+      0,
+      0
+    ]
+  },
+  {
+    "name": "ChrcOpt",
+    "kind": "N",
+    "number": 49,
+    "parent": "",
+    "fields": [
+      {
+        "name": "MDID",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            16,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "ExtID",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            16,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "PDUpdMode",
+        "nullable": false,
+        "types": [
+          [
+            "N",
+            1,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      }
+    ],
+    "nested": [],
+    "indexes": [
+      {
+        "name": "MDID",
+        "unique": false,
+        "fields": [
+          "MDID",
+          "ExtID"
+        ],
+        "clustered": false,
+        "flag2": false,
+        "rest": [
+          0,
+          [
+            0
+          ],
+          0,
+          0
+        ]
+      }
+    ],
+    "one": 1,
+    "key": "S",
+    "splitters": [
+      [],
+      []
+    ],
+    "tail": [
+      "",
+      0,
+      0
+    ]
+  },
+  {
+    "name": "AccOpt",
+    "kind": "N",
+    "number": 50,
+    "parent": "",
+    "fields": [
+      {
+        "name": "MDID",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            16,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "ExtID",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            16,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "PDUpdMode",
+        "nullable": false,
+        "types": [
+          [
+            "N",
+            1,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      }
+    ],
+    "nested": [],
+    "indexes": [
+      {
+        "name": "MDID",
+        "unique": false,
+        "fields": [
+          "MDID",
+          "ExtID"
+        ],
+        "clustered": false,
+        "flag2": false,
+        "rest": [
+          0,
+          [
+            0
+          ],
+          0,
+          0
+        ]
+      }
+    ],
+    "one": 1,
+    "key": "S",
+    "splitters": [
+      [],
+      []
+    ],
+    "tail": [
+      "",
+      0,
+      0
+    ]
+  },
+  {
+    "name": "CKindsOpt",
+    "kind": "N",
+    "number": 51,
+    "parent": "",
+    "fields": [
+      {
+        "name": "MDID",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            16,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "ExtID",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            16,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "PDUpdMode",
+        "nullable": false,
+        "types": [
+          [
+            "N",
+            1,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      }
+    ],
+    "nested": [],
+    "indexes": [
+      {
+        "name": "MDID",
+        "unique": false,
+        "fields": [
+          "MDID",
+          "ExtID"
+        ],
+        "clustered": false,
+        "flag2": false,
+        "rest": [
+          0,
+          [
+            0
+          ],
+          0,
+          0
+        ]
+      }
+    ],
+    "one": 1,
+    "key": "S",
+    "splitters": [
+      [],
+      []
+    ],
+    "tail": [
+      "",
+      0,
+      0
+    ]
+  },
+  {
+    "name": "UsersWorkHistory",
+    "kind": "N",
+    "number": 52,
+    "parent": "",
+    "fields": [
+      {
+        "name": "ID",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            16,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "UserID",
+        "nullable": false,
+        "types": [
+          [
+            "B",
+            16,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "URL",
+        "nullable": false,
+        "types": [
+          [
+            "S",
+            2147483648,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "Date",
+        "nullable": false,
+        "types": [
+          [
+            "T",
+            0,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "URLHash",
+        "nullable": false,
+        "types": [
+          [
+            "N",
+            10,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      },
+      {
+        "name": "ECSActivity",
+        "nullable": true,
+        "types": [
+          [
+            "L",
+            0,
+            0,
+            "",
+            0,
+            null
+          ]
+        ],
+        "tail": [
+          "",
+          0
+        ]
+      }
+    ],
+    "nested": [],
+    "indexes": [
+      {
+        "name": "ByID",
+        "unique": true,
+        "fields": [
+          "ID"
+        ],
+        "clustered": false,
+        "flag2": false,
+        "rest": [
+          0,
+          [
+            0
+          ],
+          0,
+          0
+        ]
+      },
+      {
+        "name": "ByUserDate",
+        "unique": false,
+        "fields": [
+          "UserID",
+          "Date"
+        ],
+        "clustered": false,
+        "flag2": false,
+        "rest": [
+          0,
+          [
+            0
+          ],
+          0,
+          0
+        ]
+      },
+      {
+        "name": "ByUserURLHash",
+        "unique": false,
+        "fields": [
+          "UserID",
+          "URLHash",
+          "Date"
+        ],
+        "clustered": true,
+        "flag2": false,
+        "rest": [
+          0,
+          [
+            0
+          ],
+          0,
+          0
+        ]
+      }
+    ],
+    "one": 1,
+    "key": "S",
+    "splitters": [
+      [],
+      []
+    ],
+    "tail": [
+      "",
+      0,
+      0
+    ]
+  }
+]

@@ -1,0 +1,2990 @@
+[
+ {
+  "collection": "ЦветаСтиля",
+  "en": "FieldAlternativeBackColor",
+  "id": -13,
+  "ru": "АльтернативныйЦветФонаПоля",
+  "server": "245,251,247",
+  "web": {
+   "dark": {
+    "client.back": "Элемент стиля|26,26,26",
+    "client.text": "Элемент стиля|26,26,26",
+    "css.back.background": "rgb(26, 26, 26)",
+    "css.text.color": "rgb(26, 26, 26)",
+    "form_server.back": "Элемент стиля|26,26,26",
+    "form_server.text": "Элемент стиля|26,26,26"
+   },
+   "taxi": {
+    "client.back": "Элемент стиля|245,251,247",
+    "client.text": "Элемент стиля|245,251,247",
+    "css.back.background": "rgb(245, 251, 247)",
+    "css.text.color": "rgb(245, 251, 247)",
+    "form_server.back": "Элемент стиля|245,251,247",
+    "form_server.text": "Элемент стиля|245,251,247"
+   },
+   "v85": {
+    "client.back": "Элемент стиля|255,255,255",
+    "client.text": "Элемент стиля|255,255,255",
+    "css.back.background": "rgb(255, 255, 255)",
+    "css.text.color": "rgb(255, 255, 255)",
+    "form_server.back": "Элемент стиля|255,255,255",
+    "form_server.text": "Элемент стиля|255,255,255"
+   }
+  }
+ },
+ {
+  "collection": "ЦветаСтиля",
+  "en": "ActivityColor",
+  "id": -44,
+  "ru": "ЦветАктивности",
+  "server": "250,204,31",
+  "web": {
+   "dark": {
+    "client.back": "Элемент стиля|250,204,31",
+    "client.text": "Элемент стиля|250,204,31",
+    "css.back.background": "rgb(110, 94, 35)",
+    "css.text.color": "rgb(250, 223, 120)",
+    "form_server.back": "Элемент стиля|244,196,16",
+    "form_server.text": "Элемент стиля|244,196,16"
+   },
+   "taxi": {
+    "client.back": "Элемент стиля|250,204,31",
+    "client.text": "Элемент стиля|250,204,31",
+    "css.back.background": "rgb(250, 204, 31)",
+    "css.text.color": "rgb(250, 204, 31)",
+    "form_server.back": "Элемент стиля|250,204,31",
+    "form_server.text": "Элемент стиля|250,204,31"
+   },
+   "v85": {
+    "client.back": "Элемент стиля|250,204,31",
+    "client.text": "Элемент стиля|250,204,31",
+    "css.back.background": "rgb(255, 239, 181)",
+    "css.text.color": "rgb(158, 127, 9)",
+    "form_server.back": "Элемент стиля|250,204,31",
+    "form_server.text": "Элемент стиля|250,204,31"
+   }
+  }
+ },
+ {
+  "collection": "ЦветаСтиля",
+  "en": "AccentColor",
+  "id": -46,
+  "ru": "ЦветАкцента",
+  "server": "0,150,70",
+  "web": {
+   "dark": {
+    "client.back": "Элемент стиля|255,228,51",
+    "client.text": "Элемент стиля|255,228,51",
+    "css.back.background": "rgb(112, 103, 39)",
+    "css.text.color": "rgb(255, 240, 140)",
+    "form_server.back": "Элемент стиля|255,228,51",
+    "form_server.text": "Элемент стиля|255,228,51"
+   },
+   "taxi": {
+    "client.back": "Элемент стиля|0,150,70",
+    "client.text": "Элемент стиля|0,150,70",
+    "css.back.background": "rgb(0, 150, 70)",
+    "css.text.color": "rgb(0, 150, 70)",
+    "form_server.back": "Элемент стиля|0,150,70",
+    "form_server.text": "Элемент стиля|0,150,70"
+   },
+   "v85": {
+    "client.back": "Элемент стиля|255,221,0",
+    "client.text": "Элемент стиля|255,221,0",
+    "css.back.background": "rgb(255, 244, 171)",
+    "css.text.color": "rgb(161, 139, 0)",
+    "form_server.back": "Элемент стиля|255,221,0",
+    "form_server.text": "Элемент стиля|255,221,0"
+   }
+  }
+ },
+ {
+  "collection": "ЦветаСтиля",
+  "en": "ImportantColor",
+  "id": -47,
+  "ru": "ЦветВажного",
+  "server": "255,225,0",
+  "web": {
+   "dark": {
+    "client.back": "Элемент стиля|255,228,51",
+    "client.text": "Элемент стиля|255,228,51",
+    "css.back.background": "rgb(112, 103, 39)",
+    "css.text.color": "rgb(255, 240, 140)",
+    "form_server.back": "Элемент стиля|255,228,51",
+    "form_server.text": "Элемент стиля|255,228,51"
+   },
+   "taxi": {
+    "client.back": "Элемент стиля|255,225,0",
+    "client.text": "Элемент стиля|255,225,0",
+    "css.back.background": "rgb(255, 225, 0)",
+    "css.text.color": "rgb(255, 225, 0)",
+    "form_server.back": "Элемент стиля|255,225,0",
+    "form_server.text": "Элемент стиля|255,225,0"
+   },
+   "v85": {
+    "client.back": "Элемент стиля|255,221,0",
+    "client.text": "Элемент стиля|255,221,0",
+    "css.back.background": "rgb(255, 244, 171)",
+    "css.text.color": "rgb(161, 139, 0)",
+    "form_server.back": "Элемент стиля|255,221,0",
+    "form_server.text": "Элемент стиля|255,221,0"
+   }
+  }
+ },
+ {
+  "collection": "ЦветаСтиля",
+  "en": "AuxiliaryNavigationColor",
+  "id": -43,
+  "ru": "ЦветДополнительнойНавигации",
+  "server": "255,255,217",
+  "web": {
+   "dark": {
+    "client.back": "Элемент стиля|255,255,217",
+    "client.text": "Элемент стиля|255,255,217",
+    "css.back.background": "rgb(41, 41, 15)",
+    "css.text.color": "rgb(127, 128, 75)",
+    "form_server.back": "Элемент стиля|64,64,18",
+    "form_server.text": "Элемент стиля|64,64,18"
+   },
+   "taxi": {
+    "client.back": "Элемент стиля|255,255,217",
+    "client.text": "Элемент стиля|255,255,217",
+    "css.back.background": "rgb(255, 255, 217)",
+    "css.text.color": "rgb(255, 255, 217)",
+    "form_server.back": "Элемент стиля|255,255,217",
+    "form_server.text": "Элемент стиля|255,255,217"
+   },
+   "v85": {
+    "client.back": "Элемент стиля|255,255,217",
+    "client.text": "Элемент стиля|255,255,217",
+    "css.back.background": "rgb(255, 255, 240)",
+    "css.text.color": "rgb(191, 191, 149)",
+    "form_server.back": "Элемент стиля|255,255,217",
+    "form_server.text": "Элемент стиля|255,255,217"
+   }
+  }
+ },
+ {
+  "collection": "ЦветаСтиля",
+  "en": "ReportLineColor",
+  "id": -28,
+  "ru": "ЦветЛинииОтчета",
+  "server": "204,192,133",
+  "web": {
+   "dark": {
+    "client.back": "Элемент стиля|204,192,133",
+    "client.text": "Элемент стиля|204,192,133",
+    "css.back.background": "rgb(84, 76, 35)",
+    "css.text.color": "rgb(201, 190, 133)",
+    "form_server.back": "Элемент стиля|147,133,62",
+    "form_server.text": "Элемент стиля|147,133,62"
+   },
+   "taxi": {
+    "client.back": "Элемент стиля|204,192,133",
+    "client.text": "Элемент стиля|204,192,133",
+    "css.back.background": "rgb(204, 192, 133)",
+    "css.text.color": "rgb(204, 192, 133)",
+    "form_server.back": "Элемент стиля|204,192,133",
+    "form_server.text": "Элемент стиля|204,192,133"
+   },
+   "v85": {
+    "client.back": "Элемент стиля|204,192,133",
+    "client.text": "Элемент стиля|204,192,133",
+    "css.back.background": "rgb(242, 237, 208)",
+    "css.text.color": "rgb(153, 140, 73)",
+    "form_server.back": "Элемент стиля|204,192,133",
+    "form_server.text": "Элемент стиля|204,192,133"
+   }
+  }
+ },
+ {
+  "collection": "ЦветаСтиля",
+  "en": "NavigationColor",
+  "id": -42,
+  "ru": "ЦветНавигации",
+  "server": "251,237,158",
+  "web": {
+   "dark": {
+    "client.back": "Элемент стиля|251,237,158",
+    "client.text": "Элемент стиля|251,237,158",
+    "css.back.background": "rgb(71, 64, 26)",
+    "css.text.color": "rgb(179, 166, 102)",
+    "form_server.back": "Элемент стиля|116,102,27",
+    "form_server.text": "Элемент стиля|116,102,27"
+   },
+   "taxi": {
+    "client.back": "Элемент стиля|251,237,158",
+    "client.text": "Элемент стиля|251,237,158",
+    "css.back.background": "rgb(251, 237, 158)",
+    "css.text.color": "rgb(251, 237, 158)",
+    "form_server.back": "Элемент стиля|251,237,158",
+    "form_server.text": "Элемент стиля|251,237,158"
+   },
+   "v85": {
+    "client.back": "Элемент стиля|251,237,158",
+    "client.text": "Элемент стиля|251,237,158",
+    "css.back.background": "rgb(255, 249, 217)",
+    "css.text.color": "rgb(189, 173, 83)",
+    "form_server.back": "Элемент стиля|251,237,158",
+    "form_server.text": "Элемент стиля|251,237,158"
+   }
+  }
+ },
+ {
+  "collection": "ЦветаСтиля",
+  "en": "SpecialTextColor",
+  "id": -16,
+  "ru": "ЦветОсобогоТекста",
+  "server": "255,0,0",
+  "web": {
+   "dark": {
+    "client.back": "Элемент стиля|255,170,166",
+    "client.text": "Элемент стиля|255,170,166",
+    "css.back.background": "rgb(207, 89, 83)",
+    "css.text.color": "rgb(255, 231, 229)",
+    "form_server.back": "Элемент стиля|255,170,166",
+    "form_server.text": "Элемент стиля|255,170,166"
+   },
+   "taxi": {
+    "client.back": "Элемент стиля|255,0,0",
+    "client.text": "Элемент стиля|255,0,0",
+    "css.back.background": "rgb(255, 0, 0)",
+    "css.text.color": "rgb(255, 0, 0)",
+    "form_server.back": "Элемент стиля|255,0,0",
+    "form_server.text": "Элемент стиля|255,0,0"
+   },
+   "v85": {
+    "client.back": "Элемент стиля|161,24,16",
+    "client.text": "Элемент стиля|161,24,16",
+    "css.back.background": "rgb(255, 103, 94)",
+    "css.text.color": "rgb(64, 3, 0)",
+    "form_server.back": "Элемент стиля|161,24,16",
+    "form_server.text": "Элемент стиля|161,24,16"
+   }
+  }
+ },
+ {
+  "collection": "ЦветаСтиля",
+  "en": "NegativeTextColor",
+  "id": -17,
+  "ru": "ЦветОтрицательногоЧисла",
+  "server": "255,0,0",
+  "web": {
+   "dark": {
+    "client.back": "Элемент стиля|255,110,102",
+    "client.text": "Элемент стиля|255,110,102",
+    "css.back.background": "rgb(112, 48, 45)",
+    "css.text.color": "rgb(255, 170, 166)",
+    "form_server.back": "Элемент стиля|255,110,102",
+    "form_server.text": "Элемент стиля|255,110,102"
+   },
+   "taxi": {
+    "client.back": "Элемент стиля|255,0,0",
+    "client.text": "Элемент стиля|255,0,0",
+    "css.back.background": "rgb(255, 0, 0)",
+    "css.text.color": "rgb(255, 0, 0)",
+    "form_server.back": "Элемент стиля|255,0,0",
+    "form_server.text": "Элемент стиля|255,0,0"
+   },
+   "v85": {
+    "client.back": "Элемент стиля|255,62,51",
+    "client.text": "Элемент стиля|255,62,51",
+    "css.back.background": "rgb(255, 187, 184)",
+    "css.text.color": "rgb(161, 24, 16)",
+    "form_server.back": "Элемент стиля|255,62,51",
+    "form_server.text": "Элемент стиля|255,62,51"
+   }
+  }
+ },
+ {
+  "collection": "ЦветаСтиля",
+  "en": "BorderColor",
+  "id": -22,
+  "ru": "ЦветРамки",
+  "server": "179,172,134",
+  "web": {
+   "dark": {
+    "client.back": "Элемент стиля|153,153,153",
+    "client.text": "Элемент стиля|153,153,153",
+    "css.back.background": "rgb(87, 87, 87)",
+    "css.text.color": "rgb(199, 199, 199)",
+    "form_server.back": "Элемент стиля|153,153,153",
+    "form_server.text": "Элемент стиля|153,153,153"
+   },
+   "taxi": {
+    "client.back": "Элемент стиля|160,160,160",
+    "client.text": "Элемент стиля|160,160,160",
+    "css.back.background": "rgb(160, 160, 160)",
+    "css.text.color": "rgb(160, 160, 160)",
+    "form_server.back": "Элемент стиля|160,160,160",
+    "form_server.text": "Элемент стиля|160,160,160"
+   },
+   "v85": {
+    "client.back": "Элемент стиля|153,153,153",
+    "client.text": "Элемент стиля|153,153,153",
+    "css.back.background": "rgb(219, 219, 219)",
+    "css.text.color": "rgb(110, 110, 110)",
+    "form_server.back": "Элемент стиля|153,153,153",
+    "form_server.text": "Элемент стиля|153,153,153"
+   }
+  }
+ },
+ {
+  "collection": "ЦветаСтиля",
+  "en": "ButtonBorderColor",
+  "id": -34,
+  "ru": "ЦветРамкиКнопки",
+  "server": "179,172,134",
+  "web": {
+   "dark": {
+    "client.back": "Элемент стиля|153,153,153",
+    "client.text": "Элемент стиля|153,153,153",
+    "css.back.background": "rgb(87, 87, 87)",
+    "css.text.color": "rgb(199, 199, 199)",
+    "form_server.back": "Элемент стиля|153,153,153",
+    "form_server.text": "Элемент стиля|153,153,153"
+   },
+   "taxi": {
+    "client.back": "Элемент стиля|178,178,178",
+    "client.text": "Элемент стиля|178,178,178",
+    "css.back.background": "rgb(178, 178, 178)",
+    "css.text.color": "rgb(178, 178, 178)",
+    "form_server.back": "Элемент стиля|178,178,178",
+    "form_server.text": "Элемент стиля|178,178,178"
+   },
+   "v85": {
+    "client.back": "Элемент стиля|153,153,153",
+    "client.text": "Элемент стиля|153,153,153",
+    "css.back.background": "rgb(219, 219, 219)",
+    "css.text.color": "rgb(110, 110, 110)",
+    "form_server.back": "Элемент стиля|153,153,153",
+    "form_server.text": "Элемент стиля|153,153,153"
+   }
+  }
+ },
+ {
+  "collection": "ЦветаСтиля",
+  "en": "FieldSelectedTextColor",
+  "id": -15,
+  "ru": "ЦветТекстаВыделенияПоля",
+  "server": "255,255,255",
+  "web": {
+   "dark": {
+    "client.back": "Элемент стиля|184,184,191",
+    "client.text": "Элемент стиля|184,184,191",
+    "css.back.background": "rgb(107, 107, 115)",
+    "css.text.color": "rgb(237, 237, 242)",
+    "form_server.back": "Элемент стиля|184,184,191",
+    "form_server.text": "Элемент стиля|184,184,191"
+   },
+   "taxi": {
+    "client.back": "Элемент стиля|255,255,255",
+    "client.text": "Элемент стиля|255,255,255",
+    "css.back.background": "rgb(255, 255, 255)",
+    "css.text.color": "rgb(255, 255, 255)",
+    "form_server.back": "Элемент стиля|255,255,255",
+    "form_server.text": "Элемент стиля|255,255,255"
+   },
+   "v85": {
+    "client.back": "Элемент стиля|77,77,84",
+    "client.text": "Элемент стиля|77,77,84",
+    "css.back.background": "rgb(155, 155, 163)",
+    "css.text.color": "rgb(28, 28, 31)",
+    "form_server.back": "Элемент стиля|77,77,84",
+    "form_server.text": "Элемент стиля|77,77,84"
+   }
+  }
+ },
+ {
+  "collection": "ЦветаСтиля",
+  "en": "ButtonTextColor",
+  "id": -21,
+  "ru": "ЦветТекстаКнопки",
+  "server": "89,67,4",
+  "web": {
+   "dark": {
+    "client.back": "Элемент стиля|237,237,242",
+    "client.text": "Элемент стиля|237,237,242",
+    "css.back.background": "rgb(157, 157, 166)",
+    "css.text.color": "rgb(237, 237, 242)",
+    "form_server.back": "Элемент стиля|237,237,242",
+    "form_server.text": "Элемент стиля|237,237,242"
+   },
+   "taxi": {
+    "client.back": "Элемент стиля|77,77,77",
+    "client.text": "Элемент стиля|77,77,77",
+    "css.back.background": "rgb(77, 77, 77)",
+    "css.text.color": "rgb(77, 77, 77)",
+    "form_server.back": "Элемент стиля|77,77,77",
+    "form_server.text": "Элемент стиля|77,77,77"
+   },
+   "v85": {
+    "client.back": "Элемент стиля|28,28,31",
+    "client.text": "Элемент стиля|28,28,31",
+    "css.back.background": "rgb(102, 102, 110)",
+    "css.text.color": "rgb(28, 28, 31)",
+    "form_server.back": "Элемент стиля|28,28,31",
+    "form_server.text": "Элемент стиля|28,28,31"
+   }
+  }
+ },
+ {
+  "collection": "ЦветаСтиля",
+  "en": "TableFooterTextColor",
+  "id": -38,
+  "ru": "ЦветТекстаПодвалаТаблицы",
+  "server": "89,67,4",
+  "web": {
+   "dark": {
+    "client.back": "Элемент стиля|237,237,242",
+    "client.text": "Элемент стиля|237,237,242",
+    "css.back.background": "rgb(157, 157, 166)",
+    "css.text.color": "rgb(237, 237, 242)",
+    "form_server.back": "Элемент стиля|237,237,242",
+    "form_server.text": "Элемент стиля|237,237,242"
+   },
+   "taxi": {
+    "client.back": "Элемент стиля|77,77,77",
+    "client.text": "Элемент стиля|77,77,77",
+    "css.back.background": "rgb(77, 77, 77)",
+    "css.text.color": "rgb(77, 77, 77)",
+    "form_server.back": "Элемент стиля|77,77,77",
+    "form_server.text": "Элемент стиля|77,77,77"
+   },
+   "v85": {
+    "client.back": "Элемент стиля|28,28,31",
+    "client.text": "Элемент стиля|28,28,31",
+    "css.back.background": "rgb(102, 102, 110)",
+    "css.text.color": "rgb(28, 28, 31)",
+    "form_server.back": "Элемент стиля|28,28,31",
+    "form_server.text": "Элемент стиля|28,28,31"
+   }
+  }
+ },
+ {
+  "collection": "ЦветаСтиля",
+  "en": "ToolTipTextColor",
+  "id": -24,
+  "ru": "ЦветТекстаПодсказки",
+  "server": "0,0,0",
+  "web": {
+   "dark": {
+    "client.back": "Элемент стиля|237,237,242",
+    "client.text": "Элемент стиля|237,237,242",
+    "css.back.background": "rgb(157, 157, 166)",
+    "css.text.color": "rgb(237, 237, 242)",
+    "form_server.back": "Элемент стиля|237,237,242",
+    "form_server.text": "Элемент стиля|237,237,242"
+   },
+   "taxi": {
+    "client.back": "Элемент стиля|0,0,0",
+    "client.text": "Элемент стиля|0,0,0",
+    "css.back.background": "rgb(0, 0, 0)",
+    "css.text.color": "rgb(0, 0, 0)",
+    "form_server.back": "Элемент стиля|0,0,0",
+    "form_server.text": "Элемент стиля|0,0,0"
+   },
+   "v85": {
+    "client.back": "Элемент стиля|28,28,31",
+    "client.text": "Элемент стиля|28,28,31",
+    "css.back.background": "rgb(102, 102, 110)",
+    "css.text.color": "rgb(28, 28, 31)",
+    "form_server.back": "Элемент стиля|28,28,31",
+    "form_server.text": "Элемент стиля|28,28,31"
+   }
+  }
+ },
+ {
+  "collection": "ЦветаСтиля",
+  "en": "FieldTextColor",
+  "id": -11,
+  "ru": "ЦветТекстаПоля",
+  "server": "0,0,0",
+  "web": {
+   "dark": {
+    "client.back": "Элемент стиля|184,184,191",
+    "client.text": "Элемент стиля|184,184,191",
+    "css.back.background": "rgb(107, 107, 115)",
+    "css.text.color": "rgb(237, 237, 242)",
+    "form_server.back": "Элемент стиля|184,184,191",
+    "form_server.text": "Элемент стиля|184,184,191"
+   },
+   "taxi": {
+    "client.back": "Элемент стиля|51,51,51",
+    "client.text": "Элемент стиля|51,51,51",
+    "css.back.background": "rgb(51, 51, 51)",
+    "css.text.color": "rgb(51, 51, 51)",
+    "form_server.back": "Элемент стиля|51,51,51",
+    "form_server.text": "Элемент стиля|51,51,51"
+   },
+   "v85": {
+    "client.back": "Элемент стиля|77,77,84",
+    "client.text": "Элемент стиля|77,77,84",
+    "css.back.background": "rgb(155, 155, 163)",
+    "css.text.color": "rgb(28, 28, 31)",
+    "form_server.back": "Элемент стиля|77,77,84",
+    "form_server.text": "Элемент стиля|77,77,84"
+   }
+  }
+ },
+ {
+  "collection": "ЦветаСтиля",
+  "en": "FormTextColor",
+  "id": -3,
+  "ru": "ЦветТекстаФормы",
+  "server": "65,48,3",
+  "web": {
+   "dark": {
+    "client.back": "Элемент стиля|237,237,242",
+    "client.text": "Элемент стиля|237,237,242",
+    "css.back.background": "rgb(157, 157, 166)",
+    "css.text.color": "rgb(237, 237, 242)",
+    "form_server.back": "Элемент стиля|237,237,242",
+    "form_server.text": "Элемент стиля|237,237,242"
+   },
+   "taxi": {
+    "client.back": "Элемент стиля|51,51,51",
+    "client.text": "Элемент стиля|51,51,51",
+    "css.back.background": "rgb(51, 51, 51)",
+    "css.text.color": "rgb(51, 51, 51)",
+    "form_server.back": "Элемент стиля|51,51,51",
+    "form_server.text": "Элемент стиля|51,51,51"
+   },
+   "v85": {
+    "client.back": "Элемент стиля|28,28,31",
+    "client.text": "Элемент стиля|28,28,31",
+    "css.back.background": "rgb(102, 102, 110)",
+    "css.text.color": "rgb(28, 28, 31)",
+    "form_server.back": "Элемент стиля|28,28,31",
+    "form_server.text": "Элемент стиля|28,28,31"
+   }
+  }
+ },
+ {
+  "collection": "ЦветаСтиля",
+  "en": "TableHeaderTextColor",
+  "id": -36,
+  "ru": "ЦветТекстаШапкиТаблицы",
+  "server": "89,67,4",
+  "web": {
+   "dark": {
+    "client.back": "Элемент стиля|77,77,77",
+    "client.text": "Элемент стиля|77,77,77",
+    "css.back.background": "rgb(194, 194, 194)",
+    "css.text.color": "rgb(232, 232, 232)",
+    "form_server.back": "Элемент стиля|217,217,217",
+    "form_server.text": "Элемент стиля|217,217,217"
+   },
+   "taxi": {
+    "client.back": "Элемент стиля|77,77,77",
+    "client.text": "Элемент стиля|77,77,77",
+    "css.back.background": "rgb(77, 77, 77)",
+    "css.text.color": "rgb(77, 77, 77)",
+    "form_server.back": "Элемент стиля|77,77,77",
+    "form_server.text": "Элемент стиля|77,77,77"
+   },
+   "v85": {
+    "client.back": "Элемент стиля|77,77,77",
+    "client.text": "Элемент стиля|77,77,77",
+    "css.back.background": "rgb(99, 99, 99)",
+    "css.text.color": "rgb(61, 61, 61)",
+    "form_server.back": "Элемент стиля|77,77,77",
+    "form_server.text": "Элемент стиля|77,77,77"
+   }
+  }
+ },
+ {
+  "collection": "ЦветаСтиля",
+  "en": "FieldSelectionBackColor",
+  "id": -14,
+  "ru": "ЦветФонаВыделенияПоля",
+  "server": "83,106,194",
+  "web": {
+   "dark": {
+    "client.back": "Элемент стиля|39,74,112",
+    "client.text": "Элемент стиля|39,74,112",
+    "css.back.background": "rgb(25, 44, 64)",
+    "css.text.color": "rgb(52, 126, 207)",
+    "form_server.back": "Элемент стиля|39,74,112",
+    "form_server.text": "Элемент стиля|39,74,112"
+   },
+   "taxi": {
+    "client.back": "Элемент стиля|83,106,194",
+    "client.text": "Элемент стиля|83,106,194",
+    "css.back.background": "rgb(83, 106, 194)",
+    "css.text.color": "rgb(83, 106, 194)",
+    "form_server.back": "Элемент стиля|83,106,194",
+    "form_server.text": "Элемент стиля|83,106,194"
+   },
+   "v85": {
+    "client.back": "Элемент стиля|171,211,255",
+    "client.text": "Элемент стиля|171,211,255",
+    "css.back.background": "rgb(229, 242, 255)",
+    "css.text.color": "rgb(56, 151, 255)",
+    "form_server.back": "Элемент стиля|171,211,255",
+    "form_server.text": "Элемент стиля|171,211,255"
+   }
+  }
+ },
+ {
+  "collection": "ЦветаСтиля",
+  "en": "ReportGroup1BackColor",
+  "id": -26,
+  "ru": "ЦветФонаГруппировкиОтчета1",
+  "server": "248,242,216",
+  "web": {
+   "dark": {
+    "client.back": "Элемент стиля|248,242,216",
+    "client.text": "Элемент стиля|248,242,216",
+    "css.back.background": "rgb(36, 32, 16)",
+    "css.text.color": "rgb(122, 116, 89)",
+    "form_server.back": "Элемент стиля|59,54,33",
+    "form_server.text": "Элемент стиля|59,54,33"
+   },
+   "taxi": {
+    "client.back": "Элемент стиля|248,242,216",
+    "client.text": "Элемент стиля|248,242,216",
+    "css.back.background": "rgb(248, 242, 216)",
+    "css.text.color": "rgb(248, 242, 216)",
+    "form_server.back": "Элемент стиля|248,242,216",
+    "form_server.text": "Элемент стиля|248,242,216"
+   },
+   "v85": {
+    "client.back": "Элемент стиля|248,242,216",
+    "client.text": "Элемент стиля|248,242,216",
+    "css.back.background": "rgb(252, 250, 240)",
+    "css.text.color": "rgb(186, 180, 151)",
+    "form_server.back": "Элемент стиля|248,242,216",
+    "form_server.text": "Элемент стиля|248,242,216"
+   }
+  }
+ },
+ {
+  "collection": "ЦветаСтиля",
+  "en": "ReportGroup2BackColor",
+  "id": -27,
+  "ru": "ЦветФонаГруппировкиОтчета2",
+  "server": "251,249,236",
+  "web": {
+   "dark": {
+    "client.back": "Элемент стиля|251,249,236",
+    "client.text": "Элемент стиля|251,249,236",
+    "css.back.background": "rgb(28, 26, 13)",
+    "css.text.color": "rgb(110, 107, 87)",
+    "form_server.back": "Элемент стиля|46,44,31",
+    "form_server.text": "Элемент стиля|46,44,31"
+   },
+   "taxi": {
+    "client.back": "Элемент стиля|251,249,236",
+    "client.text": "Элемент стиля|251,249,236",
+    "css.back.background": "rgb(251, 249, 236)",
+    "css.text.color": "rgb(251, 249, 236)",
+    "form_server.back": "Элемент стиля|251,249,236",
+    "form_server.text": "Элемент стиля|251,249,236"
+   },
+   "v85": {
+    "client.back": "Элемент стиля|251,249,236",
+    "client.text": "Элемент стиля|251,249,236",
+    "css.back.background": "rgb(255, 254, 250)",
+    "css.text.color": "rgb(189, 186, 172)",
+    "form_server.back": "Элемент стиля|251,249,236",
+    "form_server.text": "Элемент стиля|251,249,236"
+   }
+  }
+ },
+ {
+  "collection": "ЦветаСтиля",
+  "en": "ButtonBackColor",
+  "id": -7,
+  "ru": "ЦветФонаКнопки",
+  "server": "245,242,221",
+  "web": {
+   "dark": {
+    "client.back": "Элемент стиля|87,87,87",
+    "client.text": "Элемент стиля|87,87,87",
+    "css.back.background": "rgb(64, 64, 64)",
+    "css.text.color": "rgb(130, 130, 130)",
+    "form_server.back": "Элемент стиля|87,87,87",
+    "form_server.text": "Элемент стиля|87,87,87"
+   },
+   "taxi": {
+    "client.back": "Элемент стиля|255,255,255",
+    "client.text": "Элемент стиля|255,255,255",
+    "css.back.background": "rgb(255, 255, 255)",
+    "css.text.color": "rgb(255, 255, 255)",
+    "form_server.back": "Элемент стиля|255,255,255",
+    "form_server.text": "Элемент стиля|255,255,255"
+   },
+   "v85": {
+    "client.back": "Элемент стиля|219,219,219",
+    "client.text": "Элемент стиля|219,219,219",
+    "css.back.background": "rgb(242, 242, 242)",
+    "css.text.color": "rgb(176, 176, 176)",
+    "form_server.back": "Элемент стиля|219,219,219",
+    "form_server.text": "Элемент стиля|219,219,219"
+   }
+  }
+ },
+ {
+  "collection": "ЦветаСтиля",
+  "en": "TableFooterBackColor",
+  "id": -37,
+  "ru": "ЦветФонаПодвалаТаблицы",
+  "server": "245,242,221",
+  "web": {
+   "dark": {
+    "client.back": "Элемент стиля|250,250,250",
+    "client.text": "Элемент стиля|250,250,250",
+    "css.back.background": "rgb(8, 8, 8)",
+    "css.text.color": "rgb(13, 13, 13)",
+    "form_server.back": "Элемент стиля|10,10,10",
+    "form_server.text": "Элемент стиля|10,10,10"
+   },
+   "taxi": {
+    "client.back": "Элемент стиля|250,250,250",
+    "client.text": "Элемент стиля|250,250,250",
+    "css.back.background": "rgb(250, 250, 250)",
+    "css.text.color": "rgb(250, 250, 250)",
+    "form_server.back": "Элемент стиля|250,250,250",
+    "form_server.text": "Элемент стиля|250,250,250"
+   },
+   "v85": {
+    "client.back": "Элемент стиля|250,250,250",
+    "client.text": "Элемент стиля|250,250,250",
+    "css.back.background": "rgb(252, 252, 252)",
+    "css.text.color": "rgb(247, 247, 247)",
+    "form_server.back": "Элемент стиля|250,250,250",
+    "form_server.text": "Элемент стиля|250,250,250"
+   }
+  }
+ },
+ {
+  "collection": "ЦветаСтиля",
+  "en": "ToolTipBackColor",
+  "id": -23,
+  "ru": "ЦветФонаПодсказки",
+  "server": "255,250,222",
+  "web": {
+   "dark": {
+    "client.back": "Элемент стиля|255,250,217",
+    "client.text": "Элемент стиля|255,250,217",
+    "css.back.background": "rgb(41, 37, 15)",
+    "css.text.color": "rgb(128, 121, 75)",
+    "form_server.back": "Элемент стиля|60,53,17",
+    "form_server.text": "Элемент стиля|60,53,17"
+   },
+   "taxi": {
+    "client.back": "Элемент стиля|255,250,217",
+    "client.text": "Элемент стиля|255,250,217",
+    "css.back.background": "rgb(255, 250, 217)",
+    "css.text.color": "rgb(255, 250, 217)",
+    "form_server.back": "Элемент стиля|255,250,222",
+    "form_server.text": "Элемент стиля|255,250,222"
+   },
+   "v85": {
+    "client.back": "Элемент стиля|255,250,217",
+    "client.text": "Элемент стиля|255,250,217",
+    "css.back.background": "rgb(255, 253, 240)",
+    "css.text.color": "rgb(191, 186, 149)",
+    "form_server.back": "Элемент стиля|255,250,222",
+    "form_server.text": "Элемент стиля|255,250,222"
+   }
+  }
+ },
+ {
+  "collection": "ЦветаСтиля",
+  "en": "FieldBackColor",
+  "id": -10,
+  "ru": "ЦветФонаПоля",
+  "server": "255,255,255",
+  "web": {
+   "dark": {
+    "client.back": "Элемент стиля|26,26,26",
+    "client.text": "Элемент стиля|26,26,26",
+    "css.back.background": "rgb(26, 26, 26)",
+    "css.text.color": "rgb(26, 26, 26)",
+    "form_server.back": "Элемент стиля|26,26,26",
+    "form_server.text": "Элемент стиля|26,26,26"
+   },
+   "taxi": {
+    "client.back": "Элемент стиля|255,255,255",
+    "client.text": "Элемент стиля|255,255,255",
+    "css.back.background": "rgb(255, 255, 255)",
+    "css.text.color": "rgb(255, 255, 255)",
+    "form_server.back": "Элемент стиля|255,255,255",
+    "form_server.text": "Элемент стиля|255,255,255"
+   },
+   "v85": {
+    "client.back": "Элемент стиля|255,255,255",
+    "client.text": "Элемент стиля|255,255,255",
+    "css.back.background": "rgb(255, 255, 255)",
+    "css.text.color": "rgb(255, 255, 255)",
+    "form_server.back": "Элемент стиля|255,255,255",
+    "form_server.text": "Элемент стиля|255,255,255"
+   }
+  }
+ },
+ {
+  "collection": "ЦветаСтиля",
+  "en": "FormBackColor",
+  "id": -1,
+  "ru": "ЦветФонаФормы",
+  "server": "252,250,235",
+  "web": {
+   "dark": {
+    "client.back": "Элемент стиля|26,26,26",
+    "client.text": "Элемент стиля|26,26,26",
+    "css.back.background": "rgb(26, 26, 26)",
+    "css.text.color": "rgb(26, 26, 26)",
+    "form_server.back": "Элемент стиля|26,26,26",
+    "form_server.text": "Элемент стиля|26,26,26"
+   },
+   "taxi": {
+    "client.back": "Элемент стиля|255,255,255",
+    "client.text": "Элемент стиля|255,255,255",
+    "css.back.background": "rgb(255, 255, 255)",
+    "css.text.color": "rgb(255, 255, 255)",
+    "form_server.back": "Элемент стиля|255,255,255",
+    "form_server.text": "Элемент стиля|255,255,255"
+   },
+   "v85": {
+    "client.back": "Элемент стиля|255,255,255",
+    "client.text": "Элемент стиля|255,255,255",
+    "css.back.background": "rgb(255, 255, 255)",
+    "css.text.color": "rgb(255, 255, 255)",
+    "form_server.back": "Элемент стиля|255,255,255",
+    "form_server.text": "Элемент стиля|255,255,255"
+   }
+  }
+ },
+ {
+  "collection": "ЦветаСтиля",
+  "en": "ReportHeaderBackColor",
+  "id": -25,
+  "ru": "ЦветФонаШапкиОтчета",
+  "server": "244,236,197",
+  "web": {
+   "dark": {
+    "client.back": "Элемент стиля|64,64,64",
+    "client.text": "Элемент стиля|64,64,64",
+    "css.back.background": "rgb(64, 64, 64)",
+    "css.text.color": "rgb(110, 110, 110)",
+    "form_server.back": "Элемент стиля|64,64,64",
+    "form_server.text": "Элемент стиля|64,64,64"
+   },
+   "taxi": {
+    "client.back": "Элемент стиля|244,236,197",
+    "client.text": "Элемент стиля|244,236,197",
+    "css.back.background": "rgb(244, 236, 197)",
+    "css.text.color": "rgb(244, 236, 197)",
+    "form_server.back": "Элемент стиля|244,236,197",
+    "form_server.text": "Элемент стиля|244,236,197"
+   },
+   "v85": {
+    "client.back": "Элемент стиля|242,242,242",
+    "client.text": "Элемент стиля|242,242,242",
+    "css.back.background": "rgb(242, 242, 242)",
+    "css.text.color": "rgb(199, 199, 199)",
+    "form_server.back": "Элемент стиля|242,242,242",
+    "form_server.text": "Элемент стиля|242,242,242"
+   }
+  }
+ },
+ {
+  "collection": "ЦветаСтиля",
+  "en": "TableHeaderBackColor",
+  "id": -35,
+  "ru": "ЦветФонаШапкиТаблицы",
+  "server": "245,242,221",
+  "web": {
+   "dark": {
+    "client.back": "Элемент стиля|250,250,250",
+    "client.text": "Элемент стиля|250,250,250",
+    "css.back.background": "rgb(8, 8, 8)",
+    "css.text.color": "rgb(13, 13, 13)",
+    "form_server.back": "Элемент стиля|10,10,10",
+    "form_server.text": "Элемент стиля|10,10,10"
+   },
+   "taxi": {
+    "client.back": "Элемент стиля|250,250,250",
+    "client.text": "Элемент стиля|250,250,250",
+    "css.back.background": "rgb(250, 250, 250)",
+    "css.text.color": "rgb(250, 250, 250)",
+    "form_server.back": "Элемент стиля|250,250,250",
+    "form_server.text": "Элемент стиля|250,250,250"
+   },
+   "v85": {
+    "client.back": "Элемент стиля|250,250,250",
+    "client.text": "Элемент стиля|250,250,250",
+    "css.back.background": "rgb(252, 252, 252)",
+    "css.text.color": "rgb(247, 247, 247)",
+    "form_server.back": "Элемент стиля|250,250,250",
+    "form_server.text": "Элемент стиля|250,250,250"
+   }
+  }
+ },
+ {
+  "collection": "ШрифтыСтиля",
+  "en": "TitleLevel2",
+  "id": -59,
+  "ru": "ЗаголовокВторогоУровня",
+  "server": "name=MS Shell Dlg;size=12;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100",
+  "web": {
+   "dark": {
+    "client.font": "Элемент стиля|name=Roboto;size=12;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100",
+    "css.font": "Almarai, Roboto, sans-serif|16px|400|normal",
+    "form_server.font": "Элемент стиля|name=Roboto;size=12;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100"
+   },
+   "taxi": {
+    "client.font": "Элемент стиля|name=Arial;size=15;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100",
+    "css.font": "Almarai, Arial, sans-serif|20px|400|normal",
+    "form_server.font": "Элемент стиля|name=Arial;size=15;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100"
+   },
+   "v85": {
+    "client.font": "Элемент стиля|name=Roboto;size=12;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100",
+    "css.font": "Almarai, Roboto, sans-serif|16px|400|normal",
+    "form_server.font": "Элемент стиля|name=Roboto;size=12;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100"
+   }
+  }
+ },
+ {
+  "collection": "ШрифтыСтиля",
+  "en": "TitleLevel1",
+  "id": -48,
+  "ru": "ЗаголовокПервогоУровня",
+  "server": "name=MS Shell Dlg;size=15;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100",
+  "web": {
+   "dark": {
+    "client.font": "Элемент стиля|name=Roboto;size=14;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100",
+    "css.font": "Almarai, Roboto, sans-serif|18.6667px|400|normal",
+    "form_server.font": "Элемент стиля|name=Roboto;size=14;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100"
+   },
+   "taxi": {
+    "client.font": "Элемент стиля|name=Arial;size=18;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100",
+    "css.font": "Almarai, Arial, sans-serif|24px|400|normal",
+    "form_server.font": "Элемент стиля|name=Arial;size=18;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100"
+   },
+   "v85": {
+    "client.font": "Элемент стиля|name=Roboto;size=14;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100",
+    "css.font": "Almarai, Roboto, sans-serif|18.6667px|400|normal",
+    "form_server.font": "Элемент стиля|name=Roboto;size=14;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100"
+   }
+  }
+ },
+ {
+  "collection": "ШрифтыСтиля",
+  "en": "TitleLevel5",
+  "id": -52,
+  "ru": "ЗаголовокПятогоУровня",
+  "server": "name=MS Shell Dlg;size=6;bold=Да;italic=Нет;underline=Нет;strike=Нет;scale=100",
+  "web": {
+   "dark": {
+    "client.font": "Элемент стиля|name=Roboto Medium;size=8;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100",
+    "css.font": "Almarai, \"Roboto Medium\", sans-serif|10.6667px|400|normal",
+    "form_server.font": "Элемент стиля|name=Roboto Medium;size=8;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100"
+   },
+   "taxi": {
+    "client.font": "Элемент стиля|name=Arial;size=8;bold=Да;italic=Нет;underline=Нет;strike=Нет;scale=100",
+    "css.font": "Almarai, Arial, sans-serif|10.6667px|700|normal",
+    "form_server.font": "Элемент стиля|name=Arial;size=8;bold=Да;italic=Нет;underline=Нет;strike=Нет;scale=100"
+   },
+   "v85": {
+    "client.font": "Элемент стиля|name=Roboto Medium;size=8;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100",
+    "css.font": "Almarai, \"Roboto Medium\", sans-serif|10.6667px|400|normal",
+    "form_server.font": "Элемент стиля|name=Roboto Medium;size=8;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100"
+   }
+  }
+ },
+ {
+  "collection": "ШрифтыСтиля",
+  "en": "TitleLevel3",
+  "id": -50,
+  "ru": "ЗаголовокТретьегоУровня",
+  "server": "name=MS Shell Dlg;size=9;bold=Да;italic=Нет;underline=Нет;strike=Нет;scale=100",
+  "web": {
+   "dark": {
+    "client.font": "Элемент стиля|name=Roboto Medium;size=10;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100",
+    "css.font": "Almarai, \"Roboto Medium\", sans-serif|13.3333px|400|normal",
+    "form_server.font": "Элемент стиля|name=Roboto Medium;size=10;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100"
+   },
+   "taxi": {
+    "client.font": "Элемент стиля|name=Arial;size=12;bold=Да;italic=Нет;underline=Нет;strike=Нет;scale=100",
+    "css.font": "Almarai, Arial, sans-serif|16px|700|normal",
+    "form_server.font": "Элемент стиля|name=Arial;size=12;bold=Да;italic=Нет;underline=Нет;strike=Нет;scale=100"
+   },
+   "v85": {
+    "client.font": "Элемент стиля|name=Roboto Medium;size=10;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100",
+    "css.font": "Almarai, \"Roboto Medium\", sans-serif|13.3333px|400|normal",
+    "form_server.font": "Элемент стиля|name=Roboto Medium;size=10;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100"
+   }
+  }
+ },
+ {
+  "collection": "ШрифтыСтиля",
+  "en": "TitleLevel4",
+  "id": -51,
+  "ru": "ЗаголовокЧетвертогоУровня",
+  "server": "name=MS Shell Dlg;size=8;bold=Да;italic=Нет;underline=Нет;strike=Нет;scale=100",
+  "web": {
+   "dark": {
+    "client.font": "Элемент стиля|name=Roboto Medium;size=9;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100",
+    "css.font": "Almarai, \"Roboto Medium\", sans-serif|12px|400|normal",
+    "form_server.font": "Элемент стиля|name=Roboto Medium;size=9;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100"
+   },
+   "taxi": {
+    "client.font": "Элемент стиля|name=Arial;size=10;bold=Да;italic=Нет;underline=Нет;strike=Нет;scale=100",
+    "css.font": "Almarai, Arial, sans-serif|13.3333px|700|normal",
+    "form_server.font": "Элемент стиля|name=Arial;size=10;bold=Да;italic=Нет;underline=Нет;strike=Нет;scale=100"
+   },
+   "v85": {
+    "client.font": "Элемент стиля|name=Roboto Medium;size=9;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100",
+    "css.font": "Almarai, \"Roboto Medium\", sans-serif|12px|400|normal",
+    "form_server.font": "Элемент стиля|name=Roboto Medium;size=9;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100"
+   }
+  }
+ },
+ {
+  "collection": "ШрифтыСтиля",
+  "en": "LargeTextFont",
+  "id": -32,
+  "ru": "КрупныйШрифтТекста",
+  "server": "name=MS Shell Dlg;size=9;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100",
+  "web": {
+   "dark": {
+    "client.font": "Элемент стиля|name=Roboto;size=11;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100",
+    "css.font": "Almarai, Roboto, sans-serif|14.6667px|400|normal",
+    "form_server.font": "Элемент стиля|name=Roboto;size=11;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100"
+   },
+   "taxi": {
+    "client.font": "Элемент стиля|name=Arial;size=14;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100",
+    "css.font": "Almarai, Arial, sans-serif|18.6667px|400|normal",
+    "form_server.font": "Элемент стиля|name=Arial;size=14;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100"
+   },
+   "v85": {
+    "client.font": "Элемент стиля|name=Roboto;size=11;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100",
+    "css.font": "Almarai, Roboto, sans-serif|14.6667px|400|normal",
+    "form_server.font": "Элемент стиля|name=Roboto;size=11;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100"
+   }
+  }
+ },
+ {
+  "collection": "ШрифтыСтиля",
+  "en": "SmallTextFont",
+  "id": -30,
+  "ru": "МелкийШрифтТекста",
+  "server": "name=MS Shell Dlg;size=6;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100",
+  "web": {
+   "dark": {
+    "client.font": "Элемент стиля|name=Roboto;size=8;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100",
+    "css.font": "Almarai, Roboto, sans-serif|10.6667px|400|normal",
+    "form_server.font": "Элемент стиля|name=Roboto;size=8;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100"
+   },
+   "taxi": {
+    "client.font": "Элемент стиля|name=Arial;size=8;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100",
+    "css.font": "Almarai, Arial, sans-serif|10.6667px|400|normal",
+    "form_server.font": "Элемент стиля|name=Arial;size=8;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100"
+   },
+   "v85": {
+    "client.font": "Элемент стиля|name=Roboto;size=8;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100",
+    "css.font": "Almarai, Roboto, sans-serif|10.6667px|400|normal",
+    "form_server.font": "Элемент стиля|name=Roboto;size=8;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100"
+   }
+  }
+ },
+ {
+  "collection": "ШрифтыСтиля",
+  "en": "NormalTextFont",
+  "id": -31,
+  "ru": "ОбычныйШрифтТекста",
+  "server": "name=MS Shell Dlg;size=8;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100",
+  "web": {
+   "dark": {
+    "client.font": "Элемент стиля|name=Roboto;size=9;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100",
+    "css.font": "Almarai, Roboto, sans-serif|12px|400|normal",
+    "form_server.font": "Элемент стиля|name=Roboto;size=9;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100"
+   },
+   "taxi": {
+    "client.font": "Элемент стиля|name=Arial;size=10;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100",
+    "css.font": "Almarai, Arial, sans-serif|13.3333px|400|normal",
+    "form_server.font": "Элемент стиля|name=Arial;size=10;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100"
+   },
+   "v85": {
+    "client.font": "Элемент стиля|name=Roboto;size=9;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100",
+    "css.font": "Almarai, Roboto, sans-serif|12px|400|normal",
+    "form_server.font": "Элемент стиля|name=Roboto;size=9;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100"
+   }
+  }
+ },
+ {
+  "collection": "ШрифтыСтиля",
+  "en": "ExtraLargeTextFont",
+  "id": -33,
+  "ru": "ОченьКрупныйШрифтТекста",
+  "server": "name=MS Shell Dlg;size=12;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100",
+  "web": {
+   "dark": {
+    "client.font": "Элемент стиля|name=Roboto;size=14;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100",
+    "css.font": "Almarai, Roboto, sans-serif|18.6667px|400|normal",
+    "form_server.font": "Элемент стиля|name=Roboto;size=14;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100"
+   },
+   "taxi": {
+    "client.font": "Элемент стиля|name=Arial;size=18;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100",
+    "css.font": "Almarai, Arial, sans-serif|24px|400|normal",
+    "form_server.font": "Элемент стиля|name=Arial;size=18;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100"
+   },
+   "v85": {
+    "client.font": "Элемент стиля|name=Roboto;size=14;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100",
+    "css.font": "Almarai, Roboto, sans-serif|18.6667px|400|normal",
+    "form_server.font": "Элемент стиля|name=Roboto;size=14;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100"
+   }
+  }
+ },
+ {
+  "collection": "ШрифтыСтиля",
+  "en": "SubtitleLevel2",
+  "id": -57,
+  "ru": "ПодзаголовокВторогоУровня",
+  "server": "name=MS Shell Dlg;size=5;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100",
+  "web": {
+   "dark": {
+    "client.font": "Элемент стиля|name=Roboto;size=6;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100",
+    "css.font": "Almarai, Roboto, sans-serif|8px|400|normal",
+    "form_server.font": "Элемент стиля|name=Roboto;size=6;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100"
+   },
+   "taxi": {
+    "client.font": "Элемент стиля|name=Arial;size=6;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100",
+    "css.font": "Almarai, Arial, sans-serif|8px|400|normal",
+    "form_server.font": "Элемент стиля|name=Arial;size=6;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100"
+   },
+   "v85": {
+    "client.font": "Элемент стиля|name=Roboto;size=6;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100",
+    "css.font": "Almarai, Roboto, sans-serif|8px|400|normal",
+    "form_server.font": "Элемент стиля|name=Roboto;size=6;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100"
+   }
+  }
+ },
+ {
+  "collection": "ШрифтыСтиля",
+  "en": "SubtitleLevel1",
+  "id": -56,
+  "ru": "ПодзаголовокПервогоУровня",
+  "server": "name=MS Shell Dlg;size=6;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100",
+  "web": {
+   "dark": {
+    "client.font": "Элемент стиля|name=Roboto;size=8;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100",
+    "css.font": "Almarai, Roboto, sans-serif|10.6667px|400|normal",
+    "form_server.font": "Элемент стиля|name=Roboto;size=8;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100"
+   },
+   "taxi": {
+    "client.font": "Элемент стиля|name=Arial;size=8;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100",
+    "css.font": "Almarai, Arial, sans-serif|10.6667px|400|normal",
+    "form_server.font": "Элемент стиля|name=Arial;size=8;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100"
+   },
+   "v85": {
+    "client.font": "Элемент стиля|name=Roboto;size=8;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100",
+    "css.font": "Almarai, Roboto, sans-serif|10.6667px|400|normal",
+    "form_server.font": "Элемент стиля|name=Roboto;size=8;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100"
+   }
+  }
+ },
+ {
+  "collection": "ШрифтыСтиля",
+  "en": "TextLevel2",
+  "id": -54,
+  "ru": "ТекстВторогоУровня",
+  "server": "name=MS Shell Dlg;size=9;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100",
+  "web": {
+   "dark": {
+    "client.font": "Элемент стиля|name=Roboto;size=10;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100",
+    "css.font": "Almarai, Roboto, sans-serif|13.3333px|400|normal",
+    "form_server.font": "Элемент стиля|name=Roboto;size=10;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100"
+   },
+   "taxi": {
+    "client.font": "Элемент стиля|name=Arial;size=12;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100",
+    "css.font": "Almarai, Arial, sans-serif|16px|400|normal",
+    "form_server.font": "Элемент стиля|name=Arial;size=12;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100"
+   },
+   "v85": {
+    "client.font": "Элемент стиля|name=Roboto;size=10;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100",
+    "css.font": "Almarai, Roboto, sans-serif|13.3333px|400|normal",
+    "form_server.font": "Элемент стиля|name=Roboto;size=10;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100"
+   }
+  }
+ },
+ {
+  "collection": "ШрифтыСтиля",
+  "en": "TextLevel1",
+  "id": -53,
+  "ru": "ТекстПервогоУровня",
+  "server": "name=MS Shell Dlg;size=12;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100",
+  "web": {
+   "dark": {
+    "client.font": "Элемент стиля|name=Roboto;size=11;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100",
+    "css.font": "Almarai, Roboto, sans-serif|14.6667px|400|normal",
+    "form_server.font": "Элемент стиля|name=Roboto;size=11;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100"
+   },
+   "taxi": {
+    "client.font": "Элемент стиля|name=Arial;size=14;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100",
+    "css.font": "Almarai, Arial, sans-serif|18.6667px|400|normal",
+    "form_server.font": "Элемент стиля|name=Arial;size=14;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100"
+   },
+   "v85": {
+    "client.font": "Элемент стиля|name=Roboto;size=11;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100",
+    "css.font": "Almarai, Roboto, sans-serif|14.6667px|400|normal",
+    "form_server.font": "Элемент стиля|name=Roboto;size=11;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100"
+   }
+  }
+ },
+ {
+  "collection": "ШрифтыСтиля",
+  "en": "TextLevel3",
+  "id": -55,
+  "ru": "ТекстТретьегоУровня",
+  "server": "name=MS Shell Dlg;size=8;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100",
+  "web": {
+   "dark": {
+    "client.font": "Элемент стиля|name=Roboto;size=9;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100",
+    "css.font": "Almarai, Roboto, sans-serif|12px|400|normal",
+    "form_server.font": "Элемент стиля|name=Roboto;size=9;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100"
+   },
+   "taxi": {
+    "client.font": "Элемент стиля|name=Arial;size=10;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100",
+    "css.font": "Almarai, Arial, sans-serif|13.3333px|400|normal",
+    "form_server.font": "Элемент стиля|name=Arial;size=10;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100"
+   },
+   "v85": {
+    "client.font": "Элемент стиля|name=Roboto;size=9;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100",
+    "css.font": "Almarai, Roboto, sans-serif|12px|400|normal",
+    "form_server.font": "Элемент стиля|name=Roboto;size=9;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100"
+   }
+  }
+ },
+ {
+  "collection": "ШрифтыСтиля",
+  "en": "TextFont",
+  "id": -20,
+  "ru": "ШрифтТекста",
+  "server": "name=MS Shell Dlg;size=8;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100",
+  "web": {
+   "dark": {
+    "client.font": "Элемент стиля|name=Roboto;size=9;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100",
+    "css.font": "Almarai, Roboto, sans-serif|12px|400|normal",
+    "form_server.font": "Элемент стиля|name=MS Shell Dlg;size=8;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100"
+   },
+   "taxi": {
+    "client.font": "Элемент стиля|name=Arial;size=10;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100",
+    "css.font": "Almarai, Arial, sans-serif|13.3333px|400|normal",
+    "form_server.font": "Элемент стиля|name=MS Shell Dlg;size=8;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100"
+   },
+   "v85": {
+    "client.font": "Элемент стиля|name=Roboto;size=9;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100",
+    "css.font": "Almarai, Roboto, sans-serif|12px|400|normal",
+    "form_server.font": "Элемент стиля|name=MS Shell Dlg;size=8;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100"
+   }
+  }
+ },
+ {
+  "collection": "РамкиСтиля",
+  "en": "ControlBorder",
+  "id": -18,
+  "ru": "РамкаЭлементаУправления",
+  "server": "{\"border\":\"\",\"kind\":\"Элемент стиля\",\"width\":-1}",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "Aquamarine",
+  "id": 4,
+  "ru": "Аквамарин",
+  "server": "127,255,212",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "AliceBlue",
+  "id": 1,
+  "ru": "АкварельноСиний",
+  "server": "240,248,255",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "AntiqueWhite",
+  "id": 2,
+  "ru": "АнтикБелый",
+  "server": "250,235,215",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "Beige",
+  "id": 6,
+  "ru": "Бежевый",
+  "server": "245,245,220",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "Snow",
+  "id": 132,
+  "ru": "Белоснежный",
+  "server": "255,250,250",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "White",
+  "id": 143,
+  "ru": "Белый",
+  "server": "255,255,255",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "Turquoise",
+  "id": 139,
+  "ru": "Бирюзовый",
+  "server": "64,224,208",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "PaleTurquoise",
+  "id": 110,
+  "ru": "БледноБирюзовый",
+  "server": "175,238,238",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "PaleGreen",
+  "id": 109,
+  "ru": "БледноЗеленый",
+  "server": "152,251,152",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "PaleGoldenrod",
+  "id": 108,
+  "ru": "БледноЗолотистый",
+  "server": "238,232,170",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "PaleVioletRed",
+  "id": 111,
+  "ru": "БледноКрасноФиолетовый",
+  "server": "219,112,147",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "Lavender",
+  "id": 61,
+  "ru": "БледноЛиловый",
+  "server": "230,230,250",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "BlanchedAlmond",
+  "id": 9,
+  "ru": "БледноМиндальный",
+  "server": "255,235,205",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "Thistle",
+  "id": 137,
+  "ru": "БледноСиреневый",
+  "server": "216,191,216",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "CornFlowerBlue",
+  "id": 18,
+  "ru": "Васильковый",
+  "server": "100,149,237",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "SpringGreen",
+  "id": 133,
+  "ru": "ВесеннеЗеленый",
+  "server": "0,255,127",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "LightBlue",
+  "id": 65,
+  "ru": "Голубой",
+  "server": "166,202,240",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "LavenderBlush",
+  "id": 62,
+  "ru": "ГолубойСКраснымОттенком",
+  "server": "255,240,245",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "LightSteelBlue",
+  "id": 78,
+  "ru": "ГолубойСоСтальнымОттенком",
+  "server": "176,196,222",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "SlateGray",
+  "id": 131,
+  "ru": "ГрифельноСерый",
+  "server": "112,128,144",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "SlateBlue",
+  "id": 130,
+  "ru": "ГрифельноСиний",
+  "server": "106,90,205",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "BurlyWood",
+  "id": 13,
+  "ru": "Древесный",
+  "server": "222,184,135",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "WhiteSmoke",
+  "id": 144,
+  "ru": "ДымчатоБелый",
+  "server": "245,245,245",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "YellowGreen",
+  "id": 146,
+  "ru": "ЖелтоЗеленый",
+  "server": "154,205,50",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "Yellow",
+  "id": 145,
+  "ru": "Желтый",
+  "server": "255,255,0",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "Moccasin",
+  "id": 99,
+  "ru": "ЗамшаСветлый",
+  "server": "255,228,181",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "LawnGreen",
+  "id": 63,
+  "ru": "ЗеленаяЛужайка",
+  "server": "124,252,0",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "Chartreuse",
+  "id": 15,
+  "ru": "ЗеленоватоЖелтый",
+  "server": "127,255,0",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "Lime",
+  "id": 80,
+  "ru": "ЗеленоватоЛимонный",
+  "server": "0,255,0",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "GreenYellow",
+  "id": 54,
+  "ru": "ЗеленоЖелтый",
+  "server": "173,255,47",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "Green",
+  "id": 53,
+  "ru": "Зеленый",
+  "server": "0,128,0",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "ForestGreen",
+  "id": 46,
+  "ru": "ЗеленыйЛес",
+  "server": "34,139,34",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "Goldenrod",
+  "id": 51,
+  "ru": "Золотистый",
+  "server": "218,165,32",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "Gold",
+  "id": 50,
+  "ru": "Золотой",
+  "server": "255,215,0",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "Indigo",
+  "id": 58,
+  "ru": "Индиго",
+  "server": "75,0,130",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "IndianRed",
+  "id": 57,
+  "ru": "Киноварь",
+  "server": "205,92,92",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "FireBrick",
+  "id": 44,
+  "ru": "Кирпичный",
+  "server": "178,34,34",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "SaddleBrown",
+  "id": 122,
+  "ru": "КожаноКоричневый",
+  "server": "139,69,19",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "Coral",
+  "id": 17,
+  "ru": "Коралловый",
+  "server": "255,127,80",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "Brown",
+  "id": 12,
+  "ru": "Коричневый",
+  "server": "165,42,42",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "RoyalBlue",
+  "id": 121,
+  "ru": "КоролевскиГолубой",
+  "server": "65,105,225",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "VioletRed",
+  "id": 141,
+  "ru": "КрасноФиолетовый",
+  "server": "208,32,144",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "Red",
+  "id": 119,
+  "ru": "Красный",
+  "server": "255,0,0",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "Cream",
+  "id": 20,
+  "ru": "Кремовый",
+  "server": "255,251,240",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "Azure",
+  "id": 5,
+  "ru": "Лазурный",
+  "server": "240,255,255",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "LimeGreen",
+  "id": 81,
+  "ru": "ЛимонноЗеленый",
+  "server": "50,205,50",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "LemonChiffon",
+  "id": 64,
+  "ru": "Лимонный",
+  "server": "255,250,205",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "Salmon",
+  "id": 123,
+  "ru": "Лосось",
+  "server": "250,128,114",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "LightSalmon",
+  "id": 73,
+  "ru": "ЛососьСветлый",
+  "server": "255,160,122",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "DarkSalmon",
+  "id": 34,
+  "ru": "ЛососьТемный",
+  "server": "233,150,122",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "Linen",
+  "id": 82,
+  "ru": "Льняной",
+  "server": "250,240,230",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "Crimson",
+  "id": 21,
+  "ru": "Малиновый",
+  "server": "220,20,60",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "MintCream",
+  "id": 97,
+  "ru": "МятныйКрем",
+  "server": "245,255,250",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "NavajoWhite",
+  "id": 100,
+  "ru": "НавахоБелый",
+  "server": "255,222,173",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "DeepSkyBlue",
+  "id": 41,
+  "ru": "НасыщенноНебесноГолубой",
+  "server": "0,191,255",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "DeepPink",
+  "id": 40,
+  "ru": "НасыщенноРозовый",
+  "server": "255,20,147",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "SkyBlue",
+  "id": 129,
+  "ru": "НебесноГолубой",
+  "server": "135,206,235",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "MediumAquaMarine",
+  "id": 85,
+  "ru": "НейтральноАквамариновый",
+  "server": "102,205,170",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "MediumTurquoise",
+  "id": 94,
+  "ru": "НейтральноБирюзовый",
+  "server": "72,209,204",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "MediumSpringGreen",
+  "id": 93,
+  "ru": "НейтральноВесеннеЗеленый",
+  "server": "0,250,154",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "MediumSlateBlue",
+  "id": 92,
+  "ru": "НейтральноГрифельноСиний",
+  "server": "123,104,238",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "MediumGreen",
+  "id": 88,
+  "ru": "НейтральноЗеленый",
+  "server": "192,220,192",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "Peru",
+  "id": 114,
+  "ru": "НейтральноКоричневый",
+  "server": "205,133,63",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "MediumPurple",
+  "id": 90,
+  "ru": "НейтральноПурпурный",
+  "server": "147,112,219",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "MediumGray",
+  "id": 87,
+  "ru": "НейтральноСерый",
+  "server": "160,160,164",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "MediumBlue",
+  "id": 86,
+  "ru": "НейтральноСиний",
+  "server": "0,0,205",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "MediumVioletRed",
+  "id": 95,
+  "ru": "НейтральноФиолетовоКрасный",
+  "server": "199,21,133",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "Olive",
+  "id": 103,
+  "ru": "Оливковый",
+  "server": "128,128,0",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "OrangeRed",
+  "id": 106,
+  "ru": "ОранжевоКрасный",
+  "server": "255,69,0",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "Orange",
+  "id": 105,
+  "ru": "Оранжевый",
+  "server": "255,165,0",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "Orchid",
+  "id": 107,
+  "ru": "Орхидея",
+  "server": "218,112,214",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "MediumOrchid",
+  "id": 89,
+  "ru": "ОрхидеяНейтральный",
+  "server": "186,85,211",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "DarkOrchid",
+  "id": 32,
+  "ru": "ОрхидеяТемный",
+  "server": "153,50,204",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "Sienna",
+  "id": 127,
+  "ru": "Охра",
+  "server": "160,82,45",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "SeaShell",
+  "id": 126,
+  "ru": "Перламутровый",
+  "server": "255,245,238",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "PeachPuff",
+  "id": 113,
+  "ru": "Персиковый",
+  "server": "255,218,185",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "SandyBrown",
+  "id": 124,
+  "ru": "ПесочноКоричневый",
+  "server": "244,164,96",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "MidnightBlue",
+  "id": 96,
+  "ru": "ПолночноСиний",
+  "server": "25,25,112",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "GhostWhite",
+  "id": 49,
+  "ru": "ПризрачноБелый",
+  "server": "248,248,255",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "Purple",
+  "id": 118,
+  "ru": "Пурпурный",
+  "server": "128,0,128",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "Wheat",
+  "id": 142,
+  "ru": "Пшеничный",
+  "server": "245,222,179",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "RosyBrown",
+  "id": 120,
+  "ru": "РозовоКоричневый",
+  "server": "188,143,143",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "Pink",
+  "id": 115,
+  "ru": "Розовый",
+  "server": "255,192,203",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "HoneyDew",
+  "id": 55,
+  "ru": "Роса",
+  "server": "240,255,240",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "Tan",
+  "id": 135,
+  "ru": "РыжеватоКоричневый",
+  "server": "210,180,140",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "LightSlateGray",
+  "id": 77,
+  "ru": "СветлоГрифельноСерый",
+  "server": "119,136,153",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "LightSlateBlue",
+  "id": 76,
+  "ru": "СветлоГрифельноСиний",
+  "server": "132,112,255",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "LightYellow",
+  "id": 79,
+  "ru": "СветлоЖелтый",
+  "server": "255,255,224",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "LightGoldenRodYellow",
+  "id": 69,
+  "ru": "СветлоЖелтыйЗолотистый",
+  "server": "250,250,210",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "LightGreen",
+  "id": 70,
+  "ru": "СветлоЗеленый",
+  "server": "144,238,144",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "LightGoldenRod",
+  "id": 68,
+  "ru": "СветлоЗолотистый",
+  "server": "255,236,139",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "LightCoral",
+  "id": 66,
+  "ru": "СветлоКоралловый",
+  "server": "240,128,128",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "Bisque",
+  "id": 7,
+  "ru": "СветлоКоричневый",
+  "server": "255,228,196",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "LightSkyBlue",
+  "id": 75,
+  "ru": "СветлоНебесноГолубой",
+  "server": "135,206,250",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "LightPink",
+  "id": 72,
+  "ru": "СветлоРозовый",
+  "server": "255,182,193",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "LightGray",
+  "id": 71,
+  "ru": "СветлоСерый",
+  "server": "192,192,192",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "Gainsboro",
+  "id": 48,
+  "ru": "СеребристоСерый",
+  "server": "220,220,220",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "Silver",
+  "id": 128,
+  "ru": "Серебряный",
+  "server": "192,192,192",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "CadetBlue",
+  "id": 14,
+  "ru": "СероСиний",
+  "server": "95,158,160",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "Gray",
+  "id": 52,
+  "ru": "Серый",
+  "server": "128,128,128",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "DodgerBlue",
+  "id": 43,
+  "ru": "СинеСерый",
+  "server": "30,144,255",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "BlueViolet",
+  "id": 11,
+  "ru": "СинеФиолетовый",
+  "server": "138,43,226",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "Blue",
+  "id": 10,
+  "ru": "Синий",
+  "server": "0,0,255",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "SteelBlue",
+  "id": 134,
+  "ru": "СинийСоСтальнымОттенком",
+  "server": "70,130,180",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "PowderBlue",
+  "id": 117,
+  "ru": "СинийСПороховымОттенком",
+  "server": "176,224,230",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "Plum",
+  "id": 116,
+  "ru": "Сливовый",
+  "server": "221,160,221",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "Ivory",
+  "id": 59,
+  "ru": "СлоноваяКость",
+  "server": "255,255,240",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "OldLace",
+  "id": 102,
+  "ru": "СтароеКружево",
+  "server": "253,245,230",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "DarkTurquoise",
+  "id": 38,
+  "ru": "ТемноБирюзовый",
+  "server": "0,206,209",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "Maroon",
+  "id": 84,
+  "ru": "ТемноБордовый",
+  "server": "128,0,0",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "DarkSlateGray",
+  "id": 37,
+  "ru": "ТемноГрифельноСерый",
+  "server": "47,79,79",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "DarkSlateBlue",
+  "id": 36,
+  "ru": "ТемноГрифельноСиний",
+  "server": "72,61,139",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "DarkGreen",
+  "id": 27,
+  "ru": "ТемноЗеленый",
+  "server": "0,100,0",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "DarkGoldenRod",
+  "id": 25,
+  "ru": "ТемноЗолотистый",
+  "server": "184,134,11",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "DarkRed",
+  "id": 33,
+  "ru": "ТемноКрасный",
+  "server": "139,0,0",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "DarkOliveGreen",
+  "id": 30,
+  "ru": "ТемноОливковоЗеленый",
+  "server": "85,107,47",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "DarkOrange",
+  "id": 31,
+  "ru": "ТемноОранжевый",
+  "server": "255,140,0",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "DarkGray",
+  "id": 26,
+  "ru": "ТемноСерый",
+  "server": "169,169,169",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "DarkBlue",
+  "id": 23,
+  "ru": "ТемноСиний",
+  "server": "0,0,139",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "DarkViolet",
+  "id": 39,
+  "ru": "ТемноФиолетовый",
+  "server": "148,0,211",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "HotPink",
+  "id": 56,
+  "ru": "ТеплоРозовый",
+  "server": "255,105,180",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "Tomato",
+  "id": 138,
+  "ru": "Томатный",
+  "server": "255,99,71",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "PapayaWhip",
+  "id": 112,
+  "ru": "ТопленоеМолоко",
+  "server": "255,239,213",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "Olivedrab",
+  "id": 104,
+  "ru": "ТусклоОливковый",
+  "server": "107,142,35",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "MistyRose",
+  "id": 98,
+  "ru": "ТусклоРозовый",
+  "server": "255,228,225",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "DimGray",
+  "id": 42,
+  "ru": "ТусклоСерый",
+  "server": "105,105,105",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "Navy",
+  "id": 101,
+  "ru": "Ультрамарин",
+  "server": "0,0,128",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "Violet",
+  "id": 140,
+  "ru": "Фиолетовый",
+  "server": "238,130,238",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "Magenta",
+  "id": 83,
+  "ru": "Фуксин",
+  "server": "255,0,255",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "DarkMagenta",
+  "id": 29,
+  "ru": "ФуксинТемный",
+  "server": "139,0,139",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "Fuchsia",
+  "id": 47,
+  "ru": "Фуксия",
+  "server": "255,0,255",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "Khaki",
+  "id": 60,
+  "ru": "Хаки",
+  "server": "240,230,140",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "DarkKhaki",
+  "id": 28,
+  "ru": "ХакиТемный",
+  "server": "189,183,107",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "Seagreen",
+  "id": 125,
+  "ru": "ЦветМорскойВолны",
+  "server": "46,139,87",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "MediumSeaGreen",
+  "id": 91,
+  "ru": "ЦветМорскойВолныНейтральный",
+  "server": "60,179,113",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "LightSeaGreen",
+  "id": 74,
+  "ru": "ЦветМорскойВолныСветлый",
+  "server": "32,178,170",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "DarkSeaGreen",
+  "id": 35,
+  "ru": "ЦветМорскойВолныТемный",
+  "server": "143,188,139",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "FloralWhite",
+  "id": 45,
+  "ru": "ЦветокБелый",
+  "server": "255,250,240",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "Cyan",
+  "id": 22,
+  "ru": "Циан",
+  "server": "0,255,255",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "Aqua",
+  "id": 3,
+  "ru": "ЦианАкварельный",
+  "server": "0,255,255",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "Teal",
+  "id": 136,
+  "ru": "ЦианНейтральный",
+  "server": "0,128,128",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "LightCyan",
+  "id": 67,
+  "ru": "ЦианСветлый",
+  "server": "224,255,255",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "DarkCyan",
+  "id": 24,
+  "ru": "ЦианТемный",
+  "server": "0,139,139",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "Black",
+  "id": 8,
+  "ru": "Черный",
+  "server": "0,0,0",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "CornSilk",
+  "id": 19,
+  "ru": "ШелковыйОттенок",
+  "server": "255,248,220",
+  "web": {}
+ },
+ {
+  "collection": "WebЦвета",
+  "en": "Chocolate",
+  "id": 16,
+  "ru": "Шоколадный",
+  "server": "210,105,30",
+  "web": {}
+ },
+ {
+  "collection": "WindowsЦвета",
+  "en": "ActiveBorder",
+  "id": 10,
+  "ru": "ГраницаАктивногоОкна",
+  "server": "200,208,212",
+  "web": {}
+ },
+ {
+  "collection": "WindowsЦвета",
+  "en": "InactiveBorder",
+  "id": 11,
+  "ru": "ГраницаНеактивногоОкна",
+  "server": "200,208,212",
+  "web": {}
+ },
+ {
+  "collection": "WindowsЦвета",
+  "en": "ActiveTitleBar",
+  "id": 2,
+  "ru": "ЗаголовокАктивногоОкна",
+  "server": "227,84,0",
+  "web": {}
+ },
+ {
+  "collection": "WindowsЦвета",
+  "en": "InactiveTitleBar",
+  "id": 3,
+  "ru": "ЗаголовокНеактивногоОкна",
+  "server": "223,150,122",
+  "web": {}
+ },
+ {
+  "collection": "WindowsЦвета",
+  "en": "ButtonFace",
+  "id": 15,
+  "ru": "Кнопка",
+  "server": "216,233,236",
+  "web": {}
+ },
+ {
+  "collection": "WindowsЦвета",
+  "en": "ButtonHighlight",
+  "id": 20,
+  "ru": "КнопкаПодсвеченная",
+  "server": "255,255,255",
+  "web": {}
+ },
+ {
+  "collection": "WindowsЦвета",
+  "en": "Highlight",
+  "id": 13,
+  "ru": "Подсвеченный",
+  "server": "197,106,49",
+  "web": {}
+ },
+ {
+  "collection": "WindowsЦвета",
+  "en": "ToolTip",
+  "id": 24,
+  "ru": "Подсказка",
+  "server": "225,255,255",
+  "web": {}
+ },
+ {
+  "collection": "WindowsЦвета",
+  "en": "ScrollBar",
+  "id": 0,
+  "ru": "ПолосаПрокрутки",
+  "server": "200,208,212",
+  "web": {}
+ },
+ {
+  "collection": "WindowsЦвета",
+  "en": "ApplicationWorkspace",
+  "id": 12,
+  "ru": "РабочаяОбластьПриложения",
+  "server": "128,128,128",
+  "web": {}
+ },
+ {
+  "collection": "WindowsЦвета",
+  "en": "Desktop",
+  "id": 1,
+  "ru": "РабочийСтол",
+  "server": "152,78,0",
+  "web": {}
+ },
+ {
+  "collection": "WindowsЦвета",
+  "en": "WindowFrame",
+  "id": 6,
+  "ru": "РамкаОкна",
+  "server": "0,0,0",
+  "web": {}
+ },
+ {
+  "collection": "WindowsЦвета",
+  "en": "MenuBar",
+  "id": 4,
+  "ru": "СтрокаМеню",
+  "server": "255,255,255",
+  "web": {}
+ },
+ {
+  "collection": "WindowsЦвета",
+  "en": "ActiveTitleBarText",
+  "id": 9,
+  "ru": "ТекстЗаголовкаАктивногоОкна",
+  "server": "255,255,255",
+  "web": {}
+ },
+ {
+  "collection": "WindowsЦвета",
+  "en": "InactiveTitleBarText",
+  "id": 19,
+  "ru": "ТекстЗаголовкаНеактивногоОкна",
+  "server": "248,228,216",
+  "web": {}
+ },
+ {
+  "collection": "WindowsЦвета",
+  "en": "ButtonText",
+  "id": 18,
+  "ru": "ТекстКнопки",
+  "server": "0,0,0",
+  "web": {}
+ },
+ {
+  "collection": "WindowsЦвета",
+  "en": "DisabledText",
+  "id": 17,
+  "ru": "ТекстНедоступный",
+  "server": "153,168,172",
+  "web": {}
+ },
+ {
+  "collection": "WindowsЦвета",
+  "en": "WindowText",
+  "id": 8,
+  "ru": "ТекстОкна",
+  "server": "0,0,0",
+  "web": {}
+ },
+ {
+  "collection": "WindowsЦвета",
+  "en": "HighlightText",
+  "id": 14,
+  "ru": "ТекстПодсвеченный",
+  "server": "255,255,255",
+  "web": {}
+ },
+ {
+  "collection": "WindowsЦвета",
+  "en": "ToolTipText",
+  "id": 23,
+  "ru": "ТекстПодсказки",
+  "server": "0,0,0",
+  "web": {}
+ },
+ {
+  "collection": "WindowsЦвета",
+  "en": "MenuItemText",
+  "id": 7,
+  "ru": "ТекстПунктаМеню",
+  "server": "0,0,0",
+  "web": {}
+ },
+ {
+  "collection": "WindowsЦвета",
+  "en": "ButtonShadow",
+  "id": 16,
+  "ru": "ТеньКнопки",
+  "server": "153,168,172",
+  "web": {}
+ },
+ {
+  "collection": "WindowsЦвета",
+  "en": "ButtonLightShadow",
+  "id": 22,
+  "ru": "ТеньКнопкиСветлая",
+  "server": "226,239,241",
+  "web": {}
+ },
+ {
+  "collection": "WindowsЦвета",
+  "en": "ButtonDarkShadow",
+  "id": 21,
+  "ru": "ТеньКнопкиТемная",
+  "server": "100,111,113",
+  "web": {}
+ },
+ {
+  "collection": "WindowsЦвета",
+  "en": "WindowBackground",
+  "id": 5,
+  "ru": "ФонОкна",
+  "server": "255,255,255",
+  "web": {}
+ },
+ {
+  "collection": "WindowsШрифты",
+  "en": "ANSIFixedFont",
+  "id": 2,
+  "ru": "ANSIШрифтМоноширинный",
+  "server": "name=Courier;size=9;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100",
+  "web": {}
+ },
+ {
+  "collection": "WindowsШрифты",
+  "en": "ANSIVariableFont",
+  "id": 3,
+  "ru": "ANSIШрифтПропорциональный",
+  "server": "name=MS Sans Serif;size=9;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100",
+  "web": {}
+ },
+ {
+  "collection": "WindowsШрифты",
+  "en": "OEMFixedFont",
+  "id": 1,
+  "ru": "OEMШрифтМоноширинный",
+  "server": "name=Terminal;size=9;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100",
+  "web": {}
+ },
+ {
+  "collection": "WindowsШрифты",
+  "en": "SystemFont",
+  "id": 4,
+  "ru": "СистемныйШрифт",
+  "server": "name=System;size=12;bold=Да;italic=Нет;underline=Нет;strike=Нет;scale=100",
+  "web": {}
+ },
+ {
+  "collection": "WindowsШрифты",
+  "en": "DefaultGUIFont",
+  "id": 0,
+  "ru": "ШрифтДиалоговИМеню",
+  "server": "name=MS Shell Dlg;size=8;bold=Нет;italic=Нет;underline=Нет;strike=Нет;scale=100",
+  "web": {}
+ },
+ {
+  "collection": "ЦветаПалитры",
+  "en": "SecondBrand",
+  "id": 1,
+  "ru": "ВторойБрендовый",
+  "server": "39,139,249",
+  "web": {
+   "dark": {
+    "client.back": "Цвет палитры|90,166,249",
+    "css.back.background": "rgb(43, 75, 110)",
+    "form_server.back": "Цвет палитры|90,166,249"
+   },
+   "taxi": {
+    "client.back": "Цвет палитры|39,139,249",
+    "css.back.background": "rgb(179, 214, 252)",
+    "form_server.back": "Цвет палитры|39,139,249"
+   },
+   "v85": {
+    "client.back": "Цвет палитры|39,139,249",
+    "css.back.background": "rgb(179, 214, 252)",
+    "form_server.back": "Цвет палитры|39,139,249"
+   }
+  }
+ },
+ {
+  "collection": "ЦветаПалитры",
+  "en": "LightBlue",
+  "id": 6,
+  "ru": "Голубой",
+  "server": "50,193,250",
+  "web": {
+   "dark": {
+    "client.back": "Цвет палитры|100,207,250",
+    "css.back.background": "rgb(44, 91, 110)",
+    "form_server.back": "Цвет палитры|100,207,250"
+   },
+   "taxi": {
+    "client.back": "Цвет палитры|50,193,250",
+    "css.back.background": "rgb(184, 235, 255)",
+    "form_server.back": "Цвет палитры|50,193,250"
+   },
+   "v85": {
+    "client.back": "Цвет палитры|50,193,250",
+    "css.back.background": "rgb(184, 235, 255)",
+    "form_server.back": "Цвет палитры|50,193,250"
+   }
+  }
+ },
+ {
+  "collection": "ЦветаПалитры",
+  "en": "Yellow",
+  "id": 4,
+  "ru": "Желтый",
+  "server": "255,213,0",
+  "web": {
+   "dark": {
+    "client.back": "Цвет палитры|255,221,51",
+    "css.back.background": "rgb(112, 100, 39)",
+    "form_server.back": "Цвет палитры|255,221,51"
+   },
+   "taxi": {
+    "client.back": "Цвет палитры|255,213,0",
+    "css.back.background": "rgb(255, 241, 171)",
+    "form_server.back": "Цвет палитры|255,213,0"
+   },
+   "v85": {
+    "client.back": "Цвет палитры|255,213,0",
+    "css.back.background": "rgb(255, 241, 171)",
+    "form_server.back": "Цвет палитры|255,213,0"
+   }
+  }
+ },
+ {
+  "collection": "ЦветаПалитры",
+  "en": "Green",
+  "id": 5,
+  "ru": "Зеленый",
+  "server": "12,220,64",
+  "web": {
+   "dark": {
+    "client.back": "Цвет палитры|55,220,96",
+    "css.back.background": "rgb(37, 102, 53)",
+    "form_server.back": "Цвет палитры|55,220,96"
+   },
+   "taxi": {
+    "client.back": "Цвет палитры|12,220,64",
+    "css.back.background": "rgb(171, 247, 190)",
+    "form_server.back": "Цвет палитры|12,220,64"
+   },
+   "v85": {
+    "client.back": "Цвет палитры|12,220,64",
+    "css.back.background": "rgb(171, 247, 190)",
+    "form_server.back": "Цвет палитры|12,220,64"
+   }
+  }
+ },
+ {
+  "collection": "ЦветаПалитры",
+  "en": "Red",
+  "id": 2,
+  "ru": "Красный",
+  "server": "255,62,51",
+  "web": {
+   "dark": {
+    "client.back": "Цвет палитры|255,110,102",
+    "css.back.background": "rgb(112, 48, 45)",
+    "form_server.back": "Цвет палитры|255,110,102"
+   },
+   "taxi": {
+    "client.back": "Цвет палитры|255,62,51",
+    "css.back.background": "rgb(255, 187, 184)",
+    "form_server.back": "Цвет палитры|255,62,51"
+   },
+   "v85": {
+    "client.back": "Цвет палитры|255,62,51",
+    "css.back.background": "rgb(255, 187, 184)",
+    "form_server.back": "Цвет палитры|255,62,51"
+   }
+  }
+ },
+ {
+  "collection": "ЦветаПалитры",
+  "en": "Orange",
+  "id": 3,
+  "ru": "Оранжевый",
+  "server": "255,160,26",
+  "web": {
+   "dark": {
+    "client.back": "Цвет палитры|255,181,77",
+    "css.back.background": "rgb(112, 83, 43)",
+    "form_server.back": "Цвет палитры|255,181,77"
+   },
+   "taxi": {
+    "client.back": "Цвет палитры|255,160,26",
+    "css.back.background": "rgb(255, 223, 179)",
+    "form_server.back": "Цвет палитры|255,160,26"
+   },
+   "v85": {
+    "client.back": "Цвет палитры|255,160,26",
+    "css.back.background": "rgb(255, 223, 179)",
+    "form_server.back": "Цвет палитры|255,160,26"
+   }
+  }
+ },
+ {
+  "collection": "ЦветаПалитры",
+  "en": "FirstBrand",
+  "id": 0,
+  "ru": "ПервыйБрендовый",
+  "server": "255,221,0",
+  "web": {
+   "dark": {
+    "client.back": "Цвет палитры|255,228,51",
+    "css.back.background": "rgb(112, 103, 39)",
+    "form_server.back": "Цвет палитры|255,228,51"
+   },
+   "taxi": {
+    "client.back": "Цвет палитры|255,221,0",
+    "css.back.background": "rgb(255, 244, 171)",
+    "form_server.back": "Цвет палитры|255,221,0"
+   },
+   "v85": {
+    "client.back": "Цвет палитры|255,221,0",
+    "css.back.background": "rgb(255, 244, 171)",
+    "form_server.back": "Цвет палитры|255,221,0"
+   }
+  }
+ },
+ {
+  "collection": "ЦветаПалитры",
+  "en": "Pink",
+  "id": 10,
+  "ru": "Розовый",
+  "server": "255,21,204",
+  "web": {
+   "dark": {
+    "client.back": "Цвет палитры|255,71,215",
+    "css.back.background": "rgb(112, 42, 97)",
+    "form_server.back": "Цвет палитры|255,71,215"
+   },
+   "taxi": {
+    "client.back": "Цвет палитры|255,21,204",
+    "css.back.background": "rgb(255, 179, 238)",
+    "form_server.back": "Цвет палитры|255,21,204"
+   },
+   "v85": {
+    "client.back": "Цвет палитры|255,21,204",
+    "css.back.background": "rgb(255, 179, 238)",
+    "form_server.back": "Цвет палитры|255,21,204"
+   }
+  }
+ },
+ {
+  "collection": "ЦветаПалитры",
+  "en": "Gray",
+  "id": 15,
+  "ru": "Серый",
+  "server": "200,200,200",
+  "web": {
+   "dark": {
+    "client.back": "Цвет палитры|110,110,110",
+    "css.back.background": "rgb(77, 77, 77)",
+    "form_server.back": "Цвет палитры|110,110,110"
+   },
+   "taxi": {
+    "client.back": "Цвет палитры|200,200,200",
+    "css.back.background": "rgb(232, 232, 232)",
+    "form_server.back": "Цвет палитры|200,200,200"
+   },
+   "v85": {
+    "client.back": "Цвет палитры|200,200,200",
+    "css.back.background": "rgb(232, 232, 232)",
+    "form_server.back": "Цвет палитры|200,200,200"
+   }
+  }
+ },
+ {
+  "collection": "ЦветаПалитры",
+  "en": "Blue",
+  "id": 7,
+  "ru": "Синий",
+  "server": "0,122,255",
+  "web": {
+   "dark": {
+    "client.back": "Цвет палитры|51,149,255",
+    "css.back.background": "rgb(39, 74, 112)",
+    "form_server.back": "Цвет палитры|51,149,255"
+   },
+   "taxi": {
+    "client.back": "Цвет палитры|0,122,255",
+    "css.back.background": "rgb(171, 211, 255)",
+    "form_server.back": "Цвет палитры|0,122,255"
+   },
+   "v85": {
+    "client.back": "Цвет палитры|0,122,255",
+    "css.back.background": "rgb(171, 211, 255)",
+    "form_server.back": "Цвет палитры|0,122,255"
+   }
+  }
+ },
+ {
+  "collection": "ЦветаПалитры",
+  "en": "Purple",
+  "id": 9,
+  "ru": "Сиреневый",
+  "server": "185,46,255",
+  "web": {
+   "dark": {
+    "client.back": "Цвет палитры|202,97,255",
+    "css.back.background": "rgb(90, 45, 112)",
+    "form_server.back": "Цвет палитры|202,97,255"
+   },
+   "taxi": {
+    "client.back": "Цвет палитры|185,46,255",
+    "css.back.background": "rgb(231, 184, 255)",
+    "form_server.back": "Цвет палитры|185,46,255"
+   },
+   "v85": {
+    "client.back": "Цвет палитры|185,46,255",
+    "css.back.background": "rgb(231, 184, 255)",
+    "form_server.back": "Цвет палитры|185,46,255"
+   }
+  }
+ },
+ {
+  "collection": "ЦветаПалитры",
+  "en": "Violet",
+  "id": 8,
+  "ru": "Фиолетовый",
+  "server": "88,85,250",
+  "web": {
+   "dark": {
+    "client.back": "Цвет палитры|137,135,250",
+    "css.back.background": "rgb(48, 47, 110)",
+    "form_server.back": "Цвет палитры|137,135,250"
+   },
+   "taxi": {
+    "client.back": "Цвет палитры|88,85,250",
+    "css.back.background": "rgb(195, 194, 255)",
+    "form_server.back": "Цвет палитры|88,85,250"
+   },
+   "v85": {
+    "client.back": "Цвет палитры|88,85,250",
+    "css.back.background": "rgb(195, 194, 255)",
+    "form_server.back": "Цвет палитры|88,85,250"
+   }
+  }
+ }
+]

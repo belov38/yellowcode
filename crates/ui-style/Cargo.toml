@@ -1,0 +1,28 @@
+[package]
+name = "ui-style"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99.1"
+license = "MIT OR Apache-2.0"
+autotests = false
+autoexamples = false
+autobenches = false
+
+[features]
+font-files = []
+skin = ["dep:zip", "dep:regex"]
+packages = ["dep:zip", "dep:quick-xml"]
+
+[dependencies]
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+zip = { version = "2", default-features = false, features = ["deflate"], optional = true }
+regex = { version = "1", optional = true }
+quick-xml = { version = "0.37", optional = true }
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+undocumented_unsafe_blocks = "warn"
+unused_result_ok = "warn"

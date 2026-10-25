@@ -1,0 +1,225 @@
+use crate::{Configuration, MdObject, Result};
+use md_model::{
+    forms::*,
+    xml_origin::{XmlOrigin, XmlPart},
+};
+use mdconf_core::{
+    Error,
+    xml::view::NodeRef,
+    xml_in::{PartsOptions, parse_part},
+};
+use memory_budget::{Limits, MemoryBudget};
+use std::{collections::HashSet, path::Path};
+const FORM_NS: &str = "http://v8.1c.ru/8.3/xcf/logform";
+type N<'a, 's> = NodeRef<'a, 's>;
+fn error(path: &Path, what: &str) -> Error {
+    Error::Xml {
+        path: path.into(),
+        what: what.into(),
+    }
+}
+fn attr<'a>(n: N<'a, '_>, name: &str) -> &'a str {
+    n.attrs()
+        .find(|a| a.ns().is_none() && a.local() == name)
+        .map(|a| a.value())
+        .unwrap_or_default()
+}
+fn scalar<'a>(n: N<'a, '_>, path: &Path) -> Result<&'a str> {
+    if n.ns() != Some(FORM_NS) || n.children().next().is_some() {
+        return Err(error(path, "wrong form scalar namespace or shape"));
+    }
+    Ok(n.text().unwrap_or_default())
+}
+fn text<'a>(n: N<'a, '_>, name: &str, path: &Path) -> Result<&'a str> {
+    let mut fields = n.children().filter(|n| n.local() == name);
+    let Some(field) = fields.next() else {
+        return Ok("");
+    };
+    if fields.next().is_some() {
+        return Err(error(path, "duplicate form field"));
+    }
+    scalar(field, path)
+}
+fn flag(n: N<'_, '_>, name: &str, path: &Path) -> Result<bool> {
+    match text(n, name, path)? {
+        "true" => Ok(true),
+        "false" | "" => Ok(false),
+        _ => Err(error(path, "invalid form flag")),
+    }
+}
+fn item(n: N<'_, '_>, path: &Path) -> Result<FormItem> {
+    if n.ns() != Some(FORM_NS) {
+        return Err(error(path, "wrong form item namespace"));
+    }
+    let id = attr(n, "id")
+        .parse()
+        .map_err(|_| error(path, "invalid form item id"))?;
+    let mut children = Vec::new();
+    let mut fields = HashSet::new();
+    for child in n.children() {
+        if (child.local() == "ChildItems" || child.attrs().any(|a| a.local() == "id"))
+            && (child.ns() != Some(FORM_NS) || !fields.insert(child.local()))
+        {
+            return Err(error(path, "wrong or duplicate form item field"));
+        }
+        if child.local() == "ChildItems" {
+            for n in child.children() {
+                children.push(item(n, path)?);
+            }
+        } else if child.attrs().any(|a| a.local() == "id") {
+            children.push(item(child, path)?);
+        }
+    }
+    Ok(FormItem {
+        id,
+        name: attr(n, "name").into(),
+        tag: n.local().into(),
+        children,
+    })
+}
+fn form(
+    origin: &XmlOrigin,
+    path: &Path,
+    opts: &PartsOptions,
+    budget: &MemoryBudget,
+    work: &mut u64,
+) -> Result<Option<Form>> {
+    let Some(file) = origin
+        .get(path)
+        .filter(|file| file.part() == XmlPart::Forms)
+    else {
+        let companions = path.with_extension("");
+        if origin
+            .files()
+            .any(|(p, f)| f.part() == XmlPart::Forms && p.starts_with(&companions))
+        {
+            return Err(error(path, "orphan form companions without descriptor"));
+        }
+        return Ok(None);
+    };
+    let arena = parse_part(file.bytes(), path, &opts.objects.shells, budget, work)?;
+    let root = arena.root().ok_or_else(|| error(path, "missing Form"))?;
+    if root.local() != "Form" || root.ns() != Some("http://v8.1c.ru/8.3/xcf/logform") {
+        return Err(error(path, "wrong form root"));
+    }
+    let mut out = Form::default();
+    let mut sections = HashSet::new();
+    for n in root.children() {
+        if !sections.insert(n.local()) {
+            return Err(error(path, "duplicate form section"));
+        }
+        if n.ns() != root.ns() {
+            return Err(error(path, "wrong form section namespace"));
+        }
+        let record = match n.local() {
+            "Attributes" => Some("Attribute"),
+            "Commands" => Some("Command"),
+            "Parameters" => Some("Parameter"),
+            "Events" => Some("Event"),
+            _ => None,
+        };
+        for c in n.children() {
+            if record.is_some_and(|name| c.local() != name) {
+                return Err(error(path, "wrong form record element"));
+            }
+            if matches!(
+                n.local(),
+                "Attributes" | "Commands" | "Parameters" | "Events" | "ChildItems"
+            ) && c.ns() != root.ns()
+            {
+                return Err(error(path, "wrong form record namespace"));
+            }
+        }
+        match n.local() {
+            "AutoCommandBar" => out.items.push(item(n, path)?),
+            "ChildItems" => {
+                for child in n.children() {
+                    out.items.push(item(child, path)?);
+                }
+            }
+            "Attributes" => {
+                for a in n.children() {
+                    out.attributes.push(FormAttribute {
+                        id: attr(a, "id")
+                            .parse()
+                            .map_err(|_| error(path, "invalid attribute id"))?,
+                        name: attr(a, "name").into(),
+                        main: flag(a, "MainAttribute", path)?,
+                    });
+                }
+            }
+            "Commands" => {
+                for a in n.children() {
+                    out.commands.push(FormCommand {
+                        id: attr(a, "id")
+                            .parse()
+                            .map_err(|_| error(path, "invalid command id"))?,
+                        name: attr(a, "name").into(),
+                        action: text(a, "Action", path)?.into(),
+                    });
+                }
+            }
+            "Parameters" => {
+                for a in n.children() {
+                    out.parameters.push(FormParameter {
+                        name: attr(a, "name").into(),
+                        key: flag(a, "KeyParameter", path)?,
+                    });
+                }
+            }
+            "Events" => {
+                for a in n.children() {
+                    out.events
+                        .push((attr(a, "name").into(), scalar(a, path)?.into()));
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(Some(out))
+}
+pub fn load(cfg: &mut Configuration, opts: &PartsOptions) -> Result<()> {
+    fn object(
+        o: &mut MdObject,
+        parent: &Path,
+        origin: &XmlOrigin,
+        opts: &PartsOptions,
+        budget: &MemoryBudget,
+        work: &mut u64,
+    ) -> Result<()> {
+        let folder = o
+            .kind
+            .folder()
+            .ok_or_else(|| error(parent, "missing form owner folder"))?;
+        let dir = parent.join(folder).join(&o.name);
+        o.form = form(
+            origin,
+            &dir.join("Ext").join("Form.xml"),
+            opts,
+            budget,
+            work,
+        )?;
+        for f in &mut o.forms {
+            f.form = form(
+                origin,
+                &dir.join("Forms").join(&f.name).join("Ext").join("Form.xml"),
+                opts,
+                budget,
+                work,
+            )?;
+        }
+        for s in &mut o.subsystems {
+            object(s, &dir, origin, opts, budget, work)?;
+        }
+        Ok(())
+    }
+    let Some(origin) = &cfg.xml_origin else {
+        return Ok(());
+    };
+    let budget = MemoryBudget::new(Limits::new(opts.objects.shells.max_xml_memory));
+    let mut work = 0;
+    for o in &mut cfg.objects {
+        object(o, Path::new(""), origin, opts, &budget, &mut work)?;
+    }
+    Ok(())
+}
