@@ -1,5 +1,6 @@
 pub mod managed;
 pub mod managed_table;
+mod writer;
 
 use std::io::{Cursor, Read};
 use std::ops::Bound;
@@ -12,7 +13,7 @@ use ibschema::storage::{FieldId, FieldInfo, IndexId, IndexInfo, StorageMap, Tabl
 use ibschema::store::{
     Direction, IndexAccess, IndexPosition, PositionedRows, ReadSeek, ReadTxn, RecordFilter, Row,
     RowHandle, RowIter, Scanned, ScannedPositioned, ScannedRows, Store, StoreError, StoreResult,
-    WriteTxn, WriterGate,
+    WriteTxn, WriterGate, WriterTicket,
 };
 use ibschema::values::RefId;
 use onecd::IndexRead;
@@ -262,6 +263,8 @@ struct PhysTable {
     cols: Vec<usize>,
     indexes: Vec<Option<String>>,
     key_index: Option<String>,
+    write_indexes: Vec<(String, IndexId)>,
+    writable: bool,
 }
 
 struct PhysMap {
@@ -319,6 +322,77 @@ fn find_index(
         .map(|x| x.name.clone()))
 }
 
+fn constraint_indexes(d: &onecd::TableDescr, ti: &TableInfo) -> Vec<(String, IndexId)> {
+    let logical = ti
+        .key_index
+        .iter()
+        .map(|ix| (IndexId::Id, ix))
+        .chain(
+            ti.indexes
+                .iter()
+                .enumerate()
+                .filter_map(|(k, ix)| u16::try_from(k).ok().map(|k| (IndexId::Named(k), ix))),
+        )
+        .filter(|(_, ix)| ix.unique)
+        .collect::<Vec<_>>();
+    d.indexes
+        .iter()
+        .filter(|ix| ix.unique)
+        .filter_map(|physical| {
+            let candidates = logical
+                .iter()
+                .filter(|(_, ix)| {
+                    let columns = ix
+                        .fields
+                        .iter()
+                        .filter_map(|f| ti.field(*f))
+                        .flat_map(|f| ti.columns.get(f.columns.clone()).unwrap_or_default());
+                    let columns = columns.collect::<Vec<_>>();
+                    columns.len() == physical.fields.len()
+                        && columns.iter().zip(&physical.fields).all(|(c, p)| {
+                            same_name(&c.name, &p.name)
+                                && d.field(&c.name).is_some_and(|(_, f)| {
+                                    p.prefix_len == 0
+                                        || matches!(
+                                            c.ty,
+                                            ColType::NC(_)
+                                                | ColType::NVC(_)
+                                                | ColType::B(_)
+                                                | ColType::VB(_)
+                                        ) && p.prefix_len >= f.length
+                                })
+                        })
+                })
+                .collect::<Vec<_>>();
+            let id = match candidates.as_slice() {
+                [only] => Some(only.0),
+                _ => candidates
+                    .iter()
+                    .find(|(id, ix)| {
+                        let width: usize = ix
+                            .fields
+                            .iter()
+                            .take(ix.prefix)
+                            .filter_map(|f| ti.field(*f))
+                            .map(|f| f.columns.len())
+                            .sum();
+                        let suffix = "@".repeat(width);
+                        let table = ti.phys.to_ascii_uppercase();
+                        let expected = match id {
+                            IndexId::Id if ti.owner.is_some() => format!("{table}_SK{suffix}"),
+                            IndexId::Id if width == 0 => "_IDRREFIDX".to_owned(),
+                            IndexId::Id => format!("{table}_S_HPK{suffix}"),
+                            IndexId::Named(k) => format!("{table}_{}{suffix}", u32::from(*k) + 1),
+                        };
+                        same_name(&physical.name, &expected)
+                    })
+                    .map(|(id, _)| *id),
+            }?;
+            Some((physical.name.clone(), id))
+        })
+        .collect()
+}
+
 impl PhysMap {
     fn build(db: &onecd::Database, map: &StorageMap) -> Result<PhysMap> {
         let txn = db.read();
@@ -363,11 +437,17 @@ impl PhysMap {
                 .map(|ix| find_index(d, ti, ix, &indexes))
                 .transpose()?
                 .flatten();
+            let write_indexes = constraint_indexes(d, ti);
+            let mut positions = cols.clone();
+            positions.sort_unstable();
+            let writable = positions.iter().copied().eq(0..d.fields.len());
             tables.push(PhysTable {
                 name: ti.phys.clone(),
                 cols,
                 indexes,
                 key_index,
+                write_indexes,
+                writable,
             });
         }
         Ok(PhysMap { tables })
@@ -378,7 +458,6 @@ pub struct Store1cd {
     db: Arc<onecd::Database>,
     map: Arc<StorageMap>,
     phys: Arc<PhysMap>,
-    #[allow(dead_code)]
     gate: Arc<WriterGate>,
     refusal: Option<String>,
 }
@@ -399,15 +478,10 @@ impl Store1cd {
             refusal,
         })
     }
-}
 
-impl Store for Store1cd {
-    fn storage(&self) -> &StorageMap {
-        &self.map
-    }
-    fn read(&self) -> StoreResult<Box<dyn ReadTxn + Send>> {
-        Ok(Box::new(Read1cd {
-            txn: self.db.read(),
+    fn transaction<T>(&self, txn: T, ticket: Option<WriterTicket>) -> Read1cd<T> {
+        Read1cd {
+            txn,
             map: Arc::clone(&self.map),
             phys: Arc::clone(&self.phys),
             memory: self.db.memory_budget().map(|budget| RowMemory {
@@ -417,13 +491,20 @@ impl Store for Store1cd {
             last_get: std::sync::Mutex::new(None),
             prefix: std::sync::atomic::AtomicUsize::new(0),
             cuts: std::sync::Mutex::new(Vec::new()),
-        }))
+            _ticket: ticket,
+        }
     }
-    fn write(&self, _wait: Duration) -> StoreResult<Box<dyn WriteTxn>> {
-        Err(StoreError::Unsupported(match &self.refusal {
-            Some(r) => r.clone(),
-            None => "store1cd writes: stage t3-d7w".to_string(),
-        }))
+}
+
+impl Store for Store1cd {
+    fn storage(&self) -> &StorageMap {
+        &self.map
+    }
+    fn read(&self) -> StoreResult<Box<dyn ReadTxn + Send>> {
+        Ok(Box::new(self.transaction(self.db.read(), None)))
+    }
+    fn write(&self, wait: Duration) -> StoreResult<Box<dyn WriteTxn>> {
+        self.begin_write(wait)
     }
 }
 
@@ -628,14 +709,25 @@ fn decode_cells_cut(
     Ok(out)
 }
 
-struct Read1cd {
-    txn: onecd::ReadTxn,
+trait TableSource {
+    fn table(&self, name: &str) -> StoreResult<onecd::TableRead<'_>>;
+}
+
+impl TableSource for onecd::ReadTxn {
+    fn table(&self, name: &str) -> StoreResult<onecd::TableRead<'_>> {
+        self.table(name).map_err(engine_err)
+    }
+}
+
+struct Read1cd<T = onecd::ReadTxn> {
+    txn: T,
     map: Arc<StorageMap>,
     phys: Arc<PhysMap>,
     memory: Option<RowMemory>,
     last_get: std::sync::Mutex<Option<memory_budget::Reservation>>,
     prefix: std::sync::atomic::AtomicUsize,
     cuts: std::sync::Mutex<Vec<(FieldId, u64)>>,
+    _ticket: Option<WriterTicket>,
 }
 
 #[derive(Clone)]
@@ -1107,7 +1199,7 @@ fn read_blob(
     }
 }
 
-impl Read1cd {
+impl<T: TableSource> Read1cd<T> {
     fn prefix(&self) -> Option<Prefix<'_>> {
         let max = self.prefix.load(std::sync::atomic::Ordering::Relaxed);
         (max > 0).then_some(Prefix {
@@ -1129,7 +1221,7 @@ impl Read1cd {
     }
 
     fn reader(&self, p: &PhysTable) -> StoreResult<onecd::TableRead<'_>> {
-        self.txn.table(&p.name).map_err(engine_err)
+        self.txn.table(&p.name)
     }
 }
 
@@ -1196,7 +1288,7 @@ fn bound_key(
     })
 }
 
-impl Read1cd {
+impl<T: TableSource> Read1cd<T> {
     fn scan_projected(
         &self,
         t: TableId,
@@ -1418,7 +1510,7 @@ struct Positioned<'a> {
     after: Option<onecd::index::IndexEntry>,
 }
 
-impl Read1cd {
+impl<T: TableSource> Read1cd<T> {
     fn positioned(
         &self,
         t: TableId,
@@ -1563,7 +1655,7 @@ impl Read1cd {
     }
 }
 
-impl ReadTxn for Read1cd {
+impl<T: TableSource> ReadTxn for Read1cd<T> {
     fn set_blob_prefix(&self, max_bytes: Option<usize>) {
         self.prefix
             .store(max_bytes.unwrap_or(0), std::sync::atomic::Ordering::Relaxed);

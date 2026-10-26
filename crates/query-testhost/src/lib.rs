@@ -47,3 +47,5 @@ pub use table::{
 pub use walks::{record_type_text, walk_error};
 
 pub use onecd::ReaderStats;
+
+pub mod vm;

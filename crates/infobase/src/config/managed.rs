@@ -350,7 +350,8 @@ fn recoverable_content_error(error: &Error) -> bool {
         | Error::SchemaMismatch(_)
         | Error::Store(_)
         | Error::Unsupported(_)
-        | Error::UnsupportedStatic(_) => false,
+        | Error::UnsupportedStatic(_)
+        | Error::WriterBusy => false,
     }
 }
 

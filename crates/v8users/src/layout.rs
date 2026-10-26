@@ -3,7 +3,7 @@ use brace::Node;
 
 pub const MAX_DATA_BYTES: usize = 1_048_576;
 const MAX_DEPTH: usize = 32;
-const MAX_COLLECTION: usize = 4096;
+pub(crate) const MAX_COLLECTION: usize = 4096;
 
 pub(crate) fn bound_text(text: &str) -> Result<(), Error> {
     if text.len() > MAX_DATA_BYTES {

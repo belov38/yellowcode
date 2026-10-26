@@ -19,6 +19,26 @@ const CSS: &str = "text/css; charset=utf-8";
 pub const FILES: &[(&str, &str, &str)] = &[
     ("x.css", CSS, include_str!("../front/x.css")),
     ("js/x/code.js", JS, include_str!("../front/js/x/code.js")),
+    (
+        "js/x/code_analysis.js",
+        JS,
+        include_str!("../front/js/x/code_analysis.js"),
+    ),
+    (
+        "js/x/code_catalog.js",
+        JS,
+        include_str!("../front/js/x/code_catalog.js"),
+    ),
+    (
+        "js/x/code_context.js",
+        JS,
+        include_str!("../front/js/x/code_context.js"),
+    ),
+    (
+        "js/x/code_completion.js",
+        JS,
+        include_str!("../front/js/x/code_completion.js"),
+    ),
     ("js/x/data.js", JS, include_str!("../front/js/x/data.js")),
     (
         "js/x/data_card.js",

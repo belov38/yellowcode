@@ -89,7 +89,7 @@ fn roles_node(roles: &[Uuid16]) -> Node {
     Node::list(items)
 }
 
-fn date_node(d: BslDate) -> Node {
+pub(crate) fn date_node(d: BslDate) -> Node {
     let p = d.parts();
     Node::atom(format!(
         "{:04}{:02}{:02}{:02}{:02}{:02}",
@@ -221,6 +221,31 @@ impl UserData {
         brace::to_text(&self.tree)
     }
 
+    pub fn matching_keys(&self) -> Result<impl Iterator<Item = (&str, &str)>, Error> {
+        let fields = self.tree.as_list().ok_or(Error::NotList)?;
+        let layout = Layout::read(fields)?;
+        let items = match layout.at(fields, 27) {
+            None => &[] as &[Node],
+            Some(count) => {
+                let start = fields
+                    .iter()
+                    .position(|n| std::ptr::eq(n, count))
+                    .ok_or(Error::BadField(27))?
+                    + 1;
+                let len = count.as_u32().ok_or(Error::BadField(27))? as usize * 2;
+                fields.get(start..start + len).ok_or(Error::BadField(27))?
+            }
+        };
+        Ok(items
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .filter_map(|pair| match pair {
+                [Node::Str(provider), Node::Str(key)] => Some((provider.as_str(), key.as_str())),
+                _ => None,
+            }))
+    }
+
     fn field(&self, i: usize) -> Option<&Node> {
         let fields = self.tree.as_list()?;
         Layout::read(fields).ok()?.at(fields, i)
@@ -312,7 +337,7 @@ pub struct UserRow {
     pub data: Vec<u8>,
     pub eauth: bool,
     pub admrole: bool,
-    pub ussprh: u32,
+    pub ussprh: u64,
     pub email: String,
 }
 

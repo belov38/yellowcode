@@ -2,6 +2,7 @@ import { createEditor, goToLine, cm } from "../editor.js";
 import { el, fill, clear } from "../dom.js";
 import { T } from "../i18n.js";
 import { update } from "../tabs.js";
+import { codeCompletion } from "./code_completion.js";
 import { cget, cpost } from "./net.js";
 
 const POLL_MS = 120;
@@ -90,10 +91,12 @@ function buildConsole(host, info) {
     session.classList.toggle("xc-bare", bare);
   };
   showSession(info);
-  const statusLine = el("div", { class: "xc-statusline" }, session, el("span", { class: "xc-rights dim" }, T.codeRights));
+  const statusLine = el("div", { class: "xc-statusline" }, session, el("span", { class: "xc-rights dim" }, T.codeRights),
+    el("span", { class: "xc-completion-note dim" }, T.codeCompletionNote));
 
   const ed = el("div", { class: "xc-ed cm-host" });
   const editor = createEditor({ parent: ed,
+    extensions: codeCompletion(),
     onChange() { clearMark(); },
     keys: [{ key: "Mod-Enter", run() { run(); return true; } }],
   });

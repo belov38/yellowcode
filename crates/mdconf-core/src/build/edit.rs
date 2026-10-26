@@ -107,25 +107,37 @@ pub fn build_edit_with(
     model.require_full()?;
     trace_rss("start");
     let list = base.list()?;
+    let mut publication = HashSet::new();
+    for meta in &list {
+        if !publication.insert(meta.name.as_str()) {
+            return Err(Error::Build {
+                object: meta.name.clone(),
+                path: "publication list".into(),
+                what: "duplicate captured publication entry".into(),
+            });
+        }
+    }
     let root = crate::entries::root_uuid(&Entries::new(base)?)?;
     if root != model.id {
         return Err(foreign(model.id, root));
     }
-    let (edited_props, base_versions) = {
+    let (edited_props, base_versions, form_changes) = {
         let base_model = crate::codec::load_with(base, &LoadOptions::default(), runner)?;
         trace_rss("base loaded");
         if base_model.header_id != model.header_id {
             return Err(foreign(model.header_id, base_model.header_id));
         }
         structure::load_options(model, &base_model)?;
-        let edited = structure::compare(model, &base_model)?;
+        let prepared = super::form_modules::Prepared::prepare(model, &base_model, base)?;
+        prepared.validate_publication(&publication)?;
+        let edited = structure::compare(model, &base_model, &prepared)?;
         trace_rss("compared");
         let versions = base_model
             .parts
             .dump_info
             .as_ref()
             .map(|d| d.versions.clone());
-        (edited, versions)
+        (edited, versions, prepared.into_changes())
     };
     trace_rss("base dropped");
     let schema = mdschema::schema()?;
@@ -256,6 +268,22 @@ pub fn build_edit_with(
             continue;
         };
         puts.insert(name.clone(), put);
+    }
+
+    for change in form_changes {
+        if puts
+            .insert(
+                change.entry.clone(),
+                Put::Changed("form module text".into(), Some(change.stored)),
+            )
+            .is_some()
+        {
+            return Err(Error::Build {
+                object: change.entry,
+                path: "form module".into(),
+                what: "duplicate prepared put".into(),
+            });
+        }
     }
 
     trace_rss("modules");

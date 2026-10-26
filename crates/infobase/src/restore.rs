@@ -20,6 +20,8 @@ use crate::raw::FolderFile;
 use crate::seed::seed;
 use crate::{Error, Infobase, OpenMode, OpenOptions, Result, SchemaCheck, Warning, folder};
 
+mod users;
+
 const SYSTEM: [&str; 14] = [
     "IBVERSION",
     "CONFIG",
@@ -642,7 +644,36 @@ fn transient(e: &io::Error) -> bool {
     cfg!(windows) && matches!(e.raw_os_error(), Some(5 | 32))
 }
 
+#[cfg(windows)]
+fn publication_leaf(path: &Path) -> Result<&std::ffi::OsStr> {
+    use std::os::windows::ffi::OsStrExt;
+
+    let name = path
+        .file_name()
+        .ok_or_else(|| bad("publication requires a file name"))?;
+    if matches!(name.encode_wide().last(), Some(0x20 | 0x2e)) {
+        return Err(bad(
+            "Windows output file name must not end in a trailing dot or space",
+        ));
+    }
+    Ok(name)
+}
+
+#[cfg(windows)]
+fn publication_path(path: &Path) -> Result<PathBuf> {
+    let name = publication_leaf(path)?;
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    Ok(io(fs::canonicalize(parent))?.join(name))
+}
+
 fn persist(from: &Path, to: &Path) -> Result<()> {
+    #[cfg(windows)]
+    let (from, to) = (publication_path(from)?, publication_path(to)?);
+    #[cfg(windows)]
+    let (from, to) = (from.as_path(), to.as_path());
     let mut path = io(tempfile::TempPath::try_from_path(from))?;
     let mut pause = std::time::Duration::from_millis(100);
     for attempt in 0.. {
@@ -711,6 +742,7 @@ struct Expected {
     rows: u64,
     dbnames: Vec<u8>,
     users_dropped: u64,
+    matching_keys: u64,
     users_descr: TableDescr,
 }
 
@@ -755,6 +787,8 @@ fn restore(
     opts: &mut RestoreOptions<'_>,
     before_publish: impl FnOnce() -> Result<()>,
 ) -> Result<RestoreReport> {
+    #[cfg(windows)]
+    publication_leaf(target)?;
     match fs::symlink_metadata(target) {
         Ok(_) => return Err(bad("target already exists")),
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
@@ -1023,18 +1057,26 @@ fn stream<R: Read>(
     }
     run.table = "V8USERS".into();
     run.progress(notes, Phase::Read);
+    let prepared = users::prepare(reader, &users, run)?;
+    users_dropped += prepared.dropped;
     let seed_users = system_descriptors()?
         .into_iter()
         .find(|d| d.name == "V8USERS")
         .ok_or_else(|| bad("seed V8USERS"))?;
     let mut users_descr = seed_users.clone();
+    let mut facts = users::Facts::default();
     if counts.first().is_some_and(|&n| n != 0) {
         batches.commit()?;
         commits += batches.commits;
         peak = peak.max(batches.peak);
         drop(batches);
         drop(db);
-        let separated = users_separated(&run.database, run.opts.memory_budget.as_ref())?;
+        let separated = if prepared.rebuild {
+            facts = users::facts(&run.database, run.opts.memory_budget.as_ref())?;
+            facts.separated
+        } else {
+            users_separated(&run.database, run.opts.memory_budget.as_ref())?
+        };
         db = Database::open(&run.database, database_options(&limits))?;
         batches = Batches::new(&db, &limits);
         if separated {
@@ -1044,36 +1086,9 @@ fn stream<R: Read>(
     batches
         .unit(4 * PAGE, "V8USERS")?
         .create_table(&users_descr)?;
-    let mut user_plan: Option<Plan> = None;
-    let mut stored_users = 0u64;
-    loop {
-        match reader.next_event()? {
-            Some(Event::TableEnd) => break,
-            Some(Event::Row(row)) => {
-                check_row(&users, &row)?;
-                if run.opts.without_users {
-                    users_dropped += 1;
-                    continue;
-                }
-                if users.source != Source::UsersSpr || !users_as_is(&users, &row) {
-                    return Err(bad(
-                        "the DT users cannot be transferred as they are (Users layout or NULL in \
-                         EAUTH/ADMROLE/USSPRH; full transfer is stage D7u); --without-users restores \
-                         the base without them",
-                    ));
-                }
-                if user_plan.is_none() {
-                    user_plan = Some(Plan::with_absent(&users_descr, &users, &["EMAIL"])?);
-                }
-                let plan = user_plan.as_ref().ok_or_else(|| bad("V8USERS plan"))?;
-                let tx = batches.unit(plan.estimate(&row), "a user")?;
-                let row = plan.row(row)?;
-                tx.table("V8USERS")?.insert(&row)?;
-                stored_users += 1;
-            }
-            _ => return Err(bad("missing system table end")),
-        }
-    }
+    let (stored_users, matching_keys) =
+        prepared.write(&users, &users_descr, &mut batches, &facts, run.opts)?;
+    drop(facts);
     counts.push(stored_users);
     for (source, table) in [
         (Source::PasswordPolicies, "V8USERPWDPLCS"),
@@ -1198,6 +1213,7 @@ fn stream<R: Read>(
         rows: 0,
         dbnames,
         users_dropped,
+        matching_keys,
         users_descr,
     };
     run.table.clear();
@@ -1449,8 +1465,8 @@ fn final_checks(
     {
         return Err(bad("SCHEMASTORAGE policy"));
     }
-    if rows_of("V8USERSMATKEYS")? != 0 {
-        return Err(bad("nonempty V8USERSMATKEYS"));
+    if rows_of("V8USERSMATKEYS")? != expected.matching_keys {
+        return Err(bad("V8USERSMATKEYS row count"));
     }
     Ok(warnings)
 }

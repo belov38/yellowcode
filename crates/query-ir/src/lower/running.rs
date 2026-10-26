@@ -1,4 +1,4 @@
-use super::layout::{R, Row, internal, later};
+use super::layout::{R, Row, internal};
 use super::rel::Lower;
 use super::vt::VtShape;
 use super::{AggL, Dec, PExpr, RelL};
@@ -83,6 +83,9 @@ impl Lower<'_> {
             .collect();
         let nd = chosen.len();
         let nr = shape.resources.len();
+        if nr == 0 {
+            return internal("periodic balance register without resources");
+        }
         let fields: Vec<_> = shape
             .period
             .iter()
@@ -106,18 +109,6 @@ impl Lower<'_> {
                 let period = if rec {
                     col(0)?
                 } else {
-                    let finer = [Kw::Second, Kw::Minute, Kw::Hour, Kw::Day]
-                        .iter()
-                        .any(|kw| units.contains(kw));
-                    let coarse = [Kw::TenDays, Kw::Month, Kw::Quarter, Kw::HalfYear, Kw::Year]
-                        .iter()
-                        .any(|kw| units.contains(kw));
-                    if units.contains(&Kw::Week) && coarse && !finer {
-                        return later(
-                            "Авто Неделя с невложенными календарными периодами в ОстаткиИОбороты",
-                            "Q5b",
-                        );
-                    }
                     let unit = [
                         Kw::Second,
                         Kw::Minute,
@@ -133,7 +124,7 @@ impl Lower<'_> {
                     .into_iter()
                     .find(|kw| units.contains(kw));
                     let Some(unit) = unit else {
-                        return later("Авто без полей периода в ОстаткиИОбороты", "Q5b");
+                        return internal("Auto running balance without period fields");
                     };
                     begin(unit, PExpr::Col(0))
                 };
@@ -174,7 +165,7 @@ impl Lower<'_> {
         for (_, p) in &fields {
             keys.push(opening_or(match p {
                 PeriodField::Period => cut(period.clone()),
-                PeriodField::Unit(kw) => cut(begin(*kw, col(0)?)),
+                PeriodField::Unit(kw) => cut(begin(*kw, period.clone())),
                 PeriodField::Recorder => {
                     if recorder {
                         col(1)?
@@ -243,7 +234,7 @@ impl Lower<'_> {
             input: input.take(),
             keys: sort,
         };
-        let wanted: Vec<_> = shape
+        let mut wanted: Vec<_> = shape
             .resources
             .iter()
             .enumerate()
@@ -254,7 +245,9 @@ impl Lower<'_> {
             })
             .collect();
         if wanted.is_empty() {
-            return later("периодическая таблица без выбранных ресурсов", "Q5b");
+            for r in 0..nr {
+                wanted.extend([raw::BALANCE, raw::RECEIPT, raw::EXPENSE].map(|c| (r, c)));
+            }
         }
         let step = RunningBalanceL {
             dims: nd,

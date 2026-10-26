@@ -22,6 +22,10 @@ pub enum Error {
     FieldCount(usize),
     #[error("DATA field {0} is malformed")]
     BadField(usize),
+    #[error("invalid or oversized user-separator configuration")]
+    InvalidRebuildContext,
+    #[error("CHANGED must have whole-second precision")]
+    FractionalChanged,
     #[error("role set numbers are exhausted (ROLESID u32::MAX given out)")]
     RoleSetNumbersExhausted,
     #[error("{0}")]

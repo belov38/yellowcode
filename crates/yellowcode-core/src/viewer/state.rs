@@ -28,6 +28,7 @@ pub struct State {
     pub check: Arc<CheckCache>,
     pub stages: Stages,
     pub fingerprint: Option<Fingerprint>,
+    pub code_analysis_active: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 fn flatten(mut n: TreeNode, out: &mut Vec<FlatNode>) -> usize {
@@ -105,6 +106,7 @@ impl State {
             check: Arc::new(CheckCache::default()),
             stages,
             fingerprint,
+            code_analysis_active: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         })
     }
 }
@@ -553,6 +555,7 @@ impl Inner {
                         check: Arc::clone(&cur.check),
                         stages: target,
                         fingerprint: Some(fp),
+                        code_analysis_active: Arc::clone(&cur.code_analysis_active),
                     });
                     let old = std::mem::replace(
                         &mut *self.current.write().unwrap_or_else(|e| e.into_inner()),

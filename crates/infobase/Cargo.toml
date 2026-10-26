@@ -27,8 +27,10 @@ onecd = { path = "../onecd" }
 zraw = { path = "../zraw" }
 brace = { path = "../brace" }
 mdconf = { path = "../mdconf" }
+mdschema = { path = "../mdschema" }
 v8cont = { path = "../v8cont" }
 serde = { version = "1", features = ["derive"] }
+v8users = { path = "../v8users" }
 
 [lints.clippy]
 dbg_macro = "warn"

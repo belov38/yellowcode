@@ -1647,7 +1647,10 @@ impl<'a> Builder<'a> {
         Ok(if slice {
             Rel::Slice(v)
         } else if kind == crate::schema::VtKind::BalanceAndTurnovers
-            && periodicity != crate::schema::Periodicity::Absent
+            && !matches!(
+                periodicity,
+                crate::schema::Periodicity::Absent | crate::schema::Periodicity::Auto
+            )
         {
             Rel::RunningBalance(v)
         } else {

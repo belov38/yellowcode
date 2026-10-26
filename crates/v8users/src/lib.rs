@@ -15,6 +15,7 @@ mod error;
 mod layout;
 pub use layout::MAX_DATA_BYTES;
 pub mod password;
+pub mod rebuild;
 pub mod roles;
 pub mod secret;
 #[cfg(feature = "testdata")]

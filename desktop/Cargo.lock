@@ -1935,6 +1935,7 @@ dependencies = [
  "ibschema",
  "md-5",
  "mdconf",
+ "mdschema",
  "memory-budget",
  "onecd",
  "rand 0.9.5",
@@ -1945,6 +1946,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "v8cont",
+ "v8users",
  "zraw",
 ]
 
@@ -2758,7 +2760,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "onec-desktop"
-version = "0.1.0-alpha.9"
+version = "0.1.0-alpha.10"
 dependencies = [
  "cf-fixtures",
  "dunce",
@@ -3157,13 +3159,18 @@ name = "query-testhost"
 version = "0.1.0"
 dependencies = [
  "brace",
+ "bsl-compiler",
  "bsl-prim",
+ "bsl-stdlib",
+ "bsl-testhost",
+ "bsl-vm",
  "ibschema",
  "infobase",
  "md-model",
  "memory-budget",
  "onecd",
  "platform-catalog",
+ "query",
  "query-exec",
  "query-ir",
  "query-syntax",
@@ -4941,6 +4948,7 @@ dependencies = [
  "base64 0.22.1",
  "brace",
  "bsl-prim",
+ "crc32fast",
  "rand 0.9.5",
  "serde",
  "sha1",

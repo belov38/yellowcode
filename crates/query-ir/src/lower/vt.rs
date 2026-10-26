@@ -262,6 +262,9 @@ impl Lower<'_> {
             .copied()
             .filter(|(f, p)| used.contains(f) || forced(*p))
             .collect();
+        let flat_auto = v.kind == VtKind::BalanceAndTurnovers
+            && v.periodicity == Periodicity::Auto
+            && used_period.is_empty();
         let coarse = match v.periodicity {
             Periodicity::Absent => true,
             Periodicity::Record | Periodicity::Recorder => false,
@@ -296,7 +299,7 @@ impl Lower<'_> {
             },
             bounds: bounds.clone(),
             coarse,
-            periodic: !matches!(v.periodicity, Periodicity::Absent),
+            periodic: !matches!(v.periodicity, Periodicity::Absent) && !flat_auto,
             needed_dims,
             view: v.span,
         };
@@ -322,7 +325,10 @@ impl Lower<'_> {
         }
         row = self.secure_raw(row, v.src, v.inner)?;
         self.inner -= 1;
-        if v.kind == VtKind::BalanceAndTurnovers && v.periodicity != Periodicity::Absent {
+        if v.kind == VtKind::BalanceAndTurnovers
+            && v.periodicity != Periodicity::Absent
+            && !flat_auto
+        {
             return self.running_vt(v, &shape, row.checked(), &used, bounds);
         }
         let col = |i: usize| -> R<PExpr> {

@@ -5,7 +5,7 @@ use flate2::read::DeflateDecoder;
 use flate2::write::DeflateEncoder;
 use std::io::{Read, Write};
 
-const MAGIC: &[u8; 8] = b"BSLCAT\x03\x00";
+const MAGIC: &[u8; 8] = b"BSLCAT\x04\x00";
 pub(crate) const MAX_PLATFORM: usize = 64;
 const MAX_INFLATED: u64 = 64 << 20;
 
@@ -58,14 +58,21 @@ fn w_param(w: &mut W, p: &ParamInfo) {
     w.bool(p.optional);
     w.bool(p.variadic);
 }
+fn w_result(w: &mut W, t: &ResultType) {
+    w.opt(&t.id, |w, s| w.str(s));
+    w.str(&t.name_ru);
+    w.opt(&t.name_en, |w, s| w.str(s));
+}
 fn w_sig(w: &mut W, s: &Signature) {
     w.vec(&s.params, w_param);
+    w.opt(&s.return_types, |w, ts| w.vec(ts, w_result));
 }
 fn w_prop(w: &mut W, p: &PropertyInfo) {
     w_names(w, &p.name_ru, &p.name_en);
     w.bool(p.readable);
     w.bool(p.writable);
     w_avail(w, &p.avail);
+    w.vec(&p.types, w_result);
 }
 fn w_method(w: &mut W, m: &MethodInfo) {
     w_names(w, &m.name_ru, &m.name_en);
@@ -232,9 +239,17 @@ fn r_param(r: &mut Rd) -> R<ParamInfo> {
         variadic: r.bool()?,
     })
 }
+fn r_result(r: &mut Rd) -> R<ResultType> {
+    Ok(ResultType {
+        id: r.opt(Rd::str)?,
+        name_ru: r.str()?,
+        name_en: r.opt(Rd::str)?,
+    })
+}
 fn r_sig(r: &mut Rd) -> R<Signature> {
     Ok(Signature {
         params: r.vec(r_param)?,
+        return_types: r.opt(|r| r.vec(r_result))?,
     })
 }
 fn r_prop(r: &mut Rd) -> R<PropertyInfo> {
@@ -245,6 +260,7 @@ fn r_prop(r: &mut Rd) -> R<PropertyInfo> {
         readable: r.bool()?,
         writable: r.bool()?,
         avail: r_avail(r)?,
+        types: r.vec(r_result)?,
     })
 }
 fn r_method(r: &mut Rd) -> R<MethodInfo> {

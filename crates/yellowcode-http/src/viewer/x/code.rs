@@ -22,8 +22,8 @@ enum Verb {
 
 pub fn handle(state: &State, req: &Request, route: &str) -> Response {
     let (verb, known) = match route {
-        "info" | "job" => (Verb::Get, true),
-        "run" | "cancel" | "reopen" => (Verb::Post, true),
+        "info" | "job" | "complete" => (Verb::Get, true),
+        "run" | "cancel" | "reopen" | "analyze" => (Verb::Post, true),
         _ => (Verb::Get, false),
     };
     if !known {
@@ -31,6 +31,12 @@ pub fn handle(state: &State, req: &Request, route: &str) -> Response {
     }
     if (req.method == "POST") != (verb == Verb::Post) {
         return error(405, "method not allowed");
+    }
+    if route == "complete" {
+        return completion(state, req);
+    }
+    if route == "analyze" {
+        return analysis(state, req);
     }
     if route == "info" {
         return info(state);
@@ -52,6 +58,90 @@ pub fn handle(state: &State, req: &Request, route: &str) -> Response {
         "cancel" => cancel(&slot, req),
         _ => error(404, "no such endpoint"),
     }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AnalysisBody {
+    text: String,
+    position_utf16: usize,
+    document_id: String,
+    revision: u64,
+    request_id: u64,
+    kind: String,
+    lang: String,
+}
+
+struct AnalysisPermit<'a>(&'a std::sync::atomic::AtomicUsize);
+impl<'a> AnalysisPermit<'a> {
+    fn acquire(active: &'a std::sync::atomic::AtomicUsize) -> Option<Self> {
+        active
+            .try_update(
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+                |n| (n < 2).then_some(n + 1),
+            )
+            .ok()
+            .map(|_| Self(active))
+    }
+}
+impl Drop for AnalysisPermit<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::Release);
+    }
+}
+
+fn analysis(state: &State, req: &Request) -> Response {
+    use yellowcode_core::viewer::{
+        Lang,
+        completion::analysis::{self, AnalysisKind},
+    };
+    if req.body.len() > crate::MAX_BODY {
+        return error(413, "analysis body is too large");
+    }
+    let body: AnalysisBody = match serde_json::from_slice(&req.body) {
+        Ok(body) => body,
+        Err(_) => return error(400, "invalid analysis body"),
+    };
+    if body.document_id.is_empty()
+        || body.document_id.chars().count() > 128
+        || body.document_id.chars().any(char::is_control)
+        || !analysis::valid_position(&body.text, body.position_utf16)
+    {
+        return error(400, "invalid document identity or UTF-16 cursor");
+    }
+    let kind = match body.kind.as_str() {
+        "completion" => AnalysisKind::Completion,
+        "signature" => AnalysisKind::Signature,
+        _ => return error(400, "invalid analysis kind"),
+    };
+    let lang = match body.lang.as_str() {
+        "ru" => Lang::Ru,
+        "en" => Lang::En,
+        _ => return error(400, "invalid analysis language"),
+    };
+    let Some(_permit) = AnalysisPermit::acquire(&state.code_analysis_active) else {
+        return reply(
+            200,
+            &json!({
+                "items":[], "total":0, "from":body.position_utf16, "to":body.position_utf16,
+                "analysisStatus":"limited", "argument":null, "anchor":null,
+                "documentId":body.document_id, "revision":body.revision, "requestId":body.request_id,
+            }),
+        );
+    };
+    let result = analysis::analyze(&state.cfg, &body.text, body.position_utf16, kind, lang);
+    let mut result = match serde_json::to_value(result) {
+        Ok(result) => result,
+        Err(_) => return error(500, "analysis serialization failed"),
+    };
+    let Some(fields) = result.as_object_mut() else {
+        return error(500, "analysis serialization failed");
+    };
+    fields.insert("documentId".into(), body.document_id.into());
+    fields.insert("revision".into(), body.revision.into());
+    fields.insert("requestId".into(), body.request_id.into());
+    reply(200, &result)
 }
 
 fn source_state(state: &State) -> Result<(), String> {
@@ -148,4 +238,48 @@ fn cancel(slot: &CodeSlot, req: &Request) -> Response {
         200,
         &json!({ "cancelled": running && slot.jobs.cancel(id) }),
     )
+}
+
+fn completion(state: &State, req: &Request) -> Response {
+    use yellowcode_core::viewer::{
+        Lang,
+        completion::{self, MAX_SEGMENTS, valid_name},
+    };
+    let raw = param(req, "path").unwrap_or("");
+    if raw.len() > MAX_SEGMENTS * (completion::MAX_NAME * 4 + 1) {
+        return error(400, "path is too long");
+    }
+    let path: Vec<String> = if raw.is_empty() {
+        Vec::new()
+    } else {
+        raw.split('.').map(str::to_string).collect()
+    };
+    let prefix = param(req, "prefix").unwrap_or("");
+    if path.len() > MAX_SEGMENTS
+        || path.iter().any(|p| p.is_empty() || !valid_name(p))
+        || !valid_name(prefix)
+    {
+        return error(400, "invalid completion path or prefix");
+    }
+    let constructors = match param(req, "constructors") {
+        None | Some("0" | "false") => false,
+        Some("1" | "true") => true,
+        _ => return error(400, "invalid constructors flag"),
+    };
+    let lang = match param(req, "lang") {
+        None => state.lang,
+        Some("ru") => Lang::Ru,
+        Some("en") => Lang::En,
+        _ => return error(400, "invalid language"),
+    };
+    match serde_json::to_value(completion::complete(
+        &state.cfg,
+        &path,
+        prefix,
+        constructors,
+        lang,
+    )) {
+        Ok(v) => reply(200, &v),
+        Err(_) => error(500, "completion serialization failed"),
+    }
 }

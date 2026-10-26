@@ -199,6 +199,19 @@ impl Selection {
             .unwrap_or(&QValue::Null))
     }
 
+    pub fn source_row(&self) -> Result<Option<RowRef>, WalkError> {
+        Ok(match self.current_or_err()? {
+            Item::Row(i) => Some(RowRef::Detail(*i)),
+            Item::Rec { tree: None, id } => self
+                .result
+                .totals
+                .as_ref()
+                .and_then(|t| t.records.get(*id as usize))
+                .map(|r| r.row),
+            _ => None,
+        })
+    }
+
     pub fn next_by_field_value(&mut self, column: &str) -> Result<bool, WalkError> {
         let col = self
             .column(column)

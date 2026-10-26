@@ -17,7 +17,7 @@ pub struct RawUserRow {
     pub data: Vec<u8>,
     pub eauth: bool,
     pub admrole: bool,
-    pub ussprh: u32,
+    pub ussprh: u64,
     pub email: String,
 }
 
@@ -97,7 +97,7 @@ fn flag(v: &Value, name: &str) -> Result<bool, Error> {
     }
 }
 
-fn number(v: &Value, name: &str) -> Result<u32, Error> {
+fn number<T: std::str::FromStr>(v: &Value, name: &str) -> Result<T, Error> {
     match v {
         Value::Numeric(n) => n
             .to_string()

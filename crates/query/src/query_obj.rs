@@ -1,9 +1,10 @@
+use crate::manager::{Manager, busy};
 use crate::{QueryHost, QueryHostProvider, VmExecHost, errors};
 use bsl_prim::Str;
 use bsl_stdlib::bind::{arg_str, arg_value};
 use bsl_vm::{Arg, CallResult, Execution, HostError, HostObject, MemberId, TypeId, TypeIdx, Value};
 use query_exec::{RunMode, TempTables, run_batch};
-use query_ir::{ParamConst, ParamShape, ParamTypes, ParamValue, ParamValues, QType, QValue};
+use query_ir::{ParamConst, ParamShape, ParamTypes, ParamValue, ParamValues};
 use std::{any::Any, cell::RefCell, collections::HashMap, rc::Rc, sync::Arc};
 
 pub(crate) fn member(t: TypeIdx, m: MemberId, method: bool) -> &'static str {
@@ -25,47 +26,6 @@ fn unavailable(t: TypeIdx, m: MemberId, method: bool) -> HostError {
         member(t, m, method),
     )
 }
-fn busy() -> HostError {
-    HostError::text(
-        "Менеджер временных таблиц уже используется",
-        "Temporary tables manager is already in use",
-    )
-}
-
-pub(crate) struct Manager {
-    ty: TypeIdx,
-    tables: RefCell<TempTables>,
-}
-impl Manager {
-    pub(crate) fn construct(ty: TypeIdx) -> Value {
-        Value::Object(Rc::new(Self {
-            ty,
-            tables: RefCell::new(TempTables::new()),
-        }))
-    }
-}
-impl HostObject for Manager {
-    fn type_id(&self) -> TypeId {
-        TypeId::of_catalog(self.ty)
-    }
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-    fn get(&self, _: &mut Execution, m: MemberId) -> CallResult<Value> {
-        Err(unavailable(self.ty, m, false).into())
-    }
-    fn set(&self, _: &mut Execution, m: MemberId, _: Value) -> CallResult<()> {
-        Err(unavailable(self.ty, m, false).into())
-    }
-    fn call(&self, _: &mut Execution, m: MemberId, _: &mut [Arg]) -> CallResult<Value> {
-        if member(self.ty, m, true) == "Close" {
-            self.tables.try_borrow_mut().map_err(|_| busy())?.close();
-            return Ok(Value::Undefined);
-        }
-        Err(unavailable(self.ty, m, true).into())
-    }
-}
-
 pub(crate) struct Query {
     ty: TypeIdx,
     text: RefCell<Str>,
@@ -94,41 +54,50 @@ impl Query {
         let fields = bsl_stdlib::structure_fields(&self.params)
             .ok_or_else(|| errors::internal("query parameters are not a structure"))?;
         let manager = self.manager.borrow().clone();
-        let mut result = None;
-        let mut calls = 0;
-        self.provider.with_host(ex, &mut |ex, host| {
-            calls += 1;
-            if calls != 1 {
-                return;
+        crate::manager::with_host(ex, &*self.provider, |ex, host| {
+            host.prepare_execution(ex)
+                .map_err(|e| errors::batch_error(ex, &text, query_exec::BatchError::Exec(e)))?;
+            let params = Params::new(ex, host, &fields)?;
+            if matches!(manager, Value::Undefined) && mode == RunMode::One {
+                let batch =
+                    query_ir::compile_batch(&text, query_syntax::ParseMode::Query, host.schema())
+                        .map_err(|e| {
+                        errors::batch_error(ex, &text, query_exec::BatchError::Compile(e))
+                    })?;
+                if batch.stmts.iter().any(|s|matches!(s,query_syntax::ast::Stmt::Query(q) if q.query.parts.iter().any(|p|p.into.is_some()))) {
+                    return Err(HostError::text("Не установлен менеджер временных таблиц","Temporary tables manager is not set").into());
+                }
             }
-            result = Some((|| {
-                host.prepare_execution(ex)
-                    .map_err(|e| errors::batch_error(ex, &text, query_exec::BatchError::Exec(e)))?;
-                let params = Params::new(ex, host, &fields)?;
-                let outcome = {
-                    let adapter = VmExecHost::new(ex, host);
-                    match &manager {
-                        Value::Object(m) => {
-                            let manager = m
-                                .as_any()
-                                .downcast_ref::<Manager>()
-                                .ok_or_else(|| errors::internal("invalid query manager"))?;
-                            let mut tables = manager.tables.try_borrow_mut().map_err(|_| busy())?;
-                            run_batch(&adapter, &text, &params, &mut tables, mode)
-                        }
-                        _ => run_batch(&adapter, &text, &params, &mut TempTables::new(), mode),
-                    }
-                };
-                outcome.map_err(|e| errors::batch_error(ex, &text, e))?;
-                Err(HostError::not_implemented("Запрос", "РезультатЗапроса (Q3 Task 14)").into())
-            })());
-        });
-        if calls != 1 {
-            return Err(errors::internal(
-                "QueryHostProvider must call its callback exactly once",
-            ));
-        }
-        result.ok_or_else(|| errors::internal("query provider returned no outcome"))?
+            let outcome = {
+                let adapter = VmExecHost::new(ex, host);
+                if let Value::Object(m) = &manager {
+                    let manager = m
+                        .as_any()
+                        .downcast_ref::<Manager>()
+                        .ok_or_else(|| errors::internal("invalid query manager"))?;
+                    *manager.state.provider.borrow_mut() = Some(self.provider.clone());
+                    let mut tables = manager.state.tables.try_borrow_mut().map_err(|_| busy())?;
+                    run_batch(&adapter, &text, &params, &mut tables, mode)
+                } else {
+                    run_batch(&adapter, &text, &params, &mut TempTables::new(), mode)
+                }
+            }
+            .map_err(|e| errors::batch_error(ex, &text, e))?;
+            let mut values = Vec::new();
+            for item in outcome {
+                values.push(crate::result_obj::adapt(
+                    ex,
+                    host,
+                    item,
+                    self.provider.clone(),
+                )?);
+            }
+            if mode == RunMode::One {
+                Ok(values.pop().unwrap_or(Value::Undefined))
+            } else {
+                Ok(bsl_stdlib::new_array(values))
+            }
+        })
     }
 }
 impl HostObject for Query {
@@ -167,6 +136,30 @@ impl HostObject for Query {
     }
     fn call(&self, ex: &mut Execution, m: MemberId, args: &mut [Arg]) -> CallResult<Value> {
         match member(self.ty, m, true) {
+            "FindParameters" => {
+                let text = self.text.borrow().to_string_lossy();
+                let manager = self.manager.borrow().clone();
+                crate::manager::with_host(ex, &*self.provider, |ex, host| {
+                    let params = {
+                        let adapter = VmExecHost::new(ex, host);
+                        if let Value::Object(m) = &manager {
+                            let m = m
+                                .as_any()
+                                .downcast_ref::<Manager>()
+                                .ok_or_else(|| errors::internal("invalid manager"))?;
+                            let mut tables = m.state.tables.try_borrow_mut().map_err(|_| busy())?;
+                            tables.forget_rolled_back(&|t| host.txn_rolled_back(t));
+                            query_exec::find_parameters(&adapter, &text, &tables)
+                        } else {
+                            query_exec::find_parameters(&adapter, &text, &TempTables::new())
+                        }
+                    }
+                    .map_err(|e| {
+                        errors::batch_error(ex, &text, query_exec::BatchError::Compile(e))
+                    })?;
+                    crate::params_desc::new(ex, host, &params)
+                })
+            }
             "SetParameter" => {
                 let name = arg_str(ex, args.first())?;
                 let value = arg_value(ex, args.get(1))?;
@@ -186,7 +179,7 @@ impl HostObject for Query {
     }
 }
 
-struct Params(HashMap<String, (QValue, ParamShape)>);
+struct Params(HashMap<String, crate::values::ConvertedParam>);
 impl Params {
     fn new(
         ex: &mut Execution,
@@ -195,67 +188,27 @@ impl Params {
     ) -> CallResult<Self> {
         let mut out = HashMap::new();
         for (name, v) in fields {
-            let value = match v {
-                Value::Undefined => QValue::Undefined,
-                Value::Null => QValue::Null,
-                Value::Bool(b) => QValue::Bool(*b),
-                Value::Number(n) => QValue::Number(n.clone()),
-                Value::String(s) => QValue::String(query_ir::QStr(s.units().into())),
-                Value::Date(d) => QValue::Date(*d),
-                _ => host.from_value(ex, v)?.ok_or_else(|| {
-                    HostError::not_implemented("Запрос", "параметры этого типа (Q3 Task 13)")
-                })?,
-            };
-            let ty = match &value {
-                QValue::Undefined => QType::undefined(),
-                QValue::Null => QType::null_only(),
-                QValue::Bool(_) => QType::boolean(),
-                QValue::Number(_) => QType::num(query_ir::NumQ {
-                    digits: 0,
-                    scale: 0,
-                    nonneg: false,
-                }),
-                QValue::String(_) => QType::str_(query_ir::StrQ {
-                    len: 0,
-                    fixed: false,
-                }),
-                QValue::Date(_) => QType::date(query_ir::DateQ::DateTime),
-                QValue::Ref { table, .. } => host
-                    .storage()
-                    .ref_atoms()
-                    .iter()
-                    .find(|(n, _)| n == table)
-                    .map(|(_, r)| QType::reference(*r))
-                    .ok_or_else(|| {
-                        HostError::not_implemented("Запрос", "неизвестный тип ссылки")
-                    })?,
-                _ => {
-                    return Err(HostError::not_implemented(
-                        "Запрос",
-                        "параметры этого типа (Q3 Task 13)",
-                    )
-                    .into());
-                }
-            };
-            out.insert(name.to_lowercase(), (value, ParamShape::Value(ty)));
+            out.insert(name.to_lowercase(), crate::values::from_value(ex, host, v)?);
         }
         Ok(Self(out))
     }
 }
 impl ParamTypes for Params {
     fn shape(&self, name: &str) -> Option<ParamShape> {
-        self.0.get(&name.to_lowercase()).map(|(_, s)| s.clone())
+        self.0.get(&name.to_lowercase()).map(|p| p.shape.clone())
     }
     fn constant(&self, name: &str) -> Option<ParamConst> {
-        self.0
-            .get(&name.to_lowercase())
-            .map(|(v, _)| ParamConst::Value(v.clone()))
+        match self.0.get(&name.to_lowercase())?.value.as_ref()? {
+            ParamValue::Value(v) => Some(ParamConst::Value(v.clone())),
+            ParamValue::List(v) => Some(ParamConst::List(v.clone())),
+            ParamValue::Table { .. } => None,
+        }
     }
 }
 impl ParamValues for Params {
     fn get(&self, name: &str) -> Option<ParamValue> {
         self.0
             .get(&name.to_lowercase())
-            .map(|(v, _)| ParamValue::Value(v.clone()))
+            .and_then(|p| p.value.clone())
     }
 }

@@ -30,8 +30,18 @@ pub fn register(reg: &mut bsl_vm::Registry, provider: std::sync::Arc<dyn QueryHo
         reg.type_impl(
             ty,
             TypeImpl {
-                ctor: Some(Arc::new(move |_, _| Ok(query_obj::Manager::construct(ty)))),
+                ctor: Some(Arc::new(move |_, _| Ok(manager::Manager::construct(ty)))),
             },
         );
     }
 }
+
+pub mod values;
+
+mod columns;
+mod manager;
+mod params_desc;
+mod result_obj;
+mod selection;
+
+mod unload;

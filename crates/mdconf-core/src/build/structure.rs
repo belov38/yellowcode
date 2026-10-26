@@ -29,9 +29,14 @@ pub(crate) fn load_options(model: &Configuration, base: &Configuration) -> Resul
     Ok(())
 }
 
-pub(crate) fn compare(model: &Configuration, base: &Configuration) -> Result<EditedProps> {
+pub(crate) fn compare(
+    model: &Configuration,
+    base: &Configuration,
+    prepared: &super::form_modules::Prepared<'_>,
+) -> Result<EditedProps> {
     let mut d = Diffs {
         cfg: model,
+        prepared,
         schema: mdschema::schema()?,
         first: None,
         lines: Vec::new(),
@@ -52,7 +57,8 @@ pub(crate) fn compare(model: &Configuration, base: &Configuration) -> Result<Edi
     }
 }
 
-struct Diffs<'c> {
+struct Diffs<'c, 'p> {
+    prepared: &'p super::form_modules::Prepared<'c>,
     cfg: &'c Configuration,
     schema: &'static mdschema::Schema,
     first: Option<(String, String, String)>,
@@ -65,7 +71,7 @@ fn task7(part: &str) -> String {
     format!("edit of {part}: not written before C7 Task 7")
 }
 
-impl Diffs<'_> {
+impl Diffs<'_, '_> {
     fn note(&mut self, object: &str, path: &str, what: String) {
         self.total += 1;
         if self.lines.len() < LISTED {
@@ -281,12 +287,12 @@ impl Diffs<'_> {
         };
         if self.same_ids(&full, "forms", &subs(forms), &subs(&b.forms)) {
             for (s, q) in forms.iter().zip(&b.forms) {
-                self.sub(s, q);
+                self.sub(o, b, s, q);
             }
         }
         if self.same_ids(&full, "templates", &subs(templates), &subs(&b.templates)) {
             for (s, q) in templates.iter().zip(&b.templates) {
-                self.sub(s, q);
+                self.sub(o, b, s, q);
             }
         }
         let recalcs = |l: &[Recalculation]| -> Vec<(String, Guid)> {
@@ -309,7 +315,9 @@ impl Diffs<'_> {
         let slots = crate::modules::slot_kinds(self.schema, kind.as_str());
         for module in modules.iter().filter(|m| !slots.contains(&m.kind)) {
             let base = b.modules.iter().find(|q| q.kind == module.kind);
-            if base.is_some_and(|q| q != module) {
+            if base.is_some_and(|q| q != module)
+                && !(module.kind == ModuleKind::FormModule && self.prepared.permits_common(o, b))
+            {
                 self.note(
                     &full,
                     &format!("modules.{:?}", module.kind),
@@ -441,7 +449,7 @@ impl Diffs<'_> {
         }
     }
 
-    fn sub(&mut self, s: &SubObject, b: &SubObject) {
+    fn sub(&mut self, owner: &MdObject, original_owner: &MdObject, s: &SubObject, b: &SubObject) {
         let SubObject {
             kind: _,
             id,
@@ -454,8 +462,17 @@ impl Diffs<'_> {
         let full = self.full(*id, name);
         self.rename(&full, name, &b.name);
         self.props(*id, props, &b.props);
-        if *module != b.module {
-            self.note(&full, "module", "form module: C7 Task 6".into());
+        if *module != b.module && !self.prepared.permits_sub(owner, original_owner, s, b) {
+            let what = match (module, &b.module) {
+                (Some(m), None) => format!("structural change: added module {:?} (C9)", m.kind),
+                (None, Some(m)) => format!("structural change: removed module {:?} (C9)", m.kind),
+                (Some(m), Some(n)) if m.kind != n.kind => format!(
+                    "structural change: module kind {:?} -> {:?} (C9)",
+                    n.kind, m.kind
+                ),
+                _ => "form module: C7 Task 6".into(),
+            };
+            self.note(&full, "module", what);
         }
         if *form != b.form {
             self.note(&full, "form", FORM.into());

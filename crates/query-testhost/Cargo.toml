@@ -11,6 +11,11 @@ autobenches = false
 
 [dependencies]
 serde_json = "1"
+bsl-compiler = { path = "../bsl-compiler" }
+query = { path = "../query" }
+bsl-vm = { path = "../bsl-vm" }
+bsl-stdlib = { path = "../bsl-stdlib" }
+bsl-testhost = { path = "../bsl-testhost" }
 memory-budget = { path = "../memory-budget" }
 query-exec = { path = "../query-exec" }
 query-ir = { path = "../query-ir" }

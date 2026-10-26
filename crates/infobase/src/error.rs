@@ -2,6 +2,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("writer busy")]
+    WriterBusy,
     #[error("{0}")]
     Memory(#[from] memory_budget::BudgetError),
     #[error("{0}")]

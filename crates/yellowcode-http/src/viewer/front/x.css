@@ -400,7 +400,7 @@ button.xb-lit:hover { background: var(--cfg-selection-hot); }
 .xc-mode { margin-left: auto; display: inline-flex; gap: 10px; align-items: center; }
 .xc-mode label { display: inline-flex; align-items: center; gap: 3px; cursor: default; }
 .xc-mode label:has(input:disabled) { color: var(--cfg-text-disabled-field); }
-.xc-statusline { display: flex; gap: 16px; align-items: center; padding: 3px 8px; border-bottom: 1px solid var(--cfg-border-control); font-size: 12px; }
+.xc-statusline { display: flex; flex-wrap: wrap; gap: 16px; align-items: center; padding: 3px 8px; border-bottom: 1px solid var(--cfg-border-control); font-size: 12px; }
 .xc-session.xc-bare { color: var(--cfg-text-special); }
 .xc-ed { flex: 1 1 55%; min-height: 80px; display: flex; border-bottom: 1px solid var(--cfg-border-control); background: var(--cfg-surface-field); overflow: hidden; }
 .xc-ed > .cm-editor { flex: 1; min-width: 0; }

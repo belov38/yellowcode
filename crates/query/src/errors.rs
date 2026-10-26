@@ -47,6 +47,12 @@ pub(crate) fn batch_error(ex: &Execution, text: &str, e: BatchError) -> CallErro
     match e {
         BatchError::Compile(e) => {
             let s = e.render(text, lang, script);
+            if e.at.is_none()
+                && e.msg == query_syntax::MsgId::SELECT_ERROR_WRONGPARAMETER
+                && matches!(&e.quoted, Some(query_syntax::MsgArg::Text(t)) if t.as_ref() == "VALUETYPE")
+            {
+                return fatal(FatalKind::Internal, s);
+            }
             HostError::text(&s, &s).into()
         }
         BatchError::Exec(ExecError::Runtime(e) | ExecError::Rights(e)) => {
@@ -70,4 +76,46 @@ pub(crate) fn batch_error(ex: &Execution, text: &str, e: BatchError) -> CallErro
             fatal(FatalKind::Memory, e.to_string())
         }
     }
+}
+
+pub(crate) fn walk_error(ex: &Execution, e: query_exec::walk::WalkError) -> CallError {
+    use query_exec::walk::WalkError;
+    let msg = |key| {
+        platform_catalog::messages::text_key(key, ex.lang())
+            .unwrap_or(key)
+            .to_owned()
+    };
+    let cause = match e {
+        WalkError::DivisionByZero => format!(
+            "{} \"{}\"",
+            msg("entext:IDS_SELECT_ERROR_ARITHMETICERROR"),
+            msg("entext:IDS_SELECT_DIVIDEBYZERO")
+        ),
+        WalkError::DimensionNotFound(n) => format!(
+            "{} \"{n}\"",
+            msg("entext:IDS_SELECT_ERROR_DIMENSIONNOTFINDED")
+        ),
+        WalkError::DimensionNotFoundInParents(n) => format!(
+            "{} \"{n}\"",
+            msg("entext:IDS_SELECT_ERROR_DIMENSIONNOTFINDEDINPARENTITERATORS")
+        ),
+        WalkError::DifferentDimensionCount => {
+            msg("entext:IDS_SELECT_ERROR_DIFFERENTCOUNTINDIMENSIONSOURCES")
+        }
+        WalkError::NoCurrentRecord | WalkError::ColumnNotFound(_) => {
+            return crate::columns::bounds().into();
+        }
+        WalkError::Exec(e) => return batch_error(ex, "", BatchError::Exec(e)),
+        WalkError::GroupingNotFound(_) => {
+            return HostError::not_implemented(
+                "ВыборкаИзРезультатаЗапроса",
+                "Q4: неизвестная группировка",
+            )
+            .into();
+        }
+        WalkError::Later(what) => {
+            return HostError::not_implemented("ВыборкаИзРезультатаЗапроса", what).into();
+        }
+    };
+    HostError::text(&cause, &cause).into()
 }

@@ -1,6 +1,7 @@
 mod check;
 mod classify;
 mod edit;
+mod form_modules;
 mod modules;
 mod structure;
 mod versions;

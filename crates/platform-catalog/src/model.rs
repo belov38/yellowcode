@@ -92,12 +92,20 @@ pub struct XdtoName {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResultType {
+    pub id: Option<String>,
+    pub name_ru: String,
+    pub name_en: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PropertyInfo {
     pub name_ru: String,
     pub name_en: String,
     pub readable: bool,
     pub writable: bool,
     pub avail: Avail,
+    pub types: Vec<ResultType>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -112,6 +120,7 @@ pub struct MethodInfo {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Signature {
     pub params: Vec<ParamInfo>,
+    pub return_types: Option<Vec<ResultType>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

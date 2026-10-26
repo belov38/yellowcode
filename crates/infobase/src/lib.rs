@@ -22,6 +22,7 @@ pub mod physical;
 pub mod raw;
 pub mod restore;
 pub mod seed;
+pub mod service;
 pub mod store1cd;
 
 pub use error::{Error, Result};

@@ -338,10 +338,29 @@ fn cache_dir() -> crate::Result<PathBuf> {
         return Ok(PathBuf::from(d));
     }
     if let Some(d) = var("XDG_CACHE_HOME") {
-        return Ok(PathBuf::from(d).join("onec/cfg"));
+        return Ok(PathBuf::from(d).join("onec").join("cfg"));
     }
-    let home = var("HOME").ok_or("cannot find the cache directory: HOME is not set")?;
-    Ok(PathBuf::from(home).join(".cache/onec/cfg"))
+    #[cfg(windows)]
+    let base = {
+        var("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir)
+    };
+    #[cfg(target_os = "macos")]
+    let base = {
+        let home = var("HOME")
+            .map(PathBuf::from)
+            .or_else(std::env::home_dir)
+            .filter(|p| !p.as_os_str().is_empty())
+            .ok_or("cannot find the cache directory: home directory is not available")?;
+        home.join("Library").join("Caches")
+    };
+    #[cfg(not(any(windows, target_os = "macos")))]
+    let base = {
+        let home = var("HOME").ok_or("cannot find the cache directory: HOME is not set")?;
+        PathBuf::from(home).join(".cache")
+    };
+    Ok(base.join("onec").join("cfg"))
 }
 
 fn sha256_of(p: &Path) -> crate::Result<String> {
