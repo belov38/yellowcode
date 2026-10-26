@@ -1,7 +1,9 @@
 use crate::ColumnInfo;
 use crate::ir::{BuildError, ColSel, Expr, ExprKind, Rel, SortKey, SourceS, SrcId, SrcKind, StmtS};
-use crate::schema::{FieldRole, QFieldId, QTableId, QuerySchema, StdRole, TableKind};
-use crate::types::{QType, StrQ};
+use crate::schema::{
+    FieldRole, Periodicity, QFieldId, QTableId, QuerySchema, StdRole, TableKind, VtKind,
+};
+use crate::types::{DateQ, QType, StrQ};
 use crate::value::{QStr, QValue};
 use bsl_prim::fold_name;
 use query_syntax::ast::CmpOp;
@@ -41,12 +43,22 @@ struct FieldSnap {
 }
 
 #[derive(Clone, Debug)]
+struct RegisterSelection {
+    register: QTableId,
+    kind: VtKind,
+    inner_cols: Vec<Option<QFieldId>>,
+}
+
+#[derive(Clone, Debug)]
 pub struct Selection {
     table: QTableId,
     state: Result<(), String>,
     unsupported: Option<(&'static str, &'static str)>,
+    register: Option<RegisterSelection>,
+    bounds: [Option<BuildValue>; 2],
     fields: Vec<FieldSnap>,
     star: Vec<QFieldId>,
+    all_fields: bool,
     filters: Vec<Filter>,
     order: Vec<(QFieldId, bool)>,
     top: Option<u64>,
@@ -57,9 +69,52 @@ impl Selection {
     pub fn of(schema: &QuerySchema, t: QTableId) -> Selection {
         let known = usize::try_from(t.0).is_ok_and(|i| i < schema.tables().len());
         let tab = schema.table(t);
+        let register = tab.owner.and_then(|register| {
+            let TableKind::Virtual(kind) = tab.kind else {
+                return None;
+            };
+            let supported = matches!(
+                (schema.table(register).kind, kind),
+                (
+                    TableKind::Object(mdschema::MdKind::AccumulationRegister),
+                    VtKind::Balance | VtKind::Turnovers
+                ) | (
+                    TableKind::Object(mdschema::MdKind::InformationRegister),
+                    VtKind::SliceLast | VtKind::SliceFirst
+                )
+            );
+            if !supported {
+                return None;
+            }
+            let inner_cols = if matches!(kind, VtKind::SliceLast | VtKind::SliceFirst) {
+                (0..tab.fields.len())
+                    .map(|i| u16::try_from(i).ok().map(QFieldId))
+                    .collect()
+            } else {
+                let shape = crate::lower::vt_shape(schema, t);
+                let mut cols =
+                    vec![
+                        None;
+                        crate::ir::raw_layout::width(shape.dims.len(), shape.resources.len())
+                    ];
+                for (slot, f) in cols
+                    .iter_mut()
+                    .skip(crate::ir::raw_layout::DIMS)
+                    .zip(shape.dims)
+                {
+                    *slot = Some(f);
+                }
+                cols
+            };
+            Some(RegisterSelection {
+                register,
+                kind,
+                inner_cols,
+            })
+        });
         let unsupported = match tab.kind {
-            TableKind::Virtual(_) => Some(("виртуальные таблицы", "Q5")),
-            TableKind::Changes => Some((".Изменения", "Q5")),
+            TableKind::Virtual(VtKind::SequenceBoundaries) => None,
+            TableKind::Virtual(_) if register.is_none() => Some(("виртуальные таблицы", "Q5")),
             _ => None,
         };
         Selection {
@@ -70,6 +125,8 @@ impl Selection {
                 Err(format!("unknown table {}", t.0))
             },
             unsupported,
+            register,
+            bounds: [None, None],
             fields: tab
                 .fields
                 .iter()
@@ -89,6 +146,7 @@ impl Selection {
                     })
                 })
                 .collect(),
+            all_fields: true,
             filters: Vec::new(),
             order: Vec::new(),
             top: None,
@@ -98,6 +156,7 @@ impl Selection {
 
     pub fn columns(mut self, fields: &[QFieldId]) -> Selection {
         self.star = fields.to_vec();
+        self.all_fields = false;
         self
     }
 
@@ -118,6 +177,15 @@ impl Selection {
 
     pub fn starts_with(mut self, f: QFieldId, prefix: BuildValue) -> Selection {
         self.filters.push(Filter::Starts(f, prefix));
+        self
+    }
+
+    pub fn virtual_bounds(
+        mut self,
+        start: Option<BuildValue>,
+        end: Option<BuildValue>,
+    ) -> Selection {
+        self.bounds = [start, end];
         self
     }
 
@@ -151,6 +219,7 @@ struct Builder<'a> {
     sel: &'a Selection,
     params: Vec<String>,
     slots: std::collections::HashMap<String, u16>,
+    source: SrcId,
 }
 
 const SRC: SrcId = SrcId(0);
@@ -166,10 +235,22 @@ impl<'a> Builder<'a> {
                 stage: u.1,
             });
         }
+        if sel.bounds.iter().any(Option::is_some) && sel.register.is_none() {
+            return internal("virtual bounds need a manager virtual table");
+        }
+        if sel.bounds[1].is_some()
+            && sel
+                .register
+                .as_ref()
+                .is_some_and(|v| v.kind != VtKind::Turnovers)
+        {
+            return internal("only turnovers accept an end boundary");
+        }
         Ok(Builder {
             sel,
             params: Vec::new(),
             slots: Default::default(),
+            source: SRC,
         })
     }
 
@@ -184,9 +265,18 @@ impl<'a> Builder<'a> {
     }
 
     fn col(&self, f: QFieldId) -> R<Expr> {
+        if self.source != SRC
+            && self
+                .sel
+                .register
+                .as_ref()
+                .is_some_and(|v| !v.inner_cols.contains(&Some(f)))
+        {
+            return internal("a manager filter field is unavailable before the register operation");
+        }
         Ok(Expr {
             kind: ExprKind::Col {
-                src: SRC,
+                src: self.source,
                 col: ColSel::Field(f),
             },
             ty: self.field(f)?.ty.clone(),
@@ -294,6 +384,15 @@ impl<'a> Builder<'a> {
             src: SRC,
             table: sel.table,
         };
+        let mut sources = vec![SourceS {
+            id: SRC,
+            all_fields: sel.all_fields,
+            kind: SrcKind::Table(sel.table),
+        }];
+        let mut tables = vec![sel.table];
+        if sel.register.is_some() {
+            self.source = SrcId(1);
+        }
         let mut preds = Vec::with_capacity(sel.filters.len());
         for f in &sel.filters {
             preds.push(self.filter(f)?);
@@ -306,7 +405,56 @@ impl<'a> Builder<'a> {
                 ty: QType::boolean(),
             }),
         };
-        if let Some(pred) = pred {
+        self.source = SRC;
+        if let Some(v) = &sel.register {
+            if let Some(source) = sources.first_mut() {
+                source.kind = SrcKind::Virtual {
+                    table: sel.table,
+                    cols: (0..sel.fields.len())
+                        .map(|i| u16::try_from(i).ok().map(QFieldId))
+                        .collect(),
+                };
+            }
+            sources.push(SourceS {
+                id: SrcId(1),
+                all_fields: false,
+                kind: SrcKind::Virtual {
+                    table: sel.table,
+                    cols: v.inner_cols.clone(),
+                },
+            });
+            tables = vec![v.register];
+            let ty = QType::date(DateQ::DateTime);
+            let bounds = [
+                sel.bounds[0]
+                    .as_ref()
+                    .map(|b| self.value(b, &ty))
+                    .transpose()?,
+                sel.bounds[1]
+                    .as_ref()
+                    .map(|b| self.value(b, &ty))
+                    .transpose()?,
+            ];
+            let step = Box::new(crate::ir::RegisterVtS {
+                src: SRC,
+                inner: SrcId(1),
+                table: sel.table,
+                register: v.register,
+                kind: v.kind,
+                bounds,
+                cond: pred,
+                periodicity: Periodicity::Absent,
+                complement: None,
+                area: None,
+                access: None,
+                span: None,
+            });
+            rel = if matches!(v.kind, VtKind::SliceLast | VtKind::SliceFirst) {
+                Rel::Slice(step)
+            } else {
+                Rel::RegisterVt(step)
+            };
+        } else if let Some(pred) = pred {
             rel = Rel::Filter {
                 input: Box::new(rel),
                 pred,
@@ -392,15 +540,14 @@ impl<'a> Builder<'a> {
             };
         }
         Ok(StmtS {
+            qr8: Vec::new(),
+            static_analysis: false,
             root: rel,
             columns,
-            sources: vec![SourceS {
-                id: SRC,
-                kind: SrcKind::Table(sel.table),
-            }],
+            sources,
             params: self.params,
             values: Vec::new(),
-            tables: vec![sel.table],
+            tables,
             allowed: false,
             auto_number: None,
             nested: Vec::new(),

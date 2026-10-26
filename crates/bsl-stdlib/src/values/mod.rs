@@ -1,6 +1,7 @@
 mod binary;
 pub(crate) mod period;
 pub mod placeholder;
+mod system_info;
 mod uuid;
 pub(crate) mod xml_type;
 
@@ -45,6 +46,7 @@ pub(crate) fn register(reg: &mut Registry) {
             ctor: Some(Arc::new(uuid::ctor)),
         },
     );
+    system_info::register(reg);
     xml_type::register(reg);
     period::register(reg);
 }

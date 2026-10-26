@@ -966,7 +966,7 @@ fn pattern_text(td: &TypeDescription) -> String {
             continue;
         }
         let flag = |fixed: bool| if fixed { 0 } else { 1 };
-        match t.qname.as_str() {
+        match t.name.legacy_qname().as_deref().unwrap_or("") {
             "xs:boolean" => parts.push("{\"B\"}".to_string()),
             "xs:string" => {
                 let s = td.string.unwrap_or(md_model::StringQualifiers {

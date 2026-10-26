@@ -3,6 +3,7 @@ use std::fmt;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use sha1::{Digest as _, Sha1};
+use subtle::ConstantTimeEq as _;
 
 pub fn sha1_b64(s: &str) -> String {
     STANDARD.encode(Sha1::digest(s.as_bytes()))
@@ -40,5 +41,12 @@ pub fn stored_value(h: &Hashes) -> String {
 }
 
 pub fn login_matches(stored_upper: &str, password: &str) -> bool {
-    !stored_upper.is_empty() && sha1_b64(&upper(password)) == stored_upper
+    let mut stored = [0u8; 20];
+    if stored_upper.len() != 28
+        || STANDARD.decode_slice(stored_upper, &mut stored) != Ok(stored.len())
+    {
+        return false;
+    }
+    let candidate = Sha1::digest(upper(password).as_bytes());
+    bool::from(candidate.as_slice().ct_eq(&stored))
 }

@@ -272,6 +272,7 @@ impl<'a> ExprItem<'a> {
     }
     fn into_item(self) -> Item {
         Item {
+            star: false,
             expr: self.expr.into_expr(),
             name: self.name.into_string(),
             nested: self.nested.map(super::NativeOwned::into_native),

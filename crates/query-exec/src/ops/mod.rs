@@ -1,11 +1,16 @@
 pub mod access;
+mod security;
+pub(crate) use security::CheckAccess;
 pub mod agg;
 pub mod expr;
 pub mod hier;
 pub mod join;
 pub mod nested;
 pub mod present;
+pub mod register;
+pub mod running;
 pub mod setops;
+pub mod slice;
 pub mod sort;
 pub mod subq;
 pub mod temp;
@@ -304,6 +309,7 @@ pub struct Mark {
 }
 
 pub struct Cx<'a> {
+    pub(crate) observation: Option<crate::observe::ObservationSession>,
     pub env: &'a ExecEnv<'a>,
     pub src: &'a dyn DataSource,
     pub outer: Vec<Row>,
@@ -325,6 +331,7 @@ impl<'a> Cx<'a> {
             subs: Rc::new(subq::SubCache::default()),
             ticks: 0,
             week_start: None,
+            observation: None,
         }
     }
 
@@ -342,6 +349,7 @@ impl<'a> Cx<'a> {
             subs: self.subs.clone(),
             ticks: 0,
             week_start: self.week_start,
+            observation: self.observation.clone(),
         }
     }
 

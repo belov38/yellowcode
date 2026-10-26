@@ -238,11 +238,24 @@ impl StaticTemplateTables {
     pub fn chart(&self) -> &'static StaticValue {
         table("templates/chart_tables.json")
     }
+    pub fn type_guid_expanded(
+        &self,
+        name: crate::ExpandedTypeName<'_>,
+        set: bool,
+    ) -> Option<&'static str> {
+        crate::type_names::unique_type_guid(
+            crate::static_platform_types(table("types.json"))?,
+            name,
+            set,
+        )
+    }
     pub fn type_guid(&self, name: &str) -> Option<&'static str> {
         pairs(Some(table("types.json")))
             .iter()
             .rev()
-            .find(|(_, value)| text(value.at(1)) == Some(name))
+            .find(|(_, value)| {
+                value.at(2).is_none_or(StaticValue::is_null) && text(value.at(1)) == Some(name)
+            })
             .map(|(guid, _)| *guid)
     }
 }
@@ -250,5 +263,13 @@ impl StaticTemplateTables {
 impl super::StaticSchema {
     pub fn build_event(&self, name: &str) -> Option<&'static str> {
         text(table("build/events.json").get(name))
+    }
+}
+
+impl super::StaticSchema {
+    pub fn platform_type(&self, guid: &str) -> Option<crate::BorrowedPlatformType<'static>> {
+        crate::static_platform_types(self.table("types.json")?)?
+            .find(|(key, _)| *key == guid)
+            .map(|(_, ty)| ty)
     }
 }

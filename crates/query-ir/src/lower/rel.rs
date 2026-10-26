@@ -37,7 +37,11 @@ pub(super) struct Lower<'a> {
     pub frozen: bool,
     pub added: u32,
     pub agg_decs: Vec<super::Dec>,
+    pub vt_used: Vec<Vec<QFieldId>>,
+    pub slice_cols: HashMap<SrcId, Vec<QFieldId>>,
     pub inner: u32,
+    pub policy_depth: u32,
+    pub applied_security: std::collections::HashSet<SrcId>,
 }
 
 const LEFT: u8 = 1;
@@ -53,6 +57,44 @@ enum SemiSrc<'e> {
     Query(&'e Rel),
     HierList(&'e [Expr]),
     HierQuery(&'e Rel),
+}
+
+fn unordered_balance_rows(r: &Rel, lower: &Lower<'_>) -> bool {
+    match r {
+        Rel::RegisterVt(v) => {
+            if v.kind != crate::schema::VtKind::Balance {
+                return false;
+            }
+            let shape = super::vt::vt_shape(lower.schema, v.table);
+            lower.vt_used.get(v.src.0 as usize).is_some_and(|used| {
+                shape
+                    .dims
+                    .iter()
+                    .chain(shape.period.iter().map(|(field, _)| field))
+                    .any(|field| used.contains(field))
+            })
+        }
+        Rel::Subquery { input, .. }
+        | Rel::Project { input, .. }
+        | Rel::Filter { input, .. }
+        | Rel::Distinct(input)
+        | Rel::Top { input, .. } => unordered_balance_rows(input, lower),
+        Rel::Aggregate {
+            input, keys, sets, ..
+        } => (!keys.is_empty() || sets.is_some()) && unordered_balance_rows(input, lower),
+        Rel::Join { l, r, .. } => {
+            unordered_balance_rows(l, lower) || unordered_balance_rows(r, lower)
+        }
+        Rel::Union { parts, .. } => parts.iter().any(|part| unordered_balance_rows(part, lower)),
+        Rel::Sort { .. }
+        | Rel::Hierarchy { .. }
+        | Rel::Empty
+        | Rel::Scan { .. }
+        | Rel::TempScan { .. }
+        | Rel::ParamScan { .. }
+        | Rel::Slice(_)
+        | Rel::RunningBalance(_) => false,
+    }
 }
 
 impl<'a> Lower<'a> {
@@ -87,7 +129,11 @@ impl<'a> Lower<'a> {
             frozen: false,
             added: 0,
             agg_decs: Vec::new(),
+            vt_used: vec![Vec::new(); n],
+            slice_cols: HashMap::new(),
             inner: 0,
+            policy_depth: 0,
+            applied_security: Default::default(),
         }
     }
 
@@ -98,7 +144,7 @@ impl<'a> Lower<'a> {
     pub fn run(&mut self) -> R<RelL> {
         self.collect_scan_columns()?;
         let stmt = self.stmt;
-        Ok(self.rel(&stmt.root)?.rel)
+        Ok(self.rel(&stmt.root)?.checked().rel)
     }
 
     pub fn run_nested(&mut self) -> R<Vec<NestedL>> {
@@ -156,6 +202,7 @@ impl<'a> Lower<'a> {
         for e in &r.exprs {
             exprs.push(self.expr(e, &mut row)?);
         }
+        let mut row = row.checked();
         Ok(NestedRowsL {
             rel: RelL::Project {
                 input: row.take(),
@@ -187,7 +234,31 @@ impl<'a> Lower<'a> {
                 err = Some(x);
             }
         });
-        err.map_or(Ok(()), Err)
+        if let Some(err) = err {
+            return Err(err);
+        }
+        let conditions: Vec<_> = self.b.security.conditions.values().collect();
+        for e in conditions {
+            let mut fields = Vec::new();
+            visit_expr(e, false, &mut |e, _| {
+                if let ExprKind::Col {
+                    src,
+                    col: ColSel::Field(f),
+                } = e.kind
+                {
+                    fields.push((src, f));
+                }
+            });
+            for (src, field) in fields {
+                if !matches!(
+                    self.stmt.sources.get(src.0 as usize).map(|s| &s.kind),
+                    Some(SrcKind::Virtual { .. })
+                ) {
+                    self.need(src, field)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     pub(super) fn separators_of(&self, src: SrcId) -> Vec<Sf> {
@@ -225,6 +296,16 @@ impl<'a> Lower<'a> {
     }
 
     fn need(&mut self, src: SrcId, f: QFieldId) -> R<()> {
+        if let Some(SrcKind::Virtual { .. }) =
+            self.stmt.sources.get(src.0 as usize).map(|s| &s.kind)
+        {
+            if let Some(u) = self.vt_used.get_mut(src.0 as usize)
+                && !u.contains(&f)
+            {
+                u.push(f);
+            }
+            return Ok(());
+        }
         let Some(SrcKind::Table(qt)) = self.stmt.sources.get(src.0 as usize).map(|s| &s.kind)
         else {
             return internal("a field of a source that is not a table");
@@ -256,6 +337,8 @@ impl<'a> Lower<'a> {
             Rel::Scan { src, table } => self.scan(*src, *table),
             Rel::TempScan { src, name } => self.temp_scan(*src, name),
             Rel::ParamScan { src, param } => self.param_scan(*src, *param),
+            Rel::RegisterVt(v) | Rel::RunningBalance(v) => self.register_vt(v),
+            Rel::Slice(v) => self.slice(v),
             Rel::Subquery { src, input } => {
                 self.inner += 1;
                 let inner = self.rel(input);
@@ -263,6 +346,7 @@ impl<'a> Lower<'a> {
                 let inner = inner?;
                 self.set_level(*src);
                 Ok(Row {
+                    signal: inner.signal,
                     rel: inner.rel,
                     width: inner.width,
                     rep: Some(*src),
@@ -300,9 +384,18 @@ impl<'a> Lower<'a> {
                     });
                 }
                 self.agg_decs = decs;
+                let signal = row
+                    .signal
+                    .map(|signal| {
+                        a.push(super::security::min(signal));
+                        k.len() + a.len() - 1
+                    })
+                    .map(|i| p16(i as i64))
+                    .transpose()?;
                 let width = k.len() + a.len();
                 let nkeys = k.len();
                 Ok(Row {
+                    signal,
                     rel: RelL::Aggregate {
                         input: row.take(),
                         keys: k,
@@ -328,7 +421,16 @@ impl<'a> Lower<'a> {
                         None => self.expr(e, &mut row)?,
                     });
                 }
+                let signal = row
+                    .signal
+                    .map(|_| {
+                        let i = ps.len();
+                        ps.push(row.signal_expr());
+                        p16(i as i64)
+                    })
+                    .transpose()?;
                 Ok(Row {
+                    signal,
                     width: ps.len(),
                     rel: RelL::Project {
                         input: row.take(),
@@ -340,7 +442,21 @@ impl<'a> Lower<'a> {
             }
             Rel::Distinct(x) => {
                 let mut row = self.rel(x)?;
-                row.rel = RelL::Distinct(row.take());
+                if let Some(signal) = row.signal {
+                    let keys = (0..p16(row.width as i64)?)
+                        .filter(|i| *i != signal)
+                        .map(PExpr::Col)
+                        .collect::<Vec<_>>();
+                    row.signal = Some(p16(keys.len() as i64)?);
+                    row.rel = RelL::Aggregate {
+                        input: row.take(),
+                        keys,
+                        sets: None,
+                        aggs: vec![super::security::min(signal)],
+                    };
+                } else {
+                    row.rel = RelL::Distinct(row.take());
+                }
                 Ok(row)
             }
             Rel::Sort { input, keys } => {
@@ -378,6 +494,12 @@ impl<'a> Lower<'a> {
                 Ok(row)
             }
             Rel::Top { input, n } => {
+                if *n > 0 && unordered_balance_rows(input, self) {
+                    return later(
+                        "Q5c-BalanceTopUnordered: ПЕРВЫЕ без порядка над Остатки",
+                        "Q5d",
+                    );
+                }
                 let mut row = self.rel(input)?;
                 row.rel = RelL::Top {
                     input: row.take(),
@@ -386,21 +508,60 @@ impl<'a> Lower<'a> {
                 Ok(row)
             }
             Rel::Union { parts, all } => {
-                let mut rels = Vec::with_capacity(parts.len());
-                let mut width = 0;
-                for (i, p) in parts.iter().enumerate() {
-                    let row = self.rel(p)?;
-                    if i == 0 {
-                        width = row.width;
+                let mut rows = parts.iter().map(|p| self.rel(p)).collect::<R<Vec<_>>>()?;
+                let secured = rows.iter().any(|r| r.signal.is_some());
+                let mut rels = Vec::with_capacity(rows.len());
+                let width = rows
+                    .first()
+                    .map(|r| r.width - usize::from(r.signal.is_some()))
+                    .unwrap_or(0);
+                for row in &mut rows {
+                    if secured {
+                        let signal = row.signal_expr();
+                        let mut exprs = (0..p16(width as i64)?).map(PExpr::Col).collect::<Vec<_>>();
+                        exprs.push(signal);
+                        row.rel = RelL::Project {
+                            input: row.take(),
+                            exprs,
+                        };
                     }
-                    rels.push(row.rel);
+                    rels.push(std::mem::replace(&mut row.rel, RelL::Empty));
                 }
-                Ok(Row {
-                    rel: RelL::Union {
+                let signal = secured.then(|| p16(width as i64)).transpose()?;
+                let rel = if let Some(signal) = signal {
+                    let last = all.iter().rposition(|a| !*a);
+                    if let Some(last) = last {
+                        let rest = rels.split_off((last + 2).min(rels.len()));
+                        let head = RelL::Aggregate {
+                            input: Box::new(RelL::Union {
+                                all: vec![true; rels.len().saturating_sub(1)],
+                                parts: rels,
+                            }),
+                            keys: (0..signal).map(PExpr::Col).collect(),
+                            sets: None,
+                            aggs: vec![super::security::min(signal)],
+                        };
+                        let parts = std::iter::once(head).chain(rest).collect::<Vec<_>>();
+                        RelL::Union {
+                            all: vec![true; parts.len().saturating_sub(1)],
+                            parts,
+                        }
+                    } else {
+                        RelL::Union {
+                            parts: rels,
+                            all: all.clone(),
+                        }
+                    }
+                } else {
+                    RelL::Union {
                         parts: rels,
                         all: all.clone(),
-                    },
-                    width,
+                    }
+                };
+                Ok(Row {
+                    signal,
+                    rel,
+                    width: width + usize::from(secured),
                     rep: None,
                     keys: None,
                 })
@@ -465,7 +626,7 @@ impl<'a> Lower<'a> {
         Some(code)
     }
 
-    fn set_level(&mut self, src: SrcId) {
+    pub(super) fn set_level(&mut self, src: SrcId) {
         if let Some(l) = self.src_level.get_mut(src.0 as usize) {
             *l = self.level;
         }
@@ -480,6 +641,7 @@ impl<'a> Lower<'a> {
         };
         let width = p16(columns.len() as i64)?;
         Ok(Row {
+            signal: None,
             width: usize::from(width),
             rel: RelL::TempScan {
                 name: bsl_prim::fold_name(name),
@@ -497,6 +659,7 @@ impl<'a> Lower<'a> {
             return internal("a value table scan of a parameter that is not one");
         };
         Ok(Row {
+            signal: None,
             width: rows.width,
             rel: RelL::Values { rows: rows.clone() },
             rep: Some(src),
@@ -504,7 +667,7 @@ impl<'a> Lower<'a> {
         })
     }
 
-    fn scan(&mut self, src: SrcId, table: QTableId) -> R<Row> {
+    pub(super) fn scan(&mut self, src: SrcId, table: QTableId) -> R<Row> {
         self.set_level(src);
         let t = self.schema.table(table);
         let cols = self
@@ -517,6 +680,7 @@ impl<'a> Lower<'a> {
         }
         if self.schema.is_unstored(table) {
             return Ok(Row {
+                signal: None,
                 width: 0,
                 rel: RelL::Top {
                     input: Box::new(RelL::Empty),
@@ -529,7 +693,8 @@ impl<'a> Lower<'a> {
         let Some(tid) = self.storage.table(table) else {
             return fatal(format!("таблица {} не привязана к хранению", t.name_ru));
         };
-        Ok(Row {
+        let row = Row {
+            signal: None,
             width: cols.len(),
             rel: RelL::Scan {
                 table: tid,
@@ -537,7 +702,8 @@ impl<'a> Lower<'a> {
             },
             rep: Some(src),
             keys: None,
-        })
+        };
+        self.secure_row(row, src)
     }
 
     fn constants(&mut self, src: SrcId, cols: Vec<Sf>) -> R<Row> {
@@ -578,6 +744,7 @@ impl<'a> Lower<'a> {
             *m = idx;
         }
         Ok(Row {
+            signal: None,
             width: flat.len(),
             rel,
             rep: Some(src),
@@ -724,12 +891,24 @@ impl<'a> Lower<'a> {
             (lr, rr, raw)
         };
         let mut row = Row {
+            signal: None,
             rel: RelL::Empty,
             width,
             rep: Some(root),
             keys: None,
         };
         let on = self.expr(on, &mut row)?;
+        let joined_signal = if first.signal.is_some() || second.signal.is_some() {
+            let a = first.signal_expr();
+            let b = second
+                .signal
+                .map(|i| p16(i64::from(i) + first.width as i64).map(super::security::neutral))
+                .transpose()?
+                .unwrap_or(PExpr::Lit(QValue::Bool(true)));
+            Some(PExpr::And(vec![a, b]))
+        } else {
+            None
+        };
         let (mut first, mut second) = (first, second);
         row.rel = RelL::Join {
             kind: if swap { JoinKind::Left } else { kind },
@@ -739,11 +918,18 @@ impl<'a> Lower<'a> {
             eq,
             by_id: false,
         };
+        if let Some(signal) = joined_signal {
+            row.append_signal(signal)?;
+        }
         Ok(row)
     }
 
     fn filter(&mut self, input: &Rel, pred: &Expr) -> R<Row> {
-        let mut row = self.rel(input)?;
+        let row = self.rel(input)?;
+        self.filter_row(row, pred)
+    }
+
+    pub(super) fn filter_row(&mut self, mut row: Row, pred: &Expr) -> R<Row> {
         let mut plain: Vec<&Expr> = Vec::new();
         let mut semis: Vec<(Semi<'_>, Vec<HierTable>)> = Vec::new();
         for c in conjuncts(pred) {
@@ -851,7 +1037,20 @@ impl Lower<'_> {
         self.agg_decs = outer_decs;
         let correlated = self.min_ref.pop().is_some_and(|m| m < self.level);
         self.level -= 1;
-        Ok((q?.rel, correlated))
+        let q = q?;
+        let signal = q.signal;
+        let width = p16(q.width as i64)?;
+        let mut q = q.checked();
+        if let Some(signal) = signal {
+            q.rel = RelL::Project {
+                input: q.take(),
+                exprs: (0..width)
+                    .filter(|i| *i != signal)
+                    .map(PExpr::Col)
+                    .collect(),
+            };
+        }
+        Ok((q.rel, correlated))
     }
 
     pub(super) fn hier_tables(&self, l: &[Expr]) -> Vec<HierTable> {

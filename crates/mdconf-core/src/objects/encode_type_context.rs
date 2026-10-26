@@ -6,7 +6,7 @@ use mdschema::Schema;
 use std::collections::{HashMap, HashSet};
 
 const TYPE_DESCRIPTION: &str = "f5c65050-3bbb-11d5-b988-0050bae0a95d";
-type Key = (String, bool, Option<Guid>);
+type Key = (crate::XmlTypeName, bool, Option<Guid>);
 type Result<T> = std::result::Result<T, TypeContextError>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -27,13 +27,13 @@ impl TypeContext {
             index.types.iter().map(|(id, name)| (*id, name.as_str())),
             schema
                 .platform_types()
-                .map(|(id, ty)| (id, ty.qname.as_str(), ty.set)),
+                .map(|(id, ty)| (id, ty.name(), ty.set)),
         )
     }
 
     fn from_authorities<'a>(
         generated: impl IntoIterator<Item = (Guid, &'a str)>,
-        platform: impl IntoIterator<Item = (&'a str, &'a str, bool)>,
+        platform: impl IntoIterator<Item = (&'a str, mdschema::ExpandedTypeName<'a>, bool)>,
     ) -> Result<Self> {
         let mut effective = HashMap::new();
         for (text, name, set) in platform {
@@ -41,7 +41,12 @@ impl TypeContext {
             if id.to_string() != text {
                 return Err(TypeContextError::InvalidContext);
             }
-            let meaning = (name.to_owned(), set, None);
+            let meaning = (
+                crate::XmlTypeName::new(name.namespace_uri, name.local)
+                    .ok_or(TypeContextError::InvalidContext)?,
+                set,
+                None,
+            );
             if let Some(previous) = effective.insert(id, meaning.clone())
                 && previous != meaning
             {
@@ -49,13 +54,24 @@ impl TypeContext {
             }
         }
         let special = Guid::parse(TYPE_DESCRIPTION).ok_or(TypeContextError::InvalidContext)?;
-        effective.insert(special, ("v8:TypeDescription".into(), false, None));
+        effective.insert(
+            special,
+            (
+                crate::XmlTypeName::from_qname("v8:TypeDescription")
+                    .ok_or(TypeContextError::InvalidContext)?,
+                false,
+                None,
+            ),
+        );
         for (id, name) in generated {
             let set = matches!(
                 name.split('.').next(),
                 Some("DefinedType" | "Characteristic")
             );
-            effective.insert(id, (format!("cfg:{name}"), set, Some(id)));
+            effective.remove(&id);
+            if let Some(name) = crate::XmlTypeName::new(mdschema::FixedNamespace::Cfg.uri(), name) {
+                effective.insert(id, (name, set, Some(id)));
+            }
         }
         let mut by_meaning = HashMap::new();
         for (id, meaning) in effective {
@@ -74,7 +90,7 @@ impl TypeContext {
         };
         let mut seen = HashSet::new();
         for reference in &description.types {
-            if !seen.insert(reference.qname.as_str()) {
+            if !seen.insert(&reference.name) {
                 return Err(TypeContextError::InvalidShape);
             }
         }
@@ -97,7 +113,7 @@ impl TypeContext {
                         .clone(),
                 );
             } else {
-                let key = (reference.qname.clone(), reference.set, reference.type_id);
+                let key = (reference.name.clone(), reference.set, reference.type_id);
                 let id = *self
                     .by_meaning
                     .get(&key)
@@ -110,8 +126,13 @@ impl TypeContext {
 }
 
 fn builtin(reference: &TypeRef) -> bool {
-    matches!(
-        reference.qname.as_str(),
-        "xs:boolean" | "xs:string" | "xs:decimal" | "xs:dateTime" | "xs:base64Binary"
-    )
+    reference
+        .name
+        .fixed_local(mdschema::FixedNamespace::Xs)
+        .is_some_and(|local| {
+            matches!(
+                local,
+                "boolean" | "string" | "decimal" | "dateTime" | "base64Binary"
+            )
+        })
 }

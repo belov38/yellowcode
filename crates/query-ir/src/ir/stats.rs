@@ -39,7 +39,7 @@ pub fn stats(s: &StmtS) -> IrStats {
                         .iter()
                         .map(|t| (t.refs.len() + t.others.len()) as u64)
                         .sum::<u64>(),
-                    crate::ir::SrcKind::Table(_) => 0,
+                    crate::ir::SrcKind::Table(_) | crate::ir::SrcKind::Virtual { .. } => 0,
                 })
                 .sum::<u64>(),
         ..IrStats::default()
@@ -92,6 +92,16 @@ pub fn stats(s: &StmtS) -> IrStats {
                         sort_keys(keys, &mut todo);
                     }
                     Rel::Union { parts, .. } => todo.extend(parts.iter().map(Node::Rel)),
+                    Rel::RegisterVt(v) | Rel::Slice(v) | Rel::RunningBalance(v) => {
+                        todo.extend(v.bounds.iter().flatten().map(Node::Expr));
+                        todo.extend(
+                            v.cond
+                                .iter()
+                                .chain(v.area.iter().map(|a| &a.pred))
+                                .chain(v.access.iter())
+                                .map(Node::Expr),
+                        );
+                    }
                 }
             }
             Node::Expr(e) => {

@@ -106,7 +106,12 @@ fn is_empty_value(v: &QValue) -> bool {
     }
 }
 
-fn settings_row(src: &dyn DataSource, t: TableId, md: Uuid16) -> Result<Option<Row>, ExecError> {
+fn settings_row(
+    src: &dyn DataSource,
+    t: TableId,
+    md: Uuid16,
+    kind: RegisterKind,
+) -> Result<Option<Row>, ExecError> {
     let info = src
         .map()
         .try_table(t)
@@ -117,6 +122,11 @@ fn settings_row(src: &dyn DataSource, t: TableId, md: Uuid16) -> Result<Option<R
         let row = row?;
         let hit = match get(info, &row, StdField::RegId) {
             Some(QValue::Binary(b)) => b.as_ref() == want.as_slice(),
+            None if kind == RegisterKind::Information
+                && info.field_by_std(StdField::RegId).is_none() =>
+            {
+                true
+            }
             _ => false,
         };
         if hit {
@@ -157,6 +167,15 @@ pub fn read_register_settings(
     md: Uuid16,
     kind: RegisterKind,
 ) -> Result<RegisterSettings, ExecError> {
+    read_register_settings_with_observation(src, md, kind, None)
+}
+
+pub(crate) fn read_register_settings_with_observation(
+    src: &dyn DataSource,
+    md: Uuid16,
+    kind: RegisterKind,
+    observation: Option<&crate::observe::ObservationSession>,
+) -> Result<RegisterSettings, ExecError> {
     let map = src.map();
     if map.object(md).is_none() {
         return Err(fatal(format!(
@@ -173,12 +192,18 @@ pub fn read_register_settings(
                         purpose::ACCUM_RG_OPT
                     ))
                 })?;
-            if let Some(row) = settings_row(src, t, md)? {
+            if let Some(obs) = observation {
+                obs.table(t);
+            }
+            if let Some(row) = settings_row(src, t, md, kind)? {
                 apply_accumulation_row(map.table(t), &row, &mut s);
             }
             if let Some(t) = service(map, md, role::ACCUMULATION_REGISTERS_AGGREGATES_OPTIONS) {
                 let info = map.table(t);
-                if let Some(row) = settings_row(src, t, md)? {
+                if let Some(obs) = observation {
+                    obs.table(t);
+                }
+                if let Some(row) = settings_row(src, t, md, kind)? {
                     s.agg_mode = boolean(get(info, &row, StdField::AggMode)).unwrap_or(false);
                 }
             }
@@ -186,7 +211,10 @@ pub fn read_register_settings(
         RegisterKind::Information => {
             if let Some(t) = service(map, md, role::INFORMATION_REGISTER_TOTALS_OPTIONS) {
                 let info = map.table(t);
-                if let Some(row) = settings_row(src, t, md)? {
+                if let Some(obs) = observation {
+                    obs.table(t);
+                }
+                if let Some(row) = settings_row(src, t, md, kind)? {
                     s.slice_using = boolean(get(info, &row, StdField::SliceUsing));
                 }
             }
@@ -204,6 +232,18 @@ pub fn settings_tables(map: &StorageMap, md: Uuid16) -> Vec<TableId> {
     .into_iter()
     .filter_map(|p| service(map, md, p))
     .collect()
+}
+
+pub fn accumulation_registers(map: &StorageMap) -> Vec<Uuid16> {
+    let mut out: Vec<Uuid16> = map
+        .tables()
+        .iter()
+        .filter(|t| t.purpose == role::ACCUMULATION_REGISTER_TOTALS_OPTIONS)
+        .filter_map(|t| t.md)
+        .collect();
+    out.sort_by_key(|m| *m.as_bytes());
+    out.dedup();
+    out
 }
 
 fn encode_row(info: &TableInfo, md: Uuid16, s: &RegisterSettings) -> Row {
@@ -228,20 +268,55 @@ fn encode_row(info: &TableInfo, md: Uuid16, s: &RegisterSettings) -> Row {
 }
 
 pub struct SettingsOverride<'a> {
-    inner: &'a dyn DataSource,
+    inner: Inner<'a>,
     by_table: BTreeMap<TableId, Vec<(Uuid16, RegisterSettings)>>,
+}
+
+enum Inner<'a> {
+    Borrowed(&'a dyn DataSource),
+    Owned(Box<dyn DataSource + 'a>),
 }
 
 impl<'a> SettingsOverride<'a> {
     pub fn new(inner: &'a dyn DataSource) -> SettingsOverride<'a> {
         SettingsOverride {
-            inner,
+            inner: Inner::Borrowed(inner),
             by_table: BTreeMap::new(),
         }
     }
 
+    pub fn owning(inner: Box<dyn DataSource + 'a>) -> SettingsOverride<'a> {
+        SettingsOverride {
+            inner: Inner::Owned(inner),
+            by_table: BTreeMap::new(),
+        }
+    }
+
+    fn src(&self) -> &dyn DataSource {
+        match &self.inner {
+            Inner::Borrowed(s) => *s,
+            Inner::Owned(s) => s.as_ref(),
+        }
+    }
+
+    pub fn movements_everywhere(&mut self) -> &mut Self {
+        for md in accumulation_registers(self.src().map()) {
+            let stored = read_register_settings(self.src(), md, RegisterKind::Accumulation)
+                .map(|s| s.use_totals)
+                .unwrap_or(true);
+            self.set(
+                md,
+                RegisterSettings {
+                    use_totals: stored,
+                    ..RegisterSettings::movements_only()
+                },
+            );
+        }
+        self
+    }
+
     pub fn set(&mut self, md: Uuid16, s: RegisterSettings) -> &mut Self {
-        for t in settings_tables(self.inner.map(), md) {
+        for t in settings_tables(self.src().map(), md) {
             let rows = self.by_table.entry(t).or_default();
             rows.retain(|(m, _)| *m != md);
             rows.push((md, s.clone()));
@@ -252,21 +327,21 @@ impl<'a> SettingsOverride<'a> {
 
 impl DataSource for SettingsOverride<'_> {
     fn map(&self) -> &StorageMap {
-        self.inner.map()
+        self.src().map()
     }
 
     fn scan(&self, t: TableId) -> Result<RowIter<'_>, ExecError> {
         let Some(over) = self.by_table.get(&t) else {
-            return self.inner.scan(t);
+            return self.src().scan(t);
         };
         let info = self
-            .inner
+            .src()
             .map()
             .try_table(t)
             .ok_or_else(|| fatal("register settings: unknown table"))?;
         let ids: Vec<Vec<u8>> = over.iter().map(|(md, _)| reg_id(*md).to_vec()).collect();
         let mut rows: Vec<Result<Row, ExecError>> = Vec::new();
-        for row in self.inner.scan(t)? {
+        for row in self.src().scan(t)? {
             let row = row?;
             let replaced = matches!(get(info, &row, StdField::RegId),
                 Some(QValue::Binary(b)) if ids.iter().any(|id| b.as_ref() == id.as_slice()));
@@ -291,22 +366,22 @@ impl DataSource for SettingsOverride<'_> {
                 "register settings override: only scans of a settings table are supported",
             ));
         }
-        self.inner.range(t, i, lo, hi, desc)
+        self.src().range(t, i, lo, hi, desc)
     }
 
     fn get_by_id(&self, t: TableId, id: &QValue) -> Result<Option<Row>, ExecError> {
-        self.inner.get_by_id(t, id)
+        self.src().get_by_id(t, id)
     }
 
     fn row_count_estimate(&self, t: TableId) -> u64 {
-        self.inner.row_count_estimate(t)
+        self.src().row_count_estimate(t)
     }
 
     fn scan_fields(&self, t: TableId, fields: &[FieldId]) -> Result<RowIter<'_>, ExecError> {
         if self.by_table.contains_key(&t) {
             return self.scan(t);
         }
-        self.inner.scan_fields(t, fields)
+        self.src().scan_fields(t, fields)
     }
 
     fn range_fields(
@@ -321,7 +396,7 @@ impl DataSource for SettingsOverride<'_> {
         if self.by_table.contains_key(&t) {
             return self.range(t, i, lo, hi, desc);
         }
-        self.inner.range_fields(t, i, lo, hi, desc, fields)
+        self.src().range_fields(t, i, lo, hi, desc, fields)
     }
 
     fn get_by_id_fields(
@@ -330,7 +405,7 @@ impl DataSource for SettingsOverride<'_> {
         id: &QValue,
         fields: &[FieldId],
     ) -> Result<Option<Row>, ExecError> {
-        self.inner.get_by_id_fields(t, id, fields)
+        self.src().get_by_id_fields(t, id, fields)
     }
 
     fn index_prefixes(
@@ -340,7 +415,7 @@ impl DataSource for SettingsOverride<'_> {
         n: usize,
         limit: usize,
     ) -> Result<Option<IndexPrefixes>, ExecError> {
-        self.inner.index_prefixes(t, i, n, limit)
+        self.src().index_prefixes(t, i, n, limit)
     }
 
     fn get_by_id_in(
@@ -350,6 +425,230 @@ impl DataSource for SettingsOverride<'_> {
         id: &QValue,
         fields: &[FieldId],
     ) -> Result<Option<Row>, ExecError> {
-        self.inner.get_by_id_in(t, area, id, fields)
+        self.src().get_by_id_in(t, area, id, fields)
     }
+}
+
+pub fn resolve_pending_view_failure(
+    src: &dyn DataSource,
+    register: Uuid16,
+    original: query_ir::CompileError,
+) -> Result<query_ir::CompileError, ExecError> {
+    resolve_pending_view_failure_with_observation(src, register, original, None)
+}
+
+pub(crate) fn resolve_pending_view_failure_with_observation(
+    src: &dyn DataSource,
+    register: Uuid16,
+    mut original: query_ir::CompileError,
+    observation: Option<&crate::observe::ObservationSession>,
+) -> Result<query_ir::CompileError, ExecError> {
+    let settings = read_register_settings_with_observation(
+        src,
+        register,
+        RegisterKind::Accumulation,
+        observation,
+    )?;
+    if !settings.use_totals {
+        original.cause = Some(Box::new(totals_off_cause()));
+    }
+    if let Some(obs) = observation {
+        obs.terminal();
+    }
+    Ok(original)
+}
+
+fn totals_off_cause() -> query_ir::CompileError {
+    query_syntax::QueryError::new(query_syntax::MsgId::USE_TOTALS_SWITCH_OFF, None)
+}
+
+struct TotalsUseStep {
+    register: Uuid16,
+    kind: RegisterKind,
+    view: Option<query_syntax::Span>,
+}
+
+fn steps_of(r: &query_ir::RelL, out: &mut Vec<TotalsUseStep>) {
+    use query_ir::{PExpr, RelL};
+    let expr = |e: &PExpr, out: &mut Vec<TotalsUseStep>| {
+        let mut subs: Vec<std::sync::Arc<RelL>> = Vec::new();
+        crate::plan::walk(e, &mut |x| match x {
+            PExpr::InQuery { q, .. } => subs.push(q.clone()),
+            PExpr::SectionAgg { rel, .. } => subs.push(rel.clone()),
+            _ => {}
+        });
+        for s in subs {
+            steps_of(&s, out);
+        }
+    };
+    match r {
+        RelL::RegisterRows(s) => out.push(TotalsUseStep {
+            register: s.register,
+            kind: RegisterKind::Accumulation,
+            view: s.view,
+        }),
+        RelL::Slice {
+            input,
+            totals,
+            step,
+        } => {
+            out.push(TotalsUseStep {
+                register: step.register,
+                kind: RegisterKind::Information,
+                view: step.view,
+            });
+            steps_of(input, out);
+            if let Some(t) = totals {
+                steps_of(t, out);
+            }
+            for e in step.bound.iter() {
+                expr(e, out);
+            }
+        }
+        RelL::Empty | RelL::Scan { .. } | RelL::TempScan { .. } | RelL::Values { .. } => {}
+        RelL::HierarchyClosure { seeds, .. } => match seeds {
+            query_ir::lower::HierSeeds::Values(values) => values.iter().for_each(|e| expr(e, out)),
+            query_ir::lower::HierSeeds::Rel(rel) => steps_of(rel, out),
+        },
+        RelL::Join { l, r, on, .. } => {
+            steps_of(l, out);
+            steps_of(r, out);
+            expr(on, out);
+        }
+        RelL::Filter { input, pred } => {
+            steps_of(input, out);
+            expr(pred, out);
+        }
+        RelL::Project { input, exprs } => {
+            steps_of(input, out);
+            exprs.iter().for_each(|e| expr(e, out));
+        }
+        RelL::RunningBalance { input, step } => {
+            steps_of(input, out);
+            expr(&step.period, out);
+            step.period_fields.iter().for_each(|e| expr(e, out));
+            step.bounds.iter().flatten().for_each(|e| expr(e, out));
+        }
+        RelL::Aggregate {
+            input, keys, aggs, ..
+        } => {
+            steps_of(input, out);
+            keys.iter().for_each(|e| expr(e, out));
+            for agg in aggs {
+                if let Some(e) = &agg.arg {
+                    expr(e, out);
+                }
+            }
+        }
+        RelL::Sort { input, keys } | RelL::HierarchyOrder { input, keys, .. } => {
+            steps_of(input, out);
+            for (e, _) in keys {
+                expr(e, out);
+            }
+        }
+        RelL::CheckAccess { input, .. } | RelL::Distinct(input) | RelL::Top { input, .. } => {
+            steps_of(input, out)
+        }
+        RelL::SemiJoin { input, q, l, .. } => {
+            l.iter().for_each(|e| expr(e, out));
+            steps_of(input, out);
+            steps_of(q, out);
+        }
+        RelL::Union { parts, .. } => parts.iter().for_each(|p| steps_of(p, out)),
+    }
+}
+
+pub fn check_totals_use(
+    stmt: &query_ir::lower::StmtL,
+    src: &dyn DataSource,
+    text: &str,
+) -> Result<Option<query_ir::CompileError>, ExecError> {
+    check_totals_use_impl(stmt, src, text, None)
+}
+
+fn check_totals_use_impl(
+    stmt: &query_ir::lower::StmtL,
+    src: &dyn DataSource,
+    text: &str,
+    observation: Option<&crate::observe::ObservationSession>,
+) -> Result<Option<query_ir::CompileError>, ExecError> {
+    let mut steps = Vec::new();
+    steps_of(&stmt.root, &mut steps);
+    for s in steps {
+        if s.kind != RegisterKind::Accumulation {
+            continue;
+        }
+        let settings = read_register_settings_with_observation(
+            src,
+            s.register,
+            RegisterKind::Accumulation,
+            observation,
+        )?;
+        if settings.use_totals {
+            continue;
+        }
+        let cause = totals_off_cause();
+        let Some(span) = s.view else {
+            return Ok(Some(cause));
+        };
+        let map = query_syntax::SourceMap::new(text);
+        let path = text
+            .get(span.start as usize..span.end as usize)
+            .unwrap_or_default();
+        return Ok(Some(
+            query_syntax::QueryError::new(
+                query_syntax::MsgId::SELECT_ERROR_ERRORPROCESSINGVIEW,
+                Some(map.at(text, span.start)),
+            )
+            .with_quoted(query_syntax::MsgArg::text(path))
+            .with_cause(cause),
+        ));
+    }
+    Ok(None)
+}
+
+pub(crate) fn check_slice_use(
+    stmt: &query_ir::lower::StmtL,
+    src: &dyn DataSource,
+    observation: Option<&crate::observe::ObservationSession>,
+) -> Result<(), ExecError> {
+    let mut steps = Vec::new();
+    steps_of(&stmt.root, &mut steps);
+    for nested in &stmt.nested {
+        if let Some(rows) = &nested.rows {
+            steps_of(&rows.rel, &mut steps);
+        }
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for step in steps {
+        if step.kind != RegisterKind::Information || !seen.insert(step.register) {
+            continue;
+        }
+        let settings =
+            read_register_settings_with_observation(src, step.register, step.kind, observation)?;
+        if settings.slice_using == Some(false) {
+            if let Some(obs) = observation {
+                obs.terminal();
+            }
+            return Err(crate::ops::register::totals_off());
+        }
+    }
+    Ok(())
+}
+
+#[doc(hidden)]
+pub fn check_totals_use_observed(
+    stmt: &query_ir::lower::StmtL,
+    src: &dyn DataSource,
+    text: &str,
+    obs: &crate::observe::ObservationSession,
+) -> Result<Option<query_ir::CompileError>, ExecError> {
+    obs.begin_precheck();
+    let result = check_totals_use_impl(stmt, src, text, Some(obs));
+    match &result {
+        Ok(Some(_)) => obs.terminal(),
+        Err(_) => obs.finish(false),
+        Ok(None) => {}
+    }
+    result
 }

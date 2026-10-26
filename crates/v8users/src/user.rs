@@ -262,6 +262,19 @@ impl UserData {
         self.field(F_PASSWORD_SET).and_then(Node::as_str) == Some(PASSWORD_SET)
     }
 
+    pub fn has_password_material(&self) -> Result<bool, Error> {
+        let fields = self.tree.as_list().ok_or(Error::NotList)?;
+        let layout = Layout::read(fields)?;
+        for logical in [F_PASSWORD_SET, F_HASH, F_HASH_UPPER, F_SECRET] {
+            if let Some(node) = layout.at(fields, logical)
+                && !node.as_str().ok_or(Error::BadField(logical))?.is_empty()
+            {
+                return Ok(true);
+            }
+        }
+        Ok(layout.at(fields, 30).and_then(Node::as_u32).unwrap_or(0) != 0)
+    }
+
     pub fn hashes(&self) -> Hashes {
         Hashes {
             plain: str_or_empty(self.field(F_HASH)),

@@ -1,11 +1,13 @@
 mod codecs_a;
 mod codecs_b;
 mod ctx;
+pub(crate) use ctx::SET_CATEGORIES;
 pub(crate) mod decode;
 #[cfg(any(test, feature = "testing"))]
 #[doc(hidden)]
 pub mod dump_fixture;
 mod fe;
+pub(crate) use fe::PREFIX as NAMESPACE_PREFIXES;
 mod model;
 mod py;
 mod query;
@@ -29,7 +31,7 @@ use crate::{Configuration, MdKind, MdObject, Result, SubKind};
 
 pub use md_model::forms::{Form, FormAttribute, FormCommand, FormItem, FormParameter};
 pub(crate) use md_model::forms::{FormShared, FormSource};
-pub(crate) use model::form_from_decoded;
+pub(crate) use model::{attribute_types, form_from_decoded};
 use shared::Shared;
 pub use variant::Serialization;
 

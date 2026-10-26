@@ -4,6 +4,22 @@ use md_model::*;
 use std::collections::HashMap;
 
 pub fn configuration_xml(cfg: &Configuration) -> Option<String> {
+    try_configuration_xml(cfg).ok().flatten()
+}
+
+pub fn try_configuration_xml(cfg: &Configuration) -> Result<Option<String>> {
+    crate::namespace_scope::validate_properties(
+        &cfg.props,
+        cfg.xml_namespace_envelopes.contains_key(&cfg.id),
+    )?;
+    configuration_xml_unscoped(cfg)
+        .map(|text| {
+            crate::namespace_scope::restore(&text, cfg.xml_namespace_envelopes.get(&cfg.id))
+        })
+        .transpose()
+}
+
+fn configuration_xml_unscoped(cfg: &Configuration) -> Option<String> {
     if cfg.props.is_empty() {
         return None;
     }
@@ -42,7 +58,7 @@ pub fn configuration_xml(cfg: &Configuration) -> Option<String> {
 }
 
 pub fn dump(cfg: &Configuration, sink: &mut DumpSink) -> Result<PartStatus> {
-    if let Some(xml) = configuration_xml(cfg) {
+    if let Some(xml) = try_configuration_xml(cfg)? {
         sink.put(Part::Configuration, "Configuration.xml", xml.as_bytes())?;
     }
     Ok(PartStatus::Written)

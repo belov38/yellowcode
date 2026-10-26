@@ -398,9 +398,20 @@ fn summary(
         let id = present!(record_id(row));
         let name = present!(values.get(3).and_then(Node::text));
         let main = values.get(10).and_then(Node::as_bool).unwrap_or(false);
+        let mut types = BudgetedVec::new(budget, CATEGORY)?;
+        for identity in crate::forms::attribute_types(values.get(5)) {
+            types.try_push(identity)?;
+        }
         attributes = append(
             attributes,
-            string(budget, name)?.map(|name| FormAttribute { id, name, main }),
+            string(budget, name)?
+                .try_zip(types.into_charged_vec())?
+                .map(|(name, types)| FormAttribute {
+                    id,
+                    name,
+                    main,
+                    types,
+                }),
         )?;
     }
     let rows = present!(top.get(4).and_then(section));

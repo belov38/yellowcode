@@ -90,13 +90,20 @@ pub(crate) fn source<'a>(
     alias: NativeOwned<'a, String>,
     from: NativeOwned<'a, tir::From>,
     joins: NativeOwned<'a, Vec<tir::Join>>,
+    all_fields: bool,
 ) -> R<NativeOwned<'a, tir::Source>> {
     if !alias.scope_matches(scope) || !from.scope_matches(scope) || !joins.scope_matches(scope) {
         return invalid(scope);
     }
     Ok(
-        super::allocation_result(scope, alias.zip(from).and_then(|v| v.zip(joins)))?
-            .map(|((alias, from), joins)| tir::Source { alias, from, joins }),
+        super::allocation_result(scope, alias.zip(from).and_then(|v| v.zip(joins)))?.map(
+            |((alias, from), joins)| tir::Source {
+                alias,
+                from,
+                joins,
+                all_fields,
+            },
+        ),
     )
 }
 pub(crate) fn join<'a>(

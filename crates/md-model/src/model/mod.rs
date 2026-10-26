@@ -1,4 +1,6 @@
+mod type_name;
 mod value;
+pub use type_name::*;
 
 pub use value::*;
 
@@ -9,6 +11,7 @@ use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Configuration {
+    pub xml_namespace_envelopes: BTreeMap<Guid, crate::namespace_scope::NamespaceEnvelope>,
     pub xml_origin: Option<crate::xml_origin::XmlOrigin>,
     pub id: Guid,
     #[doc(hidden)]

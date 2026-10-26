@@ -167,7 +167,12 @@ fn canonical(n: N<'_, '_>, path: &Path, diagnostics: &mut Diagnostics) -> Result
     let mut first_extension = None;
     while let Some(n) = stack.pop() {
         for (prefix, uri) in n.ns_decls() {
-            if let Some(expected) = canonical.lookup_prefix(prefix)
+            if prefix.is_some()
+                && let Some(expected) = canonical.lookup_prefix(prefix).or_else(|| {
+                    prefix
+                        .and_then(mdschema::FixedNamespace::from_prefix)
+                        .map(|ns| ns.uri())
+                })
                 && expected != uri
             {
                 return Err(err(path, "noncanonical namespace binding"));
@@ -181,25 +186,26 @@ fn canonical(n: N<'_, '_>, path: &Path, diagnostics: &mut Diagnostics) -> Result
             None
         };
         let xsi = attr(n, Some("http://www.w3.org/2001/XMLSchema-instance"), "type");
-        for q in qname.into_iter().chain(xsi) {
-            let (prefix, _) = q
-                .split_once(':')
-                .ok_or_else(|| err(path, "noncanonical QName"))?;
-            let expected = canonical.lookup_prefix(Some(prefix));
-            let mut ancestor = Some(n);
-            let mut binding = None;
-            while let Some(a) = ancestor {
-                if let Some((_, uri)) = a.ns_decls().find(|(p, _)| *p == Some(prefix)) {
-                    binding = Some(uri);
-                    break;
-                }
-                ancestor = a.parent();
-            }
-            let binding = binding.ok_or_else(|| err(path, "unbound QName prefix"))?;
+        for (q, type_member) in qname
+            .into_iter()
+            .map(|q| (q, true))
+            .chain(xsi.map(|q| (q, false)))
+        {
+            let (binding, local) = super::namespaces::expanded(&n, q)
+                .ok_or_else(|| err(path, "malformed or unbound QName"))?;
+            let prefix = q.split_once(':').map(|(prefix, _)| prefix);
+            let expected = prefix.and_then(|prefix| canonical.lookup_prefix(Some(prefix)));
             if expected.is_some_and(|expected| binding != expected) {
                 return Err(err(path, "wrong QName namespace binding"));
             }
-            if expected.is_none() {
+            let admitted = type_member
+                && super::values::admitted_type(
+                    mdschema::schema()?,
+                    binding,
+                    local,
+                    n.local() == "TypeSet",
+                );
+            if (type_member && !admitted) || (!type_member && expected.is_none()) {
                 extensions += 1;
                 if first_extension.is_none() {
                     first_extension = Some(q.to_string());

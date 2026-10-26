@@ -12,10 +12,17 @@ impl Configuration {
     }
 
     fn set_target(&self, r: &TypeRef) -> Option<&MdObject> {
-        let (kind, name) = if let Some(n) = r.qname.strip_prefix("cfg:DefinedType.") {
+        let (kind, name) = if let Some(n) = r
+            .name
+            .fixed_local(crate::FixedNamespace::Cfg)?
+            .strip_prefix("DefinedType.")
+        {
             (MdKind::DefinedType, n)
         } else {
-            let n = r.qname.strip_prefix("cfg:Characteristic.")?;
+            let n = r
+                .name
+                .fixed_local(crate::FixedNamespace::Cfg)?
+                .strip_prefix("Characteristic.")?;
             (MdKind::ChartOfCharacteristicTypes, n)
         };
         let by_id = r
@@ -39,9 +46,9 @@ pub fn expand_with(
         date: t.date,
         binary: t.binary,
     };
-    let mut frames: Vec<(std::vec::IntoIter<TypeRef>, Option<String>)> =
+    let mut frames: Vec<(std::vec::IntoIter<TypeRef>, Option<crate::XmlTypeName>)> =
         vec![(t.types.clone().into_iter(), None)];
-    let mut done: HashSet<String> = HashSet::new();
+    let mut done: HashSet<crate::XmlTypeName> = HashSet::new();
     while let Some((iter, _)) = frames.last_mut() {
         let Some(r) = iter.next() else {
             if let Some((_, Some(name))) = frames.pop() {
@@ -49,20 +56,20 @@ pub fn expand_with(
             }
             continue;
         };
-        if done.contains(&r.qname) {
+        if done.contains(&r.name) {
             continue;
         }
         let target = set_types(&r).filter(|inner| !inner.types.is_empty());
         match target {
-            Some(inner) if !frames.iter().any(|(_, f)| f.as_deref() == Some(&r.qname)) => {
+            Some(inner) if !frames.iter().any(|(_, f)| f.as_ref() == Some(&r.name)) => {
                 out.number = out.number.or(inner.number);
                 out.string = out.string.or(inner.string);
                 out.date = out.date.or(inner.date);
                 out.binary = out.binary.or(inner.binary);
-                frames.push((inner.types.into_iter(), Some(r.qname)));
+                frames.push((inner.types.into_iter(), Some(r.name)));
             }
             _ => {
-                if !out.types.iter().any(|x| x.qname == r.qname) {
+                if !out.types.iter().any(|x| x.name == r.name) {
                     out.types.push(r);
                 }
             }

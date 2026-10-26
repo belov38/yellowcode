@@ -1,3 +1,6 @@
+mod application;
+mod forms;
+
 use crate::model::{AppModel, FieldRole, ObjId, ObjKind};
 use bsl_compiler::{
     AppGlobal, AppMethodSig, AppNames, CatalogBuiltins, CommonFlags, ContextValue, ExecContext,
@@ -26,6 +29,7 @@ enum Loc {
     Config(usize),
     Object(usize, usize),
     Command(usize, usize),
+    Form(usize, usize),
 }
 
 #[derive(Clone, Debug)]
@@ -50,6 +54,7 @@ struct Members {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CtxKind {
+    Form,
     Object,
     RecordSet,
     ValueManager,
@@ -61,6 +66,7 @@ struct ModuleCtx {
     template: Arc<Members>,
     own: HashSet<String>,
     common_attrs: bool,
+    extension: Arc<Members>,
 }
 
 type ExportIndex = Arc<HashMap<String, AppMethodSig>>;
@@ -74,6 +80,7 @@ pub struct AppNamesImpl {
     md_index: HashMap<crate::model::Uuid16, usize>,
     exports: ExportCache,
     global_index: Mutex<HashMap<ExecContext, ExportIndex>>,
+    application_vars: application::VariableCache,
     templates: Mutex<HashMap<String, Arc<Members>>>,
     module_ctx: Mutex<HashMap<String, Option<Arc<ModuleCtx>>>>,
     fingerprint: OnceLock<[u8; 32]>,
@@ -308,6 +315,14 @@ impl AppNamesImpl {
                 });
             }
         }
+        listed.extend(forms::entries(&model).into_iter().filter_map(|form| {
+            Some(Listed {
+                name: form.name,
+                kind: ModuleKind::Form,
+                loc: form.loc?,
+                owner: form.owner,
+            })
+        }));
         AppNamesImpl {
             model,
             listed,
@@ -318,6 +333,7 @@ impl AppNamesImpl {
             global_index: Mutex::new(HashMap::new()),
             templates: Mutex::new(HashMap::new()),
             module_ctx: Mutex::new(HashMap::new()),
+            application_vars: Mutex::new(HashMap::new()),
             fingerprint: OnceLock::new(),
         }
     }
@@ -327,6 +343,11 @@ impl AppNamesImpl {
         let m = match loc {
             Loc::Config(i) => cfg.modules.get(i),
             Loc::Object(o, m) => cfg.objects.get(o).and_then(|o| o.modules.get(m)),
+            Loc::Form(o, f) => cfg
+                .objects
+                .get(o)
+                .and_then(|o| o.forms.get(f))
+                .and_then(|f| f.module.as_ref()),
             Loc::Command(o, c) => cfg
                 .objects
                 .get(o)
@@ -373,6 +394,16 @@ impl AppNamesImpl {
         let m = &self.model;
         let mut h = Sha256::new();
         put(&mut h, &format!("{:?}", m.script));
+        for application in m.config.modules.iter().filter(|module| {
+            matches!(
+                module.kind,
+                md_model::ModuleKind::ManagedApplicationModule
+                    | md_model::ModuleKind::OrdinaryApplicationModule
+            )
+        }) {
+            put(&mut h, &format!("{:?}", application.kind));
+            h.update(Sha256::digest(&application.source));
+        }
         section(&mut h, "common", m.common_modules.len());
         for c in &m.common_modules {
             put(&mut h, &c.name);
@@ -459,6 +490,21 @@ impl AppNamesImpl {
         section(&mut h, "attrs", attrs.len());
         for a in attrs {
             put(&mut h, a);
+        }
+        let forms = forms::entries(m);
+        section(&mut h, "forms", forms.len());
+        for form in forms {
+            put(&mut h, &fold_name(&form.name));
+            if let Some(summary) = form.summary {
+                section(&mut h, "form-attrs", summary.attributes.len());
+                for attribute in &summary.attributes {
+                    put(&mut h, &fold_name(&attribute.name));
+                }
+                put(&mut h, self.form_extension(summary).unwrap_or(""));
+            } else {
+                section(&mut h, "form-attrs", 0);
+                put(&mut h, "");
+            }
         }
         section(&mut h, "listed", self.listed.len());
         for l in &self.listed {
@@ -574,6 +620,9 @@ impl AppNamesImpl {
     }
 
     fn resolve(&self, module: &str) -> Option<ModuleCtx> {
+        if let Some(context) = self.form_context(module) {
+            return Some(context);
+        }
         let parts: Vec<&str> = module.split('.').collect();
         let [word, name, tail] = parts.as_slice() else {
             return None;
@@ -589,7 +638,7 @@ impl AppNamesImpl {
             CtxKind::ValueManager if kind == ObjKind::Constant => {
                 ("КонстантаМенеджерЗначения".to_string(), false)
             }
-            CtxKind::ValueManager => return None,
+            CtxKind::ValueManager | CtxKind::Form => return None,
         };
         let own = match self.model.find(kind, name) {
             Some(id) => self.own_names(id, ctx == CtxKind::Manager),
@@ -600,6 +649,7 @@ impl AppNamesImpl {
             template: self.template_members(&template),
             own,
             common_attrs,
+            extension: Arc::default(),
         })
     }
 
@@ -618,6 +668,16 @@ impl AppNamesImpl {
 }
 
 impl AppNames for AppNamesImpl {
+    fn application_variable(
+        &self,
+        name: &str,
+        ctx: ExecContext,
+    ) -> Option<bsl_compiler::ApplicationVariable> {
+        self.application_variables(ctx)
+            .get(&fold_name(name))
+            .cloned()
+    }
+
     fn global_value(&self, name: &str, ctx: ExecContext) -> Option<AppGlobal> {
         let m = self.commons.get(&fold_name(name))?;
         (!m.flags.global && reach(m.flags, ctx).is_some()).then(|| AppGlobal::CommonModule {
@@ -632,18 +692,22 @@ impl AppNames for AppNamesImpl {
     fn context_value(&self, module: &str, name: &str) -> Option<ContextValue> {
         let c = self.ctx_of(module)?;
         let n = fold_name(name);
-        if c.kind != CtxKind::Manager && matches!(n.as_str(), "этотобъект" | "thisobject")
+        if (c.kind != CtxKind::Manager && matches!(n.as_str(), "этотобъект" | "thisobject"))
+            || (c.kind == CtxKind::Form && matches!(n.as_str(), "этаформа" | "thisform"))
         {
             return Some(ContextValue::ThisObject);
         }
         let has = c.template.props.contains(&n)
+            || c.extension.props.contains(&n)
             || c.own.contains(&n)
             || (c.common_attrs && self.common_attrs.contains(&n));
         has.then_some(ContextValue::Member)
     }
 
     fn context_method(&self, module: &str, name: &str) -> bool {
-        self.ctx_of(module)
-            .is_some_and(|c| c.template.methods.contains(&fold_name(name)))
+        self.ctx_of(module).is_some_and(|c| {
+            let name = fold_name(name);
+            c.template.methods.contains(&name) || c.extension.methods.contains(&name)
+        })
     }
 }

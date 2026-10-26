@@ -299,6 +299,7 @@ fn query(q: &mut tir::Query) {
 
 fn items(v: &mut [tir::Item], clear: bool) {
     for it in v {
+        it.star = false;
         if clear {
             it.name.clear();
         }
@@ -321,6 +322,8 @@ fn select(s: &mut tir::Select, later_part: bool) {
 }
 
 fn source(s: &mut tir::Source) {
+    s.all_fields = false;
+    s.alias.clear();
     match &mut s.from {
         tir::From::Table { args, .. } => {
             while args.last().is_some_and(|a| a.is_none()) {

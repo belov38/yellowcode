@@ -9,6 +9,12 @@ pub fn dump(cfg: &Configuration, out: &Path, opts: &DumpOptions) -> Result<DumpR
     if let Some(report) = md_xmlout::xml_origin::dump(cfg, out, opts)? {
         return Ok(report);
     }
+    if opts.parts.contains(&Part::Configuration) {
+        let _ = codec::parts::configuration::try_configuration_xml(cfg)?;
+    }
+    if opts.parts.contains(&Part::Predefined) {
+        codec::parts::predefined::preflight(cfg)?;
+    }
     let mut sink = DumpSink::new(out);
     let mut not_written = Vec::new();
     for &part in &opts.parts {

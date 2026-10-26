@@ -90,7 +90,13 @@ impl TypeSet {
         let td = cfg.expand_type(td);
         let mut atoms = Vec::with_capacity(td.types.len());
         for t in &td.types {
-            atoms.push(atom(&t.qname, t.set, t.type_id, by_type_id, diag));
+            atoms.push(atom(
+                &t.name.to_string(),
+                t.set,
+                t.type_id,
+                by_type_id,
+                diag,
+            ));
         }
         TypeSet {
             atoms,

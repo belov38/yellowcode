@@ -28,4 +28,7 @@ export const xpost = (route, body, params) => post("x/query/", route, body, para
 export const qget = (route, params, signal) => api("x/qb/" + route, params, signal);
 export const qpost = (route, body, params) => post("x/qb/", route, body, params);
 
+export const cget = (route, params, signal) => api("x/code/" + route, params, signal);
+export const cpost = (route, body, params) => post("x/code/", route, body, params);
+
 export const isErrorOut = (j) => !!j && typeof j === "object" && !Array.isArray(j) && typeof j.phase === "string" && Array.isArray(j.chain);

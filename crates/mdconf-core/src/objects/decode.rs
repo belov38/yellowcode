@@ -267,7 +267,10 @@ impl SetTypes {
     }
 
     fn get(&self, index: &crate::index::Index, r: &TypeRef) -> Option<TypeDescription> {
-        let name = r.qname.strip_prefix("cfg:DefinedType.")?;
+        let name = r
+            .name
+            .fixed_local(crate::FixedNamespace::Cfg)?
+            .strip_prefix("DefinedType.")?;
         let by_id = r
             .type_id
             .and_then(|id| index.type_owners.get(&id))
@@ -534,7 +537,7 @@ fn allowed_types(ctx: &Ctx, sets: &SetTypes, node: &Node, hdr: &[usize]) -> Opti
         d.types
             .into_iter()
             .filter(|t| !t.set)
-            .map(|t| t.qname)
+            .map(|t| t.name.to_string())
             .collect(),
     )
 }

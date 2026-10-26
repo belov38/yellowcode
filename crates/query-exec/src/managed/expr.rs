@@ -11,7 +11,7 @@ use memory_budget::{BudgetError, BudgetedVec, Category, MemoryBudget, Shared};
 use query_ir::{
     Dec, PExpr,
     managed_value::{
-        ManagedRow, ManagedValue, ScalarValue, ValueRef,
+        ManagedCopyError, ManagedRow, ManagedValue, ScalarValue, ValueRef,
         row::{ScopedInput, ScopedRow},
     },
 };
@@ -45,6 +45,14 @@ error_from!(
     CollationError => Collation, FunctionError => Function, LikeError => Like,
     TypeEvalError => Type,
 );
+impl From<ManagedCopyError> for ExprError {
+    fn from(error: ManagedCopyError) -> Self {
+        match error {
+            ManagedCopyError::Budget(error) => Self::Memory(error),
+            ManagedCopyError::Unsupported(kind) => Self::Unsupported(kind),
+        }
+    }
+}
 impl std::fmt::Display for ExprError {
     fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -259,9 +267,25 @@ fn eval_context(
                 None => cast::try_cast(&source, 0, to, ref_tables)?,
             }
         }
-        PExpr::TypeOf { x, refs } => {
+        PExpr::TypeOf {
+            x,
+            refs,
+            route_points,
+        } => {
             let source = eval(x)?;
-            type_info::try_type_of(&source, 0, refs)?
+            if let ValueRef::Ref { table, .. } = value(&source)?.view()
+                && let Ok(i) = route_points.binary_search_by_key(&table, |(number, _)| *number)
+                && let Some((_, atom)) = route_points.get(i)
+            {
+                ManagedValue::try_type_atom(
+                    Some(query_ir::schema::atoms::TypeAtom::Other(
+                        query_ir::Other::RoutePoint(*atom),
+                    )),
+                    source.budget(),
+                )?
+            } else {
+                type_info::try_type_of(&source, 0, refs)?
+            }
         }
         PExpr::Func {
             f,

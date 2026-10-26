@@ -19,6 +19,7 @@ form-layout = { path = "../form-layout" }
 ui-style = { path = "../ui-style", features = ["font-files", "skin", "packages"] }
 x-qbuilder = { path = "../x-qbuilder" }
 query-console = { path = "../query-console" }
+code-console = { path = "../code-console" }
 serde = { version = "1", features = ["derive"] }
 
 [lints.clippy]

@@ -10,6 +10,12 @@ pub trait AccessPolicy: Send + Sync {
     fn read_policy(&self, t: &SourceTable, used: &FieldSet) -> Result<Access, HostError>;
 }
 
+#[derive(Clone, Copy)]
+pub struct SecurityCtx<'a> {
+    pub access: &'a dyn AccessPolicy,
+    pub session: &'a dyn SessionValues,
+}
+
 #[derive(Clone, Debug)]
 pub enum Access {
     Deny,
@@ -35,6 +41,7 @@ pub struct SourceTable {
 pub enum TablePart {
     Main,
     Tabular(Guid),
+    Standard(StdRole),
     Virtual(VtKind),
     Changes,
 }
@@ -43,6 +50,7 @@ pub enum TablePart {
 pub struct FieldSet {
     pub all: bool,
     pub fields: Vec<Guid>,
+    pub standard: Vec<StdRole>,
 }
 
 #[derive(Clone, Debug)]

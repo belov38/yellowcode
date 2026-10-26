@@ -30,8 +30,13 @@ pub enum FatalKind {
     StackOverflow,
     ModuleInit,
     Budget,
+    Cancelled,
     Memory,
     Internal,
+    Later {
+        what: &'static str,
+        stage: &'static str,
+    },
 }
 
 #[derive(Debug)]

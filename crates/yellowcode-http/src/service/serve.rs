@@ -1,6 +1,6 @@
 use super::memory::{ErrorBody, Refusal};
 use super::{query, query_output};
-use crate::{DeadlineReader, close_gracefully, transport as http};
+use crate::{DeadlineReader, close_gracefully, conn::DeadlineWriter, transport as http};
 use query_console::Console;
 use std::{
     io::Write,
@@ -460,38 +460,6 @@ fn send_response_counted<B: AsRef<[u8]>>(
     *wire_bytes = writer.wire_bytes;
     let reset = stream.set_nonblocking(false);
     result.and(reset)
-}
-
-struct DeadlineWriter<'a> {
-    stream: &'a TcpStream,
-    deadline: Instant,
-    wire_bytes: u64,
-}
-impl Write for DeadlineWriter<'_> {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        loop {
-            let left = self.deadline.saturating_duration_since(Instant::now());
-            if left.is_zero() {
-                return Err(std::io::ErrorKind::TimedOut.into());
-            }
-            match self.stream.write(buf) {
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(left.min(Duration::from_millis(1)));
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                result => {
-                    if let Ok(bytes) = result {
-                        self.wire_bytes = self.wire_bytes.saturating_add(bytes as u64);
-                    }
-                    return result;
-                }
-            }
-        }
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.stream.flush()
-    }
 }
 
 struct RequestDiagnostic<'a> {

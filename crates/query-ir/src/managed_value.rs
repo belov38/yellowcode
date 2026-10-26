@@ -9,6 +9,26 @@ mod arithmetic;
 pub mod row;
 pub use arithmetic::{NumberBinaryOp, NumberValueError};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ManagedCopyError {
+    Budget(BudgetError),
+    Unsupported(&'static str),
+}
+impl From<BudgetError> for ManagedCopyError {
+    fn from(error: BudgetError) -> Self {
+        Self::Budget(error)
+    }
+}
+impl std::fmt::Display for ManagedCopyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Budget(error) => error.fmt(f),
+            Self::Unsupported(kind) => write!(f, "unsupported managed value: {kind}"),
+        }
+    }
+}
+impl std::error::Error for ManagedCopyError {}
+
 pub type ManagedRow = BudgetedVec<ManagedValue>;
 pub type SharedManagedRow = Shared<Vec<ManagedValue>>;
 
@@ -150,31 +170,36 @@ impl ManagedValue {
             QType::try_from_atom_budgeted(atom, budget)?.try_into_shared()?,
         )))
     }
-    pub fn try_copy(value: &QValue, budget: &MemoryBudget) -> Result<Self, BudgetError> {
+    pub fn try_copy(value: &QValue, budget: &MemoryBudget) -> Result<Self, ManagedCopyError> {
         Self::copy_at(value, budget, 0)
     }
-    fn copy_at(value: &QValue, budget: &MemoryBudget, depth: usize) -> Result<Self, BudgetError> {
+    fn copy_at(
+        value: &QValue,
+        budget: &MemoryBudget,
+        depth: usize,
+    ) -> Result<Self, ManagedCopyError> {
         if depth >= 128 {
-            return Err(BudgetError::Overflow);
+            return Err(BudgetError::Overflow.into());
         }
         Ok(Self(match value {
             QValue::Null => Backing::Null,
             QValue::Undefined => Backing::Undefined,
             QValue::Bool(value) => Backing::Bool(*value),
             QValue::Number(value) => Backing::Number(ManagedNumber::try_copy(value, budget)?),
-            QValue::String(value) => return Self::try_utf16(&value.0, budget),
+            QValue::String(value) => return Self::try_utf16(&value.0, budget).map_err(Into::into),
             QValue::Date(value) => Backing::Date(*value),
             QValue::Uuid(value) => Backing::Uuid(*value),
             QValue::Ref { table, id } => Backing::Ref {
                 table: *table,
                 id: *id,
             },
-            QValue::Type(value) => return Self::try_type(value, budget),
-            QValue::Binary(value) => return Self::try_binary(value, budget),
-            QValue::Storage(value) => return Self::try_storage(value, budget),
+            QValue::Type(value) => return Self::try_type(value, budget).map_err(Into::into),
+            QValue::Binary(value) => return Self::try_binary(value, budget).map_err(Into::into),
+            QValue::Storage(value) => return Self::try_storage(value, budget).map_err(Into::into),
             QValue::SysEnum(ty, value) => Backing::SysEnum(*ty, *value),
             QValue::Nested(value) => Backing::Nested(copy_nested(value, budget, depth)?),
-            QValue::PointInTime(_) | QValue::Boundary(_) => return Err(BudgetError::Overflow),
+            QValue::PointInTime(_) => return Err(ManagedCopyError::Unsupported("point in time")),
+            QValue::Boundary(_) => return Err(ManagedCopyError::Unsupported("boundary")),
         }))
     }
     pub fn view(&self) -> ValueRef<'_> {
@@ -232,7 +257,7 @@ fn copy_nested(
     input: &NestedResult,
     budget: &MemoryBudget,
     depth: usize,
-) -> Result<Shared<ManagedNestedResult>, BudgetError> {
+) -> Result<Shared<ManagedNestedResult>, ManagedCopyError> {
     let columns = copy_columns(&input.columns, budget, depth)?;
     let mut rows = BudgetedVec::try_with_capacity(budget, Category::Execution, input.rows.len())?;
     for row in &input.rows {
@@ -242,6 +267,11 @@ fn copy_nested(
         }
         rows.try_push(output.try_into_shared()?)?;
     }
-    let charge = budget.try_reserve(Category::Execution, 0)?;
-    Shared::try_new(ManagedNestedResult { columns, rows }, charge)
+    let charge = budget
+        .try_reserve(Category::Execution, 0)
+        .map_err(BudgetError::from)?;
+    Ok(Shared::try_new(
+        ManagedNestedResult { columns, rows },
+        charge,
+    )?)
 }

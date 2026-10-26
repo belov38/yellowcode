@@ -5,6 +5,8 @@
 #![forbid(unsafe_code)]
 
 pub mod app;
+mod application;
+pub use application::application_variables;
 pub mod builtins;
 pub mod bytecode;
 pub mod compat;
@@ -20,7 +22,10 @@ mod resolve;
 pub mod split;
 pub mod sym;
 
-pub use app::{AppGlobal, AppMethodSig, AppNames, ContextValue, NoApp, ParamSig};
+pub use app::{
+    AppGlobal, AppMethodSig, AppNames, ApplicationModule, ApplicationVariable, ContextValue, NoApp,
+    ParamSig,
+};
 pub use bsl_prim::CompatMode;
 pub use bsl_syntax::{ExecContext, MsgId};
 pub use builtins::CatalogBuiltins;

@@ -1,5 +1,6 @@
 pub mod blocks;
 pub mod check;
+pub mod code_consoles;
 pub mod configurator;
 pub mod consoles;
 pub mod definition;

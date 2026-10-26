@@ -137,6 +137,7 @@ impl<'c, 'a, 'r, 'w, 't> Builder<'c, 'a, 'r, 'w, 't> {
             }
             _ => None,
         };
+        let static_analysis = statement.typed.static_analysis;
         let sources = ctx.finish(&mut self.sources)?;
         let values = ctx.finish(&mut self.values)?;
         let tables = ctx.finish(&mut self.tables)?;
@@ -152,6 +153,8 @@ impl<'c, 'a, 'r, 'w, 't> Builder<'c, 'a, 'r, 'w, 't> {
         Ok(ctx.allocated(parts.zip(present))?.map(
             |(((((((root, columns), sources), params), values), tables), nested), present)| {
                 ir::StmtS {
+                    qr8: Vec::new(),
+                    static_analysis,
                     root,
                     columns,
                     sources,
@@ -727,13 +730,22 @@ impl<'c, 'a, 'r, 'w, 't> Builder<'c, 'a, 'r, 'w, 't> {
             .finish()
             .map(|columns| ir::SourceS {
                 id,
+                all_fields: source.all_fields,
                 kind: ir::SrcKind::Subquery { columns },
             });
         ctx.scratch_push(&mut self.sources, placeholder)?;
         let (kind, rel) = match &source.from {
             tir::From::Table { id: table, .. } => {
                 match self.schema.table(*table).kind {
-                    crate::TableKind::Virtual(_) => {
+                    crate::TableKind::Virtual(
+                        crate::VtKind::TaskByPerformer | crate::VtKind::FilterCriterion,
+                    ) => {
+                        return Err(BuildProblem::Later {
+                            what: "Q7d-ManagedExpansion",
+                            stage: "Q7d",
+                        });
+                    }
+                    crate::TableKind::Virtual(v) if v != crate::VtKind::BusinessProcessPoints => {
                         return Err(BuildProblem::Later {
                             what: "виртуальные таблицы",
                             stage: "Q5",
@@ -789,7 +801,11 @@ impl<'c, 'a, 'r, 'w, 't> Builder<'c, 'a, 'r, 'w, 't> {
                 (kind, ctx.subquery(id, input)?)
             }
         };
-        let replacement = kind.map(|kind| ir::SourceS { id, kind });
+        let replacement = kind.map(|kind| ir::SourceS {
+            id,
+            kind,
+            all_fields: source.all_fields,
+        });
         let entry = self
             .sources
             .get_mut(slot)

@@ -17,6 +17,7 @@ pub mod graph;
 pub mod index;
 mod load;
 pub mod model;
+pub mod namespace_scope;
 pub mod parts;
 mod settings;
 pub mod templates;

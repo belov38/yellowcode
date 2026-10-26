@@ -209,11 +209,8 @@ fn write_type(w: &mut XmlWriter, t: &TypeDescription) {
     let lvl = w.depth() + 1;
     for (set, tag) in [(false, "v8:Type"), (true, "v8:TypeSet")] {
         for r in t.types.iter().filter(|r| r.set == set) {
-            match r.qname.strip_prefix("cfg:") {
-                Some(n) => w.raw(&format!(
-                    "<{tag} xmlns:d{lvl}p1=\"http://v8.1c.ru/8.1/data/enterprise/current-config\">d{lvl}p1:{n}</{tag}>"
-                )),
-                None => w.leaf(tag, Some(&r.qname), &[]),
+            if let Some(elem) = crate::codec::values::type_member_elem(tag, &r.name, lvl, true) {
+                w.elem(&elem);
             }
         }
     }
@@ -344,25 +341,57 @@ fn write_item(w: &mut XmlWriter, it: &PredefinedItem, states: &HashMap<Guid, &st
 }
 
 pub fn predefined_xml(_cfg: &Configuration, owner: &MdObject, p: &Predefined) -> Option<String> {
-    let src = p.source.as_ref()?;
-    let xsi = xsi_type(owner.kind)?;
-    let states = ext_states(src)?;
+    try_predefined_xml(_cfg, owner, p).ok().flatten()
+}
+
+pub fn try_predefined_xml(
+    _cfg: &Configuration,
+    owner: &MdObject,
+    p: &Predefined,
+) -> Result<Option<String>> {
+    let Some(src) = p.source.as_ref() else {
+        return Ok(None);
+    };
+    let Some(xsi) = xsi_type(owner.kind) else {
+        return Ok(None);
+    };
+    let Some(states) = ext_states(src) else {
+        return Ok(None);
+    };
+    for item in p.iter() {
+        if let Some(description) = &item.type_desc {
+            crate::namespace_scope::validate_type(description)?;
+        }
+    }
     let mut w = XmlWriter::new(1);
     for it in &p.items {
         write_item(&mut w, it, &states);
     }
     let body = w.text();
     let sep = if body.is_empty() { "" } else { "\r\n" };
-    Some(format!(
+    Ok(Some(format!(
         "{XML_HEAD}\r\n<PredefinedData xmlns=\"http://v8.1c.ru/8.3/xcf/predef\" xmlns:v8=\"http://v8.1c.ru/8.1/data/core\" \
          xmlns:xr=\"http://v8.1c.ru/8.3/xcf/readable\" xmlns:xs=\"http://www.w3.org/2001/XMLSchema\" \
          xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:type=\"{xsi}\" version=\"{DUMP_VERSION}\">{sep}{body}\r\n</PredefinedData>"
-    ))
+    )))
+}
+
+pub fn preflight(cfg: &Configuration) -> Result<()> {
+    for owner in &cfg.objects {
+        if let Some(p) = owner.predefined() {
+            let _ = try_predefined_xml(cfg, owner, p)?;
+        }
+    }
+    Ok(())
 }
 
 pub fn dump(cfg: &Configuration, sink: &mut DumpSink) -> Result<PartStatus> {
+    preflight(cfg)?;
     for o in &cfg.objects {
-        let Some(xml) = o.predefined().and_then(|p| predefined_xml(cfg, o, p)) else {
+        let Some(p) = o.predefined() else {
+            continue;
+        };
+        let Some(xml) = try_predefined_xml(cfg, o, p)? else {
             continue;
         };
         let rel = format!("{}/Ext/Predefined.xml", object_dir(cfg, o));

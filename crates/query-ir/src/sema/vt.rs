@@ -188,6 +188,40 @@ impl<'scope> Analyzer<'scope> {
             for (i, arg) in a.args.iter().enumerate() {
                 let typed = if let Some(arg) = arg {
                     match params.get(i) {
+                        Some((VtParamKind::Value, _))
+                            if matches!(
+                                self.schema.table(id).kind,
+                                TableKind::Virtual(
+                                    VtKind::TaskByPerformer | VtKind::FilterCriterion
+                                )
+                            ) =>
+                        {
+                            if self.schema.table(id).kind
+                                == TableKind::Virtual(VtKind::FilterCriterion)
+                                && self.opts.mode == AnalyzeMode::Execute
+                                && let ExprKind::Param(p) = &arg.expr.kind
+                                && let Some(shape) = self.params.shape(&p.name.text)?
+                                && !matches!(&*shape, crate::ParamShape::Value(_))
+                            {
+                                return Err(self.view_parameter_error(path, i));
+                            }
+                            let t = self.in_vt_scope(Level::default(), |a| {
+                                a.expr_value(
+                                    &arg.expr,
+                                    ExprCtx::new(Clause::VtArg, arg.expr.span.start),
+                                )
+                            })?;
+                            if self.schema.table(id).kind
+                                == TableKind::Virtual(VtKind::FilterCriterion)
+                                && let Some(meta) =
+                                    self.schema.meta(id).and_then(|m| m.criterion.as_ref())
+                                && t.ty != QType::default()
+                                && t.ty != meta.ty
+                            {
+                                return Err(self.view_parameter_error(path, i));
+                            }
+                            t.into_native_owned()?.into_some()
+                        }
                         Some((VtParamKind::Period, _)) => self.vt_period(path, i, arg)?,
                         Some((VtParamKind::Condition, _)) => {
                             let scope = self.condition_scope(id);
@@ -231,10 +265,19 @@ impl<'scope> Analyzer<'scope> {
         if let Some(a) = args {
             self.check_period_order(id, path, a)?;
         }
+        let typed_args = typed_args.finish();
+        if self.schema.table(id).kind == TableKind::Virtual(VtKind::FilterCriterion)
+            && !typed_args
+                .trusted_borrow()
+                .first()
+                .is_some_and(Option::is_some)
+        {
+            return Err(self.view_parameter_error(path, 0));
+        }
         let mut out = VtSource {
             periodicity,
             complement,
-            args: typed_args.finish(),
+            args: typed_args,
             breakdown,
             check: None,
         };
@@ -358,20 +401,14 @@ impl<'scope> Analyzer<'scope> {
         i: usize,
         arg: &ast::VtArg,
     ) -> R<mem::NativeOwned<'scope, Option<TExpr>>> {
-        let (role, ru, en) = match self
-            .schema
-            .table(id)
-            .params
-            .get(i)
-            .map(|p| p.name_en.as_str())
-        {
-            Some("Balanced account condition") => {
-                (StdRole::BalancedAccount, "КорСчет", "BalancedAccount")
-            }
-            Some("AccountDr condition") => (StdRole::AccountDr, "СчетДт", "AccountDr"),
-            Some("Account Cr condition") => (StdRole::AccountCr, "СчетКт", "AccountCr"),
-            _ => (StdRole::Account, "Счет", "Account"),
-        };
+        let (role, ru, en) = account_condition(
+            self.schema
+                .table(id)
+                .params
+                .get(i)
+                .map(|p| p.name_en.as_str()),
+        )
+        .unwrap_or((StdRole::Account, "Счет", "Account"));
         let ty = self
             .schema
             .table(id)
@@ -631,11 +668,18 @@ impl<'scope> Analyzer<'scope> {
             ))
     }
 
-    pub(crate) fn vt_checks(&self, levels: &[Level]) -> R<()> {
+    pub(crate) fn vt_checks(&mut self, levels: &[Level]) -> R<()> {
         for level in levels {
             for src in &level.sources {
                 let Some(check) = &src.vt_check else { continue };
                 if !src.dim_res_used {
+                    if self.defer_accum_balance_failure
+                        && let super::scope::SourceCols::Table { id, .. } = &src.cols
+                        && self.schema.table(self.schema.root(*id)).kind
+                            == TableKind::Object(MdKind::AccumulationRegister)
+                    {
+                        self.pending_view_failure = Some(*id);
+                    }
                     return Err(self.view_dimensions_error(&check.path, check.at));
                 }
             }
@@ -686,4 +730,16 @@ fn periodicity_of(arg: &ast::VtArg) -> Periodicity {
         ExprKind::Lit(Lit::String(s)) => periodicity_word(s),
         _ => Periodicity::Absent,
     }
+}
+
+pub(crate) fn account_condition(
+    name: Option<&str>,
+) -> Option<(StdRole, &'static str, &'static str)> {
+    Some(match name? {
+        "Account condition" => (StdRole::Account, "Счет", "Account"),
+        "Balanced account condition" => (StdRole::BalancedAccount, "КорСчет", "BalancedAccount"),
+        "AccountDr condition" => (StdRole::AccountDr, "СчетДт", "AccountDr"),
+        "Account Cr condition" => (StdRole::AccountCr, "СчетКт", "AccountCr"),
+        _ => return None,
+    })
 }

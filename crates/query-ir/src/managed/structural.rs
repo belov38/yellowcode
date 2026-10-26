@@ -205,20 +205,32 @@ impl ManagedClone for crate::tir::Item {
     }
     fn clone_owned<'a>(&self, arena: &'a CompileArena) -> AResult<NativeOwned<'a, Self>> {
         let depth = self.graph_depth(128)?;
-        let (expr, name, nested, unknown) = (&self.expr, &self.name, &self.nested, &self.unknown);
+        let (expr, name, nested, unknown, star) = (
+            &self.expr,
+            &self.name,
+            &self.nested,
+            &self.unknown,
+            &self.star,
+        );
         fields!(
             arena,
             Self {
                 expr,
                 name,
                 nested,
-                unknown
+                unknown,
+                star
             }
         )
         .map(|value| value.set_depth(depth))
     }
 }
-struct_clone!(crate::tir::Source { alias, from, joins });
+struct_clone!(crate::tir::Source {
+    alias,
+    from,
+    joins,
+    all_fields
+});
 impl ManagedClone for crate::tir::Join {
     fn graph_depth(&self, remaining: u16) -> AResult<u16> {
         Ok(self.on.graph_depth(remaining)?.max(
@@ -294,6 +306,7 @@ impl ManagedClone for crate::tir::From {
                 args,
                 periodicity,
                 complement,
+                span,
                 breakdown,
             } => fields!(
                 arena,
@@ -302,6 +315,7 @@ impl ManagedClone for crate::tir::From {
                     args,
                     periodicity,
                     complement,
+                    span,
                     breakdown
                 }
             ),

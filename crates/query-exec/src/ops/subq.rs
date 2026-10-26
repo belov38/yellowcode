@@ -33,7 +33,11 @@ fn plan_of(id: usize, q: &RelL, cx: &Cx<'_>) -> Result<Rc<Plan>, ExecError> {
     if let Some(p) = cx.subs.plans.borrow().get(&id) {
         return Ok(p.clone());
     }
-    let p = Rc::new(plan_rel(q, 0, cx.src, cx.temps, cx.subs.opts)?);
+    let mut planned = plan_rel(q, 0, cx.src, cx.temps, cx.subs.opts)?;
+    if let Some(obs) = &cx.observation {
+        obs.publish_deferred(id, &mut planned);
+    }
+    let p = Rc::new(planned);
     cx.subs.plans.borrow_mut().insert(id, p.clone());
     Ok(p)
 }

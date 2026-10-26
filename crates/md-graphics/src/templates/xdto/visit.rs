@@ -44,32 +44,14 @@ impl<'a, 'src> Policy<'a, 'src> {
                 name,
             ));
         }
-        let value = mdschema::static_schema()
-            .table("types.json")?
-            .get(tid)?
-            .as_array()?;
-        let (prefix, local) = value.get(1)?.as_str()?.split_once(':')?;
-        let ns = match prefix {
-            "cfg" => CFG,
-            "v8" => V8,
-            "xs" => XS,
-            "v8ui" => V8UI,
-            "ent" => "http://v8.1c.ru/8.1/data/enterprise",
-            _ => {
-                self.failed.set(true);
-                return None;
-            }
-        };
+        let ty = mdschema::static_schema().platform_type(tid)?;
         Some((
-            if value.first()?.as_str()? == "TypeSet" {
-                "TypeSet"
-            } else {
-                "Type"
-            },
-            ns,
-            local,
+            if ty.set { "TypeSet" } else { "Type" },
+            ty.name.namespace_uri,
+            ty.name.local,
         ))
     }
+
     fn object(&self, id: &str) -> Option<(&'static str, &'a str)> {
         let name = self.lookup?.name(&brace::Guid::parse(id)?)?;
         let (kind, local) = name.split_once('.')?;
@@ -104,19 +86,27 @@ impl<'a, 'src> Policy<'a, 'src> {
                     CFG => Some("cfg:"),
                     _ => None,
                 };
-                prefix
-                    .and_then(|prefix| {
-                        mdschema::static_schema()
-                            .table("types.json")?
-                            .as_object()?
-                            .iter()
-                            .rev()
-                            .find_map(|(id, value)| {
+                if let Some(prefix) = prefix {
+                    mdschema::static_schema()
+                        .table("types.json")
+                        .and_then(|table| table.as_object())
+                        .and_then(|rows| {
+                            rows.iter().rev().find_map(|(id, value)| {
+                                if !value.at(2).is_none_or(mdschema::StaticValue::is_null) {
+                                    return None;
+                                }
                                 let name = value.at(1)?.as_str()?;
                                 (name.strip_prefix(prefix) == Some(local)).then_some(*id)
                             })
-                    })
-                    .unwrap_or("0")
+                        })
+                        .unwrap_or("0")
+                } else {
+                    mdschema::ExpandedTypeName::new(uri, local)
+                        .and_then(|name| {
+                            mdschema::static_template_tables().type_guid_expanded(name, group == 1)
+                        })
+                        .unwrap_or("0")
+                }
             }
             None => "0",
         };

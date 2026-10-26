@@ -429,6 +429,7 @@ fn information(b: &mut Builder<'_>, r: &mut Reg<'_>, owner: &str) {
     let o = r.obj;
     let per = text_prop(o, "InformationRegisterPeriodicity").unwrap_or("Nonperiodical");
     r.meta.periodic = per != "Nonperiodical";
+    r.meta.recorder_position = per == "RecorderPosition";
     r.period = QType::date(match per {
         "Day" | "Month" | "Quarter" | "Year" => DateQ::Date,
         "Second" | "RecorderPosition" | "Nonperiodical" => DateQ::DateTime,

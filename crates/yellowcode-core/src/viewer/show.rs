@@ -88,7 +88,7 @@ fn type_json(t: &TypeDescription) -> Json {
     let mut m = Map::new();
     m.insert(
         "types".into(),
-        Json::Array(t.types.iter().map(|r| json!(r.qname)).collect()),
+        Json::Array(t.types.iter().map(|r| json!(r.name.to_string())).collect()),
     );
     if let Some(n) = t.number {
         m.insert(

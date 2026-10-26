@@ -1,6 +1,8 @@
 #[allow(non_camel_case_types, clippy::upper_case_acronyms)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum MsgId {
+    DBERROR_ACCESSDENIED,
+    DBERROR_SECURITYINSTR,
     SELECT_ERROR_ACCESSDENIEDFIELD,
     SELECT_ERROR_ACCESSDENIEDFUNCTION,
     SELECT_ERROR_ACCESSDENIEDTABLE,
@@ -191,7 +193,9 @@ pub enum MsgId {
 }
 
 impl MsgId {
-    pub const ALL: [MsgId; 187] = [
+    pub const ALL: [MsgId; 189] = [
+        MsgId::DBERROR_ACCESSDENIED,
+        MsgId::DBERROR_SECURITYINSTR,
         MsgId::SELECT_ERROR_ACCESSDENIEDFIELD,
         MsgId::SELECT_ERROR_ACCESSDENIEDFUNCTION,
         MsgId::SELECT_ERROR_ACCESSDENIEDTABLE,
@@ -382,7 +386,19 @@ impl MsgId {
     ];
 }
 
-pub(crate) static MESSAGES: [(&str, &str, &str, &str); 187] = [
+pub(crate) static MESSAGES: [(&str, &str, &str, &str); 189] = [
+    (
+        "backend",
+        "IDS_DBERROR_ACCESSDENIED",
+        "У пользователя недостаточно прав на исполнение операции над базой данных.",
+        "You do not have enough rights to perform the database operation.",
+    ),
+    (
+        "backend",
+        "IDS_DBERROR_SECURITYINSTR",
+        "Ошибка в ограничении доступа к данным.",
+        "Data access restriction error.",
+    ),
     (
         "entext",
         "IDS_SELECT_ERROR_ACCESSDENIEDFIELD",

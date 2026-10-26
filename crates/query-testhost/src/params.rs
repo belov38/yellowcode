@@ -188,8 +188,15 @@ fn parse(base: &TestBase, repr: &str) -> Result<Parsed, ParamErr> {
         return Ok(opaque(ParamShape::TypeDescription));
     }
     let (v, t) = scalar(base, r)?;
-    let constant =
-        matches!(v, QValue::Number(_) | QValue::String(_)).then(|| ParamConst::Value(v.clone()));
+    let constant = matches!(
+        v,
+        QValue::Number(_)
+            | QValue::String(_)
+            | QValue::Date(_)
+            | QValue::PointInTime(_)
+            | QValue::Boundary(_)
+    )
+    .then(|| ParamConst::Value(v.clone()));
     Ok(Parsed {
         value: ParamValue::Value(v),
         shape: ParamShape::Value(t),

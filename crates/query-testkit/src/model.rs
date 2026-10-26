@@ -27,7 +27,7 @@ pub fn td(qnames: &[&str]) -> TypeDescription {
         types: qnames
             .iter()
             .map(|q| TypeRef {
-                qname: (*q).into(),
+                name: md_model::XmlTypeName::from_qname(q).unwrap(),
                 set: q.starts_with("cfg:DefinedType.")
                     || q.starts_with("cfg:Characteristic.")
                     || (q.starts_with("cfg:") && !q.contains('.')),

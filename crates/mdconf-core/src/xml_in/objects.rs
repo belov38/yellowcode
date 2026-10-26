@@ -4,6 +4,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[path = "namespace_capture.rs"]
+mod namespace_capture;
+
 #[derive(Debug, Clone)]
 pub struct ObjectOptions {
     pub shells: ShellOptions,
@@ -45,6 +48,7 @@ pub fn load_objects(dir: &Path, options: &ObjectOptions) -> Result<ObjectDump> {
         reader: ValueReader::new(&first.configuration)?,
         report: ObjectReport::default(),
         max_value_bytes: options.max_value_bytes,
+        namespace_envelopes: Default::default(),
     };
     let (mut d, mut report) = shells::load_with_values(dir, &options.shells, Some(assembly))?;
     if first.configuration.index != d.configuration.index || first.format != d.format {
@@ -68,6 +72,7 @@ pub(super) struct Assembly {
     pub reader: ValueReader,
     pub report: ObjectReport,
     pub max_value_bytes: u64,
+    pub namespace_envelopes: BTreeMap<brace::Guid, md_model::namespace_scope::NamespaceEnvelope>,
 }
 impl Assembly {
     pub fn properties(
@@ -91,9 +96,17 @@ impl Assembly {
                 depth += 1;
                 parent = n.parent();
             }
-            let value = self
-                .reader
-                .read_property(scope, &descriptor, &fragment, depth);
+            let inherited = p
+                .parent()
+                .ok_or_else(|| walk::err(path, "missing property namespace scope"))?;
+            let value = self.reader.read_property_named_scoped(
+                scope,
+                &descriptor,
+                (&fragment, p.local()),
+                depth,
+                &inherited,
+            );
+            self.capture_scope(p, &value, path)?;
             let raw = matches!(value, Value::Xml(_));
             let counts = self
                 .report
@@ -174,6 +187,7 @@ impl Assembly {
         Ok(copy(n))
     }
 }
+
 pub(super) fn headers(
     props: &[crate::Prop],
     synonym: &mut crate::LocalString,

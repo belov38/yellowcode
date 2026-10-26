@@ -10,6 +10,12 @@ autoexamples = false
 autobenches = false
 
 [dependencies]
+rand = "0.9"
+thiserror = "2"
+platform-catalog = { path = "../platform-catalog" }
+bsl-lib = { path = "../bsl-lib" }
+bsl-stdlib = { path = "../bsl-stdlib" }
+md-model = { path = "../md-model" }
 yellowcode-core = { path = "../yellowcode-core" }
 query-console = { path = "../query-console" }
 appobj = { path = "../appobj" }
@@ -17,6 +23,10 @@ bsl-vm = { path = "../bsl-vm" }
 query-exec = { path = "../query-exec" }
 query-ir = { path = "../query-ir" }
 evlog = { path = "../evlog" }
+v8users = { path = "../v8users" }
+onecd = { path = "../onecd", default-features = false }
+ibschema = { path = "../ibschema" }
+icu46-sys = { path = "../icu46-sys" }
 
 [lints.clippy]
 dbg_macro = "warn"

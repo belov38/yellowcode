@@ -251,6 +251,9 @@ pub(crate) fn global_name(g: &GlobalRef) -> String {
     let c = platform_catalog::catalog();
     match g {
         GlobalRef::App(crate::app::AppGlobal::CommonModule { name }) => name.clone(),
+        GlobalRef::ApplicationVariable(variable) => {
+            format!("{:?}.{}", variable.module, variable.name)
+        }
         GlobalRef::PlatformProperty(i) => c
             .global_properties()
             .get(usize::from(*i))

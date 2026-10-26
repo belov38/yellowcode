@@ -90,6 +90,21 @@ pub enum Plan {
     Values {
         rows: Arc<query_ir::ValueRows>,
     },
+    RegisterRows {
+        step: Box<query_ir::lower::RegisterRowsL>,
+        #[doc(hidden)]
+        observation: Option<crate::observe::RegisterObservation>,
+    },
+    Slice {
+        input: Box<Plan>,
+        totals: Option<Box<Plan>>,
+        step: Box<query_ir::lower::SliceL>,
+        observation: Option<crate::observe::RegisterObservation>,
+    },
+    RunningBalance {
+        input: Box<Plan>,
+        step: Box<query_ir::lower::RunningBalanceL>,
+    },
     TempScan {
         table: TempTableId,
         name: String,
@@ -101,6 +116,10 @@ pub enum Plan {
         index_name: String,
         lo: Bound<Vec<PExpr>>,
         hi: Bound<Vec<PExpr>>,
+    },
+    CheckAccess {
+        input: Box<Plan>,
+        signal: u16,
     },
     Filter {
         input: Box<Plan>,
@@ -307,6 +326,43 @@ impl Planner<'_> {
             R::Scan { table, fields } => self.access(*table, fields, rep, pending)?,
             R::TempScan { name, .. } => self.temp_access(name, pending)?,
             R::Values { rows } => wrap(Plan::Values { rows: rows.clone() }, pending),
+            R::Slice {
+                input,
+                totals,
+                step,
+            } => wrap(
+                Plan::Slice {
+                    input: Box::new(self.rel(input, false, Vec::new())?),
+                    totals: totals
+                        .as_ref()
+                        .map(|t| self.rel(t, false, Vec::new()).map(Box::new))
+                        .transpose()?,
+                    step: step.clone(),
+                    observation: None,
+                },
+                pending,
+            ),
+            R::RegisterRows(step) => wrap(
+                Plan::RegisterRows {
+                    step: step.clone(),
+                    observation: None,
+                },
+                pending,
+            ),
+            R::RunningBalance { input, step } => wrap(
+                Plan::RunningBalance {
+                    input: Box::new(self.rel(input, false, Vec::new())?),
+                    step: step.clone(),
+                },
+                pending,
+            ),
+            R::CheckAccess { input, signal } => wrap(
+                Plan::CheckAccess {
+                    input: Box::new(self.rel(input, rep, Vec::new())?),
+                    signal: *signal,
+                },
+                pending,
+            ),
             R::Filter { input, pred } => {
                 let mut p = pending;
                 conjuncts(pred, &mut p);
@@ -537,7 +593,8 @@ pub(crate) fn width(r: &query_ir::RelL) -> usize {
         R::TempScan { width, .. } => usize::from(*width),
         R::Values { rows } => rows.width,
         R::Join { l, r, .. } => width(l) + width(r),
-        R::Filter { input, .. }
+        R::CheckAccess { input, .. }
+        | R::Filter { input, .. }
         | R::Sort { input, .. }
         | R::Top { input, .. }
         | R::SemiJoin { input, .. }
@@ -547,6 +604,9 @@ pub(crate) fn width(r: &query_ir::RelL) -> usize {
         R::Aggregate { keys, aggs, .. } => keys.len() + aggs.len(),
         R::Union { parts, .. } => parts.first().map_or(0, width),
         R::HierarchyClosure { .. } => 1,
+        R::RunningBalance { step, .. } => step.width(),
+        R::RegisterRows(s) => query_ir::ir::raw_layout::width(s.dims.len(), s.resources.len()),
+        R::Slice { step, .. } => step.width,
     }
 }
 
@@ -564,6 +624,20 @@ pub fn build<'a>(p: &Plan) -> BoxOp<'a> {
         Plan::Scan { table, fields, .. } => Box::new(Scan::new(*table, fields.clone())),
         Plan::TempScan { table, .. } => Box::new(TempScan::new(*table)),
         Plan::Values { rows } => Box::new(ValuesScan::new(rows.clone())),
+        Plan::Slice {
+            input,
+            totals,
+            step,
+            observation,
+        } => Box::new(crate::ops::slice::Slice::new(
+            (**step).clone(),
+            (**input).clone(),
+            totals.as_ref().map(|t| (**t).clone()),
+            observation.clone(),
+        )),
+        Plan::RegisterRows { step, observation } => Box::new(
+            crate::ops::register::RegisterRows::observed((**step).clone(), observation.clone()),
+        ),
         Plan::TempIndexRange {
             table,
             index,
@@ -611,6 +685,13 @@ pub fn build<'a>(p: &Plan) -> BoxOp<'a> {
             )
             .skipping(*skip),
         ),
+        Plan::RunningBalance { input, step } => Box::new(crate::ops::running::RunningBalance::new(
+            build(input),
+            (**step).clone(),
+        )),
+        Plan::CheckAccess { input, signal } => {
+            Box::new(crate::ops::CheckAccess::new(build(input), *signal))
+        }
         Plan::Filter { input, pred } => Box::new(Filter::new(build(input), pred.clone())),
         Plan::Project { input, exprs } => Box::new(Project::new(build(input), exprs.clone())),
         Plan::Aggregate {
@@ -806,6 +887,25 @@ impl Plan {
                 kids = vec![];
                 format!("values {}x{}", rows.rows.len(), rows.width)
             }
+            Plan::Slice {
+                input,
+                totals,
+                step,
+                ..
+            } => {
+                kids = std::iter::once(&**input)
+                    .chain(totals.iter().map(|t| &**t))
+                    .collect();
+                format!("slice first={}", step.first)
+            }
+            Plan::RunningBalance { input, .. } => {
+                kids = vec![input];
+                "running-balance".to_string()
+            }
+            Plan::RegisterRows { step, .. } => {
+                kids = vec![];
+                format!("register-rows {:?}", step.kind)
+            }
             Plan::TempIndexRange {
                 name, index_name, ..
             } => {
@@ -854,6 +954,10 @@ impl Plan {
                     values.len(),
                     skip_text(*skip)
                 )
+            }
+            Plan::CheckAccess { input, signal } => {
+                kids = vec![input];
+                format!("check-access hidden={signal}")
             }
             Plan::Filter { input, .. } => {
                 kids = vec![input];

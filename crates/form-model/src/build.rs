@@ -21,7 +21,7 @@ pub fn from_configuration(
 
 pub fn type_desc(t: &mdconf::TypeDescription) -> TypeDesc {
     TypeDesc {
-        types: t.types.iter().map(|r| r.qname.clone()).collect(),
+        types: t.types.iter().map(|r| r.name.to_string()).collect(),
         string_len: t.string.map(|s| s.length),
         number: t.number.map(|n| (n.digits, n.fraction)),
         date: t.date.map(|d| match d {

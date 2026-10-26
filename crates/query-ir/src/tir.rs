@@ -8,6 +8,7 @@ use query_syntax::{Func, INLINE_DEPTH, Kw, Span, with_deep_stack};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Stmt {
+    pub static_analysis: bool,
     pub kind: StmtKind,
     pub max_depth: u32,
 }
@@ -96,6 +97,7 @@ pub struct Select {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Item {
+    pub star: bool,
     pub expr: TExpr,
     pub name: String,
     pub nested: Option<Vec<Item>>,
@@ -104,6 +106,7 @@ pub struct Item {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Source {
+    pub all_fields: bool,
     pub alias: String,
     pub from: From,
     pub joins: Vec<Join>,
@@ -116,6 +119,7 @@ pub enum From {
         args: Vec<Option<TExpr>>,
         periodicity: Periodicity,
         complement: Option<crate::schema::Complement>,
+        span: Option<query_syntax::Span>,
         breakdown: Vec<QFieldId>,
     },
     Temp(QShared<TempSchema>),

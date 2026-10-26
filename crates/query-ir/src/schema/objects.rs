@@ -420,9 +420,9 @@ fn fill(
         }
         MdKind::BusinessProcess => {
             number_and_date(&mut fs, o);
+            fs.std(StdRole::Completed, QType::boolean());
             fs.std(StdRole::HeadTask, refs_type(b.refs.of_kind(MdKind::Task)));
             fs.std(StdRole::Started, QType::boolean());
-            fs.std(StdRole::Completed, QType::boolean());
         }
         MdKind::Task => {
             number_and_date(&mut fs, o);
@@ -440,11 +440,13 @@ fn fill(
                 fs.std(StdRole::Description, t);
             }
             fs.std(StdRole::Executed, QType::boolean());
-            children(b, &mut fs, o, ChildTag::AddressingAttribute, false, &owner);
         }
         _ => {}
     }
     children(b, &mut fs, o, ChildTag::Attribute, folders, &owner);
+    if kind == MdKind::Task {
+        children(b, &mut fs, o, ChildTag::AddressingAttribute, false, &owner);
+    }
     for c in commons.iter().filter(|c| c.used_by(o)) {
         fs.push(common_field(c), true);
     }

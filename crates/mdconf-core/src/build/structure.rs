@@ -147,6 +147,7 @@ impl Diffs<'_> {
             id: _,
             root_info: _,
             xml_origin: _,
+            xml_namespace_envelopes: _,
             header_id: _,
             compat,
             props,

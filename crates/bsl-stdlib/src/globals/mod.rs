@@ -8,11 +8,17 @@ pub(crate) mod binary;
 pub(crate) mod data;
 pub(crate) mod dates;
 pub(crate) mod format;
+pub(crate) mod message;
 pub(crate) mod numbers;
 pub(crate) mod strings;
 pub(crate) mod tz;
 
 pub(crate) fn register(reg: &mut Registry) {
+    reg.global_fn(
+        "БезопасныйРежим",
+        "SafeMode",
+        std::sync::Arc::new(|ex, _| Ok(Value::Bool(ex.effective_flags().safe_mode))),
+    );
     strings::register(reg);
     numbers::register(reg);
     data::register(reg);
@@ -20,6 +26,7 @@ pub(crate) fn register(reg: &mut Registry) {
     dates::register(reg);
     tz::register(reg);
     format::register(reg);
+    message::register(reg);
 }
 
 pub(crate) fn str_value(units: Vec<u16>) -> Value {

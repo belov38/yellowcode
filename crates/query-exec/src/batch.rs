@@ -5,7 +5,7 @@ use query_ir::ir::{BuildError, Rel, build_stmt};
 use query_ir::tir::{From as TFrom, Query, Select, StmtKind, TExpr, TKind};
 use query_ir::{
     AnalyzeMode, AnalyzeOptions, BindCtx, CompileError, CompileRefusal, CompiledStmt, ExecError,
-    ParamInfo, ParamTypes, ParamValues, QValue, TempOut, analyze_stmt, bind,
+    ParamInfo, ParamTypes, ParamValues, QValue, TempOut,
 };
 use query_syntax::{ParseMode, Preflight, PublicParseLimit};
 
@@ -67,7 +67,7 @@ pub fn run_batch_detailed(
     temp: &mut TempTables,
     mode: RunMode,
 ) -> Result<Vec<StmtRun>, BatchError> {
-    run_batch_inner(host, text, params, temp, mode, None)
+    run_batch_inner(host, text, params, temp, mode, None, None)
 }
 
 pub struct BatchMem<'a> {
@@ -178,6 +178,25 @@ impl CompileModel {
             + self.c_pre_names * ir.tables * max_predefined_bytes
             + self.c_ltype * ir.type_refs
     }
+
+    pub fn policy(
+        &self,
+        stats: &query_ir::bind::PolicyCompileStats,
+        max_predefined_bytes: u64,
+    ) -> u64 {
+        let p = &stats.predicates;
+        let policy_ir = query_ir::ir::stats::IrStats {
+            rels: 4 * (p.sources + p.joins + p.subqueries + 1),
+            exprs: 4 * (p.nodes + p.columns),
+            fanout_sum: 4 * p.fanout_sum,
+            tables: p.sources,
+            type_refs: 4 * p.type_refs,
+            ..Default::default()
+        };
+        self.lower(&stats.statement, max_predefined_bytes)
+            + 2 * self.build(p)
+            + self.lower(&policy_ir, max_predefined_bytes)
+    }
 }
 
 pub const PUBLIC_MAX_COLUMNS: u64 = 4096;
@@ -210,7 +229,7 @@ pub fn run_batch_budgeted(
     mode: RunMode,
     mem: &BatchMem<'_>,
 ) -> Result<Vec<StmtRun>, BatchError> {
-    run_batch_inner(host, text, params, temp, mode, Some(mem))
+    run_batch_inner(host, text, params, temp, mode, Some(mem), None)
 }
 
 fn run_batch_inner(
@@ -220,9 +239,10 @@ fn run_batch_inner(
     temp: &mut TempTables,
     mode: RunMode,
     mem: Option<&BatchMem<'_>>,
+    observations: Option<&mut Vec<crate::observe::ObservationSession>>,
 ) -> Result<Vec<StmtRun>, BatchError> {
     forget(host, temp);
-    let r = run_batch_leased(host, text, params, temp, mode, mem);
+    let r = run_batch_leased(host, text, params, temp, mode, mem, observations);
     if r.is_err()
         && let Some(mem) = mem
     {
@@ -238,6 +258,7 @@ fn run_batch_leased(
     temp: &mut TempTables,
     mode: RunMode,
     mem: Option<&BatchMem<'_>>,
+    mut observations: Option<&mut Vec<crate::observe::ObservationSession>>,
 ) -> Result<Vec<StmtRun>, BatchError> {
     let (batch, stages) = match mem {
         None => (
@@ -256,6 +277,7 @@ fn run_batch_leased(
             (batch, Some((mem, Box::new(pre))))
         }
     };
+    host.admit_batch(&batch, temp).map_err(exec)?;
     let mut out = Vec::with_capacity(if mode == RunMode::One {
         1
     } else {
@@ -263,9 +285,28 @@ fn run_batch_leased(
     });
     for i in 0..batch.stmts.len() {
         crate::probe::hit();
-        host.check_txn().map_err(|e| exec(ExecError::Host(e)))?;
+        let observation = observations.as_deref_mut().and_then(|sessions| {
+            sessions.push(crate::observe::ObservationSession::new());
+            sessions.last()
+        });
+        host.check_txn().map_err(|e| {
+            if let Some(obs) = observation {
+                obs.finish(false);
+            }
+            exec(ExecError::Host(e))
+        })?;
         let stage = stages.as_ref().map(|(mem, pre)| Stage { mem, pre, i });
-        match step(host, &batch, text, i, params, temp, mode, stage.as_ref()) {
+        match step(
+            host,
+            &batch,
+            text,
+            i,
+            params,
+            temp,
+            mode,
+            stage.as_ref(),
+            observation,
+        ) {
             Ok(r) => {
                 if mode == RunMode::One {
                     out.clear();
@@ -347,6 +388,7 @@ fn prepare(
     mode: RunMode,
     stage: Option<&Stage<'_, '_>>,
     leased: &mut u64,
+    observation: Option<&crate::observe::ObservationSession>,
 ) -> Result<Prepared, Failure> {
     let schema = host.schema();
     let opts = AnalyzeOptions {
@@ -371,7 +413,32 @@ fn prepare(
             temp.len(),
         ))?;
     }
-    let compiled = analyze_stmt(batch, text, i, schema, &opts).map_err(BatchError::Compile)?;
+    let compiled = match query_ir::sema::analyze_stmt_for_execution(batch, text, i, schema, &opts) {
+        Ok(compiled) => compiled,
+        Err(query_ir::sema::ExecutionAnalysisFailure::Compile(error)) => {
+            return Err(BatchError::Compile(error).into());
+        }
+        Err(query_ir::sema::ExecutionAnalysisFailure::PendingViewFailure { table, original }) => {
+            let view = schema.table(table);
+            let register = view
+                .object
+                .or_else(|| view.owner.and_then(|owner| schema.table(owner).object))
+                .ok_or_else(|| {
+                    compile_stage(exec(ExecError::Fatal(
+                        "balance view without register metadata".into(),
+                    )))
+                })?;
+            let src = host.read_source();
+            let error = crate::register::resolve_pending_view_failure_with_observation(
+                &*src,
+                register,
+                original,
+                observation,
+            )
+            .map_err(|error| compile_stage(exec(error)))?;
+            return Err(BatchError::Compile(error).into());
+        }
+    };
     if compiled.drop.is_some() {
         return Ok(Prepared {
             compiled,
@@ -388,6 +455,18 @@ fn prepare(
         }
         take(st.mem.model.build(&stats))?;
     }
+    let ctx = BindCtx {
+        security: query_ir::host::SecurityCtx {
+            access: host.access(),
+            session: host.session(),
+        },
+        schema,
+        storage: host.storage(),
+        map: host.map(),
+        params,
+        host,
+    };
+    query_ir::bind::preflight_virtual(&compiled, &ctx).map_err(exec)?;
     let ir = build_stmt(&compiled, schema).map_err(build_error)?;
     if let Some(st) = stage {
         let stats = query_ir::ir::stats::stats(&ir);
@@ -395,14 +474,18 @@ fn prepare(
         st.mem.grow(bytes)?;
         *leased += bytes;
     }
-    let ctx = BindCtx {
-        schema,
-        storage: host.storage(),
-        map: host.map(),
-        params,
-        host,
-    };
-    let lowered = bind(&ir, &ctx).map_err(exec)?;
+    let lowered = query_ir::bind::bind_with_policy_charge(&ir, &ctx, &mut |stats| {
+        if let Some(st) = stage {
+            let bytes = st.mem.model.policy(stats, st.mem.max_predefined_bytes);
+            st.mem.grow(bytes).map_err(|e| match e {
+                BatchError::Exec(e) => e,
+                _ => ExecError::Fatal("policy lease failed".into()),
+            })?;
+            *leased += bytes;
+        }
+        Ok(())
+    })
+    .map_err(exec)?;
     Ok(Prepared {
         compiled,
         ordered: is_ordered(&ir.root),
@@ -420,10 +503,29 @@ fn step(
     temp: &mut TempTables,
     mode: RunMode,
     stage: Option<&Stage<'_, '_>>,
+    observation: Option<&crate::observe::ObservationSession>,
 ) -> Result<StmtRun, Failure> {
     forget(host, temp);
     let mut leased = 0u64;
-    let r = step_prepared(host, batch, text, i, params, temp, mode, stage, &mut leased);
+    let r = step_prepared(
+        host,
+        batch,
+        text,
+        i,
+        params,
+        temp,
+        mode,
+        stage,
+        &mut leased,
+        observation,
+    );
+    if let Some(obs) = observation {
+        if r.is_ok() {
+            obs.finish(true);
+        } else if obs.report().closure != crate::observe::ClosureStatus::TerminalPrecheck {
+            obs.finish(false);
+        }
+    }
     if let Some(st) = stage {
         st.mem.release(leased);
     }
@@ -441,8 +543,20 @@ fn step_prepared(
     mode: RunMode,
     stage: Option<&Stage<'_, '_>>,
     leased: &mut u64,
+    observation: Option<&crate::observe::ObservationSession>,
 ) -> Result<StmtRun, Failure> {
-    let p = prepare(host, batch, text, i, params, temp, mode, stage, leased)?;
+    let p = prepare(
+        host,
+        batch,
+        text,
+        i,
+        params,
+        temp,
+        mode,
+        stage,
+        leased,
+        observation,
+    )?;
     let ordered = p.ordered;
     let done = |outcome, put| {
         Ok(StmtRun {
@@ -462,8 +576,26 @@ fn step_prepared(
     take_locks(host, &p.compiled, lowered)?;
     let res = {
         let src = host.read_source();
-        let mut res =
-            execute_temps(lowered, &*src, &env, Some(&*temp), host.plan_options()).map_err(exec)?;
+        let refused = match observation {
+            Some(obs) => crate::register::check_totals_use_observed(lowered, &*src, text, obs),
+            None => crate::register::check_totals_use(lowered, &*src, text),
+        }
+        .map_err(exec)?;
+        if let Some(e) = refused {
+            return Err(BatchError::Compile(e).into());
+        }
+        let mut res = match observation {
+            Some(obs) => crate::exec::execute_temps_observed(
+                lowered,
+                &*src,
+                &env,
+                Some(&*temp),
+                host.plan_options(),
+                obs,
+            ),
+            None => execute_temps(lowered, &*src, &env, Some(&*temp), host.plan_options()),
+        }
+        .map_err(exec)?;
         if !lowered.present.is_empty() {
             let mut mem = MemBudget::of_env(&env);
             if !mem.is_leased()
@@ -810,7 +942,18 @@ pub fn explain_last(
     let n = batch.stmts.len();
     for i in 0..n.saturating_sub(1) {
         host.check_txn().map_err(|e| exec(ExecError::Host(e)))?;
-        step(host, &batch, text, i, params, temp, RunMode::Batch, None).map_err(|f| f.err)?;
+        step(
+            host,
+            &batch,
+            text,
+            i,
+            params,
+            temp,
+            RunMode::Batch,
+            None,
+            None,
+        )
+        .map_err(|f| f.err)?;
     }
     let p = prepare(
         host,
@@ -822,6 +965,7 @@ pub fn explain_last(
         RunMode::Batch,
         None,
         &mut 0,
+        None,
     )
     .map_err(|f| f.err)?;
     let Some(lowered) = &p.lowered else {
@@ -851,4 +995,23 @@ pub fn count_column(script: query_syntax::ScriptVariant) -> query_ir::ColumnInfo
         width: 10,
         nested: None,
     }
+}
+
+#[doc(hidden)]
+pub fn run_batch_observed(
+    host: &dyn ExecHost,
+    text: &str,
+    params: &dyn ParamSource,
+    temp: &mut TempTables,
+    mode: RunMode,
+    sessions: &mut Vec<crate::observe::ObservationSession>,
+) -> Result<Vec<StmtRun>, BatchError> {
+    sessions.clear();
+    let result = run_batch_inner(host, text, params, temp, mode, None, Some(sessions));
+    if result.is_err() && sessions.is_empty() {
+        let session = crate::observe::ObservationSession::new();
+        session.finish(false);
+        sessions.push(session);
+    }
+    result
 }

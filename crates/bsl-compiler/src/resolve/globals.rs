@@ -115,6 +115,8 @@ impl GlobalLookup for Globals<'_> {
         }
         let global = if let Some(g) = self.app.global_value(name, self.platform.ctx) {
             GlobalRef::App(g)
+        } else if let Some(variable) = self.app.application_variable(name, self.platform.ctx) {
+            GlobalRef::ApplicationVariable(variable)
         } else if let Some(i) = self.platform.property(name) {
             GlobalRef::PlatformProperty(i)
         } else {

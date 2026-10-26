@@ -313,3 +313,85 @@ pub fn write_response_with_allow<B: AsRef<[u8]>>(
     }
     w.flush()
 }
+
+pub fn write_owned_response(
+    w: &mut dyn Write,
+    status: u16,
+    headers: &[(String, String)],
+    body: &[u8],
+    head_only: bool,
+) -> std::io::Result<()> {
+    fn bad() -> std::io::Error {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "invalid response metadata",
+        )
+    }
+    fn token(b: u8) -> bool {
+        b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b)
+    }
+    if !(200..=599).contains(&status) || matches!(status, 204 | 205 | 304) {
+        return Err(bad());
+    }
+    for (name, value) in headers {
+        if name.is_empty()
+            || !name.bytes().all(token)
+            || !value.bytes().all(|b| b == b'\t' || (b >= 32 && b != 127))
+        {
+            return Err(bad());
+        }
+    }
+    let phrase = match status {
+        200 => "OK",
+        201 => "Created",
+        202 => "Accepted",
+        203 => "Non-Authoritative Information",
+        206 => "Partial Content",
+        301 => "Moved Permanently",
+        302 => "Found",
+        303 => "See Other",
+        307 => "Temporary Redirect",
+        308 => "Permanent Redirect",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        406 => "Not Acceptable",
+        408 => "Request Timeout",
+        409 => "Conflict",
+        410 => "Gone",
+        411 => "Length Required",
+        413 => "Content Too Large",
+        414 => "URI Too Long",
+        415 => "Unsupported Media Type",
+        422 => "Unprocessable Content",
+        429 => "Too Many Requests",
+        431 => "Request Header Fields Too Large",
+        500 => "Internal Server Error",
+        501 => "Not Implemented",
+        502 => "Bad Gateway",
+        503 => "Service Unavailable",
+        504 => "Gateway Timeout",
+        _ => "Unknown",
+    };
+    write!(w, "HTTP/1.1 {status} {phrase}\r\n")?;
+    for (name, value) in headers {
+        if ["Content-Length", "Transfer-Encoding", "Connection"]
+            .iter()
+            .any(|h| name.eq_ignore_ascii_case(h))
+        {
+            continue;
+        }
+        write!(w, "{name}: {value}\r\n")?;
+    }
+    write!(
+        w,
+        "Content-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    )?;
+    if !head_only {
+        w.write_all(body)?;
+    }
+    w.flush()
+}

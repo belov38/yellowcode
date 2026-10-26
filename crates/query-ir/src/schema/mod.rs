@@ -4,6 +4,7 @@ mod managed;
 mod misc;
 pub mod names;
 mod objects;
+pub(crate) mod qr8;
 mod registers;
 pub mod templates;
 mod typemap;
@@ -296,6 +297,8 @@ pub(crate) struct Item {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct ObjMeta {
+    pub addressing: Option<qr8::Addressing>,
+    pub criterion: Option<qr8::Criterion>,
     pub kind: MdKind,
     pub dims: Vec<Item>,
     pub resources: Vec<Item>,
@@ -303,6 +306,7 @@ pub(crate) struct ObjMeta {
     pub commons: Vec<String>,
     pub balance_type: bool,
     pub periodic: bool,
+    pub recorder_position: bool,
     pub subordinate: bool,
     pub filter_on_period: bool,
     pub corr: bool,
@@ -316,6 +320,8 @@ pub(crate) struct ObjMeta {
 impl ObjMeta {
     pub fn new(kind: MdKind) -> ObjMeta {
         ObjMeta {
+            addressing: None,
+            criterion: None,
             kind,
             dims: Vec::new(),
             resources: Vec::new(),
@@ -323,6 +329,7 @@ impl ObjMeta {
             commons: Vec::new(),
             balance_type: false,
             periodic: false,
+            recorder_position: false,
             subordinate: false,
             filter_on_period: false,
             corr: false,
@@ -416,6 +423,7 @@ impl QuerySchema {
         let commons = objects::build(&mut b)?;
         registers::build(&mut b, &commons)?;
         misc::build(&mut b, &commons)?;
+        qr8::build(&mut b);
         b.finish().map(Arc::new)
     }
 
@@ -468,6 +476,42 @@ impl QuerySchema {
             .ok()
             .and_then(|i| self.refs.get(i))
             .unwrap_or(&EMPTY_REF)
+    }
+
+    pub(crate) fn supports_native_vt(&self, id: QTableId) -> bool {
+        self.supports_register_vt(id)
+            || matches!(
+                self.table(id).kind,
+                TableKind::Changes
+                    | TableKind::Virtual(
+                        VtKind::SequenceBoundaries | VtKind::BusinessProcessPoints
+                    )
+            )
+    }
+
+    pub(crate) fn supports_register_vt(&self, id: QTableId) -> bool {
+        let table = self.table(id);
+        table.owner.is_some_and(|owner| {
+            matches!(
+                (self.table(owner).kind, table.kind),
+                (
+                    TableKind::Object(mdschema::MdKind::AccumulationRegister),
+                    TableKind::Virtual(
+                        VtKind::Balance | VtKind::Turnovers | VtKind::BalanceAndTurnovers
+                    )
+                ) | (
+                    TableKind::Object(mdschema::MdKind::InformationRegister),
+                    TableKind::Virtual(VtKind::SliceLast | VtKind::SliceFirst)
+                )
+            )
+        })
+    }
+
+    pub(crate) fn is_presentation_field(&self, table: QTableId, field: QFieldId) -> bool {
+        self.field(table, field).is_some_and(|f| {
+            f.role == FieldRole::Virtual
+                && (f.name_ru == "Представление" || f.name_en == "Presentation")
+        })
     }
 
     pub fn hierarchical_table(&self, r: RefAtom) -> Option<QTableId> {

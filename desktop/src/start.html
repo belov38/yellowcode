@@ -90,14 +90,38 @@ input[type=text], select { border-color: #b5b5b5; background: white; color: #555
 .setup-versions th { font-weight: normal; background: #f2f2f2; text-align: left; border: 1px solid #ddd; padding: 6px; }
 .setup-link { border: 0; background: transparent; text-decoration: underline; padding: 0; }
 #skin-settings-open { margin-right: auto; }
+#launcher { height: calc(100vh - 28px); min-height: 380px; grid-template-columns: 164px minmax(0, 1fr) 158px; gap: 16px; }
+#source-nav { display: flex; flex-direction: column; gap: 6px; padding-right: 12px; border-right: 1px solid #ddd; }
+#source-nav .brand { color: #333; font-size: 19px; margin: 0 0 18px; }
+#source-nav button { text-align: left; padding: 9px 8px; border: 1px solid transparent; background: transparent; white-space: normal; }
+#source-nav button[aria-selected=true] { background: #fff2b9; border-color: #e8c54c; }
+#sources > label { color: #333; font-size: 18px; margin-bottom: 12px; }
+#source-search { width: 100%; padding: 7px; margin-bottom: 10px; }
+#recent li { height: auto; min-height: 56px; padding: 8px; }
+.source-name { display: block; font-weight: bold; }
+.source-meta { display: block; font-size: 12px; color: #666; margin-top: 4px; }
+#source-path { height: auto; min-height: 34px; font-size: 12px; overflow-wrap: anywhere; white-space: normal; }
+#source-mode, #source-empty { font-size: 12px; line-height: 1.5; margin: 8px 0; }
+#source-empty { padding: 14px; border: 1px solid #ddd; }
+#actions { padding-top: 36px; }
+#add { margin-top: 20px; }
+#enterprise, #follow-link { display: none; }
+#source-origin { display: block; width: 100%; margin-top: 6px; }
+#wizard { height: 490px; }
+@media (max-width: 640px) {
+  #launcher { grid-template-columns: 136px minmax(0, 1fr); }
+  #actions { grid-column: 2; padding: 0; flex-direction: row; flex-wrap: wrap; gap: 5px; }
+  #actions button { margin: 0; } #quit { margin-left: auto; }
+}
 </style>
 </head>
 <body>
 <main id="launcher">
-<section id="sources"><label id="list-title" for="recent"></label><ul id="recent" role="listbox" tabindex="0" aria-labelledby="list-title"></ul><div id="source-path"></div></section>
+<nav id="source-nav" role="tablist" aria-orientation="vertical" aria-label="Источники"><strong class="brand">Yellowcode</strong><button id="nav-recent" role="tab" aria-selected="true" aria-controls="sources" data-section="recent"></button><button id="nav-onec" role="tab" aria-selected="false" aria-controls="sources" data-section="onec" tabindex="-1"></button><button id="nav-yellowcode" role="tab" aria-selected="false" aria-controls="sources" data-section="yellowcode" tabindex="-1"></button><button id="nav-files" role="tab" aria-selected="false" aria-controls="sources" data-section="files" tabindex="-1"></button></nav>
+<section id="sources" role="tabpanel" aria-labelledby="nav-recent"><label id="list-title" for="recent"></label><input id="source-search" type="search"><p id="source-empty" hidden></p><ul id="recent" role="listbox" tabindex="0" aria-labelledby="list-title"></ul><div id="source-path"></div><div id="source-mode" role="status"></div></section>
 <aside id="actions"><button id="enterprise" disabled></button><button id="open" disabled></button><button id="add"></button><button id="edit" disabled></button><button id="remove" disabled></button><button id="setup"></button><button id="follow-link" disabled></button><button id="quit"></button></aside>
 </main>
-<dialog id="wizard" aria-labelledby="wizard-title"><h2 class="caption"><span id="wizard-title"></span><button id="wizard-close" type="button" aria-label="Close">×</button></h2><div class="content"><label class="field"><span id="name-label"></span><input id="source-name" type="text" maxlength="256"></label><div class="field"><label id="path-label" for="source-input"></label><span class="path-row"><input id="source-input" type="text"><button id="pick-file" type="button"></button><button id="pick-folder" type="button"></button></span></div></div><div class="footer"><button id="finish"></button><button id="wizard-cancel"></button></div></dialog>
+<dialog id="wizard" aria-labelledby="wizard-title"><h2 class="caption"><span id="wizard-title"></span><button id="wizard-close" type="button" aria-label="Close">×</button></h2><div class="content"><label class="field"><span id="name-label"></span><input id="source-name" type="text" maxlength="256"></label><div class="field"><label id="path-label" for="source-input"></label><span class="path-row"><input id="source-input" type="text"><button id="pick-file" type="button"></button><button id="pick-folder" type="button"></button></span></div><label class="field"><span id="origin-label"></span><select id="source-origin"><option value="one_c" id="origin-onec"></option><option value="yellowcode" id="origin-yellowcode"></option></select></label><p id="source-hint"></p></div><div class="footer"><button id="finish"></button><button id="wizard-cancel"></button></div></dialog>
 <dialog id="launch-settings" aria-labelledby="launch-settings-title"><h2 class="caption"><span id="launch-settings-title"></span><button data-launch-close aria-label="Close">×</button></h2><div class="content" id="launch-settings-content"></div><div class="footer"><button id="skin-settings-open"></button><button data-launch-close>OK</button><button data-launch-close id="launch-settings-cancel"></button></div></dialog>
 <dialog id="settings" aria-labelledby="settings-title"><h2 class="caption" id="settings-title"></h2><div class="content"><label class="field"><span id="skin-label"></span> <select id="skins"></select></label><button id="skin-file"></button><button id="skin-folder"></button></div><div class="footer"><button id="settings-close"></button></div></dialog>
 <dialog id="error" aria-labelledby="error-title"><h2 class="caption" id="error-title">Yellowcode</h2><div class="content" id="error-text"></div><div class="footer"><button id="error-close">OK</button></div></dialog>

@@ -36,7 +36,15 @@ enum Node<'a> {
 }
 
 pub fn stats(c: &CompiledStmt) -> StmtStats {
-    let mut s = StmtStats {
+    walk(c, &mut |_| {})
+}
+
+pub(crate) fn visit_schema_sources(c: &CompiledStmt, f: &mut dyn FnMut(crate::QTableId)) {
+    walk(c, f);
+}
+
+fn walk(c: &CompiledStmt, source: &mut dyn FnMut(crate::QTableId)) -> StmtStats {
+    let s = StmtStats {
         columns: columns(&c.columns),
         type_refs: column_refs(&c.columns),
         ..StmtStats::default()
@@ -44,7 +52,22 @@ pub fn stats(c: &CompiledStmt) -> StmtStats {
     let StmtKind::Query(q) = &c.typed.kind else {
         return s;
     };
-    let mut todo: Vec<Node<'_>> = vec![Node::Query(q)];
+    walk_nodes(s, vec![Node::Query(q)], source)
+}
+
+pub(crate) fn predicate_stats(p: &crate::access::PredicateForm) -> StmtStats {
+    let node = match p {
+        crate::access::PredicateForm::Short(e) => Node::Expr(e),
+        crate::access::PredicateForm::Full { query, .. } => Node::Select(query),
+    };
+    walk_nodes(StmtStats::default(), vec![node], &mut |_| {})
+}
+
+fn walk_nodes(
+    mut s: StmtStats,
+    mut todo: Vec<Node<'_>>,
+    source: &mut dyn FnMut(crate::QTableId),
+) -> StmtStats {
     while let Some(node) = todo.pop() {
         match node {
             Node::Query(q) => {
@@ -85,7 +108,8 @@ pub fn stats(c: &CompiledStmt) -> StmtStats {
                     todo.push(Node::Expr(&j.on));
                 }
                 match &src.from {
-                    From::Table { args, .. } => {
+                    From::Table { id, args, .. } => {
+                        source(*id);
                         s.sources += 1;
                         todo.extend(args.iter().flatten().map(Node::Expr));
                     }

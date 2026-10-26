@@ -22,6 +22,8 @@ brew install --cask belov38/yellowcode/yellowcode
 
 **Linux** (x86_64; Debian 12, Ubuntu 24.04 и новее): пакет `.deb` или `.rpm`, либо `.AppImage`.
 
+**Linux ARM64**, в том числе Raspberry Pi 4/5 с 64-битной Raspberry Pi OS (Bookworm): пакет `.deb` или `.rpm`, либо `.AppImage`.
+
 ## Как начать
 
 Откройте `.cf`, `.dt` или файловую базу (`1Cv8.1CD` или папку базы).

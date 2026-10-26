@@ -24,6 +24,7 @@ pub(super) fn p16(n: i64) -> R<u16> {
 }
 
 pub(super) struct Row {
+    pub signal: Option<u16>,
     pub rel: RelL,
     pub width: usize,
     pub rep: Option<SrcId>,
@@ -33,6 +34,7 @@ pub(super) struct Row {
 impl Row {
     pub fn empty() -> Row {
         Row {
+            signal: None,
             rel: RelL::Empty,
             width: 0,
             rep: None,

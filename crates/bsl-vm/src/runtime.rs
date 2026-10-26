@@ -11,6 +11,7 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 #[derive(Clone)]
 pub struct Runtime(Arc<Inner>);
@@ -74,6 +75,7 @@ impl Runtime {
         Execution {
             runtime: self.clone(),
             session_tz: env.time_zone().to_owned(),
+            messages: Messages::default(),
             env,
             opts,
             host_data: None,
@@ -119,6 +121,7 @@ pub struct ExecOptions {
     pub stack_limit: u64,
     pub weights: StackWeights,
     pub max_native_depth: u32,
+    pub cancel: Option<Arc<AtomicBool>>,
 }
 
 impl Default for ExecOptions {
@@ -132,8 +135,26 @@ impl Default for ExecOptions {
             stack_limit: 46_000,
             weights: StackWeights::default(),
             max_native_depth: 64,
+            cancel: None,
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UserMessage {
+    pub text: String,
+    pub status: Option<String>,
+}
+
+pub const MESSAGE_CAP_COUNT: usize = 10_000;
+pub const MESSAGE_CAP_BYTES: usize = 8 << 20;
+
+#[derive(Default)]
+struct Messages {
+    kept: Vec<UserMessage>,
+    bytes: usize,
+    dropped: usize,
+    closed: bool,
 }
 
 pub struct Execution {
@@ -143,6 +164,7 @@ pub struct Execution {
     host_data: Option<Box<dyn Any>>,
     reuse: Option<ReuseStore>,
     session_tz: String,
+    messages: Messages,
     pub(crate) system_enums: HashMap<TypeIdx, Value>,
     pub(crate) exec: crate::exec::ExecState,
 }
@@ -202,6 +224,23 @@ impl Execution {
 
     pub fn set_session_time_zone(&mut self, tz: String) {
         self.session_tz = tz;
+    }
+
+    pub fn push_message(&mut self, m: UserMessage) {
+        let ms = &mut self.messages;
+        let size = m.text.len() + m.status.as_ref().map_or(0, String::len);
+        if !ms.closed && ms.kept.len() < MESSAGE_CAP_COUNT && size <= MESSAGE_CAP_BYTES - ms.bytes {
+            ms.bytes += size;
+            ms.kept.push(m);
+        } else {
+            ms.closed = true;
+            ms.dropped += 1;
+        }
+    }
+
+    pub fn take_messages(&mut self) -> (Vec<UserMessage>, usize) {
+        let ms = std::mem::take(&mut self.messages);
+        (ms.kept, ms.dropped)
     }
 
     pub fn reserve(&mut self, bytes: u64) -> Result<(), Exception> {

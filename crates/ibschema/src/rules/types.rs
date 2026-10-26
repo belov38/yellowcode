@@ -89,7 +89,8 @@ pub(crate) fn classes(
     let bad = |why: String| Error::Unsupported(format!("{at}: {why}"));
     let mut out: Vec<Class> = Vec::new();
     for t in &td.types {
-        let q = t.qname.as_str();
+        let legacy = t.name.to_string();
+        let q = legacy.as_str();
         let got = match q {
             "xs:string" => {
                 let s = td

@@ -1,3 +1,4 @@
+pub mod code;
 pub mod data;
 pub mod qb;
 pub mod query;
@@ -17,6 +18,7 @@ const CSS: &str = "text/css; charset=utf-8";
 
 pub const FILES: &[(&str, &str, &str)] = &[
     ("x.css", CSS, include_str!("../front/x.css")),
+    ("js/x/code.js", JS, include_str!("../front/js/x/code.js")),
     ("js/x/data.js", JS, include_str!("../front/js/x/data.js")),
     (
         "js/x/data_card.js",
@@ -95,6 +97,7 @@ pub fn handle(state: &State, req: &Request) -> Option<Response> {
         let rest = req.path.strip_prefix("/api/x/").unwrap_or_default();
         match rest.split_once('/') {
             Some(("query", route)) => query::handle(state, req, route),
+            Some(("code", route)) => code::handle(state, req, route),
             Some(("data", route)) => data::handle(state, req, route),
             Some(("qb", route)) => qb::handle(state, req, route),
             _ => error(404, "no such endpoint"),

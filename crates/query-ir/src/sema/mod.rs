@@ -105,6 +105,38 @@ pub fn analyze_stmt(
     })
 }
 
+#[derive(Debug)]
+pub enum ExecutionAnalysisFailure {
+    Compile(CompileError),
+    PendingViewFailure {
+        table: crate::QTableId,
+        original: CompileError,
+    },
+}
+
+pub fn analyze_stmt_for_execution(
+    batch: &ast::Batch,
+    text: &str,
+    i: usize,
+    schema: &QuerySchema,
+    opts: &AnalyzeOptions<'_>,
+) -> Result<Arc<CompiledStmt>, ExecutionAnalysisFailure> {
+    let opts = *opts;
+    with_deep_stack(batch.max_depth, move || {
+        crate::compile::reject_unresolved(batch, text)
+            .map_err(ExecutionAnalysisFailure::Compile)?;
+        let mut analyzer = Analyzer::new(batch, text, schema, opts);
+        analyzer.defer_accum_balance_failure = opts.mode == AnalyzeMode::Execute;
+        match analyzer.stmt(i) {
+            Ok(stmt) => Ok(Arc::new(stmt)),
+            Err(original) => Err(match analyzer.pending_view_failure {
+                Some(table) => ExecutionAnalysisFailure::PendingViewFailure { table, original },
+                None => ExecutionAnalysisFailure::Compile(original),
+            }),
+        }
+    })
+}
+
 pub(crate) fn analyze_here(
     batch: &ast::Batch,
     text: &str,
@@ -118,6 +150,8 @@ pub(crate) fn analyze_here(
 }
 
 pub(crate) struct Analyzer<'a> {
+    pub defer_accum_balance_failure: bool,
+    pub pending_view_failure: Option<crate::QTableId>,
     pub memory: Option<&'a crate::managed::CompileArena>,
     pub stmts: &'a [ast::Stmt],
     pub max_depth: u32,
@@ -207,6 +241,8 @@ impl<'a> Analyzer<'a> {
         opts: AnalyzeOptions<'a>,
     ) -> Analyzer<'a> {
         Analyzer {
+            defer_accum_balance_failure: false,
+            pending_view_failure: None,
             memory: None,
             stmts,
             max_depth,
@@ -291,6 +327,7 @@ impl<'a> Analyzer<'a> {
                     value_deps: Vec::new(),
                     table_params: Vec::new(),
                     typed: tir::Stmt {
+                        static_analysis: self.opts.mode == AnalyzeMode::Static,
                         kind: tir::StmtKind::Drop(name),
                         max_depth,
                     },
@@ -392,6 +429,7 @@ impl<'a> Analyzer<'a> {
                             .map(|name| crate::managed::string(self.memory, name)),
                     )?,
                     typed: tir::Stmt {
+                        static_analysis: self.opts.mode == AnalyzeMode::Static,
                         kind: tir::StmtKind::Query(query),
                         max_depth,
                     },
@@ -418,6 +456,7 @@ impl<'a> Analyzer<'a> {
                 let name = OwnedString::new(scope, &drop.name.text)?.into_native_owned();
                 let typed = statement::typed_drop(
                     OwnedString::new(scope, &drop.name.text)?.into_native_owned(),
+                    self.opts.mode == AnalyzeMode::Static,
                 );
                 statement::assemble(
                     scope,
@@ -505,7 +544,7 @@ impl<'a> Analyzer<'a> {
                         params,
                         value_deps: statement::names(scope, &self.value_deps)?,
                         table_params: statement::names(scope, &self.table_params)?,
-                        typed: statement::typed_query(query),
+                        typed: statement::typed_query(query, self.opts.mode == AnalyzeMode::Static),
                     },
                 )
             }

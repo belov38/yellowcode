@@ -110,9 +110,12 @@ dependencies = [
  "evlog",
  "ibschema",
  "md-model",
+ "mdschema",
  "platform-catalog",
+ "query",
  "query-exec",
  "query-ir",
+ "query-syntax",
  "quick-xml 0.37.5",
  "rand 0.9.5",
  "sha2",
@@ -606,6 +609,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c0f78a02292a74a88ac736019ab962ece0bc380e3f977bf72e376c5d78ff0678"
 dependencies = [
  "cc",
+]
+
+[[package]]
+name = "code-console"
+version = "0.1.0"
+dependencies = [
+ "appobj",
+ "bsl-compiler",
+ "bsl-stdlib",
+ "bsl-syntax",
+ "bsl-testhost",
+ "bsl-vm",
+ "evlog",
+ "infobase",
+ "onecd",
+ "platform-catalog",
+ "serde",
 ]
 
 [[package]]
@@ -2318,6 +2338,7 @@ dependencies = [
  "brace",
  "md-model",
  "mdschema",
+ "quick-xml 0.37.5",
  "regex",
  "thiserror 2.0.21",
 ]
@@ -2737,7 +2758,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "onec-desktop"
-version = "0.1.0-alpha.8"
+version = "0.1.0-alpha.9"
 dependencies = [
  "cf-fixtures",
  "dunce",
@@ -3052,6 +3073,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "query"
+version = "0.1.0"
+dependencies = [
+ "bsl-prim",
+ "bsl-stdlib",
+ "bsl-vm",
+ "ibschema",
+ "platform-catalog",
+ "query-exec",
+ "query-ir",
+ "query-syntax",
 ]
 
 [[package]]
@@ -4910,6 +4945,7 @@ dependencies = [
  "serde",
  "sha1",
  "sha2",
+ "subtle",
  "thiserror 2.0.21",
 ]
 
@@ -5708,6 +5744,7 @@ dependencies = [
  "bsl-syntax",
  "bsl-testhost",
  "clap",
+ "code-console",
  "dtfile",
  "form-layout",
  "form-model",
@@ -5735,6 +5772,7 @@ dependencies = [
 name = "yellowcode-http"
 version = "0.1.0"
 dependencies = [
+ "code-console",
  "form-layout",
  "mdconf",
  "memory-budget",
@@ -5752,11 +5790,21 @@ name = "yellowcode-server"
 version = "0.1.0"
 dependencies = [
  "appobj",
+ "bsl-lib",
+ "bsl-stdlib",
  "bsl-vm",
  "evlog",
+ "ibschema",
+ "icu46-sys",
+ "md-model",
+ "onecd",
+ "platform-catalog",
  "query-console",
  "query-exec",
  "query-ir",
+ "rand 0.9.5",
+ "thiserror 2.0.21",
+ "v8users",
  "yellowcode-core",
 ]
 

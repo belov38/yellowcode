@@ -250,11 +250,6 @@ impl AppState {
             }
         };
         self.loaders.fetch_sub(1, Ordering::SeqCst);
-        if matches!(out, Finish::Failed(_)) && !Path::new(path).exists() {
-            let mut r = lock(&self.recent);
-            r.remove(Path::new(path));
-            let _ = r.save(&self.recent_file);
-        }
         out
     }
 
@@ -288,6 +283,9 @@ pub struct RecentOut {
     path: String,
     label: String,
     exists: bool,
+    kind: recent::Kind,
+    origin: recent::Origin,
+    recent_rank: Option<usize>,
 }
 
 fn event(path: &str, name: Option<String>, error: Option<String>) -> SourceEvent {
@@ -424,19 +422,32 @@ fn save_source(
     old: Option<String>,
     path: String,
     name: String,
+    origin: Option<recent::Origin>,
 ) -> Result<String, String> {
     let path = resolved(Path::new(&path)).unwrap_or(path);
-    yellowcode_core::viewer::source::detect(Path::new(&path)).map_err(|e| e.to_string())?;
+    let metadata_only = old.as_deref() == Some(path.as_str())
+        && lock(&state.recent)
+            .sources
+            .iter()
+            .any(|i| i.path == Path::new(&path));
+    if !metadata_only {
+        yellowcode_core::viewer::source::detect(Path::new(&path)).map_err(|e| e.to_string())?;
+    }
     let mut recent = lock(&state.recent);
-    let mut updated = Recent {
-        items: recent.items.clone(),
-    };
-    updated.set(old.as_deref().map(Path::new), Path::new(&path), &name)?;
+    let mut updated = recent.clone();
+    let saved = updated.set(old.as_deref().map(Path::new), Path::new(&path), &name)?;
+    let saved_path = saved
+        .to_str()
+        .ok_or("source path must be valid Unicode")?
+        .to_string();
+    if let Some(origin) = origin {
+        updated.set_origin(&saved, origin)?;
+    }
     updated
         .save(&state.recent_file)
         .map_err(|e| e.to_string())?;
     *recent = updated;
-    Ok(path)
+    Ok(saved_path)
 }
 
 #[tauri::command]
@@ -444,7 +455,7 @@ fn startup_dialog_size(window: tauri::WebviewWindow, dialog: &str) -> Result<(),
     let (width, height) = match dialog {
         "wizard" => (490.0, 490.0),
         "settings" => (548.0, 704.0),
-        "" => (490.0, 363.0),
+        "" => (820.0, 500.0),
         _ => return Err("unknown startup dialog".into()),
     };
     window
@@ -508,7 +519,17 @@ async fn open_source(app: AppHandle, path: String) -> Result<(), String> {
 #[tauri::command(async)]
 fn recent(state: tauri::State<'_, AppState>) -> Vec<RecentOut> {
     let items = lock(&state.recent).items.clone();
-    Recent::exists_now(&items)
+    source_output(&items, &items)
+}
+
+#[tauri::command(async)]
+fn sources(state: tauri::State<'_, AppState>) -> Vec<RecentOut> {
+    let recent = lock(&state.recent).clone();
+    source_output(&recent.sources, &recent.items)
+}
+
+fn source_output(items: &[recent::RecentItem], history: &[recent::RecentItem]) -> Vec<RecentOut> {
+    Recent::exists_now(items)
         .into_iter()
         .filter_map(|i| {
             Some(RecentOut {
@@ -516,6 +537,9 @@ fn recent(state: tauri::State<'_, AppState>) -> Vec<RecentOut> {
                 label: recent::menu_label(&i.path),
                 exists: i.exists,
                 name: i.name,
+                kind: i.kind,
+                origin: i.origin,
+                recent_rank: history.iter().position(|h| h.path == i.path),
             })
         })
         .collect()
@@ -524,9 +548,7 @@ fn recent(state: tauri::State<'_, AppState>) -> Vec<RecentOut> {
 #[tauri::command(async)]
 fn forget_recent(state: tauri::State<'_, AppState>, path: String) -> Result<(), String> {
     let mut recent = lock(&state.recent);
-    let mut updated = Recent {
-        items: recent.items.clone(),
-    };
+    let mut updated = recent.clone();
     updated.remove(Path::new(&path));
     updated
         .save(&state.recent_file)
@@ -751,6 +773,7 @@ fn run(opts: Options, lang: Lang) -> tauri::Result<()> {
             quit,
             open_source,
             recent,
+            sources,
             forget_recent,
             status,
             cancel_load,
@@ -778,8 +801,8 @@ fn run(opts: Options, lang: Lang) -> tauri::Result<()> {
                     Lang::Ru => "Запуск Yellowcode",
                     Lang::En => "Start Yellowcode",
                 })
-                .inner_size(490.0, 363.0)
-                .min_inner_size(490.0, 363.0)
+                .inner_size(820.0, 500.0)
+                .min_inner_size(600.0, 420.0)
                 .build()?;
             if smoke {
                 std::thread::spawn(|| {

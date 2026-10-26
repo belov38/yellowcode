@@ -220,7 +220,16 @@ impl Xml {
                 }
                 V::Ref(value) => Self::leaf(budget, tag, &value.name, 0)?,
                 V::Typed(value) => Self::typed(budget, tag, value)?,
-                V::Type(value) => Self::type_description(budget, tag, value)?,
+                V::Type(value) => Self::type_description(
+                    budget,
+                    tag,
+                    value,
+                    stack
+                        .len()
+                        .checked_mul(2)
+                        .and_then(|n| n.checked_add(2))
+                        .ok_or(BudgetError::Overflow)?,
+                )?,
                 V::LStr(value) => {
                     let mut root = Self::new(budget, tag, 0, value.0.len())?;
                     for (lang, value) in &value.0 {
@@ -351,6 +360,7 @@ impl Xml {
         budget: &MemoryBudget,
         tag: &str,
         source: &crate::TypeDescription,
+        member_depth: usize,
     ) -> Result<Self, BudgetError> {
         let qualifiers = if source.types.is_empty() {
             0
@@ -368,12 +378,26 @@ impl Xml {
         let mut root = Self::new(budget, tag, 0, capacity)?;
         for set in [false, true] {
             for item in source.types.iter().filter(|r| r.set == set) {
-                root = root.child(Self::leaf(
-                    budget,
-                    if set { "v8:TypeSet" } else { "v8:Type" },
-                    &item.qname,
-                    0,
-                )?)?
+                let tag = if set { "v8:TypeSet" } else { "v8:Type" };
+                let fixed = mdschema::FixedNamespace::from_uri(item.name.namespace_uri());
+                let mut buffer = [0; 24];
+                let depth = super::leaf::decimal(
+                    i64::try_from(member_depth).map_err(|_| BudgetError::Overflow)?,
+                    &mut buffer,
+                )?;
+                let prefix = match fixed {
+                    Some(ns) => text(budget, &[ns.prefix()])?,
+                    None => text(budget, &["d", depth, "p1"])?,
+                };
+                let value = text(budget, &[prefix.as_str(), ":", &item.name.local])?;
+                let declaration =
+                    fixed.is_none() || fixed == Some(mdschema::FixedNamespace::Dcsset);
+                let mut leaf = Self::leaf(budget, tag, value.as_str(), usize::from(declaration))?;
+                if declaration {
+                    let key = text(budget, &["xmlns:", prefix.as_str()])?;
+                    leaf = leaf.attr(budget, key.as_str(), item.name.namespace_uri())?;
+                }
+                root = root.child(leaf)?;
             }
         }
         if source.types.is_empty() {

@@ -31,6 +31,28 @@ pub fn child_tag_name(tag: ChildTag) -> &'static str {
 }
 
 pub fn object_xml(cfg: &Configuration, obj: &MdObject) -> String {
+    try_object_xml(cfg, obj).unwrap_or_default()
+}
+
+pub fn try_object_xml(cfg: &Configuration, obj: &MdObject) -> Result<String> {
+    let has_envelope = cfg.xml_namespace_envelopes.contains_key(&obj.id);
+    crate::namespace_scope::validate_properties(&obj.props, has_envelope)?;
+    fn children(items: &[Child], has_envelope: bool) -> Result<()> {
+        for child in items {
+            crate::namespace_scope::validate_properties(&child.props, has_envelope)?;
+            children(&child.children, has_envelope)?;
+        }
+        Ok(())
+    }
+    children(&obj.children, has_envelope)?;
+    let text = object_xml_unscoped(cfg, obj);
+    if text.is_empty() {
+        return Ok(text);
+    }
+    crate::namespace_scope::restore(&text, cfg.xml_namespace_envelopes.get(&obj.id))
+}
+
+fn object_xml_unscoped(cfg: &Configuration, obj: &MdObject) -> String {
     let _ = cfg;
     let Ok(s) = mdschema::schema() else {
         return String::new();
@@ -71,6 +93,22 @@ pub fn object_xml(cfg: &Configuration, obj: &MdObject) -> String {
 }
 
 pub fn subobject_xml(cfg: &Configuration, sub: &SubObject) -> String {
+    try_subobject_xml(cfg, sub).unwrap_or_default()
+}
+
+pub fn try_subobject_xml(cfg: &Configuration, sub: &SubObject) -> Result<String> {
+    crate::namespace_scope::validate_properties(
+        &sub.props,
+        cfg.xml_namespace_envelopes.contains_key(&sub.id),
+    )?;
+    let text = subobject_xml_unscoped(cfg, sub);
+    if text.is_empty() {
+        return Ok(text);
+    }
+    crate::namespace_scope::restore(&text, cfg.xml_namespace_envelopes.get(&sub.id))
+}
+
+fn subobject_xml_unscoped(cfg: &Configuration, sub: &SubObject) -> String {
     let _ = cfg;
     let sk = match sub.kind {
         SubKind::Form => "Form",
@@ -88,6 +126,36 @@ pub fn subobject_xml(cfg: &Configuration, sub: &SubObject) -> String {
 }
 
 pub fn recalculation_xml(cfg: &Configuration, register: &MdObject, r: &Recalculation) -> String {
+    try_recalculation_xml(cfg, register, r).unwrap_or_default()
+}
+
+pub fn try_recalculation_xml(
+    cfg: &Configuration,
+    register: &MdObject,
+    r: &Recalculation,
+) -> Result<String> {
+    crate::namespace_scope::validate_properties(
+        &r.props,
+        cfg.xml_namespace_envelopes.contains_key(&r.id),
+    )?;
+    for dimension in &r.dimensions {
+        crate::namespace_scope::validate_properties(
+            &dimension.props,
+            cfg.xml_namespace_envelopes.contains_key(&r.id),
+        )?;
+    }
+    let text = recalculation_xml_unscoped(cfg, register, r);
+    if text.is_empty() {
+        return Ok(text);
+    }
+    crate::namespace_scope::restore(&text, cfg.xml_namespace_envelopes.get(&r.id))
+}
+
+fn recalculation_xml_unscoped(
+    cfg: &Configuration,
+    register: &MdObject,
+    r: &Recalculation,
+) -> String {
     let _ = cfg;
     let Ok(s) = mdschema::schema() else {
         return String::new();
@@ -114,18 +182,27 @@ pub fn recalculation_xml(cfg: &Configuration, register: &MdObject, r: &Recalcula
 
 pub fn object_files(cfg: &Configuration) -> Vec<(String, String)> {
     let mut out = Vec::new();
-    let _ = each_file(cfg, &mut |rel, text| {
+    if each_file(cfg, &mut |rel, text| {
         out.push((rel, text));
         Ok(())
-    });
+    })
+    .is_err()
+    {
+        out.clear();
+    }
     out
 }
 
 pub fn dump(cfg: &Configuration, sink: &mut DumpSink) -> Result<PartStatus> {
+    preflight(cfg)?;
     each_file(cfg, &mut |rel, text| {
         sink.put(Part::Objects, &rel, text.as_bytes())
     })?;
     Ok(PartStatus::Written)
+}
+
+pub fn preflight(cfg: &Configuration) -> Result<()> {
+    each_file(cfg, &mut |_, _| Ok(()))
 }
 
 fn each_file(cfg: &Configuration, f: &mut dyn FnMut(String, String) -> Result<()>) -> Result<()> {
@@ -147,19 +224,19 @@ fn object_with_subs(
     o: &MdObject,
     f: &mut dyn FnMut(String, String) -> Result<()>,
 ) -> Result<()> {
-    let text = object_xml(cfg, o);
+    let text = try_object_xml(cfg, o)?;
     if text.is_empty() {
         return Ok(());
     }
     f(format!("{}.xml", object_dir(cfg, o)), text)?;
     for sub in o.forms.iter().chain(&o.templates) {
-        let t = subobject_xml(cfg, sub);
+        let t = try_subobject_xml(cfg, sub)?;
         if !t.is_empty() {
             f(format!("{}.xml", sub_dir(cfg, o, sub)), t)?;
         }
     }
     for r in &o.recalculations {
-        let t = recalculation_xml(cfg, o, r);
+        let t = try_recalculation_xml(cfg, o, r)?;
         if !t.is_empty() {
             f(recalc_path(cfg, o, r), t)?;
         }

@@ -57,7 +57,8 @@ fn primitive(xml: &str, lang: Lang) -> Option<&'static str> {
 
 fn one(t: &TypeDescription, r: &TypeRef, lang: Lang) -> String {
     let ru = lang == Lang::Ru;
-    match r.qname.as_str() {
+    let label = r.name.to_string();
+    match label.as_str() {
         "xs:string" => {
             let name = primitive("xs:string", lang).unwrap_or("String");
             match t.string {

@@ -7,6 +7,13 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 pub trait ExecHost: BindHost {
+    fn admit_batch(
+        &self,
+        _: &query_syntax::ast::Batch,
+        _: &crate::TempTables,
+    ) -> Result<(), query_ir::ExecError> {
+        Ok(())
+    }
     fn schema(&self) -> &Arc<QuerySchema>;
     fn storage(&self) -> &StorageBinding;
     fn map(&self) -> &StorageMap;

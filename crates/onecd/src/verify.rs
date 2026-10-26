@@ -617,18 +617,6 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn check_versions(&mut self, f: &IFile) {
-        if self.fi.format == Format::V838 && f.versions[2] != u32::from(f.fatlevel) {
-            self.out.push(Violation {
-                location: Location::InternalFile(f.header_page),
-                what: format!(
-                    "version v3 is {} with fatlevel {} (v3 is 1 exactly with allocation pages)",
-                    f.versions[2], f.fatlevel
-                ),
-            });
-        }
-    }
-
     fn open_file(&mut self, header: u32, name: String, report: bool) -> Result<Option<IFile>> {
         if header == 0 {
             return Ok(None);
@@ -637,7 +625,6 @@ impl<'a> Checker<'a> {
         match IFile::open(self.pr, self.fi, header) {
             Ok(f) => {
                 self.claim_file(&f, owner);
-                self.check_versions(&f);
                 Ok(Some(f))
             }
             Err(e) => {
@@ -691,7 +678,6 @@ impl<'a> Checker<'a> {
         let root = &catalog.root;
         let owner = self.owner("the root file".into());
         self.claim_file(root, owner);
-        self.check_versions(root);
         let failed: HashSet<u32> = catalog.errors.iter().map(|(r, _)| *r).collect();
         let refs: Vec<u32> = catalog
             .entries

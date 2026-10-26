@@ -22,6 +22,7 @@ sha2 = "0.10"
 tempfile = "3"
 v8users = { path = "../v8users" }
 brace = { path = "../brace" }
+code-console = { path = "../code-console" }
 bsl-compiler = { path = "../bsl-compiler" }
 bsl-prim = { path = "../bsl-prim", default-features = false }
 bsl-syntax = { path = "../bsl-syntax" }

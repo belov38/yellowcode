@@ -57,6 +57,7 @@ pub struct TestHost<'b> {
     access: Unrestricted,
     session: NoSession,
     plan: query_exec::plan::PlanOptions,
+    pub movements: bool,
 }
 
 impl<'b> TestHost<'b> {
@@ -109,6 +110,7 @@ impl<'b> TestHost<'b> {
             access: Unrestricted,
             session: NoSession,
             plan: query_exec::plan::PlanOptions::default(),
+            movements: false,
         })
     }
 
@@ -196,7 +198,13 @@ impl ExecHost for TestHost<'_> {
     }
     fn read_source(&self) -> Box<dyn DataSource + '_> {
         self.note("read_source".to_string());
-        Box::new(StoreSource::new(&*self.snapshot, self.base.map()))
+        let src = Box::new(StoreSource::new(&*self.snapshot, self.base.map()));
+        if self.movements {
+            let mut o = query_exec::register::SettingsOverride::owning(src);
+            o.movements_everywhere();
+            return Box::new(o);
+        }
+        src
     }
     fn txn(&self) -> Option<TxnId> {
         self.txn.get()

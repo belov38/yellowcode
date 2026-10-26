@@ -12,7 +12,7 @@ import { conversionItems } from "./convert.js";
 import { desktopItems, recentItems, openSource, desktopBusy } from "./desktop.js";
 import { skinItems } from "./skin.js";
 import { dialogCommands, openDialog } from "./dialogs.js";
-import { openQuery, dataTreeItems } from "./x/index.js";
+import { openQuery, openCode, dataTreeItems } from "./x/index.js";
 
 const registry = new Map();
 const serviceTools = new Map();
@@ -21,6 +21,7 @@ export function registerServiceTool(key, tool) {
   return () => serviceTools.delete(key);
 }
 registerServiceTool("query-console", { label: () => T.queryConsole, shortcut: "Ctrl+Shift+Q", run: openQuery });
+registerServiceTool("code-console", { label: () => T.codeConsole, shortcut: "Ctrl+Shift+E", run: openCode });
 let treeDataPath = null;
 let treeData = null;
 let treeDataRequest = null;

@@ -319,7 +319,20 @@ fn tasks_by_performer(b: &mut Builder<'_>) -> Result<(), SchemaError> {
         };
         let mut f = Tf::new(o.kind, Some(tpl));
         let star: HashSet<QFieldId> = src.star.iter().copied().collect();
-        for (i, x) in src.fields.iter().enumerate() {
+        let main = match o.prop("MainAddressingAttribute") {
+            Some(Value::Ref(r)) => o
+                .children
+                .iter()
+                .find(|c| match r.id {
+                    Some(id) => id == c.id,
+                    None => r.name.rsplit('.').next() == Some(c.name.as_str()),
+                })
+                .map(|c| c.id),
+            _ => None,
+        };
+        let mut ordered: Vec<_> = src.fields.iter().enumerate().collect();
+        ordered.sort_by_key(|(_, f)| main.is_some() && f.md == main);
+        for (i, x) in ordered {
             if x.role == FieldRole::Std(StdRole::DataVersion) {
                 continue;
             }

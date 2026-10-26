@@ -1,0 +1,155 @@
+{
+  "platform": "8.5.1.1529",
+  "scope": "metadata descriptions only; all other XML refuses",
+  "headers": {
+    "before": "<MetaDataObject xmlns=\"http://v8.1c.ru/8.3/MDClasses\" xmlns:app=\"http://v8.1c.ru/8.2/managed-application/core\" xmlns:cfg=\"http://v8.1c.ru/8.1/data/enterprise/current-config\" xmlns:cmi=\"http://v8.1c.ru/8.2/managed-application/cmi\" xmlns:ent=\"http://v8.1c.ru/8.1/data/enterprise\" xmlns:lf=\"http://v8.1c.ru/8.2/managed-application/logform\" xmlns:style=\"http://v8.1c.ru/8.1/data/ui/style\" xmlns:sys=\"http://v8.1c.ru/8.1/data/ui/fonts/system\" xmlns:v8=\"http://v8.1c.ru/8.1/data/core\" xmlns:v8ui=\"http://v8.1c.ru/8.1/data/ui\" xmlns:web=\"http://v8.1c.ru/8.1/data/ui/colors/web\" xmlns:win=\"http://v8.1c.ru/8.1/data/ui/colors/windows\" xmlns:xen=\"http://v8.1c.ru/8.3/xcf/enums\" xmlns:xpr=\"http://v8.1c.ru/8.3/xcf/predef\" xmlns:xr=\"http://v8.1c.ru/8.3/xcf/readable\" xmlns:xs=\"http://www.w3.org/2001/XMLSchema\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" version=\"2.20\">",
+    "after": "<MetaDataObject xmlns=\"http://v8.1c.ru/8.3/MDClasses\" xmlns:app=\"http://v8.1c.ru/8.2/managed-application/core\" xmlns:cfg=\"http://v8.1c.ru/8.1/data/enterprise/current-config\" xmlns:cmi=\"http://v8.1c.ru/8.2/managed-application/cmi\" xmlns:ent=\"http://v8.1c.ru/8.1/data/enterprise\" xmlns:lf=\"http://v8.1c.ru/8.2/managed-application/logform\" xmlns:pal=\"http://v8.1c.ru/8.1/data/ui/colors/palette\" xmlns:style=\"http://v8.1c.ru/8.1/data/ui/style\" xmlns:sys=\"http://v8.1c.ru/8.1/data/ui/fonts/system\" xmlns:v8=\"http://v8.1c.ru/8.1/data/core\" xmlns:v8ui=\"http://v8.1c.ru/8.1/data/ui\" xmlns:web=\"http://v8.1c.ru/8.1/data/ui/colors/web\" xmlns:win=\"http://v8.1c.ru/8.1/data/ui/colors/windows\" xmlns:xen=\"http://v8.1c.ru/8.3/xcf/enums\" xmlns:xpr=\"http://v8.1c.ru/8.3/xcf/predef\" xmlns:xr=\"http://v8.1c.ru/8.3/xcf/readable\" xmlns:xs=\"http://www.w3.org/2001/XMLSchema\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" version=\"2.21\">"
+  },
+  "defaults": [
+    {
+      "context": "CommonForm/Properties",
+      "after": "UsePurposes",
+      "name": "UseInInterfaceCompatibilityMode",
+      "xml": "<UseInInterfaceCompatibilityMode>Any</UseInInterfaceCompatibilityMode>",
+      "evidence": 105
+    },
+    {
+      "context": "Configuration/Properties",
+      "after": "AllowedIncomingShareRequestTypes",
+      "name": "MainClientApplicationWindowInterfaceVariant",
+      "xml": "<MainClientApplicationWindowInterfaceVariant>NavigationLeft</MainClientApplicationWindowInterfaceVariant>",
+      "evidence": 1
+    },
+    {
+      "context": "Configuration/Properties",
+      "after": "AuxiliaryDataHistoryChangeHistoryForm",
+      "name": "AuxiliaryDataHistoryVersionDataForm",
+      "xml": "<AuxiliaryDataHistoryVersionDataForm/>",
+      "evidence": 1
+    },
+    {
+      "context": "Configuration/Properties",
+      "after": "AuxiliaryDataHistoryVersionDataForm",
+      "name": "AuxiliaryDataHistoryVersionDifferencesForm",
+      "xml": "<AuxiliaryDataHistoryVersionDifferencesForm/>",
+      "evidence": 1
+    },
+    {
+      "context": "Configuration/Properties",
+      "after": "AuxiliaryDataHistoryVersionDifferencesForm",
+      "name": "AuxiliaryCollaborationSystemUsersChoiceForm",
+      "xml": "<AuxiliaryCollaborationSystemUsersChoiceForm/>",
+      "evidence": 1
+    },
+    {
+      "context": "Configuration/Properties",
+      "after": "AuxiliaryDynamicListSettingsForm",
+      "name": "AuxiliaryDataHistoryChangeHistoryForm",
+      "xml": "<AuxiliaryDataHistoryChangeHistoryForm/>",
+      "evidence": 1
+    },
+    {
+      "context": "Configuration/Properties",
+      "after": "AuxiliaryReportForm",
+      "name": "AuxiliaryReportVariantForm",
+      "xml": "<AuxiliaryReportVariantForm/>",
+      "evidence": 1
+    },
+    {
+      "context": "Configuration/Properties",
+      "after": "AuxiliaryReportSettingsForm",
+      "name": "AuxiliaryDynamicListSettingsForm",
+      "xml": "<AuxiliaryDynamicListSettingsForm/>",
+      "evidence": 1
+    },
+    {
+      "context": "Configuration/Properties",
+      "after": "AuxiliaryReportVariantForm",
+      "name": "AuxiliaryReportSettingsForm",
+      "xml": "<AuxiliaryReportSettingsForm/>",
+      "evidence": 1
+    },
+    {
+      "context": "Configuration/Properties",
+      "after": "Caption",
+      "name": "ShortCaption",
+      "xml": "<ShortCaption/>",
+      "evidence": 1
+    },
+    {
+      "context": "Configuration/Properties",
+      "after": "DefaultCollaborationSystemUsersChoiceForm",
+      "name": "AuxiliaryReportForm",
+      "xml": "<AuxiliaryReportForm/>",
+      "evidence": 1
+    },
+    {
+      "context": "Configuration/Properties",
+      "after": "DefaultInterface",
+      "name": "Caption",
+      "xml": "<Caption/>",
+      "evidence": 1
+    },
+    {
+      "context": "Configuration/Properties",
+      "after": "InterfaceCompatibilityMode",
+      "name": "Version85InterfaceMigrationMode",
+      "xml": "<Version85InterfaceMigrationMode>DontUse</Version85InterfaceMigrationMode>",
+      "evidence": 1
+    },
+    {
+      "context": "Configuration/Properties",
+      "after": "MainClientApplicationWindowInterfaceVariant",
+      "name": "ClientApplicationTheme",
+      "xml": "<ClientApplicationTheme>Auto</ClientApplicationTheme>",
+      "evidence": 1
+    },
+    {
+      "context": "Configuration/Properties",
+      "after": "MainClientApplicationWindowMode",
+      "name": "ClientApplicationWindowsOpenVariant",
+      "xml": "<ClientApplicationWindowsOpenVariant>OpenDataInDialogs</ClientApplicationWindowsOpenVariant>",
+      "evidence": 1
+    },
+    {
+      "context": "Enum/ChildObjects/EnumValue/Properties",
+      "after": "Comment",
+      "name": "Color",
+      "xml": "<Color>auto</Color>",
+      "evidence": 472
+    },
+    {
+      "context": "Form/Properties",
+      "after": "UsePurposes",
+      "name": "UseInInterfaceCompatibilityMode",
+      "xml": "<UseInInterfaceCompatibilityMode>Any</UseInInterfaceCompatibilityMode>",
+      "evidence": 804
+    },
+    {
+      "context": "Report/Properties",
+      "after": "DefaultVariantForm",
+      "name": "AuxiliaryVariantForm",
+      "xml": "<AuxiliaryVariantForm/>",
+      "evidence": 41
+    }
+  ],
+  "changes": [
+    {
+      "context": "Configuration/Properties/ConfigurationExtensionCompatibilityMode",
+      "before": "Version8_3_27",
+      "after": "Version8_5_1",
+      "evidence": 1
+    }
+  ],
+  "counts": {
+    "metadata": 3735,
+    "non_xml": 3542,
+    "source_files": 9619,
+    "target_files": 9620,
+    "unqualified_xml": 2342
+  },
+  "configuration_sha256": {
+    "source": "6ddd3bb864852f3818df86431f7adf4aa4cc98cb804b2342877c346b2c6b4b73",
+    "target": "9797123b2289b0576b3ca7ce42640da4c2d6520b1e1ae9177e49bbaf66e3110b"
+  }
+}

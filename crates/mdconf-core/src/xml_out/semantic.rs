@@ -3,6 +3,7 @@ use memory_budget::BudgetError;
 
 #[doc(hidden)]
 pub trait SemanticEmit {
+    fn depth(&self) -> usize;
     fn open_attributes(&mut self, tag: &str, attrs: &[(&str, &str)]) -> Result<(), BudgetError>;
     fn attribute_fragments<'a>(
         &mut self,
@@ -27,6 +28,9 @@ pub trait SemanticEmit {
     ) -> Result<(), BudgetError>;
 }
 impl SemanticEmit for XmlWriter {
+    fn depth(&self) -> usize {
+        XmlWriter::depth(self)
+    }
     fn open_attributes(&mut self, tag: &str, attrs: &[(&str, &str)]) -> Result<(), BudgetError> {
         self.open(tag, attrs);
         Ok(())
@@ -85,6 +89,9 @@ impl SemanticEmit for XmlWriter {
     }
 }
 impl SemanticEmit for XmlEmit<'_> {
+    fn depth(&self) -> usize {
+        XmlEmit::depth(self)
+    }
     fn open_attributes(&mut self, tag: &str, attrs: &[(&str, &str)]) -> Result<(), BudgetError> {
         self.open(tag, attrs.iter().copied())
     }

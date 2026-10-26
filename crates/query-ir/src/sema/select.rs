@@ -87,7 +87,7 @@ pub(crate) fn each_child<'a>(e: &'a TExpr, f: &mut dyn FnMut(&'a TExpr)) {
     }
 }
 
-fn has_agg(e: &TExpr) -> bool {
+pub(crate) fn has_agg(e: &TExpr) -> bool {
     if matches!(e.kind, TKind::Agg { nested: true, .. }) {
         return false;
     }

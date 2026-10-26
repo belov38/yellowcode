@@ -1,4 +1,6 @@
 mod from_tir;
+mod running;
+pub use running::RunningBalanceS;
 pub(crate) mod print;
 pub mod stats;
 
@@ -6,7 +8,7 @@ pub use from_tir::build_stmt;
 pub(crate) use from_tir::visit_expr as visit_expr_in_place;
 pub use print::print;
 
-use crate::schema::{QFieldId, QTableId, ValuePath};
+use crate::schema::{QFieldId, QTableId, QuerySchema, ValuePath};
 use crate::tir;
 use crate::types::{NumQ, QType};
 use crate::value::QValue;
@@ -25,6 +27,8 @@ pub enum ColSel {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct StmtS {
+    pub qr8: Vec<Qr8Param>,
+    pub static_analysis: bool,
     pub root: Rel,
     pub columns: Vec<ColumnInfo>,
     pub sources: Vec<SourceS>,
@@ -63,7 +67,14 @@ impl Drop for StmtS {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub enum Qr8Param {
+    Session { slot: u16, name: Option<String> },
+    Criterion { slot: u16, table: QTableId },
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct SourceS {
+    pub all_fields: bool,
     pub id: SrcId,
     pub kind: SrcKind,
 }
@@ -73,6 +84,10 @@ pub enum SrcKind {
     Table(QTableId),
     Subquery {
         columns: Vec<QType>,
+    },
+    Virtual {
+        table: QTableId,
+        cols: Vec<Option<QFieldId>>,
     },
     Temp {
         columns: Vec<QType>,
@@ -138,6 +153,51 @@ pub enum Rel {
         parts: Vec<Rel>,
         all: Vec<bool>,
     },
+    RegisterVt(Box<RegisterVtS>),
+    Slice(Box<SliceS>),
+    RunningBalance(Box<RunningBalanceS>),
+}
+
+pub type SliceS = RegisterVtS;
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct AreaFilter {
+    pub pred: Expr,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct RegisterVtS {
+    pub src: SrcId,
+    pub inner: SrcId,
+    pub table: QTableId,
+    pub register: QTableId,
+    pub kind: crate::schema::VtKind,
+    pub bounds: [Option<Expr>; 2],
+    pub cond: Option<Expr>,
+    pub periodicity: crate::schema::Periodicity,
+    pub complement: Option<crate::schema::Complement>,
+    pub area: Option<AreaFilter>,
+    pub access: Option<Expr>,
+    pub span: Option<query_syntax::Span>,
+}
+
+pub mod raw_layout {
+    pub const PERIOD: usize = 0;
+    pub const RECORDER: usize = 1;
+    pub const LINE: usize = 2;
+    pub const DIMS: usize = 3;
+    pub const PER_RESOURCE: usize = 5;
+    pub const BALANCE: usize = 0;
+    pub const RECEIPT: usize = 1;
+    pub const EXPENSE: usize = 2;
+    pub const TURNOVER: usize = 3;
+    pub const CLOSING: usize = 4;
+    pub fn component(dims: usize, r: usize, c: usize) -> usize {
+        DIMS + dims + PER_RESOURCE * r + c
+    }
+    pub fn width(dims: usize, resources: usize) -> usize {
+        DIMS + dims + PER_RESOURCE * resources
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -266,8 +326,30 @@ impl std::fmt::Display for BuildError {
 
 impl std::error::Error for BuildError {}
 
-pub fn uses_week(s: &StmtS) -> bool {
-    let mut found = false;
+pub fn uses_week(s: &StmtS, schema: &QuerySchema) -> bool {
+    fn register_week(r: &Rel) -> bool {
+        match r {
+            Rel::RegisterVt(v) | Rel::RunningBalance(v) => {
+                v.periodicity == crate::schema::Periodicity::Unit(query_syntax::Kw::Week)
+            }
+            Rel::Subquery { input, .. }
+            | Rel::Distinct(input)
+            | Rel::Top { input, .. }
+            | Rel::Filter { input, .. }
+            | Rel::Aggregate { input, .. }
+            | Rel::Project { input, .. }
+            | Rel::Sort { input, .. }
+            | Rel::Hierarchy { input, .. } => register_week(input),
+            Rel::Join { l, r, .. } => register_week(l) || register_week(r),
+            Rel::Union { parts, .. } => parts.iter().any(register_week),
+            Rel::Empty
+            | Rel::Scan { .. }
+            | Rel::TempScan { .. }
+            | Rel::ParamScan { .. }
+            | Rel::Slice(_) => false,
+        }
+    }
+    let mut found = register_week(&s.root);
     let mut look = |e: &Expr| {
         if let ExprKind::Func { f, args, .. } = &e.kind {
             let week_unit = args
@@ -278,6 +360,24 @@ pub fn uses_week(s: &StmtS) -> bool {
                     f,
                     query_syntax::Func::BeginOfPeriod | query_syntax::Func::EndOfPeriod
                 ) && week_unit);
+        }
+        if let ExprKind::Col {
+            src,
+            col: ColSel::Field(field),
+        } = &e.kind
+            && let Some(SourceS {
+                kind: SrcKind::Virtual { table, .. },
+                ..
+            }) = s.sources.get(src.0 as usize)
+        {
+            found |= schema.field(*table, *field).is_some_and(|field| {
+                field.period == Some(crate::schema::PeriodField::Unit(query_syntax::Kw::Week))
+            });
+        }
+        match &e.kind {
+            ExprKind::InQuery { q, .. } => found |= register_week(q),
+            ExprKind::SectionAgg { rel, .. } => found |= register_week(rel),
+            _ => {}
         }
     };
     from_tir::visit_rel(&s.root, &mut look);

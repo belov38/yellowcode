@@ -42,7 +42,7 @@ pub struct TypeDescription {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeRef {
-    pub qname: String,
+    pub name: super::XmlTypeName,
     pub set: bool,
     pub type_id: Option<Guid>,
 }

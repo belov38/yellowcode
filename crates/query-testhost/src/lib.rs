@@ -15,6 +15,7 @@
 )]
 
 mod batch_memory;
+mod detail_ties;
 mod exec_host;
 mod host;
 mod managed_store;
@@ -37,7 +38,8 @@ pub use repr::{
 pub use run::{
     CaseOutcome, ExplainRun, RunFailure, RunMode, StmtRun, Verdict, case_by_id, cases, cases_in,
     check, check_case, explain_text, has_walk_or_unload, known_deviations, outcome_json, run_case,
-    run_case_on, run_text, run_text_cancel, run_text_cancel_budgeted, run_text_with_plan,
+    run_case_movements, run_case_on, run_text, run_text_cancel, run_text_cancel_budgeted,
+    run_text_with_plan,
 };
 pub use table::{
     ConditionKind, RecordField, StoredRows, StoredScanned, StoredTable, record_field_kind,

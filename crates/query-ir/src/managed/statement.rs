@@ -262,15 +262,23 @@ pub(crate) fn put<'a>(
 pub(crate) fn add<'a>(name: NativeOwned<'a, String>) -> NativeOwned<'a, Option<TempOutput>> {
     name.map(|v| Some(TempOutput::Add(v)))
 }
-pub(crate) fn typed_query<'a>(query: NativeOwned<'a, tir::Query>) -> NativeOwned<'a, tir::Stmt> {
+pub(crate) fn typed_query<'a>(
+    query: NativeOwned<'a, tir::Query>,
+    static_analysis: bool,
+) -> NativeOwned<'a, tir::Stmt> {
     query.map(|query| tir::Stmt {
         kind: tir::StmtKind::Query(query),
+        static_analysis,
         max_depth: 0,
     })
 }
-pub(crate) fn typed_drop<'a>(name: NativeOwned<'a, String>) -> NativeOwned<'a, tir::Stmt> {
+pub(crate) fn typed_drop<'a>(
+    name: NativeOwned<'a, String>,
+    static_analysis: bool,
+) -> NativeOwned<'a, tir::Stmt> {
     name.map(|name| tir::Stmt {
         kind: tir::StmtKind::Drop(name),
+        static_analysis,
         max_depth: 0,
     })
 }

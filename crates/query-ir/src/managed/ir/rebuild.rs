@@ -257,6 +257,12 @@ impl<'a> Rebuild<'_, 'a, '_, '_, '_> {
                     .set_depth(d))
             }
             Rel::Subquery { src, input } => c.subquery(*src, self.rel(input)?),
+            Rel::RegisterVt(_) | Rel::Slice(_) | Rel::RunningBalance(_) => {
+                Err(BuildProblem::Later {
+                    what: "виртуальные таблицы",
+                    stage: "Q5",
+                })
+            }
             Rel::Join { kind, l, r, on } => {
                 let l = self.rel(l)?;
                 let r = self.rel(r)?;
@@ -374,6 +380,14 @@ impl<'a> Rebuild<'_, 'a, '_, '_, '_> {
                 self.rel_reads_own(input) || keys.iter().any(|k| reads(&k.expr))
             }
             Rel::Union { parts, .. } => parts.iter().any(|p| self.rel_reads_own(p)),
+            Rel::RegisterVt(v) | Rel::Slice(v) | Rel::RunningBalance(v) => {
+                v.bounds.iter().flatten().any(reads)
+                    || v.cond
+                        .iter()
+                        .chain(v.area.iter().map(|a| &a.pred))
+                        .chain(v.access.iter())
+                        .any(reads)
+            }
         }
     }
 }

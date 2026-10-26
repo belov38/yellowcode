@@ -27,6 +27,14 @@ fn full_name(short: &str, lang: Lang) -> String {
 }
 
 impl AppNames for StandNames {
+    fn application_variable(
+        &self,
+        name: &str,
+        ctx: ExecContext,
+    ) -> Option<bsl_compiler::ApplicationVariable> {
+        self.scan.application_variable(name, ctx)
+    }
+
     fn global_value(&self, name: &str, ctx: ExecContext) -> Option<AppGlobal> {
         if fold_name(name) == fold_name(STAND_GLOBAL) {
             return Some(AppGlobal::CommonModule {

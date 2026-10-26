@@ -27,15 +27,29 @@ fn len_fixed(it: &[Node]) -> Option<(u32, bool)> {
     Some((length, !variable))
 }
 
-fn simple(qname: &str) -> TypeRef {
-    TypeRef {
-        qname: qname.into(),
+fn simple(qname: &str) -> Option<TypeRef> {
+    Some(TypeRef {
+        name: crate::XmlTypeName::from_qname(qname)?,
         set: false,
         type_id: None,
-    }
+    })
 }
 
 pub fn type_desc(ctx: &Ctx, pat: &Node) -> Option<TypeDescription> {
+    type_desc_with_platform(ctx, pat, |text| {
+        ctx.schema
+            .platform_type(text)
+            .map(|p| mdschema::BorrowedPlatformType {
+                name: p.name(),
+                set: p.set,
+            })
+    })
+}
+fn type_desc_with_platform<'p>(
+    ctx: &Ctx,
+    pat: &Node,
+    platform: impl Fn(&str) -> Option<mdschema::BorrowedPlatformType<'p>>,
+) -> Option<TypeDescription> {
     let l = pat.as_list()?;
     if l.first()?.text()? != "Pattern" {
         return None;
@@ -50,14 +64,14 @@ pub fn type_desc(ctx: &Ctx, pat: &Node) -> Option<TypeDescription> {
     for it in l.get(1..)? {
         let it = it.as_list()?;
         match it.first()?.text()? {
-            "B" => d.types.push(simple("xs:boolean")),
+            "B" => d.types.push(simple("xs:boolean")?),
             "S" => {
-                d.types.push(simple("xs:string"));
+                d.types.push(simple("xs:string")?);
                 let (length, fixed) = len_fixed(it)?;
                 d.string = Some(StringQualifiers { length, fixed });
             }
             "N" => {
-                d.types.push(simple("xs:decimal"));
+                d.types.push(simple("xs:decimal")?);
                 d.number = Some(NumberQualifiers {
                     digits: num(it.get(1)?)?,
                     fraction: num(it.get(2)?)?,
@@ -65,7 +79,7 @@ pub fn type_desc(ctx: &Ctx, pat: &Node) -> Option<TypeDescription> {
                 });
             }
             "D" => {
-                d.types.push(simple("xs:dateTime"));
+                d.types.push(simple("xs:dateTime")?);
                 d.date = Some(match it.get(1).and_then(Node::text) {
                     Some("D") => DateFractions::Date,
                     Some("T") => DateFractions::Time,
@@ -73,7 +87,7 @@ pub fn type_desc(ctx: &Ctx, pat: &Node) -> Option<TypeDescription> {
                 });
             }
             "R" => {
-                d.types.push(simple("xs:base64Binary"));
+                d.types.push(simple("xs:base64Binary")?);
                 let (length, fixed) = len_fixed(it)?;
                 d.binary = Some(BinaryQualifiers { length, fixed });
             }
@@ -83,16 +97,16 @@ pub fn type_desc(ctx: &Ctx, pat: &Node) -> Option<TypeDescription> {
                 let r = if let Some(n) = ctx.index.types.get(&g) {
                     let set = SET_CATEGORIES.contains(&n.split('.').next()?);
                     TypeRef {
-                        qname: format!("cfg:{n}"),
+                        name: crate::XmlTypeName::new(mdschema::FixedNamespace::Cfg.uri(), n)?,
                         set,
                         type_id: Some(g),
                     }
                 } else if text == T_TYPEDESC {
-                    simple("v8:TypeDescription")
+                    simple("v8:TypeDescription")?
                 } else {
-                    let p = ctx.schema.platform_type(text)?;
+                    let p = platform(text)?;
                     TypeRef {
-                        qname: p.qname.clone(),
+                        name: crate::XmlTypeName::new(p.name.namespace_uri, p.name.local)?,
                         set: p.set,
                         type_id: None,
                     }

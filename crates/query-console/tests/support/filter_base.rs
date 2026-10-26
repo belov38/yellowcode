@@ -149,7 +149,16 @@ fn populate(
     holes: bool,
     value: &dyn Fn(u64, StdField, &TableInfo) -> Option<FieldValue>,
 ) {
-    let table = table_info(dir, query_name);
+    populate_table(dir, &table_info(dir, query_name), count, holes, value);
+}
+
+fn populate_table(
+    dir: &Path,
+    table: &TableInfo,
+    count: u64,
+    holes: bool,
+    value: &dyn Fn(u64, StdField, &TableInfo) -> Option<FieldValue>,
+) {
     let db = open_rw(dir);
     let mut write = db.write().unwrap();
     let mut target = write.table(&table.phys).unwrap();
@@ -169,10 +178,10 @@ fn populate(
             })
             .collect::<Vec<_>>();
         for (i, field) in table.fields.iter().enumerate() {
-            let Some(v) = field.std.and_then(|std| value(n, std, &table)) else {
+            let Some(v) = field.std.and_then(|std| value(n, std, table)) else {
                 continue;
             };
-            let cols = fields::encode(&table, FieldId(i as u16), &v).unwrap();
+            let cols = fields::encode(table, FieldId(i as u16), &v).unwrap();
             for (j, c) in field.columns.clone().zip(cols) {
                 row[j] = infobase::colval::to_onecd(&c, table.columns[j].ty).unwrap();
             }
@@ -186,6 +195,32 @@ fn populate(
         target.delete(id).unwrap();
     }
     write.commit().unwrap();
+}
+
+pub fn mark_predefined_initialized(dir: &Path) {
+    let ib = infobase::Infobase::open(
+        dir,
+        infobase::OpenOptions {
+            schema_check: infobase::SchemaCheck::Warn,
+            locking: onecd::Locking::None,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let tables: Vec<TableInfo> = ib
+        .storage()
+        .tables()
+        .iter()
+        .filter(|t| t.field_by_std(StdField::PdInitialized).is_some())
+        .cloned()
+        .collect();
+    drop(ib);
+    assert!(!tables.is_empty(), "no table of the predefined data flag");
+    for table in &tables {
+        populate_table(dir, table, 1, false, &|_, std, _| {
+            (std == StdField::PdInitialized).then_some(FieldValue::Bool(true))
+        });
+    }
 }
 
 fn reference(table: &TableInfo, n: u64) -> FieldValue {

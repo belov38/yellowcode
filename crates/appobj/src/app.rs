@@ -217,6 +217,7 @@ impl Application {
     }
 
     pub fn register(self: &Arc<Self>, reg: &mut bsl_vm::Registry) -> Result<()> {
+        let query = Arc::new(crate::CallQueryProvider::new(self.clone())?);
         let types = AppTypes::register_with(&self.model, reg, Some(Arc::downgrade(self)))?;
         if let Err(second) = self.types.set(types) {
             debug_assert!(
@@ -240,7 +241,9 @@ impl Application {
         crate::meta::register(self, reg)?;
         crate::managers::register(self, reg);
         crate::rights::register(self, reg);
+        crate::session_info::register(reg);
         crate::predefined::register(self, reg);
+        query::register(reg, query);
         Ok(())
     }
 
@@ -297,6 +300,10 @@ impl Application {
         r.map(|()| state).map_err(SessionError::SessionModule)
     }
 
+    pub fn bare_session(&self, start: SessionStart) -> SessionState {
+        SessionState::new(start, self.model.session_params.len())
+    }
+
     fn run_session_module(&self, ex: &mut Execution) -> std::result::Result<(), Exception> {
         let Some(m) = self.modules.session_module() else {
             return Ok(());
@@ -326,6 +333,7 @@ impl Application {
         );
         ex.attach_reuse(reuse);
         ex.set_host_data(Box::new(CallContext {
+            query: crate::queryhost::QueryCallState::new(self.me.clone()),
             sess,
             params,
             common: HashMap::new(),
@@ -346,6 +354,7 @@ impl Application {
             return (SessionState::detached(), CallOutcome::default());
         };
         let mut ctx = *ctx;
+        ctx.query.end();
         for s in ctx.selections.drain(..) {
             if let Some(s) = s.upgrade() {
                 s.release();

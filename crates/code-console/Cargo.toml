@@ -1,0 +1,33 @@
+[package]
+name = "code-console"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99.1"
+license = "MIT OR Apache-2.0"
+publish = false
+autotests = false
+autoexamples = false
+autobenches = false
+
+[features]
+testing = []
+
+[dependencies]
+appobj = { path = "../appobj" }
+bsl-compiler = { path = "../bsl-compiler" }
+bsl-stdlib = { path = "../bsl-stdlib" }
+bsl-syntax = { path = "../bsl-syntax" }
+bsl-testhost = { path = "../bsl-testhost" }
+bsl-vm = { path = "../bsl-vm" }
+evlog = { path = "../evlog" }
+infobase = { path = "../infobase" }
+onecd = { path = "../onecd" }
+platform-catalog = { path = "../platform-catalog" }
+serde = { version = "1", features = ["derive"] }
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+undocumented_unsafe_blocks = "warn"
+unused_result_ok = "warn"

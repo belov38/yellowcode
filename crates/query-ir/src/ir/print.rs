@@ -194,6 +194,29 @@ impl Printer<'_> {
                 }
                 self.w(")");
             }
+            Rel::RegisterVt(v) | Rel::Slice(v) | Rel::RunningBalance(v) => {
+                let name = &self.schema.table(v.table).name_ru;
+                let _ = write!(
+                    self.out,
+                    "(register-vt s{} {name} inner s{}",
+                    v.src.0, v.inner.0
+                );
+                for (i, b) in v.bounds.iter().enumerate() {
+                    if let Some(b) = b {
+                        let _ = write!(self.out, " bound{i}=");
+                        self.expr(b);
+                    }
+                }
+                let _ = write!(self.out, " periodicity={:?}", v.periodicity);
+                if let Some(c) = v.complement {
+                    let _ = write!(self.out, " complement={c:?}");
+                }
+                if let Some(c) = &v.cond {
+                    self.w(" cond=");
+                    self.expr(c);
+                }
+                self.w(")");
+            }
         }
     }
 

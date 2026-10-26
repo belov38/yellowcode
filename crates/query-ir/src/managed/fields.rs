@@ -25,6 +25,7 @@ impl<'a> FieldItem<'a> {
         let name = string(scope, name)?;
         Ok(Self {
             value: ManuallyDrop::new(Item {
+                star: true,
                 expr: TExpr {
                     kind: TKind::Field {
                         level: 0,

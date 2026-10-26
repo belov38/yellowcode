@@ -26,7 +26,7 @@ impl<'c, 'a, 'r, 'w, 't> Builder<'c, 'a, 'r, 'w, 't> {
             ));
         }
         let (owner_ref, tab) = self.owner_of(&item.expr)?;
-        let src = self.section_source(tab)?;
+        let src = self.section_source(tab, item.nested.iter().flatten().any(|item| item.star))?;
         let owner = self.section_col(src, tab, StdRole::Ref)?;
         let number = self.section_col(src, tab, StdRole::LineNumber)?;
         let mut outer = ctx.scratch(0)?;
@@ -238,7 +238,7 @@ impl<'c, 'a, 'r, 'w, 't> Builder<'c, 'a, 'r, 'w, 't> {
             "a nested table step without a section",
         ))
     }
-    fn section_source(&mut self, table: QTableId) -> BuildResult<ir::SrcId> {
+    fn section_source(&mut self, table: QTableId, all_fields: bool) -> BuildResult<ir::SrcId> {
         let ctx = self.ctx;
         let id = ir::SrcId(
             u32::try_from(self.sources.len())
@@ -246,10 +246,12 @@ impl<'c, 'a, 'r, 'w, 't> Builder<'c, 'a, 'r, 'w, 't> {
         );
         ctx.scratch_push(
             &mut self.sources,
-            ctx.scalar((id, table)).map(|(id, table)| ir::SourceS {
-                id,
-                kind: ir::SrcKind::Table(table),
-            }),
+            ctx.scalar((id, table, all_fields))
+                .map(|(id, table, all_fields)| ir::SourceS {
+                    id,
+                    all_fields,
+                    kind: ir::SrcKind::Table(table),
+                }),
         )?;
         self.touch(table)?;
         Ok(id)

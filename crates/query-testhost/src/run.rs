@@ -142,6 +142,16 @@ pub fn run_case(base: &TestBase, case: &Value) -> CaseOutcome {
     run_case_on(&host, case)
 }
 
+pub fn run_case_movements(base: &TestBase, case: &Value) -> CaseOutcome {
+    let lang = case_lang(case);
+    let mut host = match TestHost::new(base, lang) {
+        Ok(h) => h,
+        Err(e) => return CaseOutcome::Err(vec![format!("internal: {e}")]),
+    };
+    host.movements = true;
+    run_case_on(&host, case)
+}
+
 pub fn run_case_on(host: &TestHost<'_>, case: &Value) -> CaseOutcome {
     match run_inner(host, case) {
         Ok(v) => CaseOutcome::Ok(v),
@@ -247,8 +257,9 @@ fn run_inner(host: &TestHost<'_>, case: &Value) -> Result<Value, Stop> {
         .map_err(|e| Stop::from(batch_failure(e, text, lang, base)))?;
     let walk_kind = case["walk"].as_str().unwrap_or("");
     let unload_kind = case["unload"].as_str().unwrap_or("");
+    let syntax = query_syntax::parse_batch(text, ParseMode::Query).ok();
     let mut results = Vec::with_capacity(runs.len());
-    for run in &runs {
+    for (statement, run) in runs.iter().enumerate() {
         let walked = match &run.outcome {
             StmtOutcome::Result(res)
                 if res.totals.is_some() || !walk_kind.is_empty() || !unload_kind.is_empty() =>
@@ -353,12 +364,23 @@ fn run_inner(host: &TestHost<'_>, case: &Value) -> Result<Value, Stop> {
                 )
             })
             .collect();
-        results.push(json!({
+        let mut result = json!({
             "columns": columns,
             "empty": rows.is_empty(),
             "rows": rows,
             "ordered": run.ordered,
-        }));
+        });
+        if run.ordered
+            && let Some(cols) = syntax
+                .as_ref()
+                .and_then(|batch| batch.stmts.get(statement))
+                .and_then(crate::detail_ties::columns)
+            && let Some(fields) = result.as_object_mut()
+        {
+            fields.insert("_ties".into(), json!(cols));
+            fields.insert("_details".into(), json!(vec![true; rows.len()]));
+        }
+        results.push(result);
     }
     Ok(json!({ "results": results }))
 }

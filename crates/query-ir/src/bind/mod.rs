@@ -1,4 +1,5 @@
 mod refid;
+pub(crate) mod security;
 mod values;
 
 pub(crate) use values::{fold_chain, visit_expr, visit_stmt};
@@ -48,6 +49,7 @@ pub struct BindCtx<'a> {
     pub map: &'a StorageMap,
     pub params: &'a dyn ParamValues,
     pub host: &'a dyn BindHost,
+    pub security: crate::host::SecurityCtx<'a>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -71,6 +73,7 @@ pub enum PBound {
 #[derive(Debug)]
 pub struct Bound<'s> {
     pub stmt: &'s StmtS,
+    pub(crate) security: security::Security,
     pub params: Vec<PBound>,
     pub values: Vec<QValue>,
     pub tables: Vec<TableId>,
@@ -82,6 +85,27 @@ pub(crate) fn resolve<'s>(stmt: &'s StmtS, ctx: &BindCtx<'_>) -> Result<Bound<'s
 }
 
 pub fn bind(stmt: &StmtS, ctx: &BindCtx<'_>) -> Result<StmtL, ExecError> {
-    let bound = resolve(stmt, ctx)?;
+    bind_with_policy_charge(stmt, ctx, &mut |_| Ok(()))
+}
+
+#[derive(Debug, Default)]
+pub struct PolicyCompileStats {
+    pub statement: crate::ir::stats::IrStats,
+    pub predicates: crate::sema::stats::StmtStats,
+}
+
+pub fn bind_with_policy_charge(
+    stmt: &StmtS,
+    ctx: &BindCtx<'_>,
+    charge: &mut dyn FnMut(&PolicyCompileStats) -> Result<(), ExecError>,
+) -> Result<StmtL, ExecError> {
+    let (secured, security) = security::prepare(stmt, ctx, charge)?;
+    let stmt = secured.as_ref().unwrap_or(stmt);
+    let mut bound = resolve(stmt, ctx)?;
+    bound.security = security;
     crate::lower::lower(&bound, ctx)
+}
+
+pub fn preflight_virtual(stmt: &crate::CompiledStmt, ctx: &BindCtx<'_>) -> Result<(), ExecError> {
+    security::preflight_virtual(stmt, ctx)
 }

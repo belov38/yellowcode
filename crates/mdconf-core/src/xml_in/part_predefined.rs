@@ -7,6 +7,21 @@ use crate::{Codec, MdKind, MdObject, Result, Value, parts::*};
 use md_model::xml_origin::XmlPart;
 use std::path::Path;
 
+struct TypeScope<'a> {
+    inherited: &'a dyn super::NamespaceScope,
+    cfg_binding: Option<&'a str>,
+}
+impl super::NamespaceScope for TypeScope<'_> {
+    fn namespace(&self, prefix: Option<&str>) -> Option<&str> {
+        if prefix == Some("cfg") {
+            self.cfg_binding
+                .or_else(|| self.inherited.namespace(prefix))
+        } else {
+            self.inherited.namespace(prefix)
+        }
+    }
+}
+
 fn refs(cx: &Context<'_>, root: N<'_, '_>, tag: &str, path: &Path) -> Result<Vec<crate::MdRef>> {
     root.children()
         .filter(|n| n.local() == tag)
@@ -114,6 +129,7 @@ fn item(
     }
     if let Some(t) = n.children().find(|n| n.local() == "Type") {
         let mut xml = cx.assembly.fragment(t, path)?;
+        let mut cfg_binding = None;
         for (source, node) in t.children().zip(xml.children.iter_mut()) {
             if matches!(source.local(), "Type" | "TypeSet") {
                 let qname = source.text().unwrap_or_default();
@@ -145,16 +161,26 @@ fn item(
                         return Err(err(path, "unsupported predefined QName namespace"));
                     }
                     if binding == Some("http://v8.1c.ru/8.1/data/enterprise/current-config") {
+                        cfg_binding = binding;
                         node.text = Some(format!("cfg:{local}"));
                         node.ns_decls.retain(|(p, _)| p.as_deref() != Some(prefix));
                     }
                 }
             }
         }
-        out.type_desc = match cx.assembly.reader.read("PredefinedItem", Codec::Type, &xml) {
-            Value::Type(v) => Some(v),
-            _ => return Err(err(path, "unsupported predefined type")),
+        let scope = TypeScope {
+            inherited: &t,
+            cfg_binding,
         };
+        out.type_desc =
+            match cx
+                .assembly
+                .reader
+                .read_scoped("PredefinedItem", Codec::Type, &xml, &scope)
+            {
+                Value::Type(v) => Some(v),
+                _ => return Err(err(path, "unsupported predefined type")),
+            };
     }
     if account_owner {
         let account_type = match text(n, "AccountType") {

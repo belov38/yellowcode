@@ -12,13 +12,28 @@ use bsl_compiler::AppGlobal;
 use bsl_compiler::ir::{Const, GlobalRef};
 use bsl_compiler::{CompiledModule, Op};
 use bsl_prim::Str;
+use platform_catalog::messages::Lang;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 const BUDGET_TEXT: &str = "<instruction budget exhausted>";
+
+const CANCEL_POLL_UNITS: u64 = 1024;
 
 impl Execution {
     pub fn charge(&mut self, units: u64) -> Result<(), Exception> {
         let total = self.exec.steps.saturating_add(units);
+        if let Some(flag) = &self.opts.cancel
+            && (self.exec.steps == 0
+                || self.exec.steps / CANCEL_POLL_UNITS != total / CANCEL_POLL_UNITS)
+            && flag.load(Ordering::Relaxed)
+        {
+            let text = match self.lang() {
+                Lang::Ru => "Выполнение прервано",
+                Lang::En => "Execution interrupted",
+            };
+            return Err(fatal(FatalKind::Cancelled, text.into()));
+        }
         if self.opts.budget.is_some_and(|b| total > b) {
             return Err(fatal(FatalKind::Budget, BUDGET_TEXT.into()));
         }
@@ -62,6 +77,9 @@ fn store_global(
         .globals
         .get(i as usize)
         .ok_or_else(|| internal("global out of range"))?;
+    if matches!(g, GlobalRef::ApplicationVariable(_)) {
+        return Err(application_variable_later());
+    }
     let catalog = ex.runtime().registry().catalog;
     let name: String = match g {
         GlobalRef::PlatformProperty(p) => catalog
@@ -73,9 +91,20 @@ fn store_global(
             .get(usize::from(t.0))
             .map(|t| t.name_ru.to_string()),
         GlobalRef::App(AppGlobal::CommonModule { name }) => Some(name.clone()),
+        GlobalRef::ApplicationVariable(_) => return Err(application_variable_later()),
     }
     .ok_or_else(|| internal("global out of range"))?;
     Err(ex.vm_error("bsl:IDS_RTE_PROP_NONWRITABLE", Some(&name)))
+}
+
+fn application_variable_later() -> Exception {
+    fatal(
+        FatalKind::Later {
+            what: "application variable state",
+            stage: "client application runtime",
+        },
+        "Application variable state requires the client application runtime".into(),
+    )
 }
 
 fn handler_op(ex: &mut Execution, name: &str) -> Exception {
@@ -385,6 +414,9 @@ fn run_ops(
                         }
                         GlobalRef::SystemEnum(t) => ex.system_enum(*t)?,
                         GlobalRef::App(g) => ex.app_global(g)?,
+                        GlobalRef::ApplicationVariable(_) => {
+                            return Err(application_variable_later());
+                        }
                     };
                     push!(v);
                 }

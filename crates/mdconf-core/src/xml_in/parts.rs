@@ -79,6 +79,8 @@ pub fn load_parts(dir: &Path, o: &PartsOptions) -> Result<PartsDump> {
     }
     super::part_misc::config_payloads(&mut cx, &mut cfg.parts)?;
     cfg.predef = cx.predef;
+    cfg.xml_namespace_envelopes
+        .extend(cx.assembly.namespace_envelopes);
     let diagnostics = cx.assembly.reader.into_diagnostics();
     for (key, count) in diagnostics.misses {
         *cfg.diagnostics.misses.entry(key).or_default() += count;
@@ -111,6 +113,7 @@ impl<'a> Context<'a> {
                 reader: ValueReader::new(cfg)?,
                 report: Default::default(),
                 max_value_bytes: opts.objects.max_value_bytes,
+                namespace_envelopes: Default::default(),
             },
             names: cfg
                 .index

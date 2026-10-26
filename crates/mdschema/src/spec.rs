@@ -169,7 +169,8 @@ impl From<RawXdtoProp> for XdtoProp {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlatformType {
     pub set: bool,
-    pub qname: String,
+    pub namespace_uri: String,
+    pub local: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -227,4 +228,16 @@ pub struct ConfigPropSpec {
     pub path: Option<ConfigPath>,
     pub codec: String,
     pub extra: serde_json::Value,
+}
+
+impl PlatformType {
+    pub fn name(&self) -> crate::ExpandedTypeName<'_> {
+        crate::ExpandedTypeName {
+            namespace_uri: &self.namespace_uri,
+            local: &self.local,
+        }
+    }
+    pub fn legacy_qname(&self) -> Option<String> {
+        self.name().legacy_qname()
+    }
 }

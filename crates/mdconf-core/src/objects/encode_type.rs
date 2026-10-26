@@ -18,12 +18,16 @@ pub(crate) fn encode_builtin_type(value: &Value) -> Result<Node, TypeError> {
         if reference.set || reference.type_id.is_some() {
             return Err(TypeError::UnsupportedType);
         }
-        let position = match reference.qname.as_str() {
-            "xs:boolean" => 0,
-            "xs:string" => 1,
-            "xs:decimal" => 2,
-            "xs:dateTime" => 3,
-            "xs:base64Binary" => 4,
+        let position = match reference
+            .name
+            .fixed_local(crate::FixedNamespace::Xs)
+            .unwrap_or("")
+        {
+            "boolean" => 0,
+            "string" => 1,
+            "decimal" => 2,
+            "dateTime" => 3,
+            "base64Binary" => 4,
             _ => return Err(TypeError::UnsupportedType),
         };
         let slot = seen.get_mut(position).ok_or(TypeError::InvalidShape)?;

@@ -143,7 +143,7 @@ fn slots(role: StdRole, kind: Option<MdKind>, list: Option<StdRole>) -> Vec<Slot
         R::Description if kind == Some(MdKind::Task) => vec![S(StdField::Name)],
         R::Description => vec![S(StdField::Description)],
         R::Predefined => vec![S(StdField::PredefinedId), S(StdField::DimIsMetadata)],
-        R::PredefinedDataName => vec![S(StdField::PredefinedId)],
+        R::PredefinedDataName | R::ThisNode => vec![S(StdField::PredefinedId)],
         R::Number => vec![S(StdField::Number)],
         R::Date => vec![S(StdField::DateTime)],
         R::Posted => vec![S(StdField::Posted)],
@@ -199,8 +199,7 @@ fn slots(role: StdRole, kind: Option<MdKind>, list: Option<StdRole>) -> Vec<Slot
         | R::ExtDimensionTypes
         | R::LeadingCalculationTypes
         | R::BaseCalculationTypes
-        | R::DisplacingCalculationTypes
-        | R::ThisNode => Vec::new(),
+        | R::DisplacingCalculationTypes => Vec::new(),
     }
 }
 
@@ -209,6 +208,7 @@ pub struct StorageBinding {
     tables: Vec<Option<TableId>>,
     fields: Vec<Vec<Option<FieldId>>>,
     refs: Vec<Option<u32>>,
+    point_refs: HashMap<RefAtom, u32>,
     enum_orders: HashMap<(QTableId, Guid), u32>,
     unbound: Vec<QTableId>,
     unbound_fields: Vec<(QTableId, QFieldId)>,
@@ -232,6 +232,16 @@ impl StorageBinding {
 
     pub fn ref_number(&self, r: RefAtom) -> Option<u32> {
         self.refs.get(usize::try_from(r.0).ok()?).copied().flatten()
+    }
+
+    pub fn route_point_refs(&self) -> Vec<(u32, RefAtom)> {
+        let mut out: Vec<_> = self
+            .point_refs
+            .iter()
+            .map(|(atom, number)| (*number, *atom))
+            .collect();
+        out.sort();
+        out
     }
 
     pub fn ref_atoms(&self) -> Vec<(u32, RefAtom)> {
@@ -292,6 +302,14 @@ impl QuerySchema {
             };
             b.refs.push(n);
         }
+        for (owner, points) in &self.values.points {
+            if let (Some(atom), Some(id)) = (self.table(*owner).reference, b.table(*points)) {
+                let number = map.ref_number(id).ok_or_else(|| {
+                    SchemaError::Config("route points storage has no reference number".into())
+                })?;
+                b.point_refs.insert(atom, number);
+            }
+        }
         for (q, values) in &self.values.enums {
             let Some(id) = b.table(*q) else { continue };
             for g in values.values() {
@@ -338,9 +356,13 @@ impl QuerySchema {
                 };
                 map.tabular_table(owner.object?, TabularKey::StdName(name))
             }
+            (TableKind::Virtual(VtKind::SequenceBoundaries), None) => {
+                map.service_table(owner_object()?, role::SEQUENCE_BOUNDARIES, None)
+            }
             (TableKind::Virtual(VtKind::ExtDimensions), None) => {
                 map.service_table(owner_object()?, role::EXT_DIMENSIONS_VALUES, None)
             }
+            (TableKind::Virtual(VtKind::TaskByPerformer), None) => map.main_table(owner_object()?),
             (TableKind::Virtual(VtKind::BusinessProcessPoints), None) => {
                 map.service_table(owner_object()?, role::ROUTE_POINTS, None)
             }
@@ -436,7 +458,10 @@ impl QuerySchema {
 
 fn has_storage(k: TableKind) -> bool {
     match k {
-        TableKind::Virtual(v) => matches!(v, VtKind::ExtDimensions | VtKind::BusinessProcessPoints),
+        TableKind::Virtual(v) => matches!(
+            v,
+            VtKind::ExtDimensions | VtKind::BusinessProcessPoints | VtKind::SequenceBoundaries
+        ),
         TableKind::Constants => false,
         _ => true,
     }

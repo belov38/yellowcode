@@ -174,6 +174,7 @@ pub(crate) enum ParamSlot {
 }
 
 pub(crate) struct CallContext {
+    pub query: Rc<crate::queryhost::QueryCallState>,
     pub sess: SessionState,
     pub params: Vec<ParamSlot>,
     pub common: HashMap<ModuleRef, ModuleInstanceRef>,

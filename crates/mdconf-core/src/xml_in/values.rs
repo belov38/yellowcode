@@ -1,8 +1,9 @@
+use super::namespaces::{NamespaceContext, NamespaceScope, expanded};
 use crate::index::Index;
 use crate::model::*;
 use crate::xml::XmlNode;
-use crate::xml_out::value_elem;
 use brace::Guid;
+use md_xmlout::codec::values::value_elem_at_depth;
 use mdschema::{Codec, Schema};
 use std::collections::HashMap;
 
@@ -47,7 +48,7 @@ impl XCtx<'_> {
     }
 }
 
-fn qname(n: &XmlNode) -> String {
+pub(super) fn qname(n: &XmlNode) -> String {
     match &n.prefix {
         Some(p) => format!("{p}:{}", n.local),
         None => n.local.clone(),
@@ -151,7 +152,42 @@ pub(crate) fn property(
     el: &XmlNode,
     depth: Option<usize>,
 ) -> Value {
-    let tag = qname(el);
+    property_scoped(cx, codec, enum_map, el, depth, &NamespaceContext::EMPTY)
+}
+
+pub(crate) fn property_scoped(
+    cx: &mut XCtx,
+    codec: Codec,
+    enum_map: Option<&std::collections::BTreeMap<String, String>>,
+    el: &XmlNode,
+    indent_depth: Option<usize>,
+    namespaces: &dyn NamespaceScope,
+) -> Value {
+    property_scoped_as(
+        cx,
+        codec,
+        enum_map,
+        el,
+        indent_depth,
+        namespaces,
+        &qname(el),
+    )
+}
+
+pub(super) fn property_scoped_as(
+    cx: &mut XCtx,
+    codec: Codec,
+    enum_map: Option<&std::collections::BTreeMap<String, String>>,
+    el: &XmlNode,
+    indent_depth: Option<usize>,
+    namespaces: &dyn NamespaceScope,
+    tag: &str,
+) -> Value {
+    let depth = indent_depth;
+    let context = NamespaceContext::extend(el, namespaces);
+    if qname(el) != tag {
+        return raw_value(cx, codec, el);
+    }
     if codec == Codec::Unknown
         || !canonical_names(el)
         || (codec == Codec::Enum
@@ -184,18 +220,19 @@ pub(crate) fn property(
         | Codec::Color => is_leaf(el).then(|| Value::Text(text_of(el))),
         Codec::Ref => ref_value(&mut attempt, el),
         Codec::LStr => lstr(el).map(Value::LStr),
-        Codec::Type => type_desc(&mut attempt, el).map(Value::Type),
+        Codec::Type => type_desc_scoped(&mut attempt, el, &context).map(Value::Type),
         Codec::TValue => typed_value(el, None).map(Value::Typed),
         Codec::MdList => ref_list(&mut attempt, el, "xr:Item", true),
         Codec::FoContent => ref_list(&mut attempt, el, "xr:Object", false),
         Codec::FieldList => field_list(el),
-        Codec::StdAttrs => std_attrs(&mut attempt, el, depth),
+        Codec::StdAttrs => std_attrs(&mut attempt, el, depth, &context),
         _ => None,
     };
     match typed {
         Some(v)
             if matches!(v, Value::Text(_) | Value::Bool(_) | Value::Ref(_))
-                || same(&expected(codec, &tag, &v), &xml_elem(el), depth) =>
+                || expected(codec, tag, &v, depth)
+                    .is_some_and(|expected| same(&expected, &xml_elem(el), depth)) =>
         {
             for (key, count) in diagnostics.misses {
                 *cx.diag.misses.entry(key).or_default() += count;
@@ -218,8 +255,12 @@ fn raw_value(cx: &mut XCtx, codec: Codec, el: &XmlNode) -> Value {
     Value::Xml(xml_elem(el))
 }
 
-fn expected(codec: Codec, tag: &str, v: &Value) -> XmlElem {
-    match v {
+fn expected(codec: Codec, tag: &str, v: &Value, indent_depth: Option<usize>) -> Option<XmlElem> {
+    let property_element_depth = match indent_depth {
+        Some(d) => d.checked_add(1)?,
+        None => 1,
+    };
+    Some(match v {
         Value::RefList(items) if codec == Codec::FoContent => {
             let mut e = XmlElem::new(tag);
             for r in items {
@@ -238,14 +279,18 @@ fn expected(codec: Codec, tag: &str, v: &Value) -> XmlElem {
                         prop.codec,
                         &format!("xr:{}", prop.name),
                         &prop.value,
-                    ));
+                        match indent_depth {
+                            Some(d) => Some(d.checked_add(2)?),
+                            None => None,
+                        },
+                    )?);
                 }
                 element = element.child(record);
             }
             element
         }
-        _ => value_elem(tag, v),
-    }
+        _ => value_elem_at_depth(tag, v, property_element_depth)?,
+    })
 }
 
 fn bool_value(el: &XmlNode) -> Option<Value> {
@@ -347,51 +392,60 @@ fn qualifier_length(n: &XmlNode) -> Option<(u32, bool)> {
     Some((length, fixed))
 }
 
-pub(crate) fn type_desc(cx: &mut XCtx, el: &XmlNode) -> Option<TypeDescription> {
+pub(super) fn admitted_type(schema: &Schema, uri: &str, local: &str, set: bool) -> bool {
+    use mdschema::FixedNamespace;
+    if uri == FixedNamespace::Cfg.uri() && local.contains('.') {
+        let expected = local
+            .split('.')
+            .next()
+            .is_some_and(|category| crate::objects::types::SET_CATEGORIES.contains(&category));
+        return set == expected;
+    }
+    if (uri == FixedNamespace::Xs.uri()
+        && matches!(
+            local,
+            "boolean" | "string" | "decimal" | "dateTime" | "base64Binary"
+        ))
+        || (uri == FixedNamespace::V8.uri() && local == "TypeDescription")
+    {
+        return !set;
+    }
+    schema.platform_types().any(|(_, ty)| {
+        let name = ty.name();
+        name.namespace_uri == uri && name.local == local && ty.set == set
+    })
+}
+
+fn type_desc_scoped(
+    cx: &mut XCtx,
+    el: &XmlNode,
+    context: &dyn NamespaceScope,
+) -> Option<TypeDescription> {
     let tag = qname(el);
     let mut d = TypeDescription::default();
     for c in &el.children {
         match qname(c).as_str() {
             q @ ("v8:Type" | "v8:TypeSet") => {
-                let qn = text_of(c);
+                let context = NamespaceContext::extend(c, context);
+                let (uri, local) = expanded(&context, c.text.as_deref()?)?;
                 let set = q == "v8:TypeSet";
-                let platform = cx.schema.platform_types().find(|(_, ty)| ty.qname == qn);
-                let generated = qn.strip_prefix("cfg:").filter(|n| n.contains('.'));
-                let expected_set = generated
-                    .map(|n| {
-                        n.split('.').next().is_some_and(|category| {
-                            crate::objects::types::SET_CATEGORIES.contains(&category)
-                        })
-                    })
-                    .or_else(|| platform.as_ref().map(|(_, ty)| ty.set))
-                    .or_else(|| {
-                        matches!(
-                            qn.as_str(),
-                            "xs:boolean"
-                                | "xs:string"
-                                | "xs:decimal"
-                                | "xs:dateTime"
-                                | "xs:base64Binary"
-                                | "v8:TypeDescription"
-                        )
-                        .then_some(false)
-                    });
-                if expected_set.is_some_and(|expected| expected != set) {
+                if c.ns.as_deref() != Some(mdschema::FixedNamespace::V8.uri())
+                    || !admitted_type(cx.schema, uri, local, set)
+                {
                     return None;
                 }
-                let type_id = match qn.strip_prefix("cfg:") {
-                    Some(n) => {
-                        let id = cx.names.by_type.get(n).copied().flatten();
-                        if id.is_none() && !cx.schema.platform_types().any(|(_, ty)| ty.qname == qn)
-                        {
-                            cx.miss("unresolved-type", &tag);
-                        }
-                        id
+                let generated = uri == mdschema::FixedNamespace::Cfg.uri() && local.contains('.');
+                let type_id = if generated {
+                    let id = cx.names.by_type.get(local).copied().flatten();
+                    if id.is_none() {
+                        cx.miss("unresolved-type", &tag);
                     }
-                    None => None,
+                    id
+                } else {
+                    None
                 };
                 d.types.push(TypeRef {
-                    qname: qn,
+                    name: XmlTypeName::new(uri, local)?,
                     set,
                     type_id,
                 });
@@ -474,7 +528,12 @@ fn typed_value(el: &XmlNode, item: Option<&str>) -> Option<TypedValue> {
     }
 }
 
-fn std_attrs(cx: &mut XCtx, el: &XmlNode, depth: Option<usize>) -> Option<Value> {
+fn std_attrs(
+    cx: &mut XCtx,
+    el: &XmlNode,
+    depth: Option<usize>,
+    namespaces: &dyn NamespaceScope,
+) -> Option<Value> {
     if !el.attrs.is_empty()
         || !el.ns_decls.is_empty()
         || el.text.is_some() && el.children.is_empty()
@@ -499,6 +558,7 @@ fn std_attrs(cx: &mut XCtx, el: &XmlNode, depth: Option<usize>) -> Option<Value>
         if attr_qname(n) != "name" {
             return None;
         }
+        let context = NamespaceContext::extend(a, namespaces);
         let mut props = Vec::with_capacity(a.children.len());
         for p in &a.children {
             let q = qname(p);
@@ -508,16 +568,26 @@ fn std_attrs(cx: &mut XCtx, el: &XmlNode, depth: Option<usize>) -> Option<Value>
                 .bag_properties()
                 .find(|(_, p)| p.xml == name)
                 .map(|(_, p)| p);
-            let codec = spec.map_or(Codec::Unknown, |p| p.codec);
+            let type_spec = (name == "Type")
+                .then(|| cx.schema.fd_template(name))
+                .flatten();
+            let codec = spec
+                .map(|p| p.codec)
+                .or_else(|| type_spec.map(|p| p.codec))
+                .unwrap_or(Codec::Unknown);
             props.push(Prop {
                 name: name.to_string(),
                 codec,
-                value: property(
+                value: property_scoped(
                     cx,
                     codec,
-                    spec.map(|s| &s.map),
+                    spec.map(|s| &s.map).or_else(|| type_spec.map(|s| &s.map)),
                     p,
-                    depth.map(|d| d.saturating_add(2)),
+                    match depth {
+                        Some(d) => Some(d.checked_add(2)?),
+                        None => None,
+                    },
+                    &context,
                 ),
             });
         }

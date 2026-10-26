@@ -9,12 +9,27 @@ use super::query::result_fields;
 use super::shared::Shared;
 use crate::Configuration;
 
+fn platform_type_name(t: &mdschema::PlatformType) -> TypeName {
+    let (name, ns) = match t.legacy_qname() {
+        Some(name) => (name, None),
+        None => (
+            format!("@:{}", t.name().local),
+            Some(t.name().namespace_uri.to_owned()),
+        ),
+    };
+    TypeName {
+        kind: if t.set { "TypeSet" } else { "Type" }.into(),
+        name,
+        ns,
+    }
+}
+
 pub(crate) const IDX: &str = "e67e2953-cebe-4d97-bb93-12b17e6384f8";
 pub(crate) const ADDCOL: &str = "5bdad865-f2c5-434b-8041-ba4aad3b6687";
 pub(crate) const DL_SPECIAL: [(&str, &str); 1] = [("10000000", "DefaultPicture")];
 const SYS_ANY: [(&str, &str); 1] = [("100000000", "RowsCount")];
 const SYS_EXTRA: [(&str, &str); 1] = [("v8:StandardPeriod|0", "Variant")];
-const SET_CATEGORIES: [&str; 2] = ["DefinedType", "Characteristic"];
+pub(crate) const SET_CATEGORIES: [&str; 2] = ["DefinedType", "Characteristic"];
 const ITEM_CHAIN_MAX: usize = 490;
 
 fn lookup<'t>(table: &'t [(&str, &str)], key: &str) -> Option<&'t str> {
@@ -401,11 +416,7 @@ impl<'a> FormInfo<'a> {
             let Some(t) = self.schema.platform_type(&g) else {
                 return Ok(None);
             };
-            out.push(TypeName {
-                kind: if t.set { "TypeSet" } else { "Type" }.into(),
-                name: t.qname.clone(),
-                ns: None,
-            });
+            out.push(platform_type_name(t));
         }
         Ok(Some(out))
     }

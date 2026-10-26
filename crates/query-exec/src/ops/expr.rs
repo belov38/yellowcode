@@ -189,9 +189,20 @@ pub fn eval<'a>(e: &PExpr, row: &[QValue], cx: &Cx<'a>) -> R<QValue> {
             let o = eval(owner, row, cx)?;
             super::subq::section_value(&o, rel, empty, cx)?
         }
-        PExpr::TypeOf { x, refs } => {
+        PExpr::TypeOf {
+            x,
+            refs,
+            route_points,
+        } => {
             let v = eval(x, row, cx)?;
-            type_of_value(&v, refs)?
+            if let QValue::Ref { table, .. } = &v
+                && let Ok(i) = route_points.binary_search_by_key(table, |(number, _)| *number)
+                && let Some((_, atom)) = route_points.get(i)
+            {
+                QValue::Type(QType::other(query_ir::Other::RoutePoint(*atom)))
+            } else {
+                type_of_value(&v, refs)?
+            }
         }
         PExpr::StoredSize { x, kind } => {
             let v = eval(x, row, cx)?;
@@ -215,7 +226,7 @@ pub fn eval<'a>(e: &PExpr, row: &[QValue], cx: &Cx<'a>) -> R<QValue> {
     })
 }
 
-fn keys_charged<T>(a: &QValue, b: &QValue, cx: &Cx<'_>, f: impl FnOnce() -> T) -> R<T> {
+pub(super) fn keys_charged<T>(a: &QValue, b: &QValue, cx: &Cx<'_>, f: impl FnOnce() -> T) -> R<T> {
     let r = rank(a);
     if r != rank(b) || r <= 4 {
         return Ok(f());

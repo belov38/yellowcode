@@ -122,6 +122,10 @@ fn words() -> Vec<(String, String)> {
         ("WebСервис", "WebService"),
         ("ИнтеграционныйСервис", "IntegrationService"),
         ("ОбщаяКоманда", "CommonCommand"),
+        ("ОбщаяФорма", "CommonForm"),
+        ("Форма", "Form"),
+        ("ХранилищеНастроек", "SettingsStorage"),
+        ("КритерийОтбора", "FilterCriterion"),
     ] {
         w.push((r.to_string(), e.to_string()));
     }
@@ -159,7 +163,11 @@ impl Modules {
             let en: Vec<&str> = m
                 .name
                 .split('.')
-                .map(|seg| {
+                .enumerate()
+                .map(|(position, seg)| {
+                    if !matches!(position, 0 | 2 | 4) {
+                        return seg;
+                    }
                     words
                         .iter()
                         .find(|(r, _)| r == seg)

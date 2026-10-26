@@ -171,6 +171,7 @@ pub enum Place {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum GlobalRef {
     App(AppGlobal),
+    ApplicationVariable(crate::ApplicationVariable),
     PlatformProperty(u16),
     SystemEnum(TypeIdx),
 }

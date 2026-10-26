@@ -84,7 +84,7 @@ impl Field {
     fn child(c: &mdconf::Child) -> Field {
         let boolean = c
             .type_desc()
-            .is_some_and(|t| matches!(t.types.as_slice(), [r] if r.qname == "xs:boolean"));
+            .is_some_and(|t| matches!(t.types.as_slice(), [r] if r.name.is_qname("xs:boolean")));
         Field {
             data: c.name.clone(),
             name: c.name.clone(),

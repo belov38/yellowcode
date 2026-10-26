@@ -1,4 +1,5 @@
 use brace::Node;
+use md_model::forms::FormAttributeType;
 
 use super::decode::{DecodedForm, Item, Rec, item_tag};
 use super::{Form, FormAttribute, FormCommand, FormItem, FormParameter};
@@ -25,6 +26,26 @@ fn flag(r: &Rec, i: usize) -> bool {
     r.raw.at(i).and_then(Node::as_bool).unwrap_or(false)
 }
 
+pub(crate) fn attribute_types(
+    pattern: Option<&Node>,
+) -> impl Iterator<Item = FormAttributeType> + '_ {
+    pattern
+        .filter(|p| p.at(0).and_then(Node::text) == Some("Pattern"))
+        .and_then(Node::as_list)
+        .and_then(|p| p.get(1..))
+        .into_iter()
+        .flatten()
+        .map(|descriptor| match descriptor.at(0).and_then(Node::text) {
+            Some("#") => descriptor
+                .at(1)
+                .and_then(Node::text)
+                .and_then(brace::Guid::parse)
+                .map_or(FormAttributeType::Invalid, FormAttributeType::Id),
+            Some(_) => FormAttributeType::Other,
+            None => FormAttributeType::Invalid,
+        })
+}
+
 pub(crate) fn form_from_decoded(d: &DecodedForm) -> Form {
     let mut items = Vec::new();
     if let Some(a) = d.acb() {
@@ -40,6 +61,7 @@ pub(crate) fn form_from_decoded(d: &DecodedForm) -> Form {
                 id: r.id.unwrap_or(0),
                 name: r.name.clone(),
                 main: flag(r, 10),
+                types: attribute_types(r.raw.at(5)).collect(),
             })
             .collect(),
         commands: d

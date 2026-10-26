@@ -20,6 +20,7 @@ pub mod managed;
 pub mod mem;
 pub mod model;
 pub mod num;
+pub mod observe;
 pub mod ops;
 pub mod plan;
 pub mod register;
@@ -45,7 +46,7 @@ pub use batch::{
     run_batch_detailed,
 };
 pub use eval::text_of as value_text;
-pub use exec::{execute, execute_temps, execute_with, result_model};
+pub use exec::{execute, execute_temps, execute_temps_observed, execute_with, result_model};
 pub use host::ExecHost;
 pub use key::{Key, key_of};
 pub use mem::MemSource;

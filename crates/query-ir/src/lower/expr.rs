@@ -331,6 +331,7 @@ impl Lower<'_> {
                 PExpr::TypeOf {
                     x: self.boxed(a, row)?,
                     refs: self.storage.ref_atoms(),
+                    route_points: self.storage.route_point_refs(),
                 }
             }
             ExprKind::Func {
@@ -411,6 +412,26 @@ impl Lower<'_> {
         };
         match col {
             ColSel::Column(i) => mk(base + i64::from(i)),
+            ColSel::Field(f)
+                if matches!(
+                    self.stmt.sources.get(src.0 as usize).map(|s| &s.kind),
+                    Some(SrcKind::Virtual { .. })
+                ) =>
+            {
+                let Some(SrcKind::Virtual { cols, .. }) =
+                    self.stmt.sources.get(src.0 as usize).map(|s| &s.kind)
+                else {
+                    return internal("a virtual source");
+                };
+                let position = match self.slice_cols.get(&src) {
+                    Some(fields) => fields.iter().position(|c| *c == f),
+                    None => cols.iter().position(|c| *c == Some(f)),
+                };
+                match position {
+                    Some(i) => mk(base + i as i64),
+                    None => internal("a field of a virtual table out of its layout"),
+                }
+            }
             ColSel::Field(f) => {
                 let stmt = self.stmt;
                 let Some(SrcKind::Table(qt)) = stmt.sources.get(src.0 as usize).map(|s| &s.kind)

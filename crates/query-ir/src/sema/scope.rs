@@ -28,6 +28,7 @@ pub(crate) struct ScopeSource<'scope> {
     pub on: Option<mem::NativeOwned<'scope, TExpr>>,
     pub vt_check: Option<VtCheck>,
     pub dim_res_used: bool,
+    pub all_fields: bool,
 }
 
 pub(crate) enum SourceCols {
@@ -300,6 +301,7 @@ impl<'scope> Level<'scope> {
                 on: None,
                 vt_check: None,
                 dim_res_used: false,
+                all_fields: false,
             },
         )?;
         Ok(level)
@@ -316,6 +318,7 @@ impl<'scope> Level<'scope> {
                 on: None,
                 vt_check: None,
                 dim_res_used: false,
+                all_fields: false,
             },
         )?;
         Ok(level)
@@ -484,6 +487,7 @@ impl<'scope> Analyzer<'scope> {
                 on: None,
                 vt_check: d.vt_check,
                 dim_res_used: false,
+                all_fields: false,
             },
         )?;
         Ok(())
@@ -547,6 +551,8 @@ impl<'scope> Analyzer<'scope> {
         let Some(id) = self.schema.find_table_managed(self.memory, parts)? else {
             return Err(self.table_not_found(path));
         };
+        let view_span =
+            matches!(self.schema.table(id).kind, TableKind::Virtual(_)).then(|| path.span());
         let (periodicity, complement, args, breakdown, vt_check) = match self.schema.table(id).kind
         {
             TableKind::Virtual(_) if self.rls => {
@@ -582,6 +588,7 @@ impl<'scope> Analyzer<'scope> {
                         args,
                         periodicity,
                         complement,
+                        span: view_span,
                         breakdown,
                     },
                 ),
@@ -740,6 +747,7 @@ impl<'scope> Analyzer<'scope> {
         let Some(src) = level.sources.get_mut(idx) else {
             return Err(self.unsupported("source out of range", s.span.start));
         };
+        let all_fields = src.all_fields;
         let alias = mem::OwnedString::new(self.memory, &src.alias)?.into_native_owned();
         let from = match (src.from.take(), &src.cols) {
             (Some(f), _) => f,
@@ -781,7 +789,7 @@ impl<'scope> Analyzer<'scope> {
             };
             joins.push_owned(mem::query::join(self.memory, j.kind, right, on)?)?;
         }
-        mem::query::source(self.memory, alias, from, joins.finish())
+        mem::query::source(self.memory, alias, from, joins.finish(), all_fields)
     }
 
     fn current_source_mut(&mut self, idx: usize) -> Option<&mut ScopeSource<'scope>> {
@@ -1097,6 +1105,7 @@ impl<'scope> Analyzer<'scope> {
     fn mark_all_used(&mut self, si: usize) {
         if let Some(src) = self.levels.last_mut().and_then(|l| l.sources.get_mut(si)) {
             src.dim_res_used = true;
+            src.all_fields = true;
         }
     }
 

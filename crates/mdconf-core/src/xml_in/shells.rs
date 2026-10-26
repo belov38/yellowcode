@@ -105,7 +105,7 @@ pub(super) fn load_with_values(
         })
         .cloned()
         .collect();
-    let (report, message) = if let Some(assembly) = loader.assembly {
+    let (report, message, namespace_envelopes) = if let Some(assembly) = loader.assembly {
         let diagnostics = assembly.reader.into_diagnostics();
         for (key, count) in diagnostics.misses {
             *loader.diag.misses.entry(key).or_default() += count;
@@ -114,15 +114,18 @@ pub(super) fn load_with_values(
         (
             assembly.report,
             "XML objects: parts and configuration settings are not loaded; unsuitable for full dumping",
+            assembly.namespace_envelopes,
         )
     } else {
         (
             ObjectReport::default(),
             "XML shells only: properties, modules and parts are not loaded; unsuitable for queries or dumping",
+            Default::default(),
         )
     };
     loader.diag.unsupported.push(message.into());
     let configuration = Configuration {
+        xml_namespace_envelopes: namespace_envelopes,
         id,
         header_id: header,
         objects,

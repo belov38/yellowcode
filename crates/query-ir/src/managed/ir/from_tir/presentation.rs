@@ -1,12 +1,6 @@
 use super::*;
-use crate::schema::{FieldRole, QFieldId, QTableId, StdRole};
+use crate::schema::{FieldRole, QFieldId, StdRole};
 impl<'c, 'a, 'r, 'w, 't> Builder<'c, 'a, 'r, 'w, 't> {
-    fn is_presentation_field(&self, table: QTableId, field: QFieldId) -> bool {
-        self.schema.field(table, field).is_some_and(|f| {
-            f.role == FieldRole::Virtual
-                && (f.name_ru == "Представление" || f.name_en == "Presentation")
-        })
-    }
     pub(super) fn presentation_item(
         &mut self,
         select: &'t tir::Select,
@@ -80,7 +74,7 @@ impl<'c, 'a, 'r, 'w, 't> Builder<'c, 'a, 'r, 'w, 't> {
                 || !last
                     .targets
                     .iter()
-                    .all(|(t, f)| self.is_presentation_field(*t, *f))
+                    .all(|(t, f)| self.schema.is_presentation_field(*t, *f))
             {
                 return Ok(None);
             }
@@ -113,7 +107,7 @@ impl<'c, 'a, 'r, 'w, 't> Builder<'c, 'a, 'r, 'w, 't> {
             return Ok(None);
         };
         let table = *table;
-        if !self.is_presentation_field(table, field) {
+        if !self.schema.is_presentation_field(table, field) {
             return Ok(None);
         }
         let Some(field) = self

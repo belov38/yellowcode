@@ -2,7 +2,9 @@ use super::{
     AggCall, BuildError, ColSel, Expr, ExprKind, NestedRows, NestedS, Rel, SortKey, SourceS, SrcId,
     SrcKind, StmtS,
 };
-use crate::schema::{FieldRole, QFieldId, QTableId, StdRole, TableKind, ValuePath};
+use crate::schema::{
+    FieldRole, QFieldId, QTableId, StdRole, TableKind, ValuePath, VtKind, VtParamKind,
+};
 use crate::tir::{self, Col, From, Query, Select, Source, TExpr, TKind};
 use crate::types::QType;
 use crate::value::QValue;
@@ -14,6 +16,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
 mod autoorder;
+mod qr8;
 mod totals;
 
 type R<T> = Result<T, BuildError>;
@@ -26,6 +29,8 @@ pub fn build_stmt(c: &CompiledStmt, schema: &QuerySchema) -> Result<StmtS, Build
     let depth = c.typed.max_depth;
     let tir::StmtKind::Query(q) = &c.typed.kind else {
         return Ok(StmtS {
+            qr8: Vec::new(),
+            static_analysis: c.typed.static_analysis,
             root: Rel::Empty,
             columns: Vec::new(),
             sources: Vec::new(),
@@ -83,6 +88,8 @@ pub fn build_stmt(c: &CompiledStmt, schema: &QuerySchema) -> Result<StmtS, Build
             _ => None,
         };
         Ok(StmtS {
+            qr8: std::mem::take(&mut b.qr8),
+            static_analysis: c.typed.static_analysis,
             root,
             columns,
             sources: std::mem::take(&mut b.sources),
@@ -105,6 +112,7 @@ struct Declared<'a> {
 }
 
 struct Builder<'a> {
+    qr8: Vec<super::Qr8Param>,
     schema: &'a QuerySchema,
     sources: Vec<SourceS>,
     levels: Vec<Vec<SrcId>>,
@@ -151,6 +159,7 @@ struct SectionMap {
 impl<'a> Builder<'a> {
     fn new(c: &CompiledStmt, schema: &'a QuerySchema) -> Builder<'a> {
         let mut b = Builder {
+            qr8: Vec::new(),
             schema,
             sources: Vec::new(),
             levels: Vec::new(),
@@ -692,7 +701,7 @@ impl<'a> Builder<'a> {
             return internal("a nested table of an unknown type in Execute");
         }
         let (owner_ref, tab) = self.owner_of(&it.expr)?;
-        let Some(tab_src) = self.section_source(tab)? else {
+        let Some(tab_src) = self.section_source(tab, nested.iter().any(|item| item.star))? else {
             return internal("a tabular section without a source");
         };
         let owner = self.section_col(tab_src, tab, StdRole::Ref)?;
@@ -795,7 +804,7 @@ impl<'a> Builder<'a> {
             return internal("an aggregate over a field that is not a tabular section");
         };
         let owner = self.section_col(src, qt, StdRole::Ref)?;
-        let Some(tab_src) = self.section_source(tab)? else {
+        let Some(tab_src) = self.section_source(tab, false)? else {
             return internal("a tabular section without a source");
         };
         let section_owner = self.section_col(tab_src, tab, StdRole::Ref)?;
@@ -942,13 +951,14 @@ impl<'a> Builder<'a> {
         }
     }
 
-    fn section_source(&mut self, tab: QTableId) -> R<Option<SrcId>> {
+    fn section_source(&mut self, tab: QTableId, all_fields: bool) -> R<Option<SrcId>> {
         let Ok(n) = u32::try_from(self.sources.len()) else {
             return internal("too many sources");
         };
         let id = SrcId(n);
         self.sources.push(SourceS {
             id,
+            all_fields,
             kind: SrcKind::Table(tab),
         });
         self.touch(tab);
@@ -987,22 +997,40 @@ impl<'a> Builder<'a> {
         ids.push(id);
         self.sources.push(SourceS {
             id,
+            all_fields: s.all_fields,
             kind: SrcKind::Subquery {
                 columns: Vec::new(),
             },
         });
         let rel = match &s.from {
+            From::Table {
+                id: t,
+                args,
+                periodicity,
+                complement,
+                span,
+                ..
+            } if self.schema.supports_register_vt(*t) => {
+                self.register_vt(id, *t, args, *periodicity, *complement, *span)?
+            }
+            From::Table { id: t, args, .. }
+                if matches!(
+                    self.schema.table(*t).kind,
+                    TableKind::Virtual(VtKind::TaskByPerformer | VtKind::FilterCriterion)
+                ) =>
+            {
+                self.qr8_source(id, *t, args)?
+            }
             From::Table { id: t, .. } => {
                 match self.schema.table(*t).kind {
-                    TableKind::Virtual(_) => {
+                    TableKind::Virtual(v)
+                        if !matches!(
+                            v,
+                            VtKind::SequenceBoundaries | VtKind::BusinessProcessPoints
+                        ) =>
+                    {
                         return Err(BuildError::Later {
                             what: "виртуальные таблицы",
-                            stage: "Q5",
-                        });
-                    }
-                    TableKind::Changes => {
-                        return Err(BuildError::Later {
-                            what: ".Изменения",
                             stage: "Q5",
                         });
                     }
@@ -1405,13 +1433,6 @@ impl<'a> Builder<'a> {
         })
     }
 
-    fn is_presentation_field(&self, t: QTableId, f: QFieldId) -> bool {
-        self.schema.field(t, f).is_some_and(|x| {
-            x.role == FieldRole::Virtual
-                && (x.name_ru == "Представление" || x.name_en == "Presentation")
-        })
-    }
-
     fn presentation_item(
         &mut self,
         sel: &'a Select,
@@ -1481,7 +1502,7 @@ impl<'a> Builder<'a> {
                 && last
                     .targets
                     .iter()
-                    .all(|(t, f)| self.is_presentation_field(*t, *f));
+                    .all(|(t, f)| self.schema.is_presentation_field(*t, *f));
             if !all {
                 return Ok(None);
             }
@@ -1504,7 +1525,7 @@ impl<'a> Builder<'a> {
             return Ok(None);
         };
         let qt = *qt;
-        if !self.is_presentation_field(qt, f) {
+        if !self.schema.is_presentation_field(qt, f) {
             return Ok(None);
         }
         let Some(r) = self
@@ -1532,11 +1553,118 @@ impl<'a> Builder<'a> {
         }))
     }
 
+    fn register_vt(
+        &mut self,
+        src: SrcId,
+        t: QTableId,
+        args: &'a [Option<TExpr>],
+        periodicity: crate::schema::Periodicity,
+        complement: Option<crate::schema::Complement>,
+        span: Option<query_syntax::Span>,
+    ) -> R<Rel> {
+        let table = self.schema.table(t);
+        let Some(register) = table.owner else {
+            return internal("a virtual table without its register");
+        };
+        let TableKind::Virtual(kind) = table.kind else {
+            return internal("not a virtual table");
+        };
+        let slice = matches!(kind, VtKind::SliceLast | VtKind::SliceFirst);
+        let shape = crate::lower::vt_shape(self.schema, t);
+        let all: Vec<Option<QFieldId>> = (0..table.fields.len())
+            .map(|i| u16::try_from(i).ok().map(QFieldId))
+            .collect();
+        if let Some(x) = self.sources.get_mut(src.0 as usize) {
+            x.kind = SrcKind::Virtual {
+                table: t,
+                cols: all,
+            };
+        }
+        let mut inner_cols: Vec<Option<QFieldId>> =
+            vec![None; crate::ir::raw_layout::width(shape.dims.len(), shape.resources.len())];
+        for (i, f) in shape.dims.iter().enumerate() {
+            if let Some(c) = inner_cols.get_mut(crate::ir::raw_layout::DIMS + i) {
+                *c = Some(*f);
+            }
+        }
+        if slice {
+            inner_cols = (0..table.fields.len())
+                .map(|i| u16::try_from(i).ok().map(QFieldId))
+                .collect();
+        }
+        let Ok(n) = u32::try_from(self.sources.len()) else {
+            return internal("too many sources");
+        };
+        let inner = SrcId(n);
+        self.sources.push(SourceS {
+            id: inner,
+            all_fields: false,
+            kind: SrcKind::Virtual {
+                table: t,
+                cols: inner_cols,
+            },
+        });
+        let mut bounds: [Option<Expr>; 2] = [None, None];
+        let mut next = 0usize;
+        let mut cond = None;
+        for (p, a) in table.params.iter().zip(args) {
+            match p.kind {
+                VtParamKind::Period => {
+                    if let Some(slot) = bounds.get_mut(next) {
+                        *slot = match a {
+                            Some(e) => Some(self.expr(e)?),
+                            None => None,
+                        };
+                    }
+                    next += 1;
+                }
+                VtParamKind::Condition => {
+                    if let Some(e) = a {
+                        self.levels.push(vec![inner]);
+                        let c = self.expr(e);
+                        self.levels.pop();
+                        cond = Some(c?);
+                    }
+                }
+                _ => {}
+            }
+        }
+        self.touch(register);
+        let v = Box::new(crate::ir::RegisterVtS {
+            src,
+            inner,
+            table: t,
+            register,
+            kind,
+            bounds,
+            cond,
+            periodicity,
+            complement,
+            area: None,
+            access: None,
+            span,
+        });
+        Ok(if slice {
+            Rel::Slice(v)
+        } else if kind == crate::schema::VtKind::BalanceAndTurnovers
+            && periodicity != crate::schema::Periodicity::Absent
+        {
+            Rel::RunningBalance(v)
+        } else {
+            Rel::RegisterVt(v)
+        })
+    }
+
     fn column_type(&self, src: SrcId, col: ColSel) -> QType {
         let Some(s) = self.sources.get(src.0 as usize) else {
             return QType::default();
         };
         match (&s.kind, col) {
+            (SrcKind::Virtual { table, .. }, ColSel::Field(f)) => self
+                .schema
+                .field(*table, f)
+                .map(|x| x.ty.clone())
+                .unwrap_or_default(),
             (SrcKind::Table(t), ColSel::Field(f)) => self
                 .schema
                 .field(*t, f)
@@ -1822,6 +1950,17 @@ pub(crate) fn visit_rel<'e>(r: &'e Rel, f: &mut dyn FnMut(&'e Expr)) {
             keys.iter().for_each(|k| visit_expr(&k.expr, true, f));
         }
         Rel::Union { parts, .. } => parts.iter().for_each(|p| visit_rel(p, f)),
+        Rel::RegisterVt(v) | Rel::Slice(v) | Rel::RunningBalance(v) => {
+            v.bounds
+                .iter()
+                .flatten()
+                .for_each(|b| visit_expr(b, true, f));
+            v.cond
+                .iter()
+                .chain(v.area.iter().map(|a| &a.pred))
+                .chain(v.access.iter())
+                .for_each(|c| visit_expr(c, true, f));
+        }
     }
 }
 
@@ -1901,6 +2040,32 @@ impl KeyIndex<'_> {
         let bx = |x: Box<Rel>| Box::new(self.rel(*x));
         match r {
             Rel::Empty | Rel::Scan { .. } | Rel::TempScan { .. } | Rel::ParamScan { .. } => r,
+            Rel::Slice(mut v) => {
+                let [a, b] = std::mem::take(&mut v.bounds);
+                v.bounds = [a.map(|e| self.rekey(e)), b.map(|e| self.rekey(e))];
+                v.cond = v.cond.take().map(|e| self.rekey(e));
+                v.area = v.area.take().map(|a| super::AreaFilter {
+                    pred: self.rekey(a.pred),
+                });
+                v.access = v.access.take().map(|e| self.rekey(e));
+                Rel::Slice(v)
+            }
+            Rel::RegisterVt(mut v) => {
+                let [a, b] = std::mem::take(&mut v.bounds);
+                v.bounds = [a.map(|e| self.rekey(e)), b.map(|e| self.rekey(e))];
+                v.cond = v.cond.take().map(|e| self.rekey(e));
+                v.area = v.area.take().map(|a| super::AreaFilter {
+                    pred: self.rekey(a.pred),
+                });
+                v.access = v.access.take().map(|e| self.rekey(e));
+                Rel::RegisterVt(v)
+            }
+            Rel::RunningBalance(mut v) => {
+                let [a, b] = std::mem::take(&mut v.bounds);
+                v.bounds = [a.map(|e| self.rekey(e)), b.map(|e| self.rekey(e))];
+                v.cond = v.cond.take().map(|e| self.rekey(e));
+                Rel::RunningBalance(v)
+            }
             Rel::Subquery { src, input } => Rel::Subquery {
                 src,
                 input: bx(input),

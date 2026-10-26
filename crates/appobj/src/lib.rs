@@ -28,10 +28,12 @@ mod rights;
 mod select;
 mod serial;
 pub mod session;
+mod session_info;
 pub mod types;
 pub mod values;
 
 pub use app::*;
 pub use error::{AppError, Result};
+pub use queryhost::CallQueryProvider;
 pub use rights::{Right, RightTarget};
 pub use session::*;

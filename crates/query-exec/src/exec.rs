@@ -35,7 +35,53 @@ pub fn execute_temps(
     temps: Option<&TempTables>,
     opts: PlanOptions,
 ) -> Result<QueryResult, ExecError> {
-    with_source(stmt.max_depth, src, move |s| run(stmt, s, env, temps, opts))?
+    execute_temps_impl(stmt, src, env, temps, opts, None)
+}
+
+fn execute_temps_impl(
+    stmt: &StmtL,
+    src: &dyn DataSource,
+    env: &ExecEnv<'_>,
+    temps: Option<&TempTables>,
+    opts: PlanOptions,
+    observation: Option<&crate::observe::ObservationSession>,
+) -> Result<QueryResult, ExecError> {
+    let Some(obs) = observation else {
+        return with_source(stmt.max_depth, src, move |s| {
+            run(stmt, s, env, temps, opts, None)
+        })?;
+    };
+    let seed = obs.execution_seed();
+    let mut guard = ObservationGuard {
+        session: obs,
+        published: false,
+    };
+    let transferred = with_source(stmt.max_depth, src, move |s| {
+        let local = crate::observe::ObservationSession::from_seed(seed);
+        let result = run(stmt, s, env, temps, opts, Some(&local));
+        local.finish(result.is_ok());
+        (result, local.seed())
+    });
+    match transferred {
+        Ok((result, report)) => {
+            obs.publish(report);
+            guard.published = true;
+            result
+        }
+        Err(error) => Err(error),
+    }
+}
+
+struct ObservationGuard<'a> {
+    session: &'a crate::observe::ObservationSession,
+    published: bool,
+}
+impl Drop for ObservationGuard<'_> {
+    fn drop(&mut self) {
+        if !self.published {
+            self.session.finish(false);
+        }
+    }
 }
 
 fn charge_sets(r: &query_ir::RelL, cx: &mut Cx<'_>) -> Result<(), ExecError> {
@@ -66,7 +112,28 @@ fn charge_sets(r: &query_ir::RelL, cx: &mut Cx<'_>) -> Result<(), ExecError> {
     }
     fn rel(r: &RelL, b: &mut u64) {
         match r {
-            RelL::Empty | RelL::Scan { .. } | RelL::TempScan { .. } | RelL::Values { .. } => {}
+            RelL::Empty
+            | RelL::Scan { .. }
+            | RelL::TempScan { .. }
+            | RelL::Values { .. }
+            | RelL::RegisterRows(_) => {}
+            RelL::Slice {
+                input,
+                totals,
+                step,
+            } => {
+                rel(input, b);
+                if let Some(t) = totals {
+                    rel(t, b);
+                }
+                exprs(step.bound.iter(), b);
+            }
+            RelL::RunningBalance { input, step } => {
+                rel(input, b);
+                expr(&step.period, b);
+                exprs(&step.period_fields, b);
+                exprs(step.bounds.iter().flatten(), b);
+            }
             RelL::Join { l, r, on, eq, .. } => {
                 rel(l, b);
                 rel(r, b);
@@ -91,7 +158,9 @@ fn charge_sets(r: &query_ir::RelL, cx: &mut Cx<'_>) -> Result<(), ExecError> {
                 exprs(keys, b);
                 exprs(aggs.iter().filter_map(|a| a.arg.as_ref()), b);
             }
-            RelL::Distinct(input) | RelL::Top { input, .. } => rel(input, b),
+            RelL::CheckAccess { input, .. } | RelL::Distinct(input) | RelL::Top { input, .. } => {
+                rel(input, b)
+            }
             RelL::Sort { input, keys } | RelL::HierarchyOrder { input, keys, .. } => {
                 rel(input, b);
                 exprs(keys.iter().map(|(k, _)| k), b);
@@ -119,11 +188,29 @@ fn run(
     env: &ExecEnv<'_>,
     temps: Option<&TempTables>,
     opts: PlanOptions,
+    observation: Option<&crate::observe::ObservationSession>,
 ) -> Result<QueryResult, ExecError> {
-    let plan = plan_temps(stmt, src, temps, opts)?;
+    crate::register::check_slice_use(stmt, src, observation)?;
+    let mut plan = plan_temps(stmt, src, temps, opts)?;
+    if let Some(obs) = observation {
+        obs.plan(&mut plan, &[0]);
+        for (index, nested) in stmt.nested.iter().enumerate() {
+            if nested.rows.is_some() {
+                obs.nested_slot(index);
+            }
+        }
+        if let Some(totals) = &stmt.totals {
+            for point in &totals.points {
+                for target in &point.hier {
+                    obs.table(target.table);
+                }
+            }
+        }
+    }
     let mut op = build(&plan);
     let mut cx = Cx::new(env, src);
     cx.temps = temps;
+    cx.observation = observation.cloned();
     cx.week_start = stmt.week_start;
     cx.plan_options(opts);
     charge_sets(&stmt.root, &mut cx)?;
@@ -189,4 +276,16 @@ pub fn result_model(r: &QueryResult) -> u64 {
         + r.totals
             .as_ref()
             .map_or(0, crate::totals::TotalsTree::model)
+}
+
+#[doc(hidden)]
+pub fn execute_temps_observed(
+    stmt: &StmtL,
+    src: &dyn DataSource,
+    env: &ExecEnv<'_>,
+    temps: Option<&TempTables>,
+    opts: PlanOptions,
+    obs: &crate::observe::ObservationSession,
+) -> Result<QueryResult, ExecError> {
+    execute_temps_impl(stmt, src, env, temps, opts, Some(obs))
 }

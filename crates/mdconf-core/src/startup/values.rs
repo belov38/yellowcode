@@ -43,6 +43,13 @@ impl<'a> ManagedValueContext<'a> {
         self.index.memory_budget()
     }
     pub fn type_desc(&self, pat: &Node) -> Result<Option<Charged<TypeDescription>>, BudgetError> {
+        self.type_desc_with_platform(pat, |raw| static_schema().platform_type(raw))
+    }
+    fn type_desc_with_platform<'p>(
+        &self,
+        pat: &Node,
+        platform: impl Fn(&str) -> Option<mdschema::BorrowedPlatformType<'p>>,
+    ) -> Result<Option<Charged<TypeDescription>>, BudgetError> {
         let list = present!(pat.as_list());
         if list.first().and_then(Node::text) != Some("Pattern") {
             return Ok(None);
@@ -61,15 +68,15 @@ impl<'a> ManagedValueContext<'a> {
         for item in items {
             let item = present!(item.as_list());
             let code = present!(item.first().and_then(Node::text));
-            let (qname, set, type_id) = match code {
-                "B" => (text(self.memory_budget(), &["xs:boolean"])?, false, None),
+            let (name, set, type_id) = match code {
+                "B" => (self.fixed_name("xs:boolean")?, false, None),
                 "S" => {
                     let (length, fixed) = present!(len_fixed(item));
                     out = out.map(|mut d| {
                         d.string = Some(StringQualifiers { length, fixed });
                         d
                     });
-                    (text(self.memory_budget(), &["xs:string"])?, false, None)
+                    (self.fixed_name("xs:string")?, false, None)
                 }
                 "N" => {
                     let digits = present!(item.get(1).and_then(num));
@@ -83,7 +90,7 @@ impl<'a> ManagedValueContext<'a> {
                         });
                         d
                     });
-                    (text(self.memory_budget(), &["xs:decimal"])?, false, None)
+                    (self.fixed_name("xs:decimal")?, false, None)
                 }
                 "D" => {
                     let date = match item.get(1).and_then(Node::text) {
@@ -95,7 +102,7 @@ impl<'a> ManagedValueContext<'a> {
                         d.date = Some(date);
                         d
                     });
-                    (text(self.memory_budget(), &["xs:dateTime"])?, false, None)
+                    (self.fixed_name("xs:dateTime")?, false, None)
                 }
                 "R" => {
                     let (length, fixed) = present!(len_fixed(item));
@@ -103,44 +110,28 @@ impl<'a> ManagedValueContext<'a> {
                         d.binary = Some(BinaryQualifiers { length, fixed });
                         d
                     });
-                    (
-                        text(self.memory_budget(), &["xs:base64Binary"])?,
-                        false,
-                        None,
-                    )
+                    (self.fixed_name("xs:base64Binary")?, false, None)
                 }
                 "#" => {
                     let raw = present!(item.get(1).and_then(Node::text));
                     let id = present!(Guid::parse(raw));
                     if let Some(name) = self.index.types.get(&id) {
+                        let expanded = present!(mdschema::ExpandedTypeName::new(
+                            mdschema::FixedNamespace::Cfg.uri(),
+                            name.as_str()
+                        ));
                         (
-                            text(self.memory_budget(), &["cfg:", name.as_str()])?,
-                            matches!(
-                                name.as_str().split('.').next(),
-                                Some("DefinedType" | "Characteristic")
-                            ),
+                            self.type_name(expanded)?,
+                            name.as_str().split('.').next().is_some_and(|category| {
+                                crate::objects::types::SET_CATEGORIES.contains(&category)
+                            }),
                             Some(id),
                         )
                     } else if raw == T_TYPEDESC {
-                        (
-                            text(self.memory_budget(), &["v8:TypeDescription"])?,
-                            false,
-                            None,
-                        )
+                        (self.fixed_name("v8:TypeDescription")?, false, None)
                     } else {
-                        let platform = present!(
-                            static_schema()
-                                .table("types.json")
-                                .and_then(|t| t.get(raw))
-                                .and_then(|v| v.as_array())
-                        );
-                        let kind = present!(platform.first().and_then(|v| v.as_str()));
-                        let qname = present!(platform.get(1).and_then(|v| v.as_str()));
-                        (
-                            text(self.memory_budget(), &[qname])?,
-                            kind == "TypeSet",
-                            None,
-                        )
+                        let platform = present!(platform(raw));
+                        (self.type_name(platform.name)?, platform.set, None)
                     }
                 }
                 _ => return Ok(None),
@@ -148,16 +139,36 @@ impl<'a> ManagedValueContext<'a> {
             if out.types.len() == out.types.capacity() {
                 return Err(BudgetError::Overflow);
             }
-            out = out.try_zip(qname.into_string()?)?.map(|(mut d, qname)| {
-                d.types.push(TypeRef {
-                    qname,
-                    set,
-                    type_id,
-                });
+            out = out.try_zip(name)?.map(|(mut d, name)| {
+                d.types.push(TypeRef { name, set, type_id });
                 d
             });
         }
         Ok(Some(out))
+    }
+    fn fixed_name(&self, qname: &str) -> Result<Charged<crate::XmlTypeName>, BudgetError> {
+        let name = mdschema::ExpandedTypeName::from_qname(qname).ok_or(BudgetError::Overflow)?;
+        self.type_name(name)
+    }
+    fn type_name(
+        &self,
+        name: mdschema::ExpandedTypeName<'_>,
+    ) -> Result<Charged<crate::XmlTypeName>, BudgetError> {
+        mdschema::ExpandedTypeName::new(name.namespace_uri, name.local)
+            .ok_or(BudgetError::Overflow)?;
+        let local = text(self.memory_budget(), &[name.local])?.into_string()?;
+        if let Some(ns) = mdschema::FixedNamespace::from_uri(name.namespace_uri) {
+            Ok(local.map(|local| crate::XmlTypeName {
+                namespace: crate::TypeNamespace::Fixed(ns),
+                local,
+            }))
+        } else {
+            let uri = text(self.memory_budget(), &[name.namespace_uri])?.into_string()?;
+            Ok(local.try_zip(uri)?.map(|(local, uri)| crate::XmlTypeName {
+                namespace: crate::TypeNamespace::Uri(uri),
+                local,
+            }))
+        }
     }
     pub fn design_time_ref(&self, node: &Node) -> Result<Option<BudgetedText>, BudgetError> {
         let list = present!(node.as_list());

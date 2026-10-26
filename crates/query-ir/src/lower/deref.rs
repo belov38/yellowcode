@@ -32,6 +32,13 @@ pub(super) enum Plan {
 }
 
 impl Plan {
+    fn needs_match_guard(&self) -> bool {
+        match self {
+            Plan::PredefName(..) | Plan::RefType(..) => true,
+            Plan::Only { inner, .. } => inner.needs_match_guard(),
+            _ => false,
+        }
+    }
     pub fn needs(&self, out: &mut Vec<Sf>) {
         match self {
             Plan::Null => {}
@@ -64,6 +71,7 @@ pub(super) fn plan_expr(plan: &Plan, mk: &mut dyn FnMut(Sf) -> R<PExpr>) -> R<PE
         Plan::RefType(s, refs) => PExpr::TypeOf {
             x: Box::new(mk(*s)?),
             refs: refs.clone(),
+            route_points: Vec::new(),
         },
         Plan::PredefName(s, names) => PExpr::Case {
             operand: Some(Box::new(mk(*s)?)),
@@ -116,6 +124,7 @@ pub(super) enum NodeKey {
     Base(SrcId, ColSel),
     Expr(String),
     Step(u32, String),
+    Policy(u32),
 }
 
 #[derive(Clone, Debug)]
@@ -204,9 +213,10 @@ impl Lower<'_> {
         let sf = (tid, fid);
         let base = match (fld.role, std) {
             (FieldRole::Std(StdRole::IsFolder), Some(StdField::Folder)) => Plan::Not(sf),
-            (FieldRole::Std(StdRole::Predefined), Some(StdField::PredefinedId)) => {
-                Plan::NonZero(sf)
-            }
+            (
+                FieldRole::Std(StdRole::Predefined | StdRole::ThisNode),
+                Some(StdField::PredefinedId),
+            ) => Plan::NonZero(sf),
             (FieldRole::Std(StdRole::PredefinedDataName), Some(StdField::PredefinedId)) => {
                 let names = match self.predef_names.get(&qt) {
                     Some(n) => n.clone(),
@@ -313,6 +323,10 @@ impl Lower<'_> {
         let Some(chain) = self.chains.get(&node).cloned() else {
             return internal("a missing dereference chain");
         };
+        let guard_single = chain
+            .targets
+            .first()
+            .is_some_and(|t| t.plan.needs_match_guard());
         let mut values = Vec::with_capacity(chain.targets.len());
         let mut matched = Vec::with_capacity(chain.targets.len());
         for t in &chain.targets {
@@ -331,7 +345,7 @@ impl Lower<'_> {
         }
         Ok(match values.len() {
             0 => PExpr::Lit(QValue::Null),
-            1 => values.pop().unwrap_or(PExpr::Lit(QValue::Null)),
+            1 if !guard_single => values.pop().unwrap_or(PExpr::Lit(QValue::Null)),
             _ => PExpr::Case {
                 operand: None,
                 whens: matched.into_iter().zip(values).collect(),
@@ -346,6 +360,8 @@ impl Lower<'_> {
         key: &PExpr,
         area: &[(String, PExpr)],
         step: &tir::Deref,
+        base: &Expr,
+        prefix: &[tir::Deref],
     ) -> R<Chain> {
         let anchor = row.rep;
         let anchor_off = match anchor {
@@ -406,9 +422,39 @@ impl Lower<'_> {
                 }
             }
             let start = p16(row.width as i64)?;
-            let scan = RelL::Scan {
-                table: tid,
-                fields: cols.iter().map(|c| c.1).collect(),
+            let secured = if self.policy_depth == 0 {
+                self.b.security.target(self.schema, base, prefix, *qt)
+            } else {
+                None
+            };
+            let (scan, scan_width, scan_signal) = if let Some(src) = secured {
+                for field in self.scan_cols.get(src.0 as usize).into_iter().flatten() {
+                    if !cols.contains(field) {
+                        cols.push(*field);
+                    }
+                }
+                let idx = cols
+                    .iter()
+                    .enumerate()
+                    .map(|(i, c)| Ok((*c, p16(i as i64)?)))
+                    .collect::<R<std::collections::HashMap<_, _>>>()?;
+                if let Some(target) = self.scan_cols.get_mut(src.0 as usize) {
+                    *target = cols.clone();
+                }
+                if let Some(target) = self.scan_idx.get_mut(src.0 as usize) {
+                    *target = idx;
+                }
+                let right = self.scan(src, *qt)?;
+                (right.rel, right.width, right.signal)
+            } else {
+                (
+                    RelL::Scan {
+                        table: tid,
+                        fields: cols.iter().map(|c| c.1).collect(),
+                    },
+                    cols.len(),
+                    None,
+                )
             };
             let mut on = vec![PExpr::Compare(
                 CmpOp::Eq,
@@ -443,7 +489,21 @@ impl Lower<'_> {
                 eq,
                 by_id: true,
             };
-            row.width += cols.len();
+            let signal = if row.signal.is_some() || scan_signal.is_some() {
+                Some(PExpr::And(vec![
+                    row.signal_expr(),
+                    scan_signal
+                        .map(|i| p16(i64::from(i) + i64::from(start)).map(super::security::neutral))
+                        .transpose()?
+                        .unwrap_or(PExpr::Lit(QValue::Bool(true))),
+                ]))
+            } else {
+                None
+            };
+            row.width += scan_width;
+            if let Some(signal) = signal {
+                row.append_signal(signal)?;
+            }
             self.added += 1;
             targets.push(Target {
                 plan,
@@ -464,8 +524,11 @@ impl Lower<'_> {
             crate::ir::ExprKind::Col { src, col } => self.node(NodeKey::Base(*src, *col)),
             _ => self.node(NodeKey::Expr(format!("{:?}", base))),
         };
+        if self.policy_depth > 0 {
+            node = self.node(NodeKey::Policy(node));
+        }
         let mut cur = Cur::Base;
-        for step in steps {
+        for (i, step) in steps.iter().enumerate() {
             let child = self.node(NodeKey::Step(node, fold_name(&step.name)));
             if !self.chain_valid(child, row) {
                 if self.frozen {
@@ -482,7 +545,16 @@ impl Lower<'_> {
                     },
                     Cur::Chain(n) => self.chain_area(n)?,
                 };
-                let chain = self.step_joins(row, &key, &area, step)?;
+                let chain = self.step_joins(
+                    row,
+                    &key,
+                    &area,
+                    step,
+                    base,
+                    steps
+                        .get(..i)
+                        .ok_or_else(|| crate::ExecError::Fatal("dereference prefix".into()))?,
+                )?;
                 let old = self.chains.insert(child, chain);
                 if let Some(log) = &mut self.chain_log {
                     log.push((child, old));

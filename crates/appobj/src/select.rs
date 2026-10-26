@@ -365,10 +365,52 @@ fn prepare(app: &Application, obj: ObjId, spec: &SelectSpec) -> Result<Prepared,
     })
 }
 
+struct InterimSelectionSecurity;
+
+impl InterimSelectionSecurity {
+    fn for_call(ex: &mut Execution) -> Result<Self, HostError> {
+        if call_ctx(ex).is_some_and(|c| c.sess.user().no_users) {
+            Ok(Self)
+        } else {
+            Err(HostError::not_implemented(
+                "P6",
+                "selection security provider",
+            ))
+        }
+    }
+}
+
+impl query_ir::AccessPolicy for InterimSelectionSecurity {
+    fn read_policy(
+        &self,
+        _: &query_ir::SourceTable,
+        _: &query_ir::FieldSet,
+    ) -> Result<query_ir::Access, query_ir::HostError> {
+        Ok(query_ir::Access::Unrestricted)
+    }
+}
+
+impl query_ir::SessionValues for InterimSelectionSecurity {
+    fn session_param(&self, name: &str) -> Result<QValue, query_ir::HostError> {
+        Err(query_ir::HostError::new(format!(
+            "P6: session parameter {name}"
+        )))
+    }
+
+    fn separators(&self) -> Result<Vec<query_ir::SeparatorFilter>, query_ir::HostError> {
+        Ok(Vec::new())
+    }
+
+    fn user(&self) -> Option<&query_ir::UserRef> {
+        None
+    }
+}
+
 fn bind(
     app: &Application,
     ctx: &QueryCtx,
     stmt: &query_ir::ir::StmtS,
+    security: &InterimSelectionSecurity,
 ) -> Result<query_ir::StmtL, HostError> {
     let host = CallBindHost::new(app);
     query_ir::bind(
@@ -379,6 +421,10 @@ fn bind(
             map: &ctx.map,
             params: &NoValues,
             host: &host,
+            security: query_ir::host::SecurityCtx {
+                access: security,
+                session: security,
+            },
         },
     )
     .map_err(|e| exec_error(&e))
@@ -475,12 +521,13 @@ impl SelectionObject {
         }
     }
 
-    fn start(&self, st: &mut State) -> Result<(), HostError> {
+    fn start(&self, ex: &mut Execution, st: &mut State) -> Result<(), HostError> {
         let Src::Pending(p) = std::mem::replace(&mut st.src, Src::Done) else {
             return Ok(());
         };
         let (ctx, stmt) = *p;
-        let lowered = bind(&self.app, &ctx, &stmt)?;
+        let security = InterimSelectionSecurity::for_call(ex)?;
+        let lowered = bind(&self.app, &ctx, &stmt, &security)?;
         let txn = self.app.store().read().map_err(|e| store_error(&e))?;
         let Some(guard) = StreamGuard::take(self.app.live_streams()) else {
             let cancel = AtomicBool::new(false);
@@ -511,13 +558,13 @@ impl SelectionObject {
         Ok(())
     }
 
-    fn advance(&self) -> Result<bool, HostError> {
+    fn advance(&self, ex: &mut Execution) -> Result<bool, HostError> {
         let mut st = self
             .state
             .try_borrow_mut()
             .map_err(|_| internal("selection re-entered"))?;
         if matches!(st.src, Src::Pending(_)) {
-            self.start(&mut st)?;
+            self.start(ex, &mut st)?;
         }
         loop {
             let item = match &mut st.src {
@@ -677,7 +724,7 @@ impl HostObject for SelectionObject {
 
     fn call(&self, ex: &mut Execution, m: MemberId, _: &mut [Arg]) -> CallResult<Value> {
         match self.member(ex, m) {
-            Some((true, "Следующий")) => Ok(Value::Bool(self.advance()?)),
+            Some((true, "Следующий")) => Ok(Value::Bool(self.advance(ex)?)),
             Some((true, "ПолучитьОбъект")) => match self.current_ref() {
                 Some(r) => crate::objects::get_object(ex, &self.app, r),
                 None => Err(crate::objects::not_selected().into()),
@@ -714,6 +761,7 @@ pub(crate) fn select(
     obj: ObjId,
     spec: SelectSpec,
 ) -> CallResult<Value> {
+    InterimSelectionSecurity::for_call(ex)?;
     let arc = app
         .arc()
         .ok_or_else(|| internal("the application is gone"))?;
@@ -762,17 +810,18 @@ pub(crate) fn select(
 }
 
 pub(crate) fn find_one(
-    _ex: &mut Execution,
+    ex: &mut Execution,
     app: &Application,
     obj: ObjId,
     mut spec: SelectSpec,
 ) -> CallResult<Value> {
+    let security = InterimSelectionSecurity::for_call(ex)?;
     spec.top = Some(1);
     let p = prepare(app, obj, &spec)?;
     let found = if p.empty {
         None
     } else {
-        let lowered = bind(app, &p.ctx, &p.stmt)?;
+        let lowered = bind(app, &p.ctx, &p.stmt, &security)?;
         let txn = app.store().read().map_err(|e| store_error(&e))?;
         let cancel = AtomicBool::new(false);
         let env = ExecEnv {

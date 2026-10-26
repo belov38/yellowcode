@@ -1,7 +1,7 @@
 use super::{PExpr, RelL, StmtL};
 use crate::QuerySchema;
 use crate::ir::print::{bin_op, cmp_op, lit_text, type_text};
-use ibschema::storage::StorageMap;
+use ibschema::storage::{StorageMap, TableId};
 use query_syntax::ast::JoinKind;
 use query_syntax::with_deep_stack;
 use std::fmt::Write;
@@ -101,6 +101,11 @@ impl Printer<'_> {
                 if *by_id {
                     self.w(" by-id");
                 }
+                self.w(")");
+            }
+            RelL::CheckAccess { input, signal } => {
+                self.w(&format!("(check-access {signal} "));
+                self.rel(input);
                 self.w(")");
             }
             RelL::Filter { input, pred } => {
@@ -244,6 +249,52 @@ impl Printer<'_> {
                 let _ = write!(self.out, "(hierarchy #{id} #{parent} ");
                 self.rel(input);
                 self.keys(keys);
+                self.w(")");
+            }
+            RelL::Slice {
+                input,
+                totals,
+                step,
+            } => {
+                let _ = write!(self.out, "(slice first={} ", step.first);
+                self.rel(input);
+                if let Some(totals) = totals {
+                    self.w(" totals=");
+                    self.rel(totals);
+                }
+                if let Some(bound) = &step.bound {
+                    self.w(" bound=");
+                    self.expr(bound);
+                }
+                self.w(")");
+            }
+            RelL::RunningBalance { input, .. } => {
+                self.w("(running-balance ");
+                self.rel(input);
+                self.w(")");
+            }
+            RelL::RegisterRows(r) => {
+                let name = |t: TableId| self.map.try_table(t).map_or("?", |x| x.logical.as_str());
+                let _ = write!(
+                    self.out,
+                    "(register-rows {:?} {}",
+                    r.kind,
+                    name(r.movements)
+                );
+                if let Some(t) = &r.totals {
+                    let _ = write!(self.out, " totals={}", name(t.table));
+                }
+                if let Some(t) = &r.turnovers {
+                    let _ = write!(self.out, " turnovers={}", name(t.table));
+                }
+                for (i, b) in r.bounds.iter().enumerate() {
+                    if let Some(b) = b {
+                        let _ = write!(self.out, " bound{i}={b:?}");
+                    }
+                }
+                if !r.coarse {
+                    self.w(" fine");
+                }
                 self.w(")");
             }
         }

@@ -11,6 +11,7 @@ autobenches = false
 
 [dependencies]
 regex = "1"
+quick-xml = "0.37"
 thiserror = "2"
 md-model = { path = "../md-model" }
 mdschema = { path = "../mdschema" }

@@ -169,6 +169,9 @@ pub struct NodeRef<'a, 'src> {
     text: Option<&'a str>,
 }
 impl<'a, 'src> NodeRef<'a, 'src> {
+    pub(crate) fn same_node(self, other: Self) -> bool {
+        std::ptr::eq(self.arena, other.arena) && self.id == other.id
+    }
     #[doc(hidden)]
     pub fn ns(self) -> Option<&'a str> {
         self.ns

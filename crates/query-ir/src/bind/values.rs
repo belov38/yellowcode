@@ -21,6 +21,7 @@ pub(super) fn resolve<'s>(stmt: &'s StmtS, ctx: &BindCtx<'_>) -> Result<Bound<'s
     let values = bind_values(stmt, ctx)?;
     with_deep_stack(stmt.max_depth, || fold_stmt(stmt, &params, &values))?;
     Ok(Bound {
+        security: Default::default(),
         stmt,
         params,
         values,
@@ -47,7 +48,7 @@ fn storage_tables(
         let t = ctx.schema.table(*q);
         let ids: Vec<TableId> = if t.kind == TableKind::Constants {
             if constants.is_empty() {
-                constants = constant_tables(ctx, *q)?;
+                constants = constant_tables(stmt, ctx, *q)?;
             }
             constants.clone()
         } else if ctx.schema.is_unstored(*q) {
@@ -62,7 +63,7 @@ fn storage_tables(
         }
     }
     if !stmt.present.is_empty() {
-        for t in crate::lower::present_targets(ctx.schema, ctx.storage, ctx.map) {
+        for t in crate::lower::present_targets(stmt, ctx.schema, ctx.storage, ctx.map) {
             if !t.route_point && seen.insert(t.storage) {
                 out.push(t.storage);
             }
@@ -72,11 +73,32 @@ fn storage_tables(
 }
 
 fn constant_tables(
+    stmt: &StmtS,
     ctx: &BindCtx<'_>,
     all: crate::schema::QTableId,
 ) -> Result<Vec<TableId>, ExecError> {
     let mut v = Vec::new();
-    for f in &ctx.schema.table(all).fields {
+    let mut used = HashSet::new();
+    visit_stmt(stmt, &mut |e, _| {
+        if let ExprKind::Col {
+            src,
+            col: crate::ir::ColSel::Field(field),
+        } = &e.kind
+            && stmt
+                .sources
+                .get(src.0 as usize)
+                .is_some_and(|s| s.kind == crate::ir::SrcKind::Table(all))
+        {
+            used.insert(*field);
+        }
+    });
+    for (i, f) in ctx.schema.table(all).fields.iter().enumerate() {
+        if !u16::try_from(i)
+            .ok()
+            .is_some_and(|i| used.contains(&crate::schema::QFieldId(i)))
+        {
+            continue;
+        }
         let Some(md) = f.md else { continue };
         let obj = ctx.map.object(md).ok_or_else(|| {
             ExecError::Fatal(format!(
@@ -144,12 +166,178 @@ fn moment_like(v: &ParamValue) -> bool {
     }
 }
 
+#[derive(Default)]
+struct BoundParamUsage {
+    bounds: HashSet<u16>,
+    outside: HashSet<u16>,
+}
+fn vt_bound_expr_params(e: &Expr, in_bound: bool, out: &mut BoundParamUsage) {
+    crate::ir::visit_expr_in_place(e, false, &mut |e| match &e.kind {
+        ExprKind::Param(i) => {
+            if in_bound {
+                out.bounds.insert(*i);
+            } else {
+                out.outside.insert(*i);
+            }
+        }
+        ExprKind::InQuery { q, .. } => vt_bound_params(q, out),
+        ExprKind::SectionAgg { rel, .. } => vt_bound_params(rel, out),
+        _ => {}
+    });
+}
+fn vt_bound_params(r: &Rel, out: &mut BoundParamUsage) {
+    match r {
+        Rel::RegisterVt(v) | Rel::RunningBalance(v) | Rel::Slice(v) => {
+            for b in v.bounds.iter().flatten() {
+                vt_bound_expr_params(b, true, out);
+            }
+            if let Some(e) = &v.cond {
+                vt_bound_expr_params(e, false, out);
+            }
+        }
+        Rel::ParamScan { param, .. } => {
+            out.outside.insert(*param);
+        }
+        Rel::Empty | Rel::Scan { .. } | Rel::TempScan { .. } => {}
+        Rel::Subquery { input, .. } | Rel::Distinct(input) | Rel::Top { input, .. } => {
+            vt_bound_params(input, out)
+        }
+        Rel::Filter { input, pred } => {
+            vt_bound_params(input, out);
+            vt_bound_expr_params(pred, false, out);
+        }
+        Rel::Join { l, r, on, .. } => {
+            vt_bound_params(l, out);
+            vt_bound_params(r, out);
+            vt_bound_expr_params(on, false, out);
+        }
+        Rel::Aggregate {
+            input, keys, aggs, ..
+        } => {
+            vt_bound_params(input, out);
+            for e in keys {
+                vt_bound_expr_params(e, false, out);
+            }
+            for e in aggs.iter().filter_map(|a| a.arg.as_ref()) {
+                vt_bound_expr_params(e, false, out);
+            }
+        }
+        Rel::Project { input, exprs } => {
+            vt_bound_params(input, out);
+            for e in exprs {
+                vt_bound_expr_params(e, false, out);
+            }
+        }
+        Rel::Sort { input, keys } | Rel::Hierarchy { input, keys, .. } => {
+            vt_bound_params(input, out);
+            for k in keys {
+                vt_bound_expr_params(&k.expr, false, out);
+            }
+        }
+        Rel::Union { parts, .. } => {
+            for r in parts {
+                vt_bound_params(r, out);
+            }
+        }
+    }
+}
+
+fn ordinary_total_params(e: &crate::totals::TotalsExpr, out: &mut HashSet<u16>) {
+    use crate::totals::TotalsExpr;
+    match e {
+        TotalsExpr::Param(i) => {
+            out.insert(*i);
+        }
+        TotalsExpr::Agg(_) | TotalsExpr::Column(_) | TotalsExpr::Const(_) => {}
+        TotalsExpr::Neg(x) | TotalsExpr::Not(x) => ordinary_total_params(x, out),
+        TotalsExpr::Bin(_, l, r) | TotalsExpr::Cmp(_, l, r) | TotalsExpr::IsNull(l, r) => {
+            ordinary_total_params(l, out);
+            ordinary_total_params(r, out);
+        }
+        TotalsExpr::And(xs) | TotalsExpr::Or(xs) => {
+            for x in xs {
+                ordinary_total_params(x, out);
+            }
+        }
+        TotalsExpr::Case { whens, otherwise } => {
+            for (condition, value) in whens {
+                ordinary_total_params(condition, out);
+                ordinary_total_params(value, out);
+            }
+            if let Some(x) = otherwise {
+                ordinary_total_params(x, out);
+            }
+        }
+    }
+}
+
 fn bind_params(stmt: &StmtS, ctx: &BindCtx<'_>, usage: &[Usage]) -> Result<Vec<PBound>, ExecError> {
     let mut out = Vec::with_capacity(stmt.params.len());
+    let mut vt_bounds = BoundParamUsage::default();
+    with_deep_stack(stmt.max_depth, || {
+        vt_bound_params(&stmt.root, &mut vt_bounds);
+        if let Some(totals) = &stmt.totals {
+            for (e, _) in &totals.items {
+                ordinary_total_params(e, &mut vt_bounds.outside);
+            }
+            for periods in totals.points.iter().filter_map(|p| p.periods.as_ref()) {
+                for e in periods.begin.iter().chain(&periods.end) {
+                    vt_bound_expr_params(e, false, &mut vt_bounds);
+                }
+            }
+        }
+        for rows in stmt.nested.iter().filter_map(|n| n.rows.as_ref()) {
+            vt_bound_params(&rows.scan, &mut vt_bounds);
+            vt_bound_expr_params(&rows.owner, false, &mut vt_bounds);
+            vt_bound_expr_params(&rows.number, false, &mut vt_bounds);
+            for e in &rows.exprs {
+                vt_bound_expr_params(e, false, &mut vt_bounds);
+            }
+        }
+    });
     for (i, name) in stmt.params.iter().enumerate() {
         let u = usage.get(i).copied().unwrap_or_default();
-        let v = ctx.params.get(name).ok_or_else(|| not_set(name))?;
-        if moment_like(&v) {
+        let session = stmt.qr8.iter().find_map(|p| match p {
+            crate::ir::Qr8Param::Session { slot, name } if usize::from(*slot) == i => Some(name),
+            _ => None,
+        });
+        let v = match session {
+            Some(Some(name)) => ParamValue::Value(
+                ctx.security
+                    .session
+                    .session_param(name)
+                    .map_err(ExecError::Host)?,
+            ),
+            Some(None) => ParamValue::Value(QValue::Undefined),
+            None => ctx.params.get(name).ok_or_else(|| not_set(name))?,
+        };
+        for check in &stmt.qr8 {
+            if let crate::ir::Qr8Param::Criterion { slot, table } = check
+                && usize::from(*slot) == i
+            {
+                let valid = match &v {
+                    ParamValue::Value(QValue::Ref { table: number, .. }) => ctx
+                        .schema
+                        .meta(*table)
+                        .and_then(|m| m.criterion.as_ref())
+                        .is_some_and(|c| {
+                            c.ty.refs
+                                .iter()
+                                .any(|r| ctx.storage.ref_number(*r) == Some(*number))
+                        }),
+                    _ => false,
+                };
+                if !valid {
+                    return Err(ExecError::Later {
+                        what: "Q7d-CriterionParameterType",
+                        stage: "Q7d",
+                    });
+                }
+            }
+        }
+        if moment_like(&v)
+            && (!vt_bounds.bounds.contains(&(i as u16)) || vt_bounds.outside.contains(&(i as u16)))
+        {
             return Err(ExecError::Later {
                 what: "МоментВремени вне параметров виртуальной таблицы",
                 stage: "Q5",
@@ -273,8 +461,8 @@ fn bind_values(stmt: &StmtS, ctx: &BindCtx<'_>) -> Result<Vec<QValue>, ExecError
                 .map_err(ExecError::Host)?,
             ValuePath::BusinessProcessPoint { .. } => {
                 return Err(ExecError::Later {
-                    what: "ЗНАЧЕНИЕ: точка маршрута",
-                    stage: "Q5",
+                    what: "Q7d-RoutePointIdentity",
+                    stage: "Q7d",
                 });
             }
             ValuePath::TypeRef(t) => {
@@ -380,6 +568,7 @@ fn visit_scans(r: &Rel, f: &mut dyn FnMut(u16)) {
             next(r);
         }
         Rel::Union { parts, .. } => parts.iter().for_each(next),
+        Rel::RegisterVt(_) | Rel::RunningBalance(_) | Rel::Slice(_) => {}
     }
 }
 
@@ -396,6 +585,17 @@ pub(crate) fn visit_stmt<'e>(stmt: &'e StmtS, f: &mut dyn FnMut(&'e Expr, bool))
 pub(crate) fn visit_rel<'e>(r: &'e Rel, f: &mut dyn FnMut(&'e Expr, bool)) {
     match r {
         Rel::Empty | Rel::Scan { .. } | Rel::TempScan { .. } | Rel::ParamScan { .. } => {}
+        Rel::RegisterVt(v) | Rel::RunningBalance(v) | Rel::Slice(v) => {
+            v.bounds
+                .iter()
+                .flatten()
+                .for_each(|b| visit_expr(b, false, f));
+            v.cond
+                .iter()
+                .chain(v.area.iter().map(|a| &a.pred))
+                .chain(v.access.iter())
+                .for_each(|c| visit_expr(c, false, f));
+        }
         Rel::Subquery { input, .. } | Rel::Distinct(input) | Rel::Top { input, .. } => {
             visit_rel(input, f)
         }

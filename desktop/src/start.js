@@ -2,37 +2,49 @@
   "use strict";
   var $ = function (id) { return document.getElementById(id); };
   var tauri = window.__TAURI__;
+  var catalog = [], section = "recent", requestId = 0;
   var items = [], selected = "", busy = false, oldPath = null;
   var splash = location.pathname === "/splash.html";
   var lang = "ru";
   var texts = {
     ru: {
-      "list-title": "Информационные базы", enterprise: "1С:Предприятие", open: "Конфигуратор", add: "Добавить…", edit: "Изменить…", remove: "Удалить", setup: "Настройка…", quit: "Выход", "follow-link": "Перейти по ссылке", "launch-settings-title": "Настройка диалога запуска", "launch-settings-cancel": "Отмена", "skin-settings-open": "Скин…",
-      "wizard-title": "Добавление информационной базы", "name-label": "Наименование информационной базы:", "path-label": "Путь к источнику:", "pick-file": "Файл…", "pick-folder": "Папка…", finish: "Готово", "wizard-cancel": "Отмена", "settings-title": "Настройка", "skin-label": "Скин:", "skin-file": "Установить из файла…", "skin-folder": "Установить из папки…", "settings-close": "Закрыть", "splash-title": "Конфигуратор", "splash-description": "Просмотрщик конфигураций 1С", cancel: "Отмена", "confirm-ok": "Удалить", "confirm-cancel": "Отмена",
-      editing: "Редактирование информационной базы", confirm: "Удалить источник из списка? Файл останется на диске.", required: "Укажите имя и путь к источнику.", missing: "Источник не найден", unavailable: "Не реализовано в Yellowcode", container: "Чтение контейнера…", "dt-config": "Извлечение CONFIG из DT (только метаданные)…", metadata: "Загрузка метаданных и модулей…", tree: "Построение дерева конфигурации…", statistics: "Подготовка статистики…", builtin: "1С классический"
+      "list-title": "Последние", enterprise: "1С:Предприятие", open: "Открыть для просмотра", add: "Добавить…", edit: "Изменить…", remove: "Убрать из списка", setup: "Настройка…", quit: "Выход", "follow-link": "Перейти по ссылке", "launch-settings-title": "Настройка диалога запуска", "launch-settings-cancel": "Отмена", "skin-settings-open": "Скин…",
+      "wizard-title": "Добавление существующего источника", "name-label": "Наименование:", "path-label": "Путь к источнику:", "pick-file": "Файл…", "pick-folder": "Папка…", finish: "Готово", "wizard-cancel": "Отмена", "settings-title": "Настройка", "skin-label": "Скин:", "skin-file": "Установить из файла…", "skin-folder": "Установить из папки…", "settings-close": "Закрыть", "splash-title": "Конфигуратор", "splash-description": "Просмотрщик конфигураций 1С", cancel: "Отмена", "confirm-ok": "Убрать из списка", "confirm-cancel": "Отмена",
+      "nav-recent": "Последние", "nav-onec": "Базы 1С", "nav-yellowcode": "Базы Yellowcode", "nav-files": "Файлы конфигураций",
+      "origin-label": "Для базы 1CD — список:", "origin-onec": "Базы 1С · только чтение", "origin-yellowcode": "Базы Yellowcode · только чтение",
+      search: "Найти по имени или пути", readonly: "Только чтение", cf: "CF/CFE · конфигурация", dt: "DT · только метаданные", xml: "XML · просмотр пока недоступен", unknown: "Тип источника не определён",
+      emptyRecent: "Здесь появятся последние открытые источники. Добавьте существующую базу или файл конфигурации.", emptyOnec: "Добавьте существующую файловую базу 1С. Открытие выполняется только для чтения.", emptyYellowcode: "Добавьте существующую базу, созданную движком Yellowcode. Создание, импорт и редактирование из этого окна пока недоступны.", emptyFiles: "Добавьте CF/CFE или DT. Из DT открываются только метаданные, без восстановления базы.", emptySearch: "Ничего не найдено", retry: "Повторить открытие", "source-hint": "Происхождение выбирается вами. Все базы открываются только для чтения.",
+      editing: "Изменение источника", confirm: "Убрать источник из списка? Файл останется на диске.", required: "Укажите имя и путь к источнику.", missing: "Источник недоступен", unavailable: "Не реализовано в Yellowcode", container: "Чтение контейнера…", "dt-config": "Извлечение CONFIG из DT (только метаданные)…", metadata: "Загрузка метаданных и модулей…", tree: "Построение дерева конфигурации…", statistics: "Подготовка статистики…", builtin: "1С классический"
     },
     en: {
-      "list-title": "Information bases", enterprise: "1C:Enterprise", open: "Designer", add: "Add…", edit: "Edit…", remove: "Remove", setup: "Settings…", quit: "Exit", "follow-link": "Follow link", "launch-settings-title": "Startup dialog settings", "launch-settings-cancel": "Cancel", "skin-settings-open": "Skin…",
-      "wizard-title": "Add information base", "name-label": "Information base name:", "path-label": "Source path:", "pick-file": "File…", "pick-folder": "Folder…", finish: "Finish", "wizard-cancel": "Cancel", "settings-title": "Settings", "skin-label": "Skin:", "skin-file": "Install from file…", "skin-folder": "Install from folder…", "settings-close": "Close", "splash-title": "Designer", "splash-description": "1C configuration viewer", cancel: "Cancel", "confirm-ok": "Remove", "confirm-cancel": "Cancel",
-      editing: "Edit information base", confirm: "Remove the source from the list? Its file will remain on disk.", required: "Enter a source name and path.", missing: "Source not found", unavailable: "Not implemented in Yellowcode", container: "Reading container…", "dt-config": "Extracting DT CONFIG (metadata only)…", metadata: "Loading metadata and modules…", tree: "Building configuration tree…", statistics: "Preparing statistics…", builtin: "1C Classic"
+      "list-title": "Recent", enterprise: "1C:Enterprise", open: "Open for viewing", add: "Add…", edit: "Edit…", remove: "Remove", setup: "Settings…", quit: "Exit", "follow-link": "Follow link", "launch-settings-title": "Startup dialog settings", "launch-settings-cancel": "Cancel", "skin-settings-open": "Skin…",
+      "wizard-title": "Add existing source", "name-label": "Name:", "path-label": "Source path:", "pick-file": "File…", "pick-folder": "Folder…", finish: "Finish", "wizard-cancel": "Cancel", "settings-title": "Settings", "skin-label": "Skin:", "skin-file": "Install from file…", "skin-folder": "Install from folder…", "settings-close": "Close", "splash-title": "Designer", "splash-description": "1C configuration viewer", cancel: "Cancel", "confirm-ok": "Remove", "confirm-cancel": "Cancel",
+      "nav-recent": "Recent", "nav-onec": "1C bases", "nav-yellowcode": "Yellowcode bases", "nav-files": "Configuration files",
+      "origin-label": "For a 1CD base — list:", "origin-onec": "1C bases · read only", "origin-yellowcode": "Yellowcode bases · read only",
+      search: "Find by name or path", readonly: "Read only", cf: "CF/CFE · configuration", dt: "DT · metadata only", xml: "XML · viewing not available yet", unknown: "Unknown source type",
+      emptyRecent: "Recently opened sources will appear here. Add an existing base or configuration file.", emptyOnec: "Add an existing 1C file base. Sources are opened read only.", emptyYellowcode: "Add an existing base created by the Yellowcode engine. Creation, import and editing are not available from this window yet.", emptyFiles: "Add CF/CFE or DT. DT opens metadata only, without restoring a base.", emptySearch: "Nothing found", retry: "Retry opening", "source-hint": "Origin is chosen by you. All bases are opened read only.",
+      editing: "Edit source", confirm: "Remove the source from the list? Its file will remain on disk.", required: "Enter a source name and path.", missing: "Source unavailable", unavailable: "Not implemented in Yellowcode", container: "Reading container…", "dt-config": "Extracting DT CONFIG (metadata only)…", metadata: "Loading metadata and modules…", tree: "Building configuration tree…", statistics: "Preparing statistics…", builtin: "1C Classic"
     }
   };
+    function node(tag, content, className) {
+      var n = document.createElement(tag); if (content) n.textContent = content; if (className) n.className = className; return n;
+    }
   function t(key) { return texts[lang][key] || key; }
   function translate() {
     document.documentElement.lang = lang;
     Object.keys(texts[lang]).forEach(function (key) { if ($(key) && key !== "confirm") $(key).textContent = t(key); });
     $("enterprise").title = t("unavailable");
     $("follow-link").title = t("unavailable");
-    $("open").title = lang === "ru" ? "Запуск в режиме Конфигуратор (Alt+Enter)" : "Start Designer (Alt+Enter)";
+    $("open").title = t("open") + " (Alt+Enter)";
+    $("source-search").placeholder = t("search");
+    $("source-search").setAttribute("aria-label", t("search"));
+    $("source-nav").setAttribute("aria-label", lang === "ru" ? "Источники" : "Sources");
     buildLaunchSettings();
     $("skins").setAttribute("aria-label", t("skin-label"));
   }
   function buildLaunchSettings() {
     var host = $("launch-settings-content"); host.textContent = "";
     function text(ru, en) { return lang === "ru" ? ru : en; }
-    function node(tag, content, className) {
-      var n = document.createElement(tag); if (content) n.textContent = content; if (className) n.className = className; return n;
-    }
     function inert(n) { n.disabled = true; n.title = t("unavailable"); return n; }
     function checkbox(ru, en, checked) {
       var label = node("label"); var input = node("input"); input.type = "checkbox"; input.checked = checked;
@@ -84,28 +96,64 @@
     Array.from($("recent").children).forEach(function (row) { row.setAttribute("aria-selected", String(row.dataset.path === path)); });
     $("source-path").textContent = item ? item.path : "";
     $("source-path").title = item ? item.path : "";
-    $("open").disabled = busy || !item || !item.exists;
+    $("open").disabled = busy || !item || item.kind === "xml";
+    $("open").textContent = item && !item.exists ? t("retry") : t("open");
+    $("add").disabled = busy;
+    $("source-mode").textContent = item ? description(item) + (!item.exists ? " · " + t("missing") : "") : "";
     $("edit").disabled = busy || !item;
     $("remove").disabled = busy || !item;
   }
+  function category(item) { return item.kind === "infobase" ? (item.origin === "yellowcode" ? "yellowcode" : "onec") : "files"; }
+  function description(item) {
+    if (item.kind === "infobase") return t("nav-" + category(item)) + " · " + t("readonly");
+    return t(item.kind || "unknown");
+  }
+  function render() {
+    var query = $("source-search").value.normalize("NFC").toLocaleLowerCase();
+    items = catalog.filter(function (item) {
+      return (section === "recent" ? item.recent_rank !== null && item.recent_rank !== undefined : category(item) === section) &&
+        (item.name + " " + item.path).normalize("NFC").toLocaleLowerCase().includes(query);
+    });
+    if (section === "recent") items.sort(function (a, b) { return a.recent_rank - b.recent_rank; });
+    $("list-title").textContent = t("nav-" + section);
+    $("sources").setAttribute("aria-labelledby", "nav-" + section);
+    $("recent").textContent = "";
+    $("recent").removeAttribute("aria-activedescendant");
+    items.forEach(function (item, index) {
+      var row = document.createElement("li");
+      row.id = "source-" + index; row.dataset.path = item.path; row.setAttribute("role", "option");
+      var name = node("span", item.name, "source-name"), meta = node("span", description(item), "source-meta");
+      row.append(name, meta);
+      row.title = item.path + (item.exists ? "" : " — " + t("missing"));
+      if (!item.exists) row.classList.add("missing");
+      row.onclick = function () { select(item.path); $("recent").focus(); };
+      row.ondblclick = function () { select(item.path); openSelected(); };
+      $("recent").appendChild(row);
+    });
+    $("source-empty").hidden = items.length > 0;
+    $("source-empty").textContent = query ? t("emptySearch") : t({recent:"emptyRecent", onec:"emptyOnec", yellowcode:"emptyYellowcode", files:"emptyFiles"}[section]);
+    $("recent").hidden = items.length === 0;
+    select(current() ? selected : (items[0] ? items[0].path : ""));
+  }
+  function switchSection(next) {
+    section = next;
+    document.querySelectorAll("[data-section]").forEach(function (button) {
+      var active = button.dataset.section === section;
+      button.setAttribute("aria-selected", String(active)); button.tabIndex = active ? 0 : -1;
+    });
+    render();
+  }
+  document.querySelectorAll("[data-section]").forEach(function (button, index, buttons) {
+    button.onclick = function () { $("source-search").value = ""; switchSection(button.dataset.section); };
+    button.onkeydown = function (e) {
+      var next = e.key === "ArrowDown" || e.key === "ArrowRight" ? (index + 1) % buttons.length : e.key === "ArrowUp" || e.key === "ArrowLeft" ? (index + buttons.length - 1) % buttons.length : e.key === "Home" ? 0 : e.key === "End" ? buttons.length - 1 : -1;
+      if (next >= 0) { e.preventDefault(); buttons[next].click(); buttons[next].focus(); }
+    };
+  });
+  $("source-search").oninput = render;
   function loadRecent() {
-    return invoke("recent").then(function (list) {
-      items = list;
-      $("recent").textContent = "";
-      items.forEach(function (item, index) {
-        var row = document.createElement("li");
-        row.id = "source-" + index;
-        row.dataset.path = item.path;
-        row.setAttribute("role", "option");
-        row.textContent = item.name;
-        row.title = item.path + (item.exists ? "" : " — " + t("missing"));
-        if (!item.exists) row.classList.add("missing");
-        row.onclick = function () { select(item.path); $("recent").focus(); };
-        row.ondblclick = function () { select(item.path); openSelected(); };
-        $("recent").appendChild(row);
-      });
-      select(current() ? selected : (items[0] ? items[0].path : ""));
-    }).catch(error);
+    var id = ++requestId;
+    return invoke("sources").then(function (list) { if (id === requestId) { catalog = list; render(); } }).catch(error);
   }
   $("recent").onkeydown = function (e) {
     if (busy) return;
@@ -119,7 +167,7 @@
   };
   function openSelected() {
     var item = current();
-    if (busy || !item || !item.exists) return;
+    if (busy || !item || item.kind === "xml") return;
     busy = true; select(selected);
     invoke("open_source", { path: item.path }).catch(function (e) { stopLoading(); error(e); });
   }
@@ -130,6 +178,7 @@
     $("wizard-title").textContent = t(item ? "editing" : "wizard-title");
     $("source-name").value = item ? item.name : "";
     $("source-input").value = item ? item.path : "";
+    $("source-origin").value = item ? item.origin || "one_c" : section === "yellowcode" ? "yellowcode" : "one_c";
     invoke("startup_dialog_size", { dialog: "wizard" }).catch(error);
     $("wizard").showModal(); $("source-name").focus();
   }
@@ -152,8 +201,11 @@
     var name = $("source-name").value.trim(), path = $("source-input").value.trim();
     if (!name || !path) { error(t("required")); return; }
     $("finish").disabled = true;
-    invoke("save_source", { old: oldPath, path: path, name: name }).then(function (saved) {
-      selected = saved || path; $("wizard").close(); return loadRecent();
+    invoke("save_source", { old: oldPath, path: path, name: name, origin: $("source-origin").value }).then(function (saved) {
+      selected = saved || path; $("wizard").close(); return loadRecent().then(function () {
+        var item = catalog.find(function (entry) { return entry.path === (saved || path); });
+        if (item) { selected = item.path; $("source-search").value = ""; switchSection(category(item)); }
+      });
     }).catch(error).finally(function () { $("finish").disabled = false; });
   }
   $("finish").onclick = finish;

@@ -30,8 +30,8 @@ pub fn stitch<'a>(
     temps: Option<&TempTables>,
     opts: PlanOptions,
 ) -> Result<(), ExecError> {
-    for n in &stmt.nested {
-        stitch_one(stmt, n, rows, cx, temps, opts)?;
+    for (index, n) in stmt.nested.iter().enumerate() {
+        stitch_one(stmt, n, rows, cx, temps, opts, index)?;
     }
     Ok(())
 }
@@ -43,6 +43,7 @@ fn stitch_one<'a>(
     cx: &mut Cx<'a>,
     temps: Option<&TempTables>,
     opts: PlanOptions,
+    observation_index: usize,
 ) -> Result<(), ExecError> {
     let col = usize::from(n.col);
     cx.mem.grow(columns_model(&n.columns) + 48)?;
@@ -93,7 +94,15 @@ fn stitch_one<'a>(
         set_all(rows, col, &empty);
         return Ok(());
     }
-    let by_owner = read_section(stmt, second, &owners, &n.columns, cx, temps, opts);
+    let by_owner = read_section(
+        stmt,
+        (second, observation_index),
+        &owners,
+        &n.columns,
+        cx,
+        temps,
+        opts,
+    );
     drop(owners);
     cx.mem.shrink(transient);
     let by_owner = by_owner?;
@@ -126,13 +135,14 @@ fn set_all(rows: &mut [Row], col: usize, v: &Arc<NestedResult>) {
 
 fn read_section<'a>(
     stmt: &StmtL,
-    second: &NestedRowsL,
+    second: (&NestedRowsL, usize),
     owners: &[Owner],
     columns: &[ColumnInfo],
     cx: &mut Cx<'a>,
     temps: Option<&TempTables>,
     opts: PlanOptions,
 ) -> Result<HashMap<Owner, Arc<NestedResult>>, ExecError> {
+    let (second, observation_index) = second;
     let seeds = vec_block(owners.len(), std::mem::size_of::<Row>())
         + owners.len() as u64 * vec_block(1, crate::model::VALUE_SIZE)
         + 64;
@@ -159,11 +169,14 @@ fn read_section<'a>(
             "the owners of a nested table are not in its statement",
         ));
     }
-    let plan = if drive_by_owners(&second.rel, &second.owners, owners.len(), cx)? {
+    let mut plan = if drive_by_owners(&second.rel, &second.owners, owners.len(), cx)? {
         plan_rel_driven(&rel, stmt.max_depth, cx.src, temps, opts)?
     } else {
         plan_rel(&rel, stmt.max_depth, cx.src, temps, opts)?
     };
+    if let Some(obs) = &cx.observation {
+        obs.publish_nested(observation_index, &mut plan);
+    }
     let mut op = build(&plan);
     let mut groups: HashMap<Owner, Vec<(QValue, Row)>> = HashMap::new();
     let mut groups_model = HashModel::new(
@@ -245,7 +258,24 @@ fn rel_model(r: &RelL) -> u64 {
     }
     let mut b = REL_NODE;
     match r {
-        RelL::Empty | RelL::Scan { .. } | RelL::TempScan { .. } => {}
+        RelL::Empty | RelL::Scan { .. } | RelL::TempScan { .. } | RelL::RegisterRows(_) => {}
+        RelL::Slice {
+            input,
+            totals,
+            step,
+        } => {
+            b += rel_model(input);
+            if let Some(totals) = totals {
+                b += rel_model(totals);
+            }
+            exprs(step.bound.iter(), &mut b);
+        }
+        RelL::RunningBalance { input, step } => {
+            b += rel_model(input);
+            expr(&step.period, &mut b);
+            exprs(&step.period_fields, &mut b);
+            exprs(step.bounds.iter().flatten(), &mut b);
+        }
         RelL::Values { rows } => b += crate::model::rows_model(&rows.rows),
         RelL::Join { l, r, on, eq, .. } => {
             b += rel_model(l) + rel_model(r);
@@ -270,7 +300,9 @@ fn rel_model(r: &RelL) -> u64 {
             exprs(keys, &mut b);
             exprs(aggs.iter().filter_map(|a| a.arg.as_ref()), &mut b);
         }
-        RelL::Distinct(input) | RelL::Top { input, .. } => b += rel_model(input),
+        RelL::CheckAccess { input, .. } | RelL::Distinct(input) | RelL::Top { input, .. } => {
+            b += rel_model(input)
+        }
         RelL::Sort { input, keys } | RelL::HierarchyOrder { input, keys, .. } => {
             b += rel_model(input);
             exprs(keys.iter().map(|(k, _)| k), &mut b);
@@ -293,9 +325,9 @@ pub const MAX_DRIVING_OWNERS: usize = 4096;
 
 fn section_table(r: &RelL, placeholder: &Arc<ValueRows>) -> Option<ibschema::storage::TableId> {
     match r {
-        RelL::Project { input, .. } | RelL::Filter { input, .. } => {
-            section_table(input, placeholder)
-        }
+        RelL::CheckAccess { input, .. }
+        | RelL::Project { input, .. }
+        | RelL::Filter { input, .. } => section_table(input, placeholder),
         RelL::Join { l, r, .. } => match (&**l, &**r) {
             (RelL::Scan { table, .. }, RelL::Values { rows }) if Arc::ptr_eq(rows, placeholder) => {
                 Some(*table)
@@ -345,9 +377,9 @@ fn replace_values(r: &mut RelL, placeholder: &Arc<ValueRows>, real: &Arc<ValueRo
             *rows = real.clone();
             true
         }
-        RelL::Project { input, .. } | RelL::Filter { input, .. } => {
-            replace_values(input, placeholder, real)
-        }
+        RelL::CheckAccess { input, .. }
+        | RelL::Project { input, .. }
+        | RelL::Filter { input, .. } => replace_values(input, placeholder, real),
         RelL::Join { l, r, .. } => {
             replace_values(l, placeholder, real) || replace_values(r, placeholder, real)
         }

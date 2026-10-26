@@ -153,6 +153,13 @@ pub mod data {
     pub fn reference(table: u32, id_hex32: &str) -> Node {
         tagged("R", Node::atom(format!("{table}:{id_hex32}")))
     }
+    pub fn authentication(name: &str, method: &str) -> Node {
+        tagged(
+            "P",
+            Node::list(vec![Node::int(514), string(name), string(method)]),
+        )
+    }
+
     pub fn props(items: Vec<Node>) -> Node {
         let mut inner = vec![Node::int(items.len() as i64)];
         inner.extend(items);

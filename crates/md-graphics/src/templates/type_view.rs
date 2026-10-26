@@ -16,6 +16,7 @@ enum Qualifier {
 }
 struct Item<'a> {
     name: [&'a str; 2],
+    namespace: Option<&'a str>,
     set: bool,
     qualifier: Qualifier,
 }
@@ -37,6 +38,7 @@ fn item<'a>(node: &'a Node, lookup: &'a dyn Lookup) -> Option<Item<'a>> {
     let values = node.as_list()?;
     let plain = |name| Item {
         name: [name, ""],
+        namespace: None,
         set: false,
         qualifier: Qualifier::None,
     };
@@ -86,8 +88,12 @@ fn item<'a>(node: &'a Node, lookup: &'a dyn Lookup) -> Option<Item<'a>> {
             let text = values.get(1)?.text()?;
             let id = Guid::parse(text)?;
             if let Some(name) = lookup.type_name(&id) {
+                if !mdschema::is_ncname(name) {
+                    return None;
+                }
                 Some(Item {
                     name: ["cfg:", name],
+                    namespace: None,
                     set: matches!(
                         name.split('.').next(),
                         Some("DefinedType" | "Characteristic")
@@ -97,15 +103,19 @@ fn item<'a>(node: &'a Node, lookup: &'a dyn Lookup) -> Option<Item<'a>> {
             } else if text == "f5c65050-3bbb-11d5-b988-0050bae0a95d" {
                 Some(plain("v8:TypeDescription"))
             } else {
-                let platform = mdschema::static_schema()
-                    .table("types.json")?
-                    .get(text)?
-                    .as_array()?;
-                let kind = platform.first()?.as_str()?;
-                let name = platform.get(1)?.as_str()?;
+                let platform = mdschema::static_schema().platform_type(text)?;
+                let fixed = mdschema::FixedNamespace::from_uri(platform.name.namespace_uri);
+                let prefix = match fixed {
+                    Some(mdschema::FixedNamespace::Cfg) => "cfg:",
+                    Some(mdschema::FixedNamespace::V8) => "v8:",
+                    Some(mdschema::FixedNamespace::Xs) => "xs:",
+                    Some(mdschema::FixedNamespace::Dcsset) => "dcsset:",
+                    None => "",
+                };
                 Some(Item {
-                    name: [name, ""],
-                    set: kind == "TypeSet",
+                    name: [prefix, platform.name.local],
+                    namespace: fixed.is_none().then_some(platform.name.namespace_uri),
+                    set: platform.set,
                     qualifier: Qualifier::None,
                 })
             }
@@ -168,11 +178,38 @@ impl<'a> TypePattern<'a> {
             for node in self.items {
                 let item = item(node, self.lookup).ok_or_else(|| read.invalid("value type"))?;
                 if item.set == set {
-                    writer.text_fragments(
-                        if set { "v8:TypeSet" } else { "v8:Type" },
-                        &item.name,
-                        &[],
-                    )?;
+                    let tag = if set { "v8:TypeSet" } else { "v8:Type" };
+                    if let Some(uri) = item.namespace {
+                        let depth = writer
+                            .depth()
+                            .checked_add(1)
+                            .ok_or_else(|| read.invalid("type namespace depth"))?;
+                        let mut prefix = Text::<64>::new();
+                        write!(&mut prefix, "d{depth}p1")
+                            .map_err(|_| read.invalid("type namespace prefix"))?;
+                        let mut key = Text::<72>::new();
+                        write!(&mut key, "xmlns:{}", prefix.as_str())
+                            .map_err(|_| read.invalid("type namespace declaration"))?;
+                        writer.text_fragments(
+                            tag,
+                            &[
+                                prefix.as_str(),
+                                ":",
+                                item.name
+                                    .get(1)
+                                    .copied()
+                                    .ok_or_else(|| read.invalid("type name"))?,
+                            ],
+                            &[(key.as_str(), uri)],
+                        )?;
+                    } else {
+                        let attrs: &[(&str, &str)] = if item.name.first() == Some(&"dcsset:") {
+                            &[("xmlns:dcsset", mdschema::FixedNamespace::Dcsset.uri())]
+                        } else {
+                            &[]
+                        };
+                        writer.text_fragments(tag, &item.name, attrs)?;
+                    }
                 }
             }
         }

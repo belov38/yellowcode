@@ -83,6 +83,7 @@ pub struct FormAttribute {
     pub id: i64,
     pub name: String,
     pub main: bool,
+    pub types: Vec<FormAttributeType>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -96,4 +97,11 @@ pub struct FormCommand {
 pub struct FormParameter {
     pub name: String,
     pub key: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FormAttributeType {
+    Id(brace::Guid),
+    Other,
+    Invalid,
 }

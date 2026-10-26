@@ -10,12 +10,15 @@
 )]
 
 pub mod build;
+pub mod fmt220;
 pub mod forms;
 pub mod forms_upgrade;
 pub mod kind;
 pub mod rights;
 pub mod spec;
 pub mod tables;
+mod type_names;
+pub use type_names::*;
 pub mod templates;
 
 pub use kind::MdKind;

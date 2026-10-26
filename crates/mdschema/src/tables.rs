@@ -128,22 +128,7 @@ impl Schema {
         let classes_top = classes.top.0;
         let class_index = index_of(&classes_top);
 
-        let raw_types: serde_json::Map<String, Value> =
-            parse("types.json", resource.json("types.json")?)?;
-        let mut types = HashMap::new();
-        for (guid, v) in raw_types {
-            let Value::Array(a) = &v else { continue };
-            let (Some(Value::String(t)), Some(Value::String(q))) = (a.first(), a.get(1)) else {
-                return Err(SchemaError(format!("types.json: bad entry {guid}")));
-            };
-            types.insert(
-                guid,
-                PlatformType {
-                    set: t == "TypeSet",
-                    qname: q.clone(),
-                },
-            );
-        }
+        let types = crate::type_names::parse_platform_types(resource.json("types.json")?)?;
 
         let raw_std: serde_json::Map<String, Value> =
             parse("stdattrs.json", resource.json("stdattrs.json")?)?;

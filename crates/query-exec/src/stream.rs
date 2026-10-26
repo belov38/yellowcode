@@ -105,6 +105,7 @@ fn run(
         });
     }
     let src = StoreSource::new(txn, map);
+    crate::register::check_slice_use(stmt, &src, None)?;
     let mut env = env.env();
     env.stop = Some(stop);
     let plan = plan_with(stmt, &src, PlanOptions::default())?;

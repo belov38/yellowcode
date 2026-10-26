@@ -23,7 +23,10 @@ bsl-vm = { path = "../bsl-vm" }
 evlog = { path = "../evlog" }
 ibschema = { path = "../ibschema" }
 md-model = { path = "../md-model" }
+mdschema = { path = "../mdschema" }
 platform-catalog = { path = "../platform-catalog" }
+query = { path = "../query" }
+query-syntax = { path = "../query-syntax" }
 query-exec = { path = "../query-exec" }
 query-ir = { path = "../query-ir" }
 

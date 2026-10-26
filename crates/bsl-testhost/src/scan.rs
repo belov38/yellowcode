@@ -1,5 +1,6 @@
 use crate::kinds::{classify, compose, kind_ru};
 use crate::xml;
+mod application;
 use bsl_compiler::{
     AppGlobal, AppMethodSig, AppNames, CatalogBuiltins, CommonFlags, ContextValue, ExecContext,
     ModuleKind, ParamSig, Reuse,
@@ -97,6 +98,7 @@ pub struct ConfigScan {
     common_attrs: HashSet<String>,
     form_files: HashMap<String, PathBuf>,
     global_cache: MethodCache,
+    application_vars: application::VariableCache,
     template_cache: Mutex<HashMap<String, Arc<Members>>>,
     global_index: Mutex<HashMap<ExecContext, Arc<HashMap<String, AppMethodSig>>>>,
     ctx_cache: Mutex<HashMap<String, Option<Arc<ModuleCtx>>>>,
@@ -333,6 +335,7 @@ impl ConfigScan {
             common_attrs,
             form_files,
             global_cache: Mutex::new(HashMap::new()),
+            application_vars: Mutex::new(HashMap::new()),
             template_cache: Mutex::new(HashMap::new()),
             global_index: Mutex::new(HashMap::new()),
             ctx_cache: Mutex::new(HashMap::new()),
@@ -705,6 +708,16 @@ impl ConfigScan {
 }
 
 impl AppNames for ConfigScan {
+    fn application_variable(
+        &self,
+        name: &str,
+        ctx: ExecContext,
+    ) -> Option<bsl_compiler::ApplicationVariable> {
+        self.application_variables(ctx)
+            .get(&fold_name(name))
+            .cloned()
+    }
+
     fn global_value(&self, name: &str, ctx: ExecContext) -> Option<AppGlobal> {
         let m = self.commons.get(&fold_name(name))?;
         (!m.flags.global && Self::reach(m.flags, ctx).is_some()).then(|| AppGlobal::CommonModule {

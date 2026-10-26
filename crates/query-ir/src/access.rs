@@ -52,12 +52,14 @@ impl AccessPredicate {
             let (item, sources, where_) = match &self.form {
                 PredicateForm::Short(e) => {
                     let sources = vec![tir::Source {
+                        all_fields: false,
                         alias: String::new(),
                         from: tir::From::Table {
                             id: self.table,
                             args: Vec::new(),
                             periodicity: crate::schema::Periodicity::Absent,
                             complement: None,
+                            span: None,
                             breakdown: Vec::new(),
                         },
                         joins: Vec::new(),
@@ -110,6 +112,7 @@ impl AccessPredicate {
                 distinct: false,
                 top: matches!(self.form, PredicateForm::Full { .. }).then_some(1),
                 items: vec![tir::Item {
+                    star: false,
                     expr: item,
                     name: String::new(),
                     nested: None,
@@ -144,6 +147,7 @@ impl AccessPredicate {
                 value_deps: Vec::new(),
                 table_params: Vec::new(),
                 typed: tir::Stmt {
+                    static_analysis: true,
                     kind: tir::StmtKind::Query(tir::Query {
                         parts: vec![select],
                         unions: Vec::new(),
@@ -156,6 +160,65 @@ impl AccessPredicate {
             })
         })?;
         build_stmt(&built, schema).map_err(|e| ExecError::Fatal(format!("access predicate: {e:?}")))
+    }
+
+    pub(crate) fn read_stmt(&self, schema: &QuerySchema) -> Result<StmtS, ExecError> {
+        let PredicateForm::Full { alias, query } = &self.form else {
+            return self.check_stmt(schema, None);
+        };
+        let (src, field, ty) = self.restricted_id(schema, alias, query)?;
+        let span = Span::default();
+        let reference = |source| tir::TExpr {
+            kind: tir::TKind::Field {
+                level: 0,
+                source,
+                col: tir::Col::Field(field),
+                derefs: Vec::new(),
+            },
+            ty: ty.clone(),
+            span,
+        };
+        let mut query = (**query).clone();
+        query.items = vec![tir::Item {
+            star: false,
+            expr: reference(src),
+            name: String::new(),
+            nested: None,
+            unknown: false,
+        }];
+        let condition = tir::TExpr {
+            kind: tir::TKind::InQuery {
+                l: vec![reference(0)],
+                not: false,
+                hierarchy: false,
+                q: Box::new(tir::Query {
+                    parts: vec![query],
+                    unions: Vec::new(),
+                    order: Vec::new(),
+                    autoorder: false,
+                    totals: None,
+                }),
+            },
+            ty: QType::boolean(),
+            span,
+        };
+        let predicate = Self {
+            table: self.table,
+            form: PredicateForm::Short(condition),
+            params: self.params.clone(),
+            max_depth: self.max_depth.saturating_add(8),
+        };
+        predicate.check_stmt(schema, None)
+    }
+
+    pub fn bind_check(
+        &self,
+        ctx: &crate::BindCtx<'_>,
+        row_id: Option<&QValue>,
+    ) -> Result<crate::StmtL, ExecError> {
+        let stmt = self.check_stmt(ctx.schema, row_id)?;
+        let bound = crate::bind::resolve(&stmt, ctx)?;
+        crate::lower::lower(&bound, ctx)
     }
 
     fn restricted_id(

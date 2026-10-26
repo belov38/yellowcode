@@ -38,6 +38,10 @@ pub struct RefObject {
 }
 
 impl RefObject {
+    pub(crate) fn belongs_to(&self, app: &Application) -> bool {
+        std::ptr::eq(self.app.as_ref(), app)
+    }
+
     pub fn table_number(&self) -> Option<u32> {
         self.app.model().storage_of(self.r.obj)?.ref_number
     }

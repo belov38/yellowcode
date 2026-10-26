@@ -1,5 +1,5 @@
-use std::net::TcpStream;
 use std::time::{Duration, Instant};
+use std::{io::Write, net::TcpStream};
 
 pub const DRAIN: Duration = Duration::from_millis(500);
 
@@ -35,5 +35,37 @@ pub fn close_gracefully(stream: &TcpStream) {
             Ok(0) | Err(_) => break,
             Ok(n) => left = left.saturating_sub(n),
         }
+    }
+}
+
+pub(crate) struct DeadlineWriter<'a> {
+    pub(crate) stream: &'a TcpStream,
+    pub(crate) deadline: Instant,
+    pub(crate) wire_bytes: u64,
+}
+impl Write for DeadlineWriter<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        loop {
+            let left = self.deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(std::io::ErrorKind::TimedOut.into());
+            }
+            match self.stream.write(buf) {
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(left.min(Duration::from_millis(1)));
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                result => {
+                    if let Ok(bytes) = result {
+                        self.wire_bytes = self.wire_bytes.saturating_add(bytes as u64);
+                    }
+                    return result;
+                }
+            }
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.stream.flush()
     }
 }

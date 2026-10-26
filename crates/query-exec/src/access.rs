@@ -6,7 +6,7 @@ use ibschema::store::{ReadTxn, Row};
 use query_ir::convert::row_to_q;
 use query_ir::{
     AccessPredicate, BindCtx, BindHost, ExecError, PExpr, ParamValue, ParamValues, QValue,
-    QuerySchema, RelL, SessionValues, StorageBinding, bind,
+    QuerySchema, RelL, SessionValues, StorageBinding,
 };
 
 use crate::exec::execute;
@@ -58,7 +58,9 @@ fn leftmost_scan(mut r: &mut RelL) -> Option<&mut RelL> {
         }
         r = match r {
             RelL::Join { l, .. } => l,
-            RelL::Filter { input, .. }
+            RelL::CheckAccess { input, .. }
+            | RelL::RunningBalance { input, .. }
+            | RelL::Filter { input, .. }
             | RelL::Project { input, .. }
             | RelL::Aggregate { input, .. }
             | RelL::Sort { input, .. }
@@ -71,6 +73,8 @@ fn leftmost_scan(mut r: &mut RelL) -> Option<&mut RelL> {
             | RelL::TempScan { .. }
             | RelL::Values { .. }
             | RelL::HierarchyClosure { .. }
+            | RelL::RegisterRows(_)
+            | RelL::Slice { .. }
             | RelL::Union { .. } => {
                 return None;
             }
@@ -103,6 +107,10 @@ pub fn eval_access(
     }
     let params = SessionParams(values);
     let bctx = BindCtx {
+        security: query_ir::host::SecurityCtx {
+            access: &PredicateInput,
+            session: ctx.sess,
+        },
         schema: ctx.schema,
         storage: ctx.storage,
         map: ctx.map,
@@ -118,13 +126,11 @@ pub fn eval_access(
         let id = q
             .get(usize::from(id_field.0))
             .ok_or_else(|| fatal("the row has no ID"))?;
-        let stmt = p.check_stmt(ctx.schema, Some(id))?;
-        let l = bind(&stmt, &bctx)?;
+        let l = p.bind_check(&bctx, Some(id))?;
         let r = execute(&l, &src, env)?;
         return Ok(Some(!r.rows.is_empty()));
     }
-    let stmt = p.check_stmt(ctx.schema, None)?;
-    let mut l = bind(&stmt, &bctx)?;
+    let mut l = p.bind_check(&bctx, None)?;
     let leaf =
         leftmost_scan(&mut l.root).ok_or_else(|| fatal("no scan of the restricted table"))?;
     let RelL::Scan { table: t, fields } = &*leaf else {
@@ -150,5 +156,18 @@ pub fn eval_access(
         Some(QValue::Bool(b)) => Ok(Some(*b)),
         Some(QValue::Null) => Ok(None),
         other => Err(fatal(&format!("the condition gave {other:?}"))),
+    }
+}
+
+struct PredicateInput;
+impl query_ir::host::AccessPolicy for PredicateInput {
+    fn read_policy(
+        &self,
+        _: &query_ir::host::SourceTable,
+        _: &query_ir::host::FieldSet,
+    ) -> Result<query_ir::host::Access, query_ir::HostError> {
+        Err(query_ir::HostError::new(
+            "predicate input used by ordinary bind",
+        ))
     }
 }

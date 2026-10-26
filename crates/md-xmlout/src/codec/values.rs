@@ -74,20 +74,30 @@ fn allowed(fixed: bool) -> &'static str {
 
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn write_type(w: &mut XmlWriter, tag: &str, t: &TypeDescription) {
-    w.elem(&type_elem(tag, t));
+    if let Some(depth) = w.depth().checked_add(1)
+        && let Some(element) = type_elem(tag, t, depth)
+    {
+        w.elem(&element);
+    }
 }
 
-fn type_elem(tag: &str, t: &TypeDescription) -> XmlElem {
+fn type_elem(tag: &str, t: &TypeDescription, property_element_depth: usize) -> Option<XmlElem> {
+    let member_depth = property_element_depth.checked_add(1)?;
     let mut e = XmlElem::new(tag);
     let leaf = |name: &str, text: &str| XmlElem::leaf(name, text);
     for r in t.types.iter().filter(|r| !r.set) {
-        e = e.child(leaf("v8:Type", &r.qname));
+        e = e.child(type_member_elem("v8:Type", &r.name, member_depth, false)?);
     }
     for r in t.types.iter().filter(|r| r.set) {
-        e = e.child(leaf("v8:TypeSet", &r.qname));
+        e = e.child(type_member_elem(
+            "v8:TypeSet",
+            &r.name,
+            member_depth,
+            false,
+        )?);
     }
     if t.types.is_empty() {
-        return e;
+        return Some(e);
     }
     if let Some(n) = &t.number {
         e = e.child(
@@ -122,10 +132,43 @@ fn type_elem(tag: &str, t: &TypeDescription) -> XmlElem {
                 .child(leaf("v8:AllowedLength", allowed(b.fixed))),
         );
     }
-    e
+    Some(e)
+}
+
+pub(crate) fn type_member_elem(
+    tag: &str,
+    name: &XmlTypeName,
+    member_element_depth: usize,
+    predefined_cfg: bool,
+) -> Option<XmlElem> {
+    mdschema::ExpandedTypeName::new(name.namespace_uri(), &name.local)?;
+    if member_element_depth == 0 {
+        return None;
+    }
+    if let Some(ns) = mdschema::FixedNamespace::from_uri(name.namespace_uri())
+        && !(predefined_cfg && ns == mdschema::FixedNamespace::Cfg)
+    {
+        let mut elem = XmlElem::leaf(tag, &format!("{}:{}", ns.prefix(), name.local));
+        if ns == mdschema::FixedNamespace::Dcsset {
+            elem = elem.with_attr("xmlns:dcsset", ns.uri());
+        }
+        return Some(elem);
+    }
+    let prefix = format!("d{member_element_depth}p1");
+    Some(
+        XmlElem::leaf(tag, &format!("{prefix}:{}", name.local))
+            .with_attr(&format!("xmlns:{prefix}"), name.namespace_uri()),
+    )
 }
 
 pub fn value_elem(tag: &str, v: &Value) -> XmlElem {
+    value_elem_at_depth(tag, v, 1).unwrap_or_else(|| XmlElem::new(tag))
+}
+
+pub fn value_elem_at_depth(tag: &str, v: &Value, property_element_depth: usize) -> Option<XmlElem> {
+    if property_element_depth == 0 {
+        return None;
+    }
     let list = |items: Vec<&str>, item: &str, attrs: &[(&str, &str)]| {
         let mut e = XmlElem::new(tag);
         for i in items {
@@ -137,7 +180,7 @@ pub fn value_elem(tag: &str, v: &Value) -> XmlElem {
         }
         e
     };
-    match v {
+    Some(match v {
         Value::Text(t) => XmlElem::leaf(tag, t),
         Value::Bool(b) => XmlElem::leaf(tag, if *b { "true" } else { "false" }),
         Value::LStr(ls) => {
@@ -152,7 +195,7 @@ pub fn value_elem(tag: &str, v: &Value) -> XmlElem {
             e
         }
         Value::Ref(r) => XmlElem::leaf(tag, &r.name),
-        Value::Type(t) => type_elem(tag, t),
+        Value::Type(t) => type_elem(tag, t, property_element_depth)?,
         Value::Typed(t) => typed_elem(tag, t),
         Value::RefList(items) => list(
             items.iter().map(|r| r.name.as_str()).collect(),
@@ -165,7 +208,11 @@ pub fn value_elem(tag: &str, v: &Value) -> XmlElem {
             for a in sa {
                 let mut c = XmlElem::new("xr:StandardAttribute").with_attr("name", &a.name);
                 for p in &a.props {
-                    c = c.child(value_elem(&format!("xr:{}", p.name), &p.value));
+                    c = c.child(value_elem_at_depth(
+                        &format!("xr:{}", p.name),
+                        &p.value,
+                        property_element_depth.checked_add(2)?,
+                    )?);
                 }
                 e = e.child(c);
             }
@@ -176,7 +223,7 @@ pub fn value_elem(tag: &str, v: &Value) -> XmlElem {
             e.name = tag.to_string();
             e
         }
-    }
+    })
 }
 
 #[cfg_attr(not(test), allow(dead_code))]

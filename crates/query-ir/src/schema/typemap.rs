@@ -272,7 +272,7 @@ fn resolve(
         (Some(t), Some(n)) if t != n => {
             diags.push(format!(
                 "{owner}: type {}: the type id names another object",
-                r.qname
+                r.name
             ));
             Some(t)
         }
@@ -290,7 +290,8 @@ pub(crate) fn map_type(
 ) -> QType {
     let mut t = QType::default();
     for r in &td.types {
-        let q = r.qname.as_str();
+        let legacy = r.name.to_string();
+        let q = legacy.as_str();
         match q {
             "xs:decimal" => {
                 t.number = Some(td.number.map_or(

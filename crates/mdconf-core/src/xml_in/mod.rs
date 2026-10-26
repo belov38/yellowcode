@@ -1,4 +1,6 @@
+mod namespaces;
 mod values;
+pub use namespaces::{NamespaceContext, NamespaceScope};
 
 use crate::xml::XmlNode;
 use crate::{Codec, Configuration, Diagnostics, Result, Value};
@@ -28,12 +30,12 @@ impl ValueReader {
         values::value(&mut cx, codec, element)
     }
 
-    pub fn read_property(
+    pub fn read_scoped(
         &mut self,
         scope: &str,
-        spec: &mdschema::PropSpec,
+        codec: Codec,
         element: &XmlNode,
-        depth: usize,
+        namespaces: &dyn NamespaceScope,
     ) -> Value {
         let mut cx = values::XCtx {
             schema: self.schema,
@@ -41,7 +43,60 @@ impl ValueReader {
             diag: &mut self.diagnostics,
             scope: scope.to_string(),
         };
-        values::property(&mut cx, spec.codec, Some(&spec.map), element, Some(depth))
+        values::property_scoped(&mut cx, codec, None, element, None, namespaces)
+    }
+
+    pub fn read_property(
+        &mut self,
+        scope: &str,
+        spec: &mdschema::PropSpec,
+        element: &XmlNode,
+        depth: usize,
+    ) -> Value {
+        self.read_property_scoped(scope, spec, element, depth, &NamespaceContext::EMPTY)
+    }
+
+    pub fn read_property_scoped(
+        &mut self,
+        scope: &str,
+        spec: &mdschema::PropSpec,
+        element: &XmlNode,
+        indent_depth: usize,
+        namespaces: &dyn NamespaceScope,
+    ) -> Value {
+        self.read_property_named_scoped(
+            scope,
+            spec,
+            (element, &values::qname(element)),
+            indent_depth,
+            namespaces,
+        )
+    }
+
+    fn read_property_named_scoped(
+        &mut self,
+        scope: &str,
+        spec: &mdschema::PropSpec,
+        property: (&XmlNode, &str),
+        indent_depth: usize,
+        namespaces: &dyn NamespaceScope,
+    ) -> Value {
+        let (element, output_tag) = property;
+        let mut cx = values::XCtx {
+            schema: self.schema,
+            names: &self.names,
+            diag: &mut self.diagnostics,
+            scope: scope.to_string(),
+        };
+        values::property_scoped_as(
+            &mut cx,
+            spec.codec,
+            Some(&spec.map),
+            element,
+            Some(indent_depth),
+            namespaces,
+            output_tag,
+        )
     }
 
     pub fn diagnostics(&self) -> &Diagnostics {
@@ -166,3 +221,9 @@ pub fn parse_part<'a>(
 mod part_paths;
 
 mod part_xml;
+
+mod fmt220;
+pub use fmt220::translate_2_20;
+
+mod fmt220_versions;
+pub use fmt220_versions::read_named_versions;

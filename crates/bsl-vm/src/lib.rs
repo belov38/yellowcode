@@ -37,7 +37,10 @@ pub use object::{CallError, CallResult, HostObject, creation_number};
 pub use ops::{BinOp, CmpOp};
 pub use place::{Arg, Place};
 pub use registry::{AppTypeInfo, CtorFn, GlobalFn, GlobalProp, Presenter, Registry, TypeImpl};
-pub use runtime::{CALL_UNIT, ExecOptions, Execution, Runtime, StackWeights};
+pub use runtime::{
+    CALL_UNIT, ExecOptions, Execution, MESSAGE_CAP_BYTES, MESSAGE_CAP_COUNT, Runtime, StackWeights,
+    UserMessage,
+};
 pub use shared::{SharedObject, SharedValue};
 pub use types::{MemberId, MemberKind, TypeId, TypeRegistry};
 pub use value::{ObjRef, Value};

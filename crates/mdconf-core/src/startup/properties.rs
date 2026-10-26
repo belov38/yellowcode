@@ -567,7 +567,10 @@ impl ManagedValueContext<'_> {
         sets: &'a ManagedObjects,
         reference: &TypeRef,
     ) -> Option<&'a TypeDescription> {
-        let name = reference.qname.strip_prefix("cfg:DefinedType.")?;
+        let name = reference
+            .name
+            .fixed_local(crate::FixedNamespace::Cfg)?
+            .strip_prefix("DefinedType.")?;
         let by_id = reference
             .type_id
             .and_then(|id| self.index.type_owners.get(&id))
@@ -598,7 +601,7 @@ impl ManagedValueContext<'_> {
         struct Frame<'a> {
             refs: &'a [TypeRef],
             next: usize,
-            owner: Option<&'a str>,
+            owner: Option<&'a crate::XmlTypeName>,
         }
         let mut stack = BudgetedVec::new(self.memory_budget(), CATEGORY)?;
         let mut done = BudgetedVec::new(self.memory_budget(), CATEGORY)?;
@@ -617,7 +620,7 @@ impl ManagedValueContext<'_> {
                 continue;
             };
             frame.next = frame.next.checked_add(1).ok_or(BudgetError::Overflow)?;
-            if done.contains(&reference.qname.as_str()) {
+            if done.contains(&&reference.name) {
                 continue;
             }
             let target = sets
@@ -626,14 +629,14 @@ impl ManagedValueContext<'_> {
             if let Some(target) = target
                 && !stack
                     .iter()
-                    .any(|frame| frame.owner == Some(reference.qname.as_str()))
+                    .any(|frame| frame.owner == Some(&reference.name))
             {
                 stack.try_push(Frame {
                     refs: &target.types,
                     next: 0,
-                    owner: Some(&reference.qname),
+                    owner: Some(&reference.name),
                 })?;
-            } else if !reference.set && reference.qname == wanted {
+            } else if !reference.set && reference.name.is_qname(wanted) {
                 return Ok(true);
             }
         }

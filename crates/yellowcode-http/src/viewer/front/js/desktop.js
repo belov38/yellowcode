@@ -66,12 +66,6 @@ export function initDesktop() {
 
   openSource = () => pick(false);
   desktopItems = async () => [{ label: T.openFolder, disabled: busy, onclick: () => pick(true) }];
-  const missing = (path) => {
-    if (busy) return;
-    dismissed = false;
-    banner(T.sourceMissing + path, true);
-    invoke("forget_recent", { path }).catch(fail);
-  };
   recentItems = async () => {
     let recent = [];
     try {
@@ -81,7 +75,7 @@ export function initDesktop() {
     }
     return recent.map((r, i) => ({
       label: i + 1 + " " + (r.label || r.path), title: r.path, accel: String((i + 1) % 10),
-      disabled: busy, missing: !r.exists, onclick: () => (r.exists ? openPath : missing)(r.path),
+      disabled: busy, missing: !r.exists, onclick: () => openPath(r.path),
     }));
   };
 
