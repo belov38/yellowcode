@@ -134,16 +134,37 @@ fn fmt_date(s: &str) -> Option<String> {
     ))
 }
 
+pub trait ReferenceLookup {
+    fn name(&self, id: &Guid) -> Option<&str>;
+    fn type_name(&self, id: &Guid) -> Option<&str>;
+    fn predefined_name(&self, id: &Guid) -> Option<&str>;
+}
+impl ReferenceLookup for Ctx<'_> {
+    fn name(&self, id: &Guid) -> Option<&str> {
+        self.index.names.get(id).map(String::as_str)
+    }
+    fn type_name(&self, id: &Guid) -> Option<&str> {
+        self.index.types.get(id).map(String::as_str)
+    }
+    fn predefined_name(&self, id: &Guid) -> Option<&str> {
+        self.predef.get(id).map(String::as_str)
+    }
+}
+
 pub fn design_time_ref(ctx: &Ctx, v: &Node) -> Option<String> {
+    design_time_ref_resolved(ctx, v)
+}
+
+pub fn design_time_ref_resolved(ctx: &dyn ReferenceLookup, v: &Node) -> Option<String> {
     let l = v.as_list()?;
     let (ou, vu) = (l.get(1)?.text()?, l.get(2)?.text()?);
     if ou == ZERO_GUID {
         return Some(String::new());
     }
     let og = Guid::parse(ou)?;
-    let on = match ctx.index.names.get(&og) {
-        Some(n) => n.clone(),
-        None => match ctx.index.types.get(&og) {
+    let on = match ctx.name(&og) {
+        Some(n) => n.to_owned(),
+        None => match ctx.type_name(&og) {
             Some(t) => {
                 let (pref, rest) = t.split_once('.')?;
                 format!("{}.{rest}", pref.strip_suffix("Ref").unwrap_or(pref))
@@ -156,10 +177,10 @@ pub fn design_time_ref(ctx: &Ctx, v: &Node) -> Option<String> {
         return Some(format!("{on}.EmptyRef"));
     }
     let vg = Guid::parse(vu)?;
-    if let Some(n) = ctx.index.names.get(&vg) {
-        return Some(n.clone());
+    if let Some(n) = ctx.name(&vg) {
+        return Some(n.to_owned());
     }
-    let pn = ctx.predef.get(&vg).filter(|s| !s.is_empty())?;
+    let pn = ctx.predefined_name(&vg).filter(|s| !s.is_empty())?;
     Some(format!("{on}.{pn}"))
 }
 

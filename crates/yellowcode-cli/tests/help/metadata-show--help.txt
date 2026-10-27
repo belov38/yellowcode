@@ -9,7 +9,8 @@ Arguments:
   <OBJECT>  
 
 Options:
-      --format <FORMAT>         [default: json] [possible values: json, text]
-      --platform-build <BUILD>  Exact emulated platform build (not the configuration compatibility mode) [default: 8.5.1.1529]
-  -h, --help                    Print help
+      --memory-limit <MEMORY_LIMIT>  Managed DT CONFIG extraction budget; decoded model memory is additional
+      --platform-build <BUILD>       Exact emulated platform build (not the configuration compatibility mode) [default: 8.5.1.1529]
+      --format <FORMAT>              [default: json] [possible values: json, text]
+  -h, --help                         Print help
 --- stderr

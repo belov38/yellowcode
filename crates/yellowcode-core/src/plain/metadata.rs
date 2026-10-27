@@ -164,6 +164,14 @@ fn text(node: &Node, depth: usize, out: &mut dyn Write) -> Result<()> {
 }
 
 pub fn run(command: Command, out: &mut dyn Write) -> Result<()> {
+    run_with_memory_limit(command, None, out)
+}
+pub fn run_with_memory_limit(
+    command: Command,
+    limit: Option<String>,
+    out: &mut dyn Write,
+) -> Result<()> {
+    let memory = viewer::source::OpenMemory::resolve(limit)?;
     match command {
         Command::Tree {
             source,
@@ -173,7 +181,12 @@ pub fn run(command: Command, out: &mut dyn Write) -> Result<()> {
             flat,
             format,
         } => {
-            let cfg = viewer::source::open(&source, &LoadOptions::default())?;
+            let cfg = viewer::source::open_with_memory(
+                &source,
+                &LoadOptions::default(),
+                &memory,
+                &mut |_| Ok(()),
+            )?;
             let kinds = kind
                 .as_deref()
                 .map(|kinds| {
@@ -217,7 +230,12 @@ pub fn run(command: Command, out: &mut dyn Write) -> Result<()> {
             object,
             format,
         } => {
-            let cfg = viewer::source::open(&source, &LoadOptions::default())?;
+            let cfg = viewer::source::open_with_memory(
+                &source,
+                &LoadOptions::default(),
+                &memory,
+                &mut |_| Ok(()),
+            )?;
             let target = path::resolve(&cfg, &object)?;
             let root = project(&cfg, &tree::tree(&cfg, None, &[], Lang::Ru), "");
             let id = uuid(&target).ok_or("metadata target has no UUID")?;

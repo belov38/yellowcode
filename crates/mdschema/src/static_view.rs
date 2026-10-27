@@ -342,6 +342,6 @@ impl StaticSchema {
 mod table_views;
 pub use table_views::{
     StaticFormContext, StaticFormProp, StaticFormTableValue, StaticFormTables, StaticRightsTables,
-    StaticStrings, StaticTemplateTables, static_form_tables, static_rights_tables,
-    static_template_tables,
+    StaticStrings, StaticTemplateTables, static_form_tables, static_form_tables_mode,
+    static_rights_tables, static_template_tables,
 };

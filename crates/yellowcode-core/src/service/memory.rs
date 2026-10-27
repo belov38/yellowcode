@@ -338,6 +338,10 @@ impl Context {
     }
 }
 
+pub fn is_config_error(error: &(dyn std::error::Error + 'static)) -> bool {
+    error.downcast_ref::<ConfigError>().is_some()
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Refusal {
     pub status: u16,

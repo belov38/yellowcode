@@ -28,6 +28,8 @@ pub struct State {
     pub check: Arc<CheckCache>,
     pub stages: Stages,
     pub fingerprint: Option<Fingerprint>,
+    pub memory: Option<source::OpenMemory>,
+    pub config_entries: Option<source::ConfigEntries>,
     pub code_analysis_active: Arc<std::sync::atomic::AtomicUsize>,
 }
 
@@ -56,16 +58,46 @@ impl State {
         lang: Lang,
         progress: &mut impl FnMut(&'static str) -> Result<()>,
     ) -> Result<State> {
+        let memory = default_memory(source)?;
+        Self::load_inner(source, names, lang, memory.as_ref(), progress)
+    }
+
+    pub fn load_with_memory(
+        source: &Path,
+        names: Option<&Path>,
+        lang: Lang,
+        memory: &source::OpenMemory,
+        progress: &mut impl FnMut(&'static str) -> Result<()>,
+    ) -> Result<State> {
+        Self::load_inner(source, names, lang, Some(memory), progress)
+    }
+    fn load_inner(
+        source: &Path,
+        names: Option<&Path>,
+        lang: Lang,
+        memory: Option<&source::OpenMemory>,
+        progress: &mut impl FnMut(&'static str) -> Result<()>,
+    ) -> Result<State> {
         let source = &source::resolve(source);
-        let cfg = crate::viewer::source::open_with_progress(
-            source,
-            &mdconf::LoadOptions {
-                keep_source: false,
-                ..Default::default()
-            },
-            progress,
-        )?;
-        Self::build(source, names, lang, cfg, Stages::ALL, None, progress)
+        let opts = mdconf::LoadOptions {
+            keep_source: false,
+            ..Default::default()
+        };
+        let (cfg, entries) = if source::detect(source)? == source::SourceKind::Dt {
+            let memory = memory.ok_or("DT opening memory context missing")?;
+            let (cfg, _, entries) = source::open_retained_dt(source, &opts, memory, progress)?;
+            (cfg, Some(entries))
+        } else {
+            let cfg = match memory {
+                Some(memory) => source::open_with_memory(source, &opts, memory, progress),
+                None => source::open_with_progress(source, &opts, progress),
+            }?;
+            (cfg, None)
+        };
+        let mut state = Self::build(source, names, lang, cfg, Stages::ALL, None, progress)?;
+        state.memory = memory.cloned();
+        state.config_entries = entries;
+        Ok(state)
     }
 
     pub fn load_stages_with_progress(
@@ -75,10 +107,52 @@ impl State {
         extra: Stages,
         progress: &mut impl FnMut(&'static str) -> Result<()>,
     ) -> Result<State> {
+        let memory = default_memory(source)?;
+        Self::load_stages_inner(source, names, lang, extra, memory.as_ref(), progress)
+    }
+
+    pub fn load_stages_with_memory(
+        source: &Path,
+        names: Option<&Path>,
+        lang: Lang,
+        extra: Stages,
+        memory: &source::OpenMemory,
+        progress: &mut impl FnMut(&'static str) -> Result<()>,
+    ) -> Result<State> {
+        Self::load_stages_inner(source, names, lang, extra, Some(memory), progress)
+    }
+    fn load_stages_inner(
+        source: &Path,
+        names: Option<&Path>,
+        lang: Lang,
+        extra: Stages,
+        memory: Option<&source::OpenMemory>,
+        progress: &mut impl FnMut(&'static str) -> Result<()>,
+    ) -> Result<State> {
         let source = &source::resolve(source);
-        let (cfg, fp) = source::open_snapshot(source, &stage_options(extra), None, progress)
+        let (cfg, fp, entries) = if source::detect(source)? == source::SourceKind::Dt {
+            let memory = memory.ok_or("DT opening memory context missing")?;
+            let (cfg, fp, entries) =
+                source::open_retained_dt(source, &stage_options(extra), memory, progress)?;
+            (cfg, fp, Some(entries))
+        } else {
+            let (cfg, fp) = match memory {
+                Some(memory) => source::open_snapshot_with_memory(
+                    source,
+                    &stage_options(extra),
+                    None,
+                    memory,
+                    progress,
+                ),
+                None => source::open_snapshot(source, &stage_options(extra), None, progress),
+            }
             .map_err(|e| crate::Error::from(e.to_string()))?;
-        Self::build(source, names, lang, cfg, extra, Some(fp), progress)
+            (cfg, fp, None)
+        };
+        let mut state = Self::build(source, names, lang, cfg, extra, Some(fp), progress)?;
+        state.memory = memory.cloned();
+        state.config_entries = entries;
+        Ok(state)
     }
 
     fn build(
@@ -92,9 +166,15 @@ impl State {
     ) -> Result<State> {
         progress("tree")?;
         let mut nodes = Vec::new();
-        flatten(tree::tree(&cfg, None, &[], lang), &mut nodes);
+        {
+            let _phase = memory_budget::profile::phase(memory_budget::profile::Phase::Tree);
+            flatten(tree::tree(&cfg, None, &[], lang), &mut nodes);
+        }
         progress("statistics")?;
-        let stats = serde_json::to_value(stats::stats(&cfg))?;
+        let stats = {
+            let _phase = memory_budget::profile::phase(memory_budget::profile::Phase::Statistics);
+            serde_json::to_value(stats::stats(&cfg))?
+        };
         Ok(State {
             skins: super::skin::Skins::store(),
             cfg,
@@ -106,8 +186,18 @@ impl State {
             check: Arc::new(CheckCache::default()),
             stages,
             fingerprint,
+            memory: None,
+            config_entries: None,
             code_analysis_active: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         })
+    }
+}
+
+fn default_memory(path: &Path) -> Result<Option<source::OpenMemory>> {
+    if source::detect(&source::resolve(path))? == source::SourceKind::Dt {
+        Ok(Some(source::OpenMemory::resolve(None)?))
+    } else {
+        Ok(None)
     }
 }
 
@@ -131,8 +221,41 @@ pub type Loader = Arc<
 >;
 
 pub fn source_loader() -> Loader {
-    Arc::new(|path, stages, expect| {
-        source::open_snapshot(path, &stage_options(stages), expect, &mut |_| Ok(()))
+    source_loader_with_memory(None)
+}
+fn source_loader_with_memory(opening: Option<source::OpenMemory>) -> Loader {
+    source_loader_with_entries(opening, None)
+}
+fn source_loader_with_entries(
+    opening: Option<source::OpenMemory>,
+    entries: Option<source::ConfigEntries>,
+) -> Loader {
+    let memory = std::sync::OnceLock::new();
+    if let Some(opening) = opening {
+        let _ = memory.set(Ok(opening));
+    }
+    Arc::new(move |path, stages, expect| {
+        if let Some(entries) = &entries {
+            return entries.load(path, &stage_options(stages), expect);
+        }
+        if memory.get().is_some()
+            || source::detect(&source::resolve(path))
+                .map_err(|e| OpenError::Decode(e.to_string()))?
+                == source::SourceKind::Dt
+        {
+            let opening =
+                memory.get_or_init(|| source::OpenMemory::resolve(None).map_err(|e| e.to_string()));
+            let opening = opening.as_ref().map_err(|e| OpenError::Decode(e.clone()))?;
+            source::open_snapshot_with_memory(
+                path,
+                &stage_options(stages),
+                expect,
+                opening,
+                &mut |_| Ok(()),
+            )
+        } else {
+            source::open_snapshot(path, &stage_options(stages), expect, &mut |_| Ok(()))
+        }
     })
 }
 
@@ -263,7 +386,8 @@ impl Viewer {
     }
 
     pub fn from_arc(state: Arc<State>) -> Viewer {
-        Viewer::build(state, source_loader())
+        let loader = source_loader_with_entries(state.memory.clone(), state.config_entries.clone());
+        Viewer::build(state, loader)
     }
 
     fn build(state: Arc<State>, loader: Loader) -> Viewer {
@@ -292,6 +416,18 @@ impl Viewer {
         progress: &mut impl FnMut(&'static str) -> Result<()>,
     ) -> Result<Viewer> {
         let state = State::load_stages_with_progress(source, names, lang, Viewer::OPEN, progress)?;
+        Ok(Viewer::from_loaded(state))
+    }
+
+    pub fn open_with_memory(
+        source: &Path,
+        names: Option<&Path>,
+        lang: Lang,
+        memory: &source::OpenMemory,
+        progress: &mut impl FnMut(&'static str) -> Result<()>,
+    ) -> Result<Viewer> {
+        let state =
+            State::load_stages_with_memory(source, names, lang, Viewer::OPEN, memory, progress)?;
         Ok(Viewer::from_loaded(state))
     }
 
@@ -555,6 +691,8 @@ impl Inner {
                         check: Arc::clone(&cur.check),
                         stages: target,
                         fingerprint: Some(fp),
+                        memory: cur.memory.clone(),
+                        config_entries: cur.config_entries.clone(),
                         code_analysis_active: Arc::clone(&cur.code_analysis_active),
                     });
                     let old = std::mem::replace(

@@ -27,6 +27,7 @@ zraw = { path = "../zraw" }
 mdschema = { path = "../mdschema" }
 md-model = { path = "../md-model" }
 md-xmlout = { path = "../md-xmlout" }
+serde = { version = "1", features = ["derive"] }
 memory-budget = { path = "../memory-budget" }
 
 [lints.clippy]

@@ -15,7 +15,7 @@ fn file(
 ) -> Result<Charged<(String, Vec<u8>)>, BudgetError> {
     text(budget, &[name])?.into_string()?.try_zip(bytes)
 }
-fn plain<S: ManagedEntrySource + ?Sized>(
+pub(in crate::startup) fn plain<S: ManagedEntrySource + ?Sized>(
     entries: &ManagedEntries<'_, S>,
     name: &str,
     which: &str,
@@ -40,7 +40,7 @@ fn plain_path(name: &str) -> bool {
         !part.is_empty() && part != "." && part != ".." && !part.contains(['\\', ':', '\0'])
     })
 }
-fn ws<S: ManagedEntrySource + ?Sized>(
+pub(in crate::startup) fn ws<S: ManagedEntrySource + ?Sized>(
     entries: &ManagedEntries<'_, S>,
     name: &str,
     keep: bool,
@@ -84,7 +84,7 @@ fn ws<S: ManagedEntrySource + ?Sized>(
     }
     Ok(output)
 }
-fn binary_modules<S: ManagedEntrySource + ?Sized>(
+pub(in crate::startup) fn binary_modules<S: ManagedEntrySource + ?Sized>(
     entries: &ManagedEntries<'_, S>,
     id: brace::Guid,
     kind: MdKind,

@@ -1,4 +1,5 @@
 use crate::scan::ScanError;
+use crate::scan_io::ScanInput;
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
 use std::path::Path;
@@ -28,9 +29,10 @@ fn attrs(e: &BytesStart<'_>) -> Vec<(String, String)> {
 
 pub(crate) fn scan_file(
     path: &Path,
+    input: &ScanInput,
     mut f: impl FnMut(&[String], Ev<'_>),
 ) -> Result<(), ScanError> {
-    let bytes = std::fs::read(path).map_err(|e| ScanError::new(path, e.to_string()))?;
+    let bytes = input.read(path)?;
     let mut rd = Reader::from_reader(bytes.as_slice());
     rd.config_mut().trim_text(true);
     let mut stack: Vec<String> = Vec::new();
@@ -78,9 +80,12 @@ fn is(stack: &[String], want: &[&str]) -> bool {
     stack.len() == want.len() && stack.iter().zip(want).all(|(a, b)| a == b)
 }
 
-pub(crate) fn config_children(path: &Path) -> Result<Vec<(String, String)>, ScanError> {
+pub(crate) fn config_children(
+    path: &Path,
+    input: &ScanInput,
+) -> Result<Vec<(String, String)>, ScanError> {
     let mut out = Vec::new();
-    scan_file(path, |st, ev| {
+    scan_file(path, input, |st, ev| {
         if let Ev::Text(t) = ev
             && st.len() == 4
             && is(
@@ -94,9 +99,12 @@ pub(crate) fn config_children(path: &Path) -> Result<Vec<(String, String)>, Scan
     Ok(out)
 }
 
-pub(crate) fn properties(path: &Path) -> Result<Vec<(String, String)>, ScanError> {
+pub(crate) fn properties_with(
+    path: &Path,
+    input: &ScanInput,
+) -> Result<Vec<(String, String)>, ScanError> {
     let mut out = Vec::new();
-    scan_file(path, |st, ev| {
+    scan_file(path, input, |st, ev| {
         if let Ev::Text(t) = ev
             && st.len() == 4
             && st.first().map(String::as_str) == Some("MetaDataObject")
@@ -114,7 +122,7 @@ pub(crate) struct ObjectNames {
     pub enum_values: Vec<String>,
 }
 
-pub(crate) fn object_names(path: &Path) -> Result<ObjectNames, ScanError> {
+pub(crate) fn object_names(path: &Path, input: &ScanInput) -> Result<ObjectNames, ScanError> {
     const FIELDS: [&str; 6] = [
         "Attribute",
         "TabularSection",
@@ -124,7 +132,7 @@ pub(crate) fn object_names(path: &Path) -> Result<ObjectNames, ScanError> {
         "AccountingFlag",
     ];
     let mut out = ObjectNames::default();
-    scan_file(path, |st, ev| {
+    scan_file(path, input, |st, ev| {
         if let Ev::Text(t) = ev
             && st.len() == 6
             && st[0] == "MetaDataObject"
@@ -142,9 +150,9 @@ pub(crate) fn object_names(path: &Path) -> Result<ObjectNames, ScanError> {
     Ok(out)
 }
 
-pub(crate) fn predefined_names(path: &Path) -> Result<Vec<String>, ScanError> {
+pub(crate) fn predefined_names(path: &Path, input: &ScanInput) -> Result<Vec<String>, ScanError> {
     let mut out = Vec::new();
-    scan_file(path, |st, ev| {
+    scan_file(path, input, |st, ev| {
         if let Ev::Text(t) = ev
             && st.first().map(String::as_str) == Some("PredefinedData")
             && st.len() >= 3
@@ -163,7 +171,7 @@ pub(crate) struct FormNames {
     pub main_type: Option<String>,
 }
 
-pub(crate) fn form_names(path: &Path) -> Result<FormNames, ScanError> {
+pub(crate) fn form_names(path: &Path, input: &ScanInput) -> Result<FormNames, ScanError> {
     fn done(first: &mut Option<String>, main: &mut bool, out: &mut FormNames) {
         if std::mem::take(main) && out.main_type.is_none() {
             out.main_type = first.take();
@@ -173,7 +181,7 @@ pub(crate) fn form_names(path: &Path) -> Result<FormNames, ScanError> {
     let mut out = FormNames::default();
     let mut first_type: Option<String> = None;
     let mut main = false;
-    scan_file(path, |st, ev| match ev {
+    scan_file(path, input, |st, ev| match ev {
         Ev::Start(a) if is(st, &["Form", "Attributes", "Attribute"]) => {
             done(&mut first_type, &mut main, &mut out);
             if let Some((_, v)) = a.iter().find(|(k, _)| k == "name") {
@@ -192,4 +200,8 @@ pub(crate) fn form_names(path: &Path) -> Result<FormNames, ScanError> {
     })?;
     done(&mut first_type, &mut main, &mut out);
     Ok(out)
+}
+
+pub(crate) fn properties(path: &Path) -> Result<Vec<(String, String)>, ScanError> {
+    properties_with(path, &ScanInput::default())
 }

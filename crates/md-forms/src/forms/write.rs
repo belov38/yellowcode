@@ -1,6 +1,7 @@
 use super::tables::{PropRef, TableView};
 use brace::Node;
 
+use super::FormResolution;
 use super::FormXml;
 use super::codecs_a::{self, flstr, fmt_title, path_segs, str_of, value_at};
 use super::ctx::{FormInfo, item_key};
@@ -8,7 +9,6 @@ use super::decode::{DecodedForm, Item, Rec, decode_form, in_kind, item_tag, nest
 use super::fe::{E, from_json, ser};
 use super::py::{Py, Raised, py_str};
 use super::shared::Shared;
-use crate::Configuration;
 use mdschema::forms::FormCompat;
 
 pub(crate) const ABSENT: &str = "\u{0}";
@@ -174,7 +174,7 @@ impl<'s> Src<'s> {
 }
 
 pub(crate) struct FormCtx<'a> {
-    pub cfg: &'a Configuration,
+    pub cfg: &'a dyn FormResolution,
     pub shared: &'a Shared,
     pub info: FormInfo<'a>,
     pub files: Vec<(String, Vec<u8>)>,
@@ -185,7 +185,7 @@ pub(crate) struct FormCtx<'a> {
 }
 
 impl<'a> FormCtx<'a> {
-    pub(crate) fn new(cfg: &'a Configuration, shared: &'a Shared, info: FormInfo<'a>) -> Self {
+    pub(crate) fn new(cfg: &'a dyn FormResolution, shared: &'a Shared, info: FormInfo<'a>) -> Self {
         let mut fc = FormCtx {
             cfg,
             shared,
@@ -517,7 +517,7 @@ fn write_item(
 }
 
 pub(crate) fn form_to_xml(
-    cfg: &Configuration,
+    cfg: &dyn FormResolution,
     shared: &Shared,
     entry: &Node,
     owner: Option<&str>,

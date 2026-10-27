@@ -14,6 +14,35 @@ pub use objects::{
     ManagedDecodedObjects, ManagedFormModule, ManagedModuleGraph, ManagedObjectIter,
     ManagedObjects, ManagedObjectsError,
 };
+mod defined_types;
+mod viewer_facts;
+pub use viewer_facts::{ConfigurationIdentity, ViewerCounters};
+mod viewer_open;
+pub use viewer_open::{
+    ManagedViewerOpen, ModuleDescriptor, ModuleLocation, ValidationKind, ValidationReceipt,
+};
+mod viewer_selection;
+pub use viewer_selection::{
+    ManagedModuleKey, ManagedObjectKey, ManagedSelectionError, ViewerDataIdentity,
+};
+mod resident_inventory;
+pub use resident_inventory::{ManagedViewerFacts, ResidentObject};
+mod resident_facts;
+pub use resident_facts::{
+    ChildFacts, ObjectFacts, RecalculationFacts, SelectedFacts, SubObjectFacts,
+};
+mod selected_objects;
+pub use selected_objects::{ManagedViewerContext, SelectedObject};
+mod selected_configdump;
+mod selected_media;
+mod selected_misc;
+pub use selected_misc::SelectedPart;
+mod selected_predefined;
+pub use selected_predefined::{ManagedPredefinedReader, SelectedPredefined};
+mod selected_rights;
+pub use selected_rights::SelectedRights;
+mod selected_modules;
+pub use selected_modules::{ModuleFacts, ModuleRead, ModuleSlot};
 
 mod predefined;
 pub use predefined::{

@@ -1,4 +1,5 @@
 use super::{StaticObjectIter, StaticValue, array, data, pairs, static_schema, text};
+use crate::forms::FormCompat;
 use std::cmp::Ordering;
 use std::iter::Peekable;
 
@@ -126,6 +127,7 @@ impl StaticFormProp {
 pub struct StaticFormContext {
     base: Option<&'static StaticValue>,
     overlay: Option<&'static StaticValue>,
+    compatibility: Option<&'static StaticValue>,
     v85: bool,
 }
 impl StaticFormContext {
@@ -142,13 +144,22 @@ impl StaticFormContext {
         let base = self.base.and_then(|value| value.get("props"));
         let overlay = self.overlay.and_then(|value| value.get("props"));
         let v85 = self.v85;
+        let compatibility = self.compatibility;
         pairs(base)
             .iter()
             .map(move |(key, value)| {
                 let replacement = overlay
                     .and_then(|overlay| overlay.get(key))
                     .filter(|value| v85 || !truthy(value.get("moved")));
-                (*key, StaticFormProp(replacement.unwrap_or(value)))
+                (
+                    *key,
+                    StaticFormProp(
+                        compatibility
+                            .and_then(|v| v.get(key))
+                            .or(replacement)
+                            .unwrap_or(value),
+                    ),
+                )
             })
             .chain(
                 pairs(overlay)
@@ -157,7 +168,12 @@ impl StaticFormContext {
                         base.and_then(|base| base.get(key)).is_none()
                             && (v85 || !truthy(value.get("moved")))
                     })
-                    .map(|(key, value)| (*key, StaticFormProp(value))),
+                    .map(move |(key, value)| {
+                        (
+                            *key,
+                            StaticFormProp(compatibility.and_then(|v| v.get(key)).unwrap_or(value)),
+                        )
+                    }),
             )
     }
 }
@@ -165,18 +181,43 @@ impl StaticFormContext {
 #[derive(Debug, Clone, Copy)]
 pub struct StaticFormTables {
     v85: bool,
+    compat: FormCompat,
 }
 pub fn static_form_tables(v85: bool) -> StaticFormTables {
-    StaticFormTables { v85 }
+    static_form_tables_mode(v85, FormCompat::Base)
+}
+pub fn static_form_tables_mode(v85: bool, compat: FormCompat) -> StaticFormTables {
+    StaticFormTables { v85, compat }
 }
 impl StaticFormTables {
+    fn compatibility(&self) -> Option<&'static StaticValue> {
+        (self.compat == FormCompat::V8_3_12)
+            .then(|| {
+                data::COMPAT_FORM_PROPERTIES
+                    .iter()
+                    .find(|(v85, _)| *v85 == self.v85)
+                    .map(|(_, value)| value)
+            })
+            .flatten()
+    }
     pub fn contexts(&self) -> impl Iterator<Item = (&'static str, StaticFormContext)> + use<> {
         let v85 = self.v85;
+        let compatibility = self.compatibility();
         MergeObjects {
             base: sorted(Some(table("forms/learned.json"))).peekable(),
             overlay: sorted(Some(table("forms/learned85.json"))).peekable(),
         }
-        .map(move |(key, base, overlay)| (key, StaticFormContext { base, overlay, v85 }))
+        .map(move |(key, base, overlay)| {
+            (
+                key,
+                StaticFormContext {
+                    base,
+                    overlay,
+                    v85,
+                    compatibility: compatibility.and_then(|value| value.get(key)),
+                },
+            )
+        })
     }
     pub fn context(&self, name: &str) -> Option<StaticFormContext> {
         let base = table("forms/learned.json").get(name);
@@ -185,6 +226,7 @@ impl StaticFormTables {
             base,
             overlay,
             v85: self.v85,
+            compatibility: self.compatibility().and_then(|value| value.get(name)),
         })
     }
     pub fn paths(&self) -> &'static StaticValue {
@@ -197,7 +239,11 @@ impl StaticFormTables {
         table("forms/misc.json")
     }
     pub fn types(&self) -> &'static StaticValue {
-        table("forms/types.json")
+        if self.compat == FormCompat::V8_3_12 {
+            &data::COMPAT_FORM_TYPES
+        } else {
+            table("forms/types.json")
+        }
     }
 }
 

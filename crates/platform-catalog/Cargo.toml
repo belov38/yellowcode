@@ -11,6 +11,8 @@ autobenches = false
 [dependencies]
 bsl-prim = { path = "../bsl-prim", default-features = false }
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
+memory-budget = { path = "../memory-budget" }
+zraw = { path = "../zraw" }
 
 [lints.clippy]
 dbg_macro = "warn"

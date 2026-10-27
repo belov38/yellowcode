@@ -26,6 +26,7 @@ use mdschema::ChildSpec;
 use std::borrow::Cow;
 use values::GraphError;
 
+pub use crate::templates::context::Lookup as FormSettingsLookup;
 pub use md_model::graph::Flowchart;
 
 const FLOWCHART_SUFFIX: &str = ".7";
@@ -197,6 +198,14 @@ pub fn dump(cfg: &Configuration, sink: &mut DumpSink) -> Result<PartStatus> {
 #[doc(hidden)]
 pub fn form_settings_lines(
     cfg: &Configuration,
+    value: &brace::Node,
+    depth: usize,
+) -> Option<Vec<String>> {
+    form_settings_lines_resolved(cfg, value, depth)
+}
+
+pub fn form_settings_lines_resolved(
+    cfg: &dyn FormSettingsLookup,
     value: &brace::Node,
     depth: usize,
 ) -> Option<Vec<String>> {

@@ -11,6 +11,119 @@ use onecd::{Locking, OpenOptions};
 use crate::Result;
 
 mod dt;
+mod dt_spill;
+mod managed_dt;
+pub use dt::ManagedSpoolError as ManagedDtSourceError;
+pub use managed_dt::{ManagedDtExtractError, ManagedDtSource};
+
+#[derive(Clone)]
+pub struct ConfigEntries {
+    spool: std::sync::Arc<dt::Spool>,
+    fingerprint: Fingerprint,
+}
+impl ConfigEntries {
+    pub fn read_range(
+        &self,
+        name: &str,
+        offset: u64,
+        len: usize,
+    ) -> mdconf::Result<Option<mdconf::StoredBytes>> {
+        use mdconf::EntrySource;
+        self.spool.stored_range_owned(name, offset, len)
+    }
+    pub fn summary(&self) -> ConfigEntrySummary {
+        self.spool.summary()
+    }
+    pub fn largest_range(
+        &self,
+        offset: u64,
+        len: usize,
+    ) -> mdconf::Result<Option<mdconf::StoredBytes>> {
+        self.spool.largest_range(offset, len)
+    }
+    pub(crate) fn load(
+        &self,
+        path: &Path,
+        opts: &LoadOptions,
+        expect: Option<&Fingerprint>,
+    ) -> std::result::Result<(Configuration, Fingerprint), OpenError> {
+        let fp = file_fingerprint(path)?;
+        if fp != self.fingerprint || expect.is_some_and(|e| e != &fp) {
+            return Err(OpenError::Changed);
+        }
+        let cfg = Configuration::load(&*self.spool, opts).map_err(|e| classify(path, &e))?;
+        if file_fingerprint(path)? != fp {
+            return Err(OpenError::Changed);
+        }
+        Ok((cfg, fp))
+    }
+}
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+pub struct ConfigEntrySummary {
+    pub entries: usize,
+    pub stored_bytes: u64,
+    pub largest_entry: u64,
+}
+
+pub(crate) fn open_retained_dt(
+    path: &Path,
+    opts: &LoadOptions,
+    memory: &OpenMemory,
+    progress: &mut impl FnMut(&'static str) -> Result<()>,
+) -> Result<(Configuration, Fingerprint, ConfigEntries)> {
+    progress("container")?;
+    let fp = file_fingerprint(path).map_err(|e| e.to_string())?;
+    let spool = std::sync::Arc::new(dt::extract_with_memory(path, memory, progress)?);
+    progress("metadata")?;
+    let cfg = {
+        let _phase = memory_budget::profile::phase(memory_budget::profile::Phase::Metadata);
+        Configuration::load(&*spool, opts).map_err(|e| dt::memory_hint(e.into()))?
+    };
+    if file_fingerprint(path).map_err(|e| e.to_string())? != fp {
+        return Err("DT input changed during metadata load".into());
+    }
+    Ok((
+        cfg,
+        fp.clone(),
+        ConfigEntries {
+            spool,
+            fingerprint: fp,
+        },
+    ))
+}
+
+#[derive(Clone)]
+pub struct OpenMemory {
+    pub(super) budget: memory_budget::MemoryBudget,
+    pub(super) startup: u64,
+    _control:
+        Option<std::sync::Arc<std::sync::Mutex<memory_budget::control::storage::ControlReserve>>>,
+}
+impl OpenMemory {
+    pub fn from_context(context: &crate::service::memory::Context) -> Self {
+        Self {
+            budget: context.ledger().clone(),
+            startup: context.restore_budget().0,
+            _control: None,
+        }
+    }
+    pub fn resolve(limit: Option<String>) -> Result<Self> {
+        let (context, reserve) = crate::service::memory::Settings::memory_only(limit).resolve()?;
+        let mut memory = Self::from_context(&context);
+        memory._control = Some(std::sync::Arc::new(std::sync::Mutex::new(reserve)));
+        Ok(memory)
+    }
+    pub fn ledger(&self) -> &memory_budget::MemoryBudget {
+        &self.budget
+    }
+}
+impl std::fmt::Debug for OpenMemory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenMemory")
+            .field("startup", &self.startup)
+            .finish_non_exhaustive()
+    }
+}
 
 const SIG_1CD: &[u8; 8] = b"1CDBMSV8";
 
@@ -96,6 +209,23 @@ pub fn open_with_progress(
     opts: &LoadOptions,
     progress: &mut impl FnMut(&'static str) -> Result<()>,
 ) -> Result<Configuration> {
+    open_inner(path, opts, None, progress)
+}
+
+pub fn open_with_memory(
+    path: &Path,
+    opts: &LoadOptions,
+    memory: &OpenMemory,
+    progress: &mut impl FnMut(&'static str) -> Result<()>,
+) -> Result<Configuration> {
+    open_inner(path, opts, Some(memory), progress)
+}
+fn open_inner(
+    path: &Path,
+    opts: &LoadOptions,
+    memory: Option<&OpenMemory>,
+    progress: &mut impl FnMut(&'static str) -> Result<()>,
+) -> Result<Configuration> {
     let path = &resolve(path);
     progress("container")?;
     match detect(path)? {
@@ -104,7 +234,10 @@ pub fn open_with_progress(
             progress("metadata")?;
             Configuration::load(&cf, opts).map_err(|e| format!("{}: {e}", path.display()).into())
         }
-        SourceKind::Dt => dt::open(path, opts, progress),
+        SourceKind::Dt => match memory {
+            Some(memory) => dt::open_with_memory(path, opts, memory, progress),
+            None => dt::open(path, opts, progress),
+        },
         SourceKind::Infobase => {
             progress("metadata")?;
             open_infobase(path, opts)
@@ -174,7 +307,8 @@ fn file_fingerprint(path: &Path) -> std::result::Result<Fingerprint, OpenError> 
 fn config_fingerprint(src: &dyn mdconf::EntrySource) -> mdconf::Result<Fingerprint> {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
-    for m in src.list()? {
+    let list = src.list_owned()?;
+    for m in list.iter() {
         h.update((m.name.len() as u64).to_le_bytes());
         h.update(m.name.as_bytes());
         h.update(m.ctime.0.to_le_bytes());
@@ -222,6 +356,25 @@ pub fn open_snapshot(
     expect: Option<&Fingerprint>,
     progress: &mut impl FnMut(&'static str) -> Result<()>,
 ) -> std::result::Result<(Configuration, Fingerprint), OpenError> {
+    open_snapshot_inner(path, opts, expect, None, progress)
+}
+
+pub fn open_snapshot_with_memory(
+    path: &Path,
+    opts: &LoadOptions,
+    expect: Option<&Fingerprint>,
+    memory: &OpenMemory,
+    progress: &mut impl FnMut(&'static str) -> Result<()>,
+) -> std::result::Result<(Configuration, Fingerprint), OpenError> {
+    open_snapshot_inner(path, opts, expect, Some(memory), progress)
+}
+fn open_snapshot_inner(
+    path: &Path,
+    opts: &LoadOptions,
+    expect: Option<&Fingerprint>,
+    memory: Option<&OpenMemory>,
+    progress: &mut impl FnMut(&'static str) -> Result<()>,
+) -> std::result::Result<(Configuration, Fingerprint), OpenError> {
     let path = &resolve(path);
     let stop = |e: crate::Error| OpenError::Decode(e.to_string());
     progress("container").map_err(stop)?;
@@ -246,7 +399,11 @@ pub fn open_snapshot(
             if !same(&fp) {
                 return Err(OpenError::Changed);
             }
-            let cfg = dt::open(path, opts, progress).map_err(|e| classify(path, &*e))?;
+            let cfg = match memory {
+                Some(memory) => dt::open_with_memory(path, opts, memory, progress),
+                None => dt::open(path, opts, progress),
+            }
+            .map_err(|e| classify(path, &*e))?;
             Ok((cfg, fp))
         }
         SourceKind::Infobase => {
@@ -307,10 +464,31 @@ pub fn with_config_entries<T>(
     path: &Path,
     consume: impl FnOnce(&dyn mdconf::EntrySource) -> Result<T>,
 ) -> Result<T> {
+    with_config_entries_inner(path, None, consume)
+}
+
+pub fn with_config_entries_with_memory<T>(
+    path: &Path,
+    memory: &OpenMemory,
+    consume: impl FnOnce(&dyn mdconf::EntrySource) -> Result<T>,
+) -> Result<T> {
+    with_config_entries_inner(path, Some(memory), consume)
+}
+fn with_config_entries_inner<T>(
+    path: &Path,
+    memory: Option<&OpenMemory>,
+    consume: impl FnOnce(&dyn mdconf::EntrySource) -> Result<T>,
+) -> Result<T> {
     let path = &resolve(path);
     match detect(path)? {
         SourceKind::Cf => consume(&CfFile::open(path)?),
-        SourceKind::Dt => consume(&dt::extract(path, &mut |_| Ok(()))?),
+        SourceKind::Dt => {
+            let spool = match memory {
+                Some(memory) => dt::extract_with_memory(path, memory, &mut |_| Ok(()))?,
+                None => dt::extract(path, &mut |_| Ok(()))?,
+            };
+            consume(&spool).map_err(dt::memory_hint)
+        }
         SourceKind::Infobase => {
             let mut opts = OpenOptions::read_only();
             opts.locking = Locking::None;

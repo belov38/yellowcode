@@ -21,7 +21,7 @@ fn category_ru() -> &'static HashMap<String, String> {
     })
 }
 
-const FALLBACK_RU: &[(&str, &str)] = &[
+pub(super) const FALLBACK_RU: &[(&str, &str)] = &[
     ("DefinedType", "ОпределяемыйТип"),
     ("Characteristic", "Характеристика"),
     ("AnyIBRef", "ЛюбаяСсылка"),
@@ -42,7 +42,7 @@ fn plain_ru(name: &str) -> Option<String> {
         })
 }
 
-fn primitive(xml: &str, lang: Lang) -> Option<&'static str> {
+pub(super) fn primitive(xml: &str, lang: Lang) -> Option<&'static str> {
     let (ru, en) = match xml {
         "xs:string" => ("Строка", "String"),
         "xs:decimal" => ("Число", "Number"),

@@ -1,3 +1,12 @@
+mod http;
+pub use http::show_http_managed;
+mod managed;
+mod selected;
+pub(crate) use managed::Property;
+pub use managed::{ManagedProperties, properties_managed};
+pub(crate) use selected::with_properties;
+pub use selected::{ManagedShowError, show_managed};
+
 use std::io::Write;
 
 use mdconf::{Configuration, Prop, TypeDescription, TypedValue, Value, XmlElem};

@@ -1,4 +1,7 @@
-use mdconf::{ChildTag, Configuration, MdKind, MdObject, Value};
+use mdconf::{ChildTag, Configuration, MdKind, MdObject};
+mod view;
+pub use view::{GeneratedChild, GeneratedObject, GeneratedValue};
+pub mod facts;
 
 use crate::stdcmd::{FormRole, ListOf, NameLang, std_name};
 use crate::{Attribute, FormDesc, GroupKind, Item, ItemKind, LStr, ParseStats, Props, TypeDesc};
@@ -52,18 +55,18 @@ impl std::fmt::Display for AutoformError {
 
 impl std::error::Error for AutoformError {}
 
-fn text_prop<'a>(o: &'a MdObject, name: &str) -> Option<&'a str> {
+fn text_prop<'a>(o: &'a impl GeneratedObject, name: &str) -> Option<&'a str> {
     match o.prop(name)? {
-        Value::Text(t) => Some(t),
+        GeneratedValue::Text(t) => Some(t),
         _ => None,
     }
 }
 
-fn bool_prop(o: &MdObject, name: &str) -> bool {
-    matches!(o.prop(name), Some(Value::Bool(true)))
+fn bool_prop(o: &impl GeneratedObject, name: &str) -> bool {
+    matches!(o.prop(name), Some(GeneratedValue::Bool(true)))
 }
 
-fn len_prop(o: &MdObject, name: &str, default: u32) -> u32 {
+fn len_prop(o: &impl GeneratedObject, name: &str, default: u32) -> u32 {
     text_prop(o, name)
         .and_then(|t| t.trim().parse().ok())
         .unwrap_or(default)
@@ -81,13 +84,11 @@ struct Field {
 }
 
 impl Field {
-    fn child(c: &mdconf::Child) -> Field {
-        let boolean = c
-            .type_desc()
-            .is_some_and(|t| matches!(t.types.as_slice(), [r] if r.name.is_qname("xs:boolean")));
+    fn child(c: impl GeneratedChild) -> Field {
+        let boolean = c.is_boolean();
         Field {
-            data: c.name.clone(),
-            name: c.name.clone(),
+            data: c.name().to_owned(),
+            name: c.name().to_owned(),
             boolean,
             title: None,
         }
@@ -160,19 +161,19 @@ impl Builder {
         g
     }
 
-    fn tabular(&mut self, ts: &mdconf::Child, main: &str) -> Item {
-        let path = format!("{main}.{}", ts.name);
+    fn tabular(&mut self, ts: impl GeneratedChild, main: &str) -> Item {
+        let path = format!("{main}.{}", ts.name());
         let props = Props {
             data_path: Some(path.clone()),
             ..Props::default()
         };
-        let mut t = self.item(ts.name.clone(), ItemKind::Table, props);
+        let mut t = self.item(ts.name().to_owned(), ItemKind::Table, props);
         let n = Field::standard("LineNumber", "N", self.lang);
         t.children
-            .push(self.field(&n, &ts.name, &path, Some(ItemKind::LabelField)));
-        for c in ts.children.iter().filter(|c| c.tag == ChildTag::Attribute) {
+            .push(self.field(&n, ts.name(), &path, Some(ItemKind::LabelField)));
+        for c in ts.children().filter(|c| c.tag() == ChildTag::Attribute) {
             let f = Field::child(c);
-            t.children.push(self.field(&f, &ts.name, &path, None));
+            t.children.push(self.field(&f, ts.name(), &path, None));
         }
         t
     }
@@ -213,9 +214,9 @@ fn main_attribute(id: i32, name: &str, ty: String) -> Attribute {
     }
 }
 
-fn used_for(c: &mdconf::Child, group: bool) -> bool {
+fn used_for(c: &impl GeneratedChild, group: bool) -> bool {
     match c.prop("Use") {
-        Some(Value::Text(t)) => match t.as_str() {
+        Some(GeneratedValue::Text(t)) => match t {
             "ForFolder" => group,
             "ForFolderAndItem" => true,
             _ => !group,
@@ -224,15 +225,15 @@ fn used_for(c: &mdconf::Child, group: bool) -> bool {
     }
 }
 
-fn is_hierarchical(o: &MdObject) -> bool {
-    o.kind == MdKind::Catalog && bool_prop(o, "Hierarchical")
+fn is_hierarchical(o: &impl GeneratedObject) -> bool {
+    o.kind() == MdKind::Catalog && bool_prop(o, "Hierarchical")
 }
 
-fn has_folders(o: &MdObject) -> bool {
+fn has_folders(o: &impl GeneratedObject) -> bool {
     is_hierarchical(o) && text_prop(o, "HierarchyType") != Some("HierarchyOfItems")
 }
 
-fn is_periodic(o: &MdObject) -> bool {
+fn is_periodic(o: &impl GeneratedObject) -> bool {
     text_prop(o, "InformationRegisterPeriodicity").is_some_and(|p| p != "Nonperiodical")
 }
 
@@ -252,7 +253,15 @@ pub fn generate(
     obj: &MdObject,
     kind: GeneratedKind,
 ) -> Result<FormDesc, AutoformError> {
-    let lang = match cfg.settings.script_variant {
+    generate_view(cfg.settings.script_variant, obj, kind)
+}
+
+pub fn generate_view(
+    script_variant: mdconf::ScriptVariant,
+    obj: &impl GeneratedObject,
+    kind: GeneratedKind,
+) -> Result<FormDesc, AutoformError> {
+    let lang = match script_variant {
         mdconf::ScriptVariant::Russian => NameLang::Ru,
         mdconf::ScriptVariant::English => NameLang::En,
     };
@@ -265,7 +274,7 @@ pub fn generate(
     match kind {
         GeneratedKind::Object | GeneratedKind::Group => {
             let group = kind == GeneratedKind::Group;
-            match obj.kind {
+            match obj.kind() {
                 MdKind::Catalog => {
                     if group && !has_folders(obj) {
                         return Err(no_role);
@@ -280,7 +289,7 @@ pub fn generate(
                 k => Err(AutoformError::Unsupported(k.as_str().to_string())),
             }
         }
-        GeneratedKind::Record => match obj.kind {
+        GeneratedKind::Record => match obj.kind() {
             MdKind::InformationRegister => {
                 if text_prop(obj, "WriteMode") == Some("RecorderSubordinate") {
                     return Err(no_role);
@@ -294,7 +303,7 @@ pub fn generate(
         },
         GeneratedKind::List | GeneratedKind::Choice => {
             let choice = kind == GeneratedKind::Choice;
-            match obj.kind {
+            match obj.kind() {
                 MdKind::Catalog | MdKind::Document | MdKind::Enum => {
                     Ok(list_form(&mut b, obj, choice))
                 }
@@ -308,7 +317,7 @@ pub fn generate(
     }
 }
 
-fn catalog_form(b: &mut Builder, o: &MdObject, group: bool) -> FormDesc {
+fn catalog_form(b: &mut Builder, o: &impl GeneratedObject, group: bool) -> FormDesc {
     let main = b.std("Object");
     let mut fields = Vec::new();
     if len_prop(o, "CodeLength", 9) > 0 {
@@ -338,12 +347,12 @@ fn catalog_form(b: &mut Builder, o: &MdObject, group: bool) -> FormDesc {
     let attr = main_attribute(
         b.next_id.saturating_add(1),
         main,
-        format!("cfg:CatalogObject.{}", o.name),
+        format!("cfg:CatalogObject.{}", o.name()),
     );
     b.form(role, attr, items)
 }
 
-fn document_form(b: &mut Builder, o: &MdObject) -> FormDesc {
+fn document_form(b: &mut Builder, o: &impl GeneratedObject) -> FormDesc {
     let main = b.std("Object");
     let mut fields = Vec::new();
     if len_prop(o, "NumberLength", 9) > 0 {
@@ -359,12 +368,12 @@ fn document_form(b: &mut Builder, o: &MdObject) -> FormDesc {
     let attr = main_attribute(
         b.next_id.saturating_add(1),
         main,
-        format!("cfg:DocumentObject.{}", o.name),
+        format!("cfg:DocumentObject.{}", o.name()),
     );
     b.form(FormRole::Object { document: true }, attr, items)
 }
 
-fn register_fields(o: &MdObject) -> Vec<Field> {
+fn register_fields(o: &impl GeneratedObject) -> Vec<Field> {
     o.dimensions()
         .chain(o.resources())
         .chain(o.attributes())
@@ -372,7 +381,7 @@ fn register_fields(o: &MdObject) -> Vec<Field> {
         .collect()
 }
 
-fn record_form(b: &mut Builder, o: &MdObject) -> FormDesc {
+fn record_form(b: &mut Builder, o: &impl GeneratedObject) -> FormDesc {
     let main = b.std("Record");
     let mut fields = Vec::new();
     if is_periodic(o) {
@@ -384,15 +393,15 @@ fn record_form(b: &mut Builder, o: &MdObject) -> FormDesc {
     let attr = main_attribute(
         b.next_id.saturating_add(1),
         main,
-        format!("cfg:InformationRegisterRecordManager.{}", o.name),
+        format!("cfg:InformationRegisterRecordManager.{}", o.name()),
     );
     b.form(FormRole::Record, attr, items)
 }
 
-fn list_form(b: &mut Builder, o: &MdObject, choice: bool) -> FormDesc {
+fn list_form(b: &mut Builder, o: &impl GeneratedObject, choice: bool) -> FormDesc {
     let list = b.std("List");
     let mut fields = Vec::new();
-    match o.kind {
+    match o.kind() {
         MdKind::Catalog => {
             if len_prop(o, "DescriptionLength", 25) > 0 {
                 fields.push(Field::standard("Description", "Наименование", b.lang));
@@ -450,9 +459,9 @@ fn list_form(b: &mut Builder, o: &MdObject, choice: bool) -> FormDesc {
         list,
         "cfg:DynamicList".to_string(),
     );
-    attr.main_table = Some(format!("{}.{}", o.kind.as_str(), o.name));
+    attr.main_table = Some(format!("{}.{}", o.kind().as_str(), o.name()));
     let role = FormRole::List {
-        of: list_of(o.kind),
+        of: list_of(o.kind()),
         hierarchical: has_folders(o),
         choice,
     };

@@ -1,5 +1,5 @@
 use std::fmt;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 
 use super::{Atom, BinNode, F_CLOSE, F_COMMA, F_OPEN};
 use crate::MAX_DEPTH;
@@ -35,6 +35,7 @@ pub enum ErrorKind {
     BadNumericTag(u8),
     TooDeep,
     Limit(&'static str),
+    InvalidBinary,
     Io(io::ErrorKind),
 }
 
@@ -47,6 +48,7 @@ impl fmt::Display for ErrorKind {
             ErrorKind::BadNumericTag(t) => write!(f, "bad numeric text tag {t:#04x}"),
             ErrorKind::TooDeep => f.write_str("nesting too deep"),
             ErrorKind::Limit(what) => write!(f, "read limit: {what}"),
+            ErrorKind::InvalidBinary => f.write_str("invalid binary chunk list"),
             ErrorKind::Io(k) => write!(f, "I/O error: {k}"),
         }
     }
@@ -138,7 +140,18 @@ impl<R: Read> Src<R> {
         Ok(done.then_some(out))
     }
 
-    pub(super) fn payload(&mut self, mut n: u64, mut sink: impl FnMut(&[u8])) -> io::Result<bool> {
+    pub(super) fn payload(&mut self, n: u64, mut sink: impl FnMut(&[u8])) -> io::Result<bool> {
+        self.try_payload(n, |piece| {
+            sink(piece);
+            Ok(())
+        })
+    }
+
+    pub(super) fn try_payload(
+        &mut self,
+        mut n: u64,
+        mut sink: impl FnMut(&[u8]) -> io::Result<()>,
+    ) -> io::Result<bool> {
         while n > 0 {
             if !self.fill()? {
                 return Ok(false);
@@ -148,7 +161,7 @@ impl<R: Read> Src<R> {
             let Some(piece) = avail.get(..k).filter(|p| !p.is_empty()) else {
                 return Ok(false);
             };
-            sink(piece);
+            sink(piece)?;
             self.pos = self.pos.saturating_add(k);
             self.offset = self.offset.saturating_add(k as u64);
             n = n.saturating_sub(k as u64);
@@ -241,6 +254,26 @@ impl<R: Read> Reader<R> {
         }
     }
 
+    pub fn copy_binary(&mut self, sink: &mut impl Write, limit: u64) -> Result<u64, Error> {
+        self.guard(|r| {
+            if r.pull(false)? != Some(Event::Open)
+                || !matches!(r.pull(false)?, Some(Event::Atom(a)) if a.as_int() == Some(0))
+            {
+                return Err(r.fail(ErrorKind::InvalidBinary));
+            }
+            let mut copied = 0u64;
+            loop {
+                let mut n = 0;
+                match r.lex_to(false, Some((sink, limit - copied, &mut n)))? {
+                    Some(Event::Close) => return Ok(copied),
+                    Some(Event::Atom(_)) => copied += n,
+                    None => return Err(r.eof()),
+                    _ => return Err(r.fail(ErrorKind::InvalidBinary)),
+                }
+            }
+        })
+    }
+
     pub fn skip_value(&mut self) -> Result<bool, Error> {
         self.guard(Self::skip_value_inner)
     }
@@ -326,6 +359,14 @@ impl<R: Read> Reader<R> {
     }
 
     fn lex(&mut self, skip: bool) -> Result<Option<Event>, Error> {
+        self.lex_to(skip, None)
+    }
+
+    fn lex_to(
+        &mut self,
+        skip: bool,
+        sink: Option<(&mut dyn Write, u64, &mut u64)>,
+    ) -> Result<Option<Event>, Error> {
         loop {
             if self.pend == 0 {
                 let at = self.src.offset;
@@ -374,9 +415,14 @@ impl<R: Read> Reader<R> {
                 continue;
             }
             let at = self.tag_off;
-            self.src.charge_node().map_err(|kind| self.fail(kind))?;
-            let atom =
-                Atom::read(&mut self.src, t, skip).map_err(|kind| Error { offset: at, kind })?;
+            let atom = if let Some((sink, limit, copied)) = sink {
+                *copied = Atom::copy_bytes(&mut self.src, t, sink, limit)
+                    .map_err(|kind| Error { offset: at, kind })?;
+                Atom::int(0)
+            } else {
+                self.src.charge_node().map_err(|kind| self.fail(kind))?;
+                Atom::read(&mut self.src, t, skip).map_err(|kind| Error { offset: at, kind })?
+            };
             self.element();
             self.prev_elem = true;
             return Ok(Some(Event::Atom(atom)));

@@ -133,6 +133,7 @@ pub struct AppState {
     lang: Lang,
     names: Option<PathBuf>,
     smoke: bool,
+    memory: Option<yellowcode_core::viewer::source::OpenMemory>,
     gate: Arc<Gate>,
 }
 
@@ -156,6 +157,7 @@ impl AppState {
             lang,
             names,
             smoke,
+            memory: None,
             gate: Gate::new(MAX_WORKERS, QUEUE_CAP),
         }
     }
@@ -311,11 +313,17 @@ fn start_load(app: &AppHandle, path: String) -> Result<(), String> {
         let (lang, names) = (st.lang, st.names.clone());
         let src = PathBuf::from(&path);
         let loaded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            State::load_stages_with_progress(
+            let memory = match &st.memory {
+                Some(memory) => memory.clone(),
+                None => yellowcode_core::viewer::source::OpenMemory::resolve(None)
+                    .map_err(|e| e.to_string())?,
+            };
+            State::load_stages_with_memory(
                 &src,
                 names.as_deref(),
                 lang,
                 Viewer::OPEN,
+                &memory,
                 &mut |stage| {
                     st.report_progress(id, stage, |status| {
                         let _ = app2.emit("source-progress", status);
@@ -643,6 +651,7 @@ pub struct Options {
     pub lang: Option<String>,
     pub names: Option<String>,
     pub smoke: bool,
+    pub memory_limit: Option<String>,
 }
 
 pub fn parse_args(args: &[String]) -> Result<Options, String> {
@@ -650,7 +659,7 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
     let mut positional = Vec::new();
     let mut args = args.iter();
     while let Some(arg) = args.next() {
-        if arg == "--lang" || arg == "--names" {
+        if arg == "--lang" || arg == "--names" || arg == "--memory-limit" {
             positional.push(arg);
             if let Some(value) = args.next() {
                 positional.push(value);
@@ -679,6 +688,9 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
             "--smoke" => o.smoke = true,
             "--lang" => o.lang = Some(it.next().ok_or("--lang needs a value")?.clone()),
             "--names" => o.names = Some(it.next().ok_or("--names needs a value")?.clone()),
+            "--memory-limit" => {
+                o.memory_limit = Some(it.next().ok_or("--memory-limit needs a value")?.clone())
+            }
             s if s.starts_with('-') => return Err(format!("unknown option {s}")),
             s if o.source.is_none() => o.source = Some(s.to_string()),
             s => return Err(format!("unexpected argument {s}")),
@@ -695,7 +707,7 @@ pub fn run_from_args(args: Vec<String>) -> i32 {
         Ok(o) => o,
         Err(e) => {
             eprintln!(
-                "yellowcode: {e}\nUsage: yellowcode [open] [<source>] [--lang ru|en] [--names <dump>] [--platform-build <BUILD>] [--smoke]"
+                "yellowcode: {e}\nUsage: yellowcode [open] [<source>] [--lang ru|en] [--names <dump>] [--platform-build <BUILD>] [--memory-limit <size>] [--smoke]"
             );
             return 2;
         }
@@ -716,7 +728,19 @@ pub fn run_from_args(args: Vec<String>) -> i32 {
             return 2;
         }
     };
-    match run(opts, lang) {
+    let memory =
+        match yellowcode_core::viewer::source::OpenMemory::resolve(opts.memory_limit.clone()) {
+            Ok(memory) => memory,
+            Err(error) => {
+                eprintln!("yellowcode: {error}");
+                return if yellowcode_core::service::memory::is_config_error(&*error) {
+                    2
+                } else {
+                    1
+                };
+            }
+        };
+    match run(opts, lang, memory) {
         Ok(()) => 0,
         Err(e) => {
             eprintln!("yellowcode: {e}");
@@ -735,7 +759,11 @@ fn skin_root(app: &AppHandle) -> tauri::Result<PathBuf> {
         .join("skins"))
 }
 
-fn run(opts: Options, lang: Lang) -> tauri::Result<()> {
+fn run(
+    opts: Options,
+    lang: Lang,
+    memory: yellowcode_core::viewer::source::OpenMemory,
+) -> tauri::Result<()> {
     process_start();
     let smoke = opts.smoke;
     let source = opts.source.clone();
@@ -791,6 +819,7 @@ fn run(opts: Options, lang: Lang) -> tauri::Result<()> {
             let recent_file = dir.join("recent.json");
             let recent = Recent::load_unchecked(&recent_file);
             let mut state = AppState::new(recent, recent_file, lang, names, smoke);
+            state.memory = Some(memory);
             state.skins = Arc::new(Mutex::new(yellowcode_core::viewer::skin::Skins::installed(
                 &skin_root(app.handle())?,
             )));

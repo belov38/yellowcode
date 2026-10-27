@@ -2,6 +2,7 @@ use crate::entries::EntryData;
 use crate::load::LoadCtx;
 use crate::{Configuration, MdObject, Result};
 use brace::{Guid, Node};
+use memory_budget::profile::{Phase, phase};
 use std::sync::Arc;
 
 mod cmdi;
@@ -26,17 +27,27 @@ pub(crate) use pictures::ext_of as picture_extension;
 pub(crate) fn load(cx: &LoadCtx, cfg: &mut Configuration, stages: crate::Stages) -> Result<()> {
     use crate::Stages;
     if stages.contains(Stages::RIGHTS) {
+        let _phase = phase(Phase::Rights);
         rights::load(cx, cfg)?;
     }
-    predefined::load(cx, cfg)?;
+    {
+        let _phase = phase(Phase::PredefinedData);
+        predefined::load(cx, cfg)?;
+    }
     if stages.contains(Stages::COMMAND_INTERFACE) {
         cmdi::load(cx, cfg)?;
     }
-    configuration::decode_configuration(cx, cfg)?;
+    {
+        let _phase = phase(Phase::ConfigurationParts);
+        configuration::decode_configuration(cx, cfg)?;
+    }
     if stages.contains(Stages::CONFIG_DUMP) {
         configdump::load(cx, cfg)?;
     }
-    misc::load(cx, cfg)?;
+    {
+        let _phase = phase(Phase::MiscParts);
+        misc::load(cx, cfg)?;
+    }
     if stages.contains(Stages::PICTURES) {
         pictures::load(cx, cfg)?;
     }

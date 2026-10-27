@@ -6,6 +6,7 @@ use crate::predefined::predefined_names;
 use crate::settings::decode_settings;
 use brace::{Guid, Node};
 use mdschema::{MdKind, Schema};
+use memory_budget::profile::{Phase, phase};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -221,6 +222,7 @@ pub(crate) fn load_with(
         uncovered == Stages::NONE || runner.probe(),
         "codec stages {uncovered:?} requested but not run"
     );
+    let _phase = phase(Phase::Inventory);
     let entries = Entries::with_meter(src, opts.meter.clone())?;
     let (format, compat) = configuration_version(&entries)?;
     let resource = mdschema::for_format(format)?;
@@ -239,10 +241,19 @@ fn load_selected(
     let schema = resource.schema()?;
     let root_info = entries.root_info()?;
     let id = root_info.id();
-    let index = crate::index::build(&entries, schema)?;
-    let predef = predefined_names(&entries, &index);
+    let index = {
+        let _phase = phase(Phase::Index);
+        crate::index::build(&entries, schema)?
+    };
+    let predef = {
+        let _phase = phase(Phase::Predefined);
+        predefined_names(&entries, &index)
+    };
     entries.check_refused()?;
-    let settings = settings_of(&entries, schema, &index)?;
+    let settings = {
+        let _phase = phase(Phase::Settings);
+        settings_of(&entries, schema, &index)?
+    };
 
     let mut diagnostics = crate::model::Diagnostics::default();
     let mut none: Vec<(String, MdKind, Guid)> = index
@@ -270,6 +281,7 @@ fn load_selected(
         .unsupported
         .extend(index.skipped.iter().cloned());
 
+    let shells_phase = phase(Phase::Shells);
     let mut cfg = Configuration {
         id,
         root_info: Some(root_info),
@@ -287,28 +299,50 @@ fn load_selected(
         },
         ..Default::default()
     };
+    drop(shells_phase);
     {
         let cx = LoadCtx {
             schema,
             entries: &entries,
             opts,
         };
-        crate::objects::decode::load(&cx, &mut cfg)?;
+        {
+            let _phase = phase(Phase::Objects);
+            crate::objects::decode::load(&cx, &mut cfg)?;
+        }
         if stages.contains(Stages::MODULES) {
-            crate::modules::load(&cx, &mut cfg)?;
+            {
+                let _phase = phase(Phase::Modules);
+                crate::modules::load(&cx, &mut cfg)?;
+            }
         }
         if stages.contains(Stages::FORMS) {
-            runner.forms(&cx, &mut cfg)?;
+            {
+                let _phase = phase(Phase::Forms);
+                runner.forms(&cx, &mut cfg)?;
+            }
         }
-        crate::parts::load(&cx, &mut cfg, stages)?;
+        {
+            let _phase = phase(Phase::Parts);
+            crate::parts::load(&cx, &mut cfg, stages)?;
+        }
         if stages.contains(Stages::TEMPLATES) {
-            runner.templates(&cx, &mut cfg)?;
+            {
+                let _phase = phase(Phase::Templates);
+                runner.templates(&cx, &mut cfg)?;
+            }
         }
         if stages.contains(Stages::FLOWCHARTS) {
-            runner.flowcharts(&cx, &mut cfg)?;
+            {
+                let _phase = phase(Phase::Flowcharts);
+                runner.flowcharts(&cx, &mut cfg)?;
+            }
         }
     }
     entries.check_refused()?;
-    drop(entries);
+    {
+        let _phase = phase(Phase::EntriesDrop);
+        drop(entries);
+    }
     Ok(cfg)
 }

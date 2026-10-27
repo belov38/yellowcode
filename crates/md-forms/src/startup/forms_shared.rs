@@ -43,6 +43,17 @@ pub struct ManagedShared {
     by_name: BudgetedVec<NamedNodes>,
 }
 impl ManagedShared {
+    pub(crate) fn memory_budget(&self) -> &MemoryBudget {
+        self.names_order.reservation().budget()
+    }
+    pub(crate) fn v85(&self) -> bool {
+        self.v85
+    }
+    pub(crate) fn child_patterns(&self) -> impl Iterator<Item = (&Guid, &Node)> {
+        self.patterns
+            .iter()
+            .filter_map(|(id, value)| value.as_deref().map(|node| (id, node)))
+    }
     pub(crate) fn names_order(&self) -> &[Guid] {
         &self.names_order
     }

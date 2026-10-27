@@ -8,6 +8,9 @@
     )
 )]
 
+#[cfg(feature = "stack-fault-probes")]
+pub mod stack_fault_probes;
+
 pub mod ast;
 pub mod diag;
 mod expr_entry;
@@ -409,9 +412,17 @@ pub fn with_deep_stack<R: Send>(depth: u32, f: impl FnOnce() -> R + Send) -> R {
     let mut out = None;
     std::thread::scope(|s| {
         let (job, out) = (&mut job, &mut out);
-        let spawned = std::thread::Builder::new()
-            .stack_size(size)
-            .spawn_scoped(s, move || *out = job.take().map(|f| f()));
+        #[cfg(feature = "stack-fault-probes")]
+        let denied = stack_fault_probes::denied();
+        #[cfg(not(feature = "stack-fault-probes"))]
+        let denied = false;
+        let spawned = if denied {
+            Err(std::io::Error::from(std::io::ErrorKind::WouldBlock))
+        } else {
+            std::thread::Builder::new()
+                .stack_size(size)
+                .spawn_scoped(s, move || *out = job.take().map(|f| f()))
+        };
         if let Ok(h) = spawned
             && let Err(p) = h.join()
         {
@@ -419,6 +430,8 @@ pub fn with_deep_stack<R: Send>(depth: u32, f: impl FnOnce() -> R + Send) -> R {
         }
     });
     if let Some(f) = job.take() {
+        #[cfg(feature = "stack-fault-probes")]
+        stack_fault_probes::did_fallback();
         out = Some(f());
     }
     out.expect("the job ran on the thread or inline")

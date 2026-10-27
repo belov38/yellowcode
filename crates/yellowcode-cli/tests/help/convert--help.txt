@@ -12,7 +12,7 @@ Options:
       --to <TO>                      [possible values: cf, dt, 1cd]
       --output <OUTPUT>              
       --users-layout <USERS_LAYOUT>  Explicit DT users layout; automatic selection awaits D4b [possible values: users8, users-spr11]
-      --memory-limit <MEMORY_LIMIT>  DT to 1CD only: managed memory budget, auto or integer bytes with B/KiB/MiB/GiB suffix (as for query and serve; YELLOWCODE_MEMORY_LIMIT)
+      --memory-limit <MEMORY_LIMIT>  DT conversion: managed memory budget, auto or integer bytes with B/KiB/MiB/GiB suffix (as for query and serve; YELLOWCODE_MEMORY_LIMIT)
       --without-users                DT to 1CD only: restore without users (needed when they cannot be transferred as they are). The base then opens without login, with full rights
   -h, --help                         Print help
 --- stderr

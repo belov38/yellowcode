@@ -29,6 +29,25 @@ impl Right {
             .and_then(|(ordinal, _)| Self::at(ordinal))
     }
 
+    pub fn all_static() -> impl Iterator<Item = Right> {
+        (0..mdschema::static_rights_tables().rights().count()).filter_map(Self::at)
+    }
+
+    pub fn static_name(self) -> &'static str {
+        mdschema::static_rights_tables()
+            .rights()
+            .nth(usize::from(self.0))
+            .map_or("", |(_, name)| name)
+    }
+
+    pub fn is_applicable(self, kind: MdKind) -> bool {
+        let wanted = self.static_name();
+        mdschema::static_rights_tables()
+            .rights_by_kind()
+            .find(|(name, _)| *name == kind.as_str())
+            .is_some_and(|(_, rights)| rights.iter().any(|name| name == wanted))
+    }
+
     pub fn all() -> impl Iterator<Item = Right> {
         (0..u16::try_from(table().len()).unwrap_or(u16::MAX)).map(Right)
     }

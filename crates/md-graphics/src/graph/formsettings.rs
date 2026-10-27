@@ -1,6 +1,6 @@
 use super::chart::{FORM_DECLARED, write_chart};
 use super::values::{GraphError, R, at, bad, is, item, list, py_space, slice};
-use crate::Configuration;
+use crate::templates::context::Lookup;
 use crate::templates::mxlxml::Writer;
 use crate::templates::{moxel, moxel_view::MoxelView, tree::TreeError};
 use crate::xml_out::XmlWriter;
@@ -23,7 +23,7 @@ pub(crate) fn kind(value: &Node) -> Option<&'static str> {
     }
 }
 
-pub(crate) fn settings_lines(cfg: &Configuration, value: &Node, depth: usize) -> R<Vec<String>> {
+pub(crate) fn settings_lines(cfg: &dyn Lookup, value: &Node, depth: usize) -> R<Vec<String>> {
     match kind(value) {
         Some("Chart") => {
             let v = list(value)?;
@@ -52,7 +52,7 @@ fn index_of(body: &[&str], line: &str) -> R<i64> {
     i64::try_from(i).map_err(|_| GraphError("line index".into()))
 }
 
-fn sheet_lines(cfg: &Configuration, value: &Node, depth: usize) -> R<Vec<String>> {
+fn sheet_lines(cfg: &dyn Lookup, value: &Node, depth: usize) -> R<Vec<String>> {
     let doc = MoxelView::read(list(item(value, 2)?)?, moxel::HEAD)
         .map_err(|error| GraphError(moxel::MoxelError::from(TreeError::from(error)).0))?;
     let text = Writer::from_view(cfg, doc)?.run()?;

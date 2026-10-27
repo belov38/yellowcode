@@ -13,7 +13,7 @@ pub struct ManagedPartsGraph {
     pub graph: ManagedModuleGraph,
     pub parts: Charged<ConfigParts>,
 }
-fn picture<S: ManagedEntrySource + ?Sized>(
+pub(in crate::startup) fn picture<S: ManagedEntrySource + ?Sized>(
     entries: &ManagedEntries<'_, S>,
     name: &str,
     which: &str,

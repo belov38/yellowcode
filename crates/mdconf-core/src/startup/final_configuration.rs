@@ -219,7 +219,9 @@ fn find_child(children: &[crate::Child], id: Guid) -> Option<&crate::Child> {
     None
 }
 
-fn unsupported(index: &ManagedIndex) -> Result<BudgetedVec<BudgetedText>, BudgetError> {
+pub(in crate::startup) fn unsupported(
+    index: &ManagedIndex,
+) -> Result<BudgetedVec<BudgetedText>, BudgetError> {
     let budget = index.memory_budget();
     let mut missing_schema = BudgetedVec::new(budget, Category::Metadata)?;
     for (id, (kind, name)) in index.objs.iter() {

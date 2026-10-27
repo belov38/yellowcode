@@ -6,6 +6,9 @@ pub(crate) enum Command {
     /// List metadata, optionally rooted at one object.
     Tree {
         source: PathBuf,
+        /// Managed DT CONFIG extraction budget; decoded model memory is additional.
+        #[arg(long, allow_hyphen_values = true)]
+        memory_limit: Option<String>,
         #[arg(long)]
         depth: Option<usize>,
         #[arg(long)]
@@ -20,6 +23,9 @@ pub(crate) enum Command {
     /// Show the typed properties of a metadata object.
     Show {
         source: PathBuf,
+        /// Managed DT CONFIG extraction budget; decoded model memory is additional.
+        #[arg(long, allow_hyphen_values = true)]
+        memory_limit: Option<String>,
         object: String,
         #[arg(long, value_enum, default_value = "json")]
         format: Format,
@@ -30,6 +36,7 @@ impl From<Command> for metadata::Command {
     fn from(c: Command) -> metadata::Command {
         match c {
             Command::Tree {
+                memory_limit: _,
                 source,
                 depth,
                 path,
@@ -45,6 +52,7 @@ impl From<Command> for metadata::Command {
                 format,
             },
             Command::Show {
+                memory_limit: _,
                 source,
                 object,
                 format,
@@ -58,5 +66,10 @@ impl From<Command> for metadata::Command {
 }
 
 pub(crate) fn run(command: Command, out: &mut dyn Write) -> yellowcode_core::Result<()> {
-    metadata::run(command.into(), out)
+    let limit = match &command {
+        Command::Tree { memory_limit, .. } | Command::Show { memory_limit, .. } => {
+            memory_limit.clone()
+        }
+    };
+    metadata::run_with_memory_limit(command.into(), limit, out)
 }

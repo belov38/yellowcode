@@ -12,6 +12,7 @@ autobenches = false
 [dependencies]
 quick-xml = "0.37"
 serde_json = "1"
+sha2 = "0.10"
 bsl-compiler = { path = "../bsl-compiler" }
 bsl-syntax = { path = "../bsl-syntax" }
 bsl-prim = { path = "../bsl-prim", default-features = false, features = ["icu"] }

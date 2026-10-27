@@ -324,7 +324,10 @@ impl<'a> TableView<'a> {
         }
     }
     pub fn embedded(v85: bool) -> Self {
-        let value = mdschema::static_form_tables(v85);
+        Self::embedded_mode(v85, mdschema::forms::FormCompat::Base)
+    }
+    pub fn embedded_mode(v85: bool, compat: mdschema::forms::FormCompat) -> Self {
+        let value = mdschema::static_form_tables_mode(v85, compat);
         Self {
             learned: ContextsRef::Embedded(value),
             paths: JsonRef::Embedded(value.paths()),

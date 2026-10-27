@@ -1,3 +1,5 @@
+pub mod borrowed;
+
 use std::collections::HashMap;
 use std::sync::OnceLock;
 

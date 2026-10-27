@@ -1,7 +1,7 @@
 mod base64;
 mod managed;
 mod managed_write;
-pub use managed_write::write_doc_budgeted;
+pub use managed_write::{write_doc_budgeted, write_node_budgeted};
 mod parse;
 pub use managed::{ManagedParseError, parse_bytes_budgeted, parse_doc_budgeted};
 mod write;

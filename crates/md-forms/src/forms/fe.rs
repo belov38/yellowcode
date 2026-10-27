@@ -106,30 +106,54 @@ pub(crate) fn esc_attr(s: &str) -> String {
     esc_text(s).replace('"', "&quot;")
 }
 
-fn local_prefix(
-    attrs: &[(String, String)],
-    text: Option<&str>,
-    depth: usize,
-) -> (Vec<(String, String)>, Option<String>) {
-    let p = format!("d{}p1", depth + 1);
-    let fix = |v: &str| match v.strip_prefix("@:") {
-        Some(rest) => format!("{p}:{rest}"),
-        None => v.to_string(),
+pub(super) fn local_marker_index(marker: &str) -> Option<usize> {
+    if marker == "@" {
+        return Some(1);
+    }
+    let digits = marker.strip_prefix('@')?;
+    if digits.starts_with('0') || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse::<usize>().ok().filter(|n| *n >= 2)
+}
+
+fn local_prefix(e: &E, depth: usize) -> (String, Vec<(String, String)>, Option<String>) {
+    let prefixes: Vec<(&str, String)> = e
+        .attrs
+        .iter()
+        .filter_map(|(key, _)| {
+            let marker = key.strip_prefix("xmlns:")?;
+            let index = local_marker_index(marker)?;
+            Some((marker, format!("d{}p{index}", depth + 1)))
+        })
+        .collect();
+    let fix = |value: &str| {
+        if let Some((prefix, local)) = value.split_once(':')
+            && let Some((_, mapped)) = prefixes.iter().find(|(marker, _)| *marker == prefix)
+        {
+            return format!("{mapped}:{local}");
+        }
+        value.to_string()
     };
-    let mut out: Vec<(String, String)> = Vec::with_capacity(attrs.len());
-    for (k, v) in attrs {
-        let k = if k == "xmlns:@" {
-            format!("xmlns:{p}")
+    let mut out: Vec<(String, String)> = Vec::with_capacity(e.attrs.len());
+    for (key, value) in &e.attrs {
+        let (key, value) = if key == "xmlns" {
+            (key.clone(), value.clone())
+        } else if let Some(marker) = key.strip_prefix("xmlns:") {
+            let key = prefixes
+                .iter()
+                .find(|(prefix, _)| *prefix == marker)
+                .map_or_else(|| key.clone(), |(_, mapped)| format!("xmlns:{mapped}"));
+            (key, value.clone())
         } else {
-            k.clone()
+            (fix(key), fix(value))
         };
-        let v = fix(v);
-        match out.iter_mut().find(|(ek, _)| *ek == k) {
-            Some(slot) => slot.1 = v,
-            None => out.push((k, v)),
+        match out.iter_mut().find(|(old, _)| *old == key) {
+            Some(slot) => slot.1 = value,
+            None => out.push((key, value)),
         }
     }
-    (out, text.map(fix))
+    (fix(&e.tag), out, e.text.as_deref().map(fix))
 }
 
 pub(crate) fn ser(e: &E, depth: usize, lines: &mut Vec<String>) {
@@ -138,20 +162,22 @@ pub(crate) fn ser(e: &E, depth: usize, lines: &mut Vec<String>) {
         return;
     }
     let local;
-    let (attrs, text): (&[(String, String)], Option<&str>) =
-        if e.attrs.iter().any(|(k, _)| k == "xmlns:@") {
-            let (a, t) = local_prefix(&e.attrs, e.text.as_deref(), depth);
-            local = (a, t);
-            (&local.0, local.1.as_deref())
+    let (tag, attrs, text): (&str, &[(String, String)], Option<&str>) =
+        if e.attrs.iter().any(|(key, _)| {
+            key.strip_prefix("xmlns:")
+                .and_then(local_marker_index)
+                .is_some()
+        }) {
+            local = local_prefix(e, depth);
+            (&local.0, &local.1, local.2.as_deref())
         } else {
-            (&e.attrs, e.text.as_deref())
+            (&e.tag, &e.attrs, e.text.as_deref())
         };
     let a: String = attrs
         .iter()
         .map(|(k, v)| format!(" {k}=\"{}\"", esc_attr(v)))
         .collect();
     let pad = "\t".repeat(depth);
-    let tag = &e.tag;
     if !e.kids.is_empty() {
         lines.push(format!("{pad}<{tag}{a}>"));
         for k in &e.kids {

@@ -1,5 +1,9 @@
+mod managed;
+mod re;
+pub use managed::{FindQuery, ManagedFindError};
+pub use re::{ALLOWANCE as REGEX_ALLOWANCE, FindRegex, MAX_PATTERN_BYTES, RegexError};
+
 use mdconf::{Child, Configuration, MdObject, Module, SubObject};
-use regex::{Regex, RegexBuilder};
 use serde::Serialize;
 
 use super::module::split_lines;
@@ -20,11 +24,11 @@ fn fold(s: &str) -> String {
 
 enum Matcher {
     Sub(String),
-    Re(Regex),
+    Re(Box<FindRegex>),
 }
 
 impl Matcher {
-    fn is_match(&self, s: &str) -> bool {
+    fn is_match(&mut self, s: &str) -> bool {
         match self {
             Matcher::Sub(p) => fold(s).contains(p.as_str()),
             Matcher::Re(r) => r.is_match(s),
@@ -147,7 +151,7 @@ pub fn find_limited(
     limit: usize,
 ) -> Result<(Vec<Hit>, usize), crate::Error> {
     let m = if regex {
-        Matcher::Re(RegexBuilder::new(pattern).case_insensitive(true).build()?)
+        Matcher::Re(Box::new(FindRegex::compile(pattern)?))
     } else {
         Matcher::Sub(fold(pattern))
     };

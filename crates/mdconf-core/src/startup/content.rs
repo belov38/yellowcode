@@ -1,5 +1,6 @@
 use super::{
-    ManagedDiagnostics, ManagedObjects, ManagedValueContext, Tree,
+    ManagedDiagnostics, ManagedValueContext, Tree,
+    defined_types::DefinedTypeLookup,
     index::text,
     properties::{NO_PROPS, PropertyInput, follow},
     values::{append, empty},
@@ -49,7 +50,7 @@ impl ManagedValueContext<'_> {
         kind: MdKind,
         name: &str,
         raw: &Node,
-        sets: Option<&ManagedObjects>,
+        sets: Option<&dyn DefinedTypeLookup>,
     ) -> Result<ManagedDecodedContent, BudgetError> {
         let budget = self.memory_budget();
         let props = self.object_properties_with_sets(kind, name, raw, sets)?;
@@ -226,7 +227,7 @@ impl ManagedValueContext<'_> {
         &self,
         tasks: BudgetedVec<Task<'a>>,
         owner: (&str, &str),
-        sets: Option<&ManagedObjects>,
+        sets: Option<&dyn DefinedTypeLookup>,
         diagnostics: &mut ManagedDiagnostics,
     ) -> Result<Charged<Vec<Child>>, BudgetError> {
         let budget = self.memory_budget();

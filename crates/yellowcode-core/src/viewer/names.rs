@@ -7,6 +7,10 @@ use platform_catalog::catalog;
 
 use super::out::Lang;
 
+mod managed;
+pub use managed::ManagedNames;
+pub(crate) use managed::{eq_path, folded_path};
+
 const PREFIX_EN: &str = "MetadataObject: ";
 const PREFIX_RU: &str = "ОбъектМетаданных: ";
 
@@ -168,14 +172,22 @@ const GROUPS: &[(&str, &str, &str)] = &[
 ];
 
 pub fn group_name(key: &str, lang: Lang) -> String {
+    group_label(key, lang).to_string()
+}
+
+pub fn group_label(key: &str, lang: Lang) -> &str {
     GROUPS
         .iter()
         .find(|(k, _, _)| *k == key)
-        .map(|(_, ru, en)| (if lang == Lang::Ru { *ru } else { *en }).to_string())
-        .unwrap_or_else(|| key.to_string())
+        .map(|(_, ru, en)| if lang == Lang::Ru { *ru } else { *en })
+        .unwrap_or(key)
 }
 
 pub fn module_name(kind: mdconf::ModuleKind, lang: Lang) -> String {
+    module_label(kind, lang).to_string()
+}
+
+pub fn module_label(kind: mdconf::ModuleKind, lang: Lang) -> &'static str {
     use mdconf::ModuleKind as M;
     let (en, ru) = match kind {
         M::Module => ("Module", "Модуль"),
@@ -190,7 +202,7 @@ pub fn module_name(kind: mdconf::ModuleKind, lang: Lang) -> String {
         M::SessionModule => ("SessionModule", "МодульСеанса"),
         M::ExternalConnectionModule => ("ExternalConnectionModule", "МодульВнешнегоСоединения"),
     };
-    (if lang == Lang::Ru { ru } else { en }).to_string()
+    if lang == Lang::Ru { ru } else { en }
 }
 
 pub fn fold_path_name(s: &str) -> String {

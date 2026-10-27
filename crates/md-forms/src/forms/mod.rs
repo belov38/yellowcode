@@ -17,6 +17,7 @@ mod sections;
 pub mod shared;
 pub(crate) mod upgrade;
 pub(crate) mod variant;
+pub mod wire;
 mod write;
 mod xmlconv;
 
@@ -35,6 +36,17 @@ pub(crate) use model::{attribute_types, form_from_decoded};
 use shared::Shared;
 pub use variant::Serialization;
 
+pub use md_graphics::graph::FormSettingsLookup;
+
+pub trait FormResolution: FormSettingsLookup {
+    fn predefined_name(&self, id: &Guid) -> Option<&str>;
+}
+impl FormResolution for Configuration {
+    fn predefined_name(&self, id: &Guid) -> Option<&str> {
+        self.predef.get(id).map(String::as_str)
+    }
+}
+
 pub(crate) fn form_shared(shared: &FormShared) -> Option<&Shared> {
     match shared {
         FormShared::Native(value) => crate::state::<Shared>(&**value),
@@ -44,6 +56,10 @@ pub(crate) fn form_shared(shared: &FormShared) -> Option<&Shared> {
             value
         }
     }
+}
+
+pub fn shared_facts(form: &Form) -> Option<&Shared> {
+    form_shared(form.shared.as_ref()?)
 }
 
 pub fn serialization(form: &Form) -> Option<Serialization> {
@@ -116,13 +132,21 @@ pub fn form_xml(cfg: &Configuration, id: Guid) -> Option<FormXml> {
 }
 
 fn write_form(cfg: &Configuration, id: Guid, f: &Form) -> Option<FormXml> {
-    let shared = form_shared(f.shared.as_ref()?)?;
     let owner = cfg
         .index
         .names
         .get(&id)
         .and_then(|n| n.rsplit_once(".Form."))
         .map(|(o, _)| o);
+    form_xml_resolved(cfg, f, owner)
+}
+
+pub fn form_xml_resolved(
+    cfg: &dyn FormResolution,
+    f: &Form,
+    owner: Option<&str>,
+) -> Option<FormXml> {
+    let shared = form_shared(f.shared.as_ref()?)?;
     let source = f.source.as_ref()?;
     let parsed;
     let root = if let Some(data) = source.entry() {
@@ -145,6 +169,20 @@ fn write_form(cfg: &Configuration, id: Guid, f: &Form) -> Option<FormXml> {
 
 pub fn form_refusal(cfg: &Configuration, id: Guid) -> Option<String> {
     let f = find_form(cfg, id)?;
+    let owner = cfg
+        .index
+        .names
+        .get(&id)
+        .and_then(|n| n.rsplit_once(".Form."))
+        .map(|(o, _)| o);
+    form_refusal_resolved(cfg, f, owner)
+}
+
+pub fn form_refusal_resolved(
+    cfg: &dyn FormResolution,
+    f: &Form,
+    owner: Option<&str>,
+) -> Option<String> {
     if serialization(f).is_none_or(Serialization::is_4_59) {
         return None;
     }
@@ -157,7 +195,7 @@ pub fn form_refusal(cfg: &Configuration, id: Guid) -> Option<String> {
     if refusal.is_some() {
         return refusal;
     }
-    write_form(cfg, id, f)
+    form_xml_resolved(cfg, f, owner)
         .is_none()
         .then(|| "writer-failed".to_string())
 }
@@ -169,7 +207,7 @@ pub fn writer_entry(
     upgrade::writer_entry(root)
 }
 
-fn plain_picture_path(p: &str) -> bool {
+pub fn plain_picture_path(p: &str) -> bool {
     p.split('/')
         .all(|c| !c.is_empty() && c != "." && c != ".." && !c.contains(['\\', ':', '\0']))
 }

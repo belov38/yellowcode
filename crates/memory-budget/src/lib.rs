@@ -14,6 +14,8 @@ pub use boxed::BudgetedBox;
 pub mod buffer;
 pub mod discovery;
 pub mod policy;
+#[doc(hidden)]
+pub mod profile;
 pub use buffer::{BudgetError, BudgetedText, BudgetedVec, BudgetedWriter};
 pub mod shared;
 pub use shared::{ErasedShared, Shared};
@@ -28,6 +30,7 @@ pub mod control;
 pub use context::{
     RequestBudget, RequestMemory, ResourceCause, ResourceFailure, ResourcePhase, StructureLimit,
 };
+pub mod sealed_heap;
 pub mod worker;
 pub use worker::{OWNER_WORKER_STACK_BYTES, WorkerContext, with_current_worker};
 

@@ -1,5 +1,6 @@
 use super::{
-    ManagedHead, ManagedObjects, ManagedPropSource, ManagedPropertyPlan, ManagedValueContext, Tree,
+    ManagedHead, ManagedPropSource, ManagedPropertyPlan, ManagedValueContext, Tree,
+    defined_types::DefinedTypeLookup,
     index::text,
     values::{append, empty},
 };
@@ -209,7 +210,7 @@ impl ManagedValueContext<'_> {
         kind: MdKind,
         name: &str,
         raw: &Node,
-        sets: Option<&ManagedObjects>,
+        sets: Option<&dyn DefinedTypeLookup>,
     ) -> Result<ManagedDecodedProperties, BudgetError> {
         let Some(spec) = super::kind_spec(kind.as_str()) else {
             return self.no_properties();
@@ -297,14 +298,14 @@ impl ManagedValueContext<'_> {
     pub(super) fn properties(
         &self,
         input: PropertyInput<'_>,
-        sets: Option<&ManagedObjects>,
+        sets: Option<&dyn DefinedTypeLookup>,
     ) -> Result<ManagedDecodedProperties, BudgetError> {
         self.properties_retained(input, sets, true)
     }
     fn properties_retained(
         &self,
         input: PropertyInput<'_>,
-        sets: Option<&ManagedObjects>,
+        sets: Option<&dyn DefinedTypeLookup>,
         retain_header: bool,
     ) -> Result<ManagedDecodedProperties, BudgetError> {
         let budget = self.memory_budget();
@@ -320,7 +321,7 @@ impl ManagedValueContext<'_> {
     pub(super) fn properties_with_plan(
         &self,
         input: PropertyInput<'_>,
-        sets: Option<&ManagedObjects>,
+        sets: Option<&dyn DefinedTypeLookup>,
         retain_header: bool,
         plan: ManagedPropertyPlan,
     ) -> Result<ManagedDecodedProperties, BudgetError> {
@@ -564,38 +565,23 @@ impl ManagedValueContext<'_> {
     }
     fn set_target<'a>(
         &self,
-        sets: &'a ManagedObjects,
+        sets: &'a dyn DefinedTypeLookup,
         reference: &TypeRef,
     ) -> Option<&'a TypeDescription> {
         let name = reference
             .name
             .fixed_local(crate::FixedNamespace::Cfg)?
             .strip_prefix("DefinedType.")?;
-        let by_id = reference
+        let owner = reference
             .type_id
             .and_then(|id| self.index.type_owners.get(&id))
-            .and_then(|owner| sets.object(owner.object))
-            .filter(|o| o.kind == MdKind::DefinedType)
-            .and_then(|o| match o.prop("Type") {
-                Some(Value::Type(ty)) => Some(ty),
-                _ => None,
-            });
-        by_id.or_else(|| {
-            sets.as_slice().iter().rev().find_map(|object| {
-                if object.kind != MdKind::DefinedType || object.name != name {
-                    return None;
-                }
-                match object.prop("Type") {
-                    Some(Value::Type(ty)) => Some(ty),
-                    _ => None,
-                }
-            })
-        })
+            .map(|owner| owner.object);
+        sets.defined_type(owner, name)
     }
     fn allows(
         &self,
         description: &TypeDescription,
-        sets: Option<&ManagedObjects>,
+        sets: Option<&dyn DefinedTypeLookup>,
         wanted: &str,
     ) -> Result<bool, BudgetError> {
         struct Frame<'a> {

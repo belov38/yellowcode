@@ -7,7 +7,7 @@ use std::io::{Read, Write};
 
 const MAGIC: &[u8; 8] = b"BSLCAT\x04\x00";
 pub(crate) const MAX_PLATFORM: usize = 64;
-const MAX_INFLATED: u64 = 64 << 20;
+pub(crate) const MAX_INFLATED: u64 = 64 << 20;
 
 #[derive(Default)]
 struct W(Vec<u8>);
@@ -418,24 +418,28 @@ fn r_data(r: &mut Rd) -> R<CatalogData> {
 }
 
 pub(crate) fn split_header(bytes: &[u8]) -> R<(&str, &[u8])> {
+    split_header_view(bytes).map_err(|message| DecodeError(message.to_string()))
+}
+
+pub(crate) fn split_header_view(bytes: &[u8]) -> Result<(&str, &[u8]), &'static str> {
     let Some(rest) = bytes.strip_prefix(MAGIC.as_slice()) else {
-        return err("bad magic");
+        return Err("bad magic");
     };
     let Some((len, rest)) = rest.split_first_chunk::<2>() else {
-        return err("truncated platform build");
+        return Err("truncated platform build");
     };
     let len = usize::from(u16::from_le_bytes(*len));
     if len > MAX_PLATFORM {
-        return err("platform build too long");
+        return Err("platform build too long");
     }
     let Some((platform, body)) = rest.split_at_checked(len) else {
-        return err("truncated platform build");
+        return Err("truncated platform build");
     };
     let Ok(platform) = std::str::from_utf8(platform) else {
-        return err("platform build is not UTF-8");
+        return Err("platform build is not UTF-8");
     };
     if !platform.is_empty() && !crate::is_platform_build(platform) {
-        return err("invalid platform build");
+        return Err("invalid platform build");
     }
     Ok((platform, body))
 }

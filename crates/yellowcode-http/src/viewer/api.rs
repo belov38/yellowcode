@@ -8,7 +8,7 @@ use super::state::State;
 use yellowcode_core::viewer::check::{self, Ctx, Run};
 use yellowcode_core::viewer::names::{child_tag_en, kind_name, module_name, sub_kind_en};
 use yellowcode_core::viewer::path::{self, Target};
-use yellowcode_core::viewer::{Lang, blocks, find, highlight, identity, module, outline, tree};
+use yellowcode_core::viewer::{Lang, find, identity, module, tree};
 
 const MAX_HITS: usize = 500;
 
@@ -205,25 +205,14 @@ fn module_text(state: &State, req: &Request) -> Response {
         Ok(m) => m,
         Err(e) => return error(404, &e.to_string()),
     };
-    let text = m.text();
-    let (items, syntax_error) = outline::outline(&text);
-    let plain = param(req, "plain") == Some("1");
-    let source_lines = module::split_lines(text.strip_prefix('\u{feff}').unwrap_or(&text));
-    let line_count = source_lines.len();
-    let source_text = plain.then(|| source_lines.join("\n"));
-    let lines = (!plain).then(|| highlight::classified_lines(&text));
     reply(
         200,
-        &json!({
-            "name": module_name(m.kind, state.lang),
-            "lines": lines,
-            "text": source_text,
-            "line_count": line_count,
-            "blocks": blocks::blocks_with(&text, &items, syntax_error.as_deref()),
-            "outline": items,
-            "syntax_error": syntax_error,
-            "modules": module_names(&target),
-        }),
+        &module::view(
+            m,
+            state.lang,
+            param(req, "plain") == Some("1"),
+            module_names(&target),
+        ),
     )
 }
 

@@ -12,6 +12,12 @@ use super::names::{child_tag_en, group_name, kind_name, module_name, section_nam
 use super::out::Lang;
 use super::types::type_text;
 
+mod managed;
+pub use managed::{ManagedFlatNode, ManagedTree};
+mod static_order {
+    include!(concat!(env!("OUT_DIR"), "/viewer_order.rs"));
+}
+
 #[derive(Debug, Serialize)]
 pub struct TreeNode {
     pub label: String,

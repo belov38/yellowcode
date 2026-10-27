@@ -1,4 +1,5 @@
 pub mod html;
+pub(crate) mod worker;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;

@@ -28,16 +28,14 @@ const BY_NAME_TAGS: [&str; 7] = [
 
 pub(super) enum TableOwner {
     Native(Arc<FormTables>),
-    #[cfg(test)]
-    Embedded(bool),
+    Embedded(bool, FormCompat),
 }
 
 impl TableOwner {
     fn view(&self) -> TableView<'_> {
         match self {
             Self::Native(value) => TableView::native(value),
-            #[cfg(test)]
-            Self::Embedded(v85) => TableView::embedded(*v85),
+            Self::Embedded(v85, compat) => TableView::embedded_mode(*v85, *compat),
         }
     }
 }
@@ -154,7 +152,50 @@ impl Shared {
             names,
         ))
     }
-    pub(crate) fn names_order(&self) -> &[Guid] {
+    pub fn from_resolution(
+        v85: bool,
+        compat: FormCompat,
+        names_order: Vec<Guid>,
+        child_patterns: HashMap<Guid, Node>,
+        facts: &dyn super::FormSettingsLookup,
+    ) -> Result<Self> {
+        Ok(Self::Legacy(LegacyShared::with_tables(
+            v85,
+            compat,
+            TableOwner::Embedded(v85, compat),
+            mdschema::forms::std_attrs()?,
+            names_order,
+            child_patterns,
+            |id| facts.name(id),
+        )))
+    }
+    pub fn v85(&self) -> bool {
+        match self {
+            Self::Legacy(v) => v.v85,
+            Self::Managed(v) => v.v85(),
+        }
+    }
+    pub fn managed_budget(&self) -> Option<&memory_budget::MemoryBudget> {
+        match self {
+            Self::Legacy(_) => None,
+            Self::Managed(v) => Some(v.memory_budget()),
+        }
+    }
+    pub fn child_patterns(&self) -> impl Iterator<Item = (&Guid, &Node)> {
+        let native = match self {
+            Self::Legacy(v) => Some(v),
+            Self::Managed(_) => None,
+        };
+        let managed = match self {
+            Self::Managed(v) => Some(v),
+            Self::Legacy(_) => None,
+        };
+        native
+            .into_iter()
+            .flat_map(|v| v.child_patterns.iter())
+            .chain(managed.into_iter().flat_map(|v| v.child_patterns()))
+    }
+    pub fn names_order(&self) -> &[Guid] {
         match self {
             Self::Legacy(v) => &v.names_order,
             Self::Managed(v) => v.names_order(),
@@ -379,7 +420,7 @@ impl Walk {
     }
 }
 
-pub(crate) fn form_compat(compatibility_mode: u32, v85: bool) -> FormCompat {
+pub fn form_compat(compatibility_mode: u32, v85: bool) -> FormCompat {
     if compatibility_mode == 80312 && !v85 {
         FormCompat::V8_3_12
     } else {
@@ -439,10 +480,30 @@ impl LegacyShared {
         child_patterns: HashMap<Guid, Node>,
         names: &HashMap<Guid, String>,
     ) -> LegacyShared {
+        Self::with_tables(
+            v85,
+            FormCompat::Base,
+            TableOwner::Native(tables),
+            std,
+            names_order,
+            child_patterns,
+            |id| names.get(id).map(String::as_str),
+        )
+    }
+
+    fn with_tables<'n>(
+        v85: bool,
+        compat: FormCompat,
+        tables: TableOwner,
+        std: &'static [KindStdAttrs],
+        names_order: Vec<Guid>,
+        child_patterns: HashMap<Guid, Node>,
+        name: impl Fn(&Guid) -> Option<&'n str>,
+    ) -> LegacyShared {
         let mut sh = LegacyShared {
             v85,
-            compat: FormCompat::Base,
-            tables: TableOwner::Native(tables),
+            compat,
+            tables,
             names_order,
             child_patterns,
             main_fields: HashMap::new(),
@@ -461,7 +522,7 @@ impl LegacyShared {
             }
         }
         for u in &sh.names_order {
-            let Some(n) = names.get(u) else { continue };
+            let Some(n) = name(u) else { continue };
             let p: Vec<&str> = n.split('.').collect();
             match p.as_slice() {
                 [k, o, _, c] => {

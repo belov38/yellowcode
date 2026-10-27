@@ -90,7 +90,7 @@ fn plain_bytes(cx: &LoadCtx, name: &str) -> Result<Option<R<Vec<u8>>>> {
     Ok(match fetch(cx, name)?.as_deref() {
         None => None,
         Some(EntryData::Nested(_)) => Some(Err("container")),
-        Some(_) => cx.entries.raw(name)?.map(Ok),
+        Some(_) => cx.entries.raw(name)?.map(|bytes| Ok(bytes.to_vec())),
     })
 }
 
@@ -198,7 +198,7 @@ fn load_modules(cx: &LoadCtx, cfg: &mut Configuration, kind: MdKind, id: Guid) -
         if let Some(b) = cx.entries.raw(&name)?
             && let Some(o) = find_mut(&mut cfg.objects, id)
         {
-            o.parts.binary_modules.push((bin, b));
+            o.parts.binary_modules.push((bin, b.to_vec()));
         }
     }
     Ok(())

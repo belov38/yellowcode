@@ -67,8 +67,8 @@ pub fn picture(key: &str) -> Option<(&'static [u8], Option<&'static [u8]>)> {
 }
 
 pub fn version() -> &'static str {
-    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    V.get_or_init(|| {
+    static V: std::sync::OnceLock<[u8; 10]> = std::sync::OnceLock::new();
+    let bytes = V.get_or_init(|| {
         let mut h: u64 = 0xcbf2_9ce4_8422_2325;
         let mut eat = |b: &[u8]| {
             for x in b {
@@ -80,6 +80,16 @@ pub fn version() -> &'static str {
             eat(png);
             eat(png2.unwrap_or_default());
         }
-        format!("{h:016x}")[..10].to_string()
-    })
+        let mut bytes = [b'0'; 10];
+        for (at, byte) in bytes.iter_mut().enumerate() {
+            let nibble = ((h >> (60 - 4 * at)) & 15) as u8;
+            *byte = if nibble < 10 {
+                b'0' + nibble
+            } else {
+                b'a' + nibble - 10
+            };
+        }
+        bytes
+    });
+    std::str::from_utf8(bytes).unwrap_or_default()
 }

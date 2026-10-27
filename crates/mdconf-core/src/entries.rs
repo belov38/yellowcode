@@ -21,9 +21,73 @@ pub struct EntryMeta {
     pub attrs: u32,
 }
 
+#[derive(Debug, Clone)]
+pub enum EntryBacking<T> {
+    Native(T),
+    Charged(memory_budget::Shared<T>),
+}
+impl<T> EntryBacking<T> {
+    pub fn from_charged(
+        value: memory_budget::Charged<T>,
+    ) -> std::result::Result<Self, memory_budget::BudgetError> {
+        Ok(Self::Charged(value.try_into_shared()?))
+    }
+    pub fn budget(&self) -> Option<&memory_budget::MemoryBudget> {
+        match self {
+            Self::Native(_) => None,
+            Self::Charged(value) => Some(value.reservation().budget()),
+        }
+    }
+}
+impl<T> std::ops::Deref for EntryBacking<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        match self {
+            Self::Native(value) => value,
+            Self::Charged(value) => value,
+        }
+    }
+}
+impl<T: PartialEq> PartialEq for EntryBacking<T> {
+    fn eq(&self, other: &Self) -> bool {
+        **self == **other
+    }
+}
+impl<T: Eq> Eq for EntryBacking<T> {}
+impl<T: Default> Default for EntryBacking<T> {
+    fn default() -> Self {
+        Self::Native(T::default())
+    }
+}
+pub type EntryList = EntryBacking<Vec<EntryMeta>>;
+pub type StoredBytes = EntryBacking<Vec<u8>>;
+
 pub trait EntrySource {
+    fn decoded_cache_capacity(&self) -> Option<std::num::NonZeroUsize> {
+        None
+    }
+
     fn list(&self) -> Result<Vec<EntryMeta>>;
     fn stored(&self, name: &str) -> Result<Option<Vec<u8>>>;
+    fn list_owned(&self) -> Result<EntryList> {
+        self.list().map(EntryBacking::Native)
+    }
+    fn stored_owned(&self, name: &str) -> Result<Option<StoredBytes>> {
+        self.stored(name)
+            .map(|value| value.map(EntryBacking::Native))
+    }
+    fn stored_owned_bounded(&self, name: &str, limit: usize) -> Result<Option<StoredBytes>> {
+        self.stored_bounded(name, limit)
+            .map(|value| value.map(EntryBacking::Native))
+    }
+    fn stored_range_owned(
+        &self,
+        name: &str,
+        _offset: u64,
+        _len: usize,
+    ) -> Result<Option<StoredBytes>> {
+        Err(bad(name, "stored range read unsupported by source"))
+    }
     fn stored_bounded(&self, name: &str, _limit: usize) -> Result<Option<Vec<u8>>> {
         Err(bad(name, "bounded stored read unsupported by source"))
     }
@@ -63,8 +127,25 @@ fn memory_error(name: &str, error: memory_budget::BudgetError) -> Error {
 }
 
 impl EntrySource for BudgetedEntries<'_> {
+    fn decoded_cache_capacity(&self) -> Option<std::num::NonZeroUsize> {
+        self.inner.decoded_cache_capacity()
+    }
     fn list(&self) -> Result<Vec<EntryMeta>> {
         self.inner.list()
+    }
+    fn list_owned(&self) -> Result<EntryList> {
+        self.inner.list_owned()
+    }
+    fn stored_owned_bounded(&self, name: &str, limit: usize) -> Result<Option<StoredBytes>> {
+        self.inner.stored_owned_bounded(name, limit)
+    }
+    fn stored_range_owned(
+        &self,
+        name: &str,
+        offset: u64,
+        len: usize,
+    ) -> Result<Option<StoredBytes>> {
+        self.inner.stored_range_owned(name, offset, len)
     }
     fn stored(&self, name: &str) -> Result<Option<Vec<u8>>> {
         Err(bad(name, "budgeted source reads entries inflated only"))
@@ -86,7 +167,7 @@ impl EntrySource for BudgetedEntries<'_> {
             .try_reserve(category, len)
             .map_err(Error::Memory)?;
         let cap = usize::try_from(len).unwrap_or(usize::MAX);
-        let Some(stored) = self.inner.stored_bounded(name, cap)? else {
+        let Some(stored) = self.inner.stored_owned_bounded(name, cap)? else {
             return Ok(None);
         };
         let out = match zraw::inflate_budgeted(&stored, limit, &self.budget, category) {
@@ -356,8 +437,8 @@ fn read_nested(raw: &[u8]) -> Option<Vec<(String, Vec<u8>)>> {
 pub struct Entries<'a> {
     src: &'a dyn EntrySource,
     #[allow(dead_code)]
-    list: Vec<EntryMeta>,
     names: HashSet<String>,
+    list: EntryList,
     cache: RefCell<HashMap<String, Arc<EntryData>>>,
     root: RefCell<Option<Arc<crate::RootInfo>>>,
     meter: Option<Arc<dyn LoadMeter>>,
@@ -375,7 +456,7 @@ impl<'a> Entries<'a> {
     }
 
     pub fn with_meter(src: &'a dyn EntrySource, meter: Option<Arc<dyn LoadMeter>>) -> Result<Self> {
-        let list = src.list()?;
+        let list = src.list_owned()?;
         let names = list.iter().map(|m| m.name.clone()).collect();
         Ok(Entries {
             src,
@@ -404,6 +485,13 @@ impl<'a> Entries<'a> {
             self.refused.set(Some(limit));
         }
         Error::Memory(limit)
+    }
+
+    fn remember_refusal<T>(&self, result: Result<T>) -> Result<T> {
+        result.map_err(|error| match error {
+            Error::Memory(limit) => self.refuse(limit),
+            other => other,
+        })
     }
 
     fn settle(&self, meter: &dyn LoadMeter, hold: Hold) {
@@ -472,6 +560,7 @@ impl<'a> Entries<'a> {
     }
 
     pub fn root_info(&self) -> Result<Arc<crate::RootInfo>> {
+        self.check_refused()?;
         if let Some(info) = self.root.borrow().as_ref() {
             return Ok(Arc::clone(info));
         }
@@ -490,13 +579,16 @@ impl<'a> Entries<'a> {
                 .map_err(|MeterRefusal(limit)| self.refuse(limit))?;
         }
         let stored = self
-            .src
-            .stored_bounded("root", crate::root::STORED_LIMIT)?
+            .remember_refusal(
+                self.src
+                    .stored_owned_bounded("root", crate::root::STORED_LIMIT),
+            )?
             .ok_or_else(|| Error::MissingEntry("root".into()))?;
         if stored.len() > crate::root::STORED_LIMIT {
             return Err(bad("root", "stored size exceeds product limit"));
         }
-        let info = Arc::new(crate::root::RootInfo::read(meta, stored)?);
+        let info =
+            Arc::new(self.remember_refusal(crate::root::RootInfo::read_owned(meta, stored))?);
         *self.root.borrow_mut() = Some(Arc::clone(&info));
         Ok(info)
     }
@@ -511,6 +603,7 @@ impl<'a> Entries<'a> {
     }
 
     pub fn get(&self, name: &str) -> Result<Option<Arc<EntryData>>> {
+        self.check_refused()?;
         #[cfg(any(test, feature = "testing"))]
         cache_managed::trace::record("get", name);
         if let Some(d) = self.cache.borrow().get(name) {
@@ -518,6 +611,13 @@ impl<'a> Entries<'a> {
         }
         if !self.contains(name) {
             return Ok(None);
+        }
+        if let Some(capacity) = self.src.decoded_cache_capacity() {
+            while self.cache.borrow().len() >= capacity.get() {
+                let victim = self.cache.borrow().keys().next().cloned();
+                let Some(victim) = victim else { break };
+                self.forget(&victim);
+            }
         }
         let data = if let Some(meter) = &self.meter {
             let Some((inflated, hold, transient)) = self.metered(&**meter, name, false)? else {
@@ -541,10 +641,10 @@ impl<'a> Entries<'a> {
             }
             data
         } else {
-            let Some(stored) = self.src.stored(name)? else {
+            let Some(stored) = self.remember_refusal(self.src.stored_owned(name))? else {
                 return Ok(None);
             };
-            Arc::new(decode_stored(&stored)?)
+            Arc::new(self.remember_refusal(decode_stored(&stored))?)
         };
         self.cache
             .borrow_mut()
@@ -575,7 +675,8 @@ impl<'a> Entries<'a> {
     }
 
     #[doc(hidden)]
-    pub fn raw(&self, name: &str) -> Result<Option<Vec<u8>>> {
+    pub fn raw(&self, name: &str) -> Result<Option<StoredBytes>> {
+        self.check_refused()?;
         #[cfg(any(test, feature = "testing"))]
         cache_managed::trace::record("raw", name);
         if !self.contains(name) {
@@ -584,13 +685,31 @@ impl<'a> Entries<'a> {
         if let Some(meter) = &self.meter {
             return Ok(self
                 .metered(&**meter, name, true)?
-                .map(|(inflated, _, _)| inflated.bytes.to_vec()));
+                .map(|(inflated, _, _)| EntryBacking::Native(inflated.bytes.to_vec())));
         }
-        let Some(stored) = self.src.stored(name)? else {
+        let Some(stored) = self.remember_refusal(self.src.stored_owned(name))? else {
             return Ok(None);
         };
+        if let Some(budget) = stored.budget() {
+            let result = match zraw::inflate_budgeted(
+                &stored,
+                zraw::DEFAULT_LIMIT,
+                budget,
+                memory_budget::Category::Metadata,
+            ) {
+                Ok(bytes) => EntryBacking::from_charged(bytes)
+                    .map(Some)
+                    .map_err(|e| memory_error(name, e)),
+                Err(zraw::ManagedInflateError::Memory(error)) => Err(memory_error(name, error)),
+                Err(_) => Ok(Some(stored)),
+            };
+            return self.remember_refusal(result);
+        }
         Ok(Some(
-            zraw::try_inflate(&stored, zraw::DEFAULT_LIMIT).unwrap_or(stored),
+            match zraw::try_inflate(&stored, zraw::DEFAULT_LIMIT) {
+                Some(bytes) => EntryBacking::Native(bytes),
+                None => stored,
+            },
         ))
     }
 }

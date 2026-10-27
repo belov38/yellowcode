@@ -1,3 +1,6 @@
+mod managed;
+pub use managed::object_window_managed;
+
 use std::collections::HashSet;
 
 use mdconf::{Child, ChildTag, Configuration, LocalString, MdObject, ModuleKind};
@@ -323,3 +326,5 @@ fn object_path(cfg: &Configuration, o: &MdObject) -> String {
     }
     format!("{}.{}", kind_name(o.kind, Lang::En), o.name)
 }
+
+pub(crate) use managed::canonical as canonical_managed;

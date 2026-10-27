@@ -3,9 +3,9 @@ use std::sync::{Arc, LazyLock};
 use brace::Guid;
 use mdschema::forms::{FormTables, form_tables};
 
-use super::fe::{E, prefix_of};
+use super::FormResolution;
+use super::fe::{E, local_marker_index, prefix_of};
 use super::py::b64_decode;
-use crate::Configuration;
 use crate::xml::{XmlNode, parse_xml};
 
 const XSI: &str = "http://www.w3.org/2001/XMLSchema-instance";
@@ -45,9 +45,9 @@ fn style_ref_uuid(text: &str) -> Option<Guid> {
     Guid::parse(u)
 }
 
-pub(crate) fn style_ref(cfg: Option<&Configuration>, text: &str) -> String {
+pub(crate) fn style_ref(cfg: Option<&dyn FormResolution>, text: &str) -> String {
     if let (Some(cfg), Some(g)) = (cfg, style_ref_uuid(text))
-        && let Some((_, short)) = cfg.index.names.get(&g).and_then(|n| n.split_once('.'))
+        && let Some((_, short)) = cfg.name(&g).and_then(|n| n.split_once('.'))
     {
         return format!("style:{short}");
     }
@@ -102,6 +102,9 @@ fn q(ns: Option<&str>, local: &str, decl: &mut Dict) -> String {
     let Some(ns) = ns else {
         return local.to_string();
     };
+    if ns == "http://www.w3.org/XML/1998/namespace" {
+        return format!("xml:{local}");
+    }
     if let Some(p) = prefix_of(ns) {
         return if p.is_empty() {
             local.to_string()
@@ -113,8 +116,24 @@ fn q(ns: Option<&str>, local: &str, decl: &mut Dict) -> String {
         decl.set_default(format!("xmlns:{p}"), ns.to_string());
         return format!("{p}:{local}");
     }
-    decl.set("xmlns:@".to_string(), ns.to_string());
-    format!("@:{local}")
+    let mut count = 0;
+    for (key, uri) in &decl.0 {
+        if let Some(marker) = key.strip_prefix("xmlns:")
+            && local_marker_index(marker).is_some()
+        {
+            if uri == ns {
+                return format!("{marker}:{local}");
+            }
+            count += 1;
+        }
+    }
+    let marker = if count == 0 {
+        "@".to_string()
+    } else {
+        format!("@{}", count + 1)
+    };
+    decl.set(format!("xmlns:{marker}"), ns.to_string());
+    format!("{marker}:{local}")
 }
 
 #[derive(Clone, Default)]
@@ -165,7 +184,7 @@ fn scope_of(ancestors: &[&XmlNode]) -> Scope {
 }
 
 pub(crate) fn conv(
-    cfg: Option<&Configuration>,
+    cfg: Option<&dyn FormResolution>,
     el: &XmlNode,
     ancestors: &[&XmlNode],
     tag: Option<&str>,
@@ -175,7 +194,7 @@ pub(crate) fn conv(
 }
 
 fn conv_in(
-    cfg: Option<&Configuration>,
+    cfg: Option<&dyn FormResolution>,
     el: &XmlNode,
     outer: &Scope,
     tag: Option<&str>,
@@ -194,7 +213,7 @@ fn conv_in(
         let tn = if key.bytes().any(|b| b.is_ascii_uppercase()) {
             None
         } else {
-            Guid::parse(key).and_then(|g| cfg.index.types.get(&g))
+            Guid::parse(key).and_then(|g| cfg.type_name(&g))
         };
         if let Some(tn) = tn {
             let head = tn.split('.').next().unwrap_or("");
@@ -282,7 +301,7 @@ fn conv_in(
 }
 
 pub(crate) fn children(
-    cfg: Option<&Configuration>,
+    cfg: Option<&dyn FormResolution>,
     el: &XmlNode,
     ancestors: &[&XmlNode],
 ) -> Vec<E> {

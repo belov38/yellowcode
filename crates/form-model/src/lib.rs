@@ -8,9 +8,12 @@ pub mod autoform;
 #[cfg(feature = "mdconf")]
 mod build;
 mod desc;
+mod discovery;
 mod dom;
 mod parse;
 mod props;
+#[cfg(feature = "mdconf")]
+mod resolver;
 pub mod stdcmd;
 mod types;
 
@@ -19,8 +22,17 @@ pub use build::{BuiltForm, MdResolver, from_configuration, type_desc};
 pub use desc::{
     Attribute, Column, Command, FormDesc, Item, ItemKind, LStr, ParseStats, PictureRef,
 };
+pub use discovery::{ExternalTypeRequest, discover_type_requests};
+#[cfg(feature = "mdconf")]
+pub mod preview_answers;
+pub mod preview_layout;
+pub mod preview_picture;
+pub mod preview_render;
+pub mod preview_wire;
 pub use parse::parse_form_xml;
 pub use props::{GroupKind, HAlign, Location, Props, Spacing, TitleLocation};
+#[cfg(feature = "mdconf")]
+pub use resolver::{ResolvedView, ResolverOwner, TitleView, TypeNamesView, TypeView};
 pub use types::{DateParts, NoConfig, Resolved, TypeDesc, TypeKind, TypeResolver};
 
 #[derive(Debug, Clone, PartialEq, Eq)]

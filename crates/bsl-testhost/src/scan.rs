@@ -1,4 +1,5 @@
 use crate::kinds::{classify, compose, kind_ru};
+use crate::scan_io::ScanInput;
 use crate::xml;
 mod application;
 use bsl_compiler::{
@@ -10,17 +11,30 @@ use bsl_syntax::{ParseMode, ParseOptions, SourceText, ast::MethodKind};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanErrorKind {
+    Io,
+    Changed,
+    Poisoned,
+    InvalidData,
+}
+
+#[derive(Debug, Clone)]
 pub struct ScanError {
+    pub kind: ScanErrorKind,
     pub path: PathBuf,
     pub what: String,
 }
 
 impl ScanError {
     pub(crate) fn new(path: &Path, what: impl Into<String>) -> ScanError {
-        ScanError {
+        Self::typed(path, ScanErrorKind::InvalidData, what)
+    }
+    pub(crate) fn typed(path: &Path, kind: ScanErrorKind, what: impl Into<String>) -> Self {
+        Self {
+            kind,
             path: path.to_path_buf(),
             what: what.into(),
         }
@@ -91,6 +105,7 @@ impl ModuleCtx {
 }
 
 pub struct ConfigScan {
+    input: ScanInput,
     root: PathBuf,
     modules: Vec<ModuleFile>,
     commons: HashMap<String, CommonModule>,
@@ -159,15 +174,22 @@ fn common_flags(props: &[(String, String)]) -> CommonFlags {
 
 const PREDEFINED: &str = "Predefined.xml";
 
-fn walk(root: &Path, dir: &Path, out: &mut Vec<PathBuf>, xml: &mut HashMap<String, PathBuf>) {
-    let Ok(rd) = std::fs::read_dir(dir) else {
+fn walk(
+    root: &Path,
+    dir: &Path,
+    out: &mut Vec<PathBuf>,
+    xml: &mut HashMap<String, PathBuf>,
+    input: &ScanInput,
+) {
+    let Some(rd) = input.read_dir(dir) else {
         return;
     };
-    for e in rd.flatten() {
-        let p = e.path();
-        let Ok(ft) = e.file_type() else { continue };
+    for e in rd {
+        let Some((p, ft)) = input.entry(dir, e) else {
+            continue;
+        };
         if ft.is_dir() {
-            walk(root, &p, out, xml);
+            walk(root, &p, out, xml, input);
         } else if p.extension().is_some_and(|x| x == "bsl")
             || p.file_name().is_some_and(|n| n == PREDEFINED)
         {
@@ -243,11 +265,16 @@ fn members_of(keep: impl Fn(&platform_catalog::TypeInfo) -> bool) -> Members {
 
 impl ConfigScan {
     pub fn load(dir: &Path) -> Result<ConfigScan, ScanError> {
+        Self::load_with(dir, ScanInput::default())
+    }
+
+    fn load_with(dir: &Path, input: ScanInput) -> Result<ConfigScan, ScanError> {
         let cfg_path = dir.join("Configuration.xml");
-        let children = xml::config_children(&cfg_path)?;
+        let children = xml::config_children(&cfg_path, &input)?;
         let mut files = Vec::new();
         let mut xml_files = HashMap::new();
-        walk(dir, dir, &mut files, &mut xml_files);
+        walk(dir, dir, &mut files, &mut xml_files, &input);
+        input.check()?;
         files.sort();
         let mut commons = HashMap::new();
         let mut objects = HashMap::new();
@@ -258,7 +285,7 @@ impl ConfigScan {
                 let xml_path = xml_files.get(&key).ok_or_else(|| {
                     ScanError::new(&cfg_path, format!("no XML file for common module: {key}"))
                 })?;
-                let flags = common_flags(&xml::properties(xml_path)?);
+                let flags = common_flags(&xml::properties_with(xml_path, &input)?);
                 commons.insert(
                     fold_name(name),
                     CommonModule {
@@ -274,7 +301,7 @@ impl ConfigScan {
                 let xml_path = xml_files.get(&key).ok_or_else(|| {
                     ScanError::new(&cfg_path, format!("no XML file for object: {key}"))
                 })?;
-                let names = xml::object_names(xml_path)?;
+                let names = xml::object_names(xml_path, &input)?;
                 let o = Object {
                     members: names.fields.iter().map(|n| fold_name(n)).collect(),
                     manager: names.enum_values.iter().map(|n| fold_name(n)).collect(),
@@ -298,7 +325,7 @@ impl ConfigScan {
             let segs: Vec<&str> = names.iter().map(String::as_str).collect();
             if let [d, n, "Ext", PREDEFINED] = segs.as_slice() {
                 if let Some(o) = objects.get_mut(&fold_name(&format!("{d}/{n}"))) {
-                    let items = xml::predefined_names(&path)?;
+                    let items = xml::predefined_names(&path, &input)?;
                     o.manager.extend(items.iter().map(|n| fold_name(n)));
                 }
                 continue;
@@ -328,6 +355,7 @@ impl ConfigScan {
             });
         }
         Ok(ConfigScan {
+            input,
             root: dir.to_path_buf(),
             modules,
             commons,
@@ -340,6 +368,35 @@ impl ConfigScan {
             global_index: Mutex::new(HashMap::new()),
             ctx_cache: Mutex::new(HashMap::new()),
         })
+    }
+
+    pub fn load_strict(dir: &Path) -> Result<ConfigScan, ScanError> {
+        let input = ScanInput::strict(dir)?;
+        let scan = Self::load_with(dir, input)?;
+        scan.verify_snapshot()?;
+        Ok(scan)
+    }
+
+    pub fn check_io(&self) -> Result<(), ScanError> {
+        self.input.check()
+    }
+
+    pub fn verify_snapshot(&self) -> Result<(), ScanError> {
+        self.input.verify(&self.root)
+    }
+
+    fn cache<'a, T>(&self, cache: &'a Mutex<T>) -> Option<MutexGuard<'a, T>> {
+        match cache.lock() {
+            Ok(guard) => Some(guard),
+            Err(_) => {
+                self.input.latch(ScanError::typed(
+                    &self.root,
+                    ScanErrorKind::Poisoned,
+                    "scanner cache poisoned",
+                ));
+                None
+            }
+        }
     }
 
     pub fn modules(&self) -> &[ModuleFile] {
@@ -392,7 +449,7 @@ impl ConfigScan {
 
     fn global_methods_of(&self, m: &CommonModule, ctx: ExecContext) -> Arc<Vec<AppMethodSig>> {
         let key = (fold_name(&m.name), ctx);
-        let Ok(mut cache) = self.global_cache.lock() else {
+        let Some(mut cache) = self.cache(&self.global_cache) else {
             return Arc::default();
         };
         if let Some(v) = cache.get(&key) {
@@ -401,7 +458,7 @@ impl ConfigScan {
         let sigs = m
             .file
             .as_ref()
-            .and_then(|p| std::fs::read(p).ok())
+            .and_then(|p| self.input.read(p).ok())
             .map(|bytes| parse_exports(&m.name, &bytes, ctx))
             .unwrap_or_default();
         let v = Arc::new(sigs);
@@ -410,7 +467,7 @@ impl ConfigScan {
     }
 
     fn template_members(&self, template: &str) -> Arc<Members> {
-        let Ok(mut cache) = self.template_cache.lock() else {
+        let Some(mut cache) = self.cache(&self.template_cache) else {
             return Arc::default();
         };
         if let Some(v) = cache.get(template) {
@@ -426,7 +483,7 @@ impl ConfigScan {
 
     fn type_members(&self, id: &str) -> Arc<Members> {
         let key = format!("#{id}");
-        let Ok(mut cache) = self.template_cache.lock() else {
+        let Some(mut cache) = self.cache(&self.template_cache) else {
             return Arc::default();
         };
         if let Some(v) = cache.get(&key) {
@@ -438,8 +495,14 @@ impl ConfigScan {
     }
 
     fn form_ctx(&self, xml_path: &Path) -> FormCtx {
-        let names = if xml_path.is_file() {
-            xml::form_names(xml_path).unwrap_or_default()
+        let names = if self.input.optional_present(xml_path) {
+            match xml::form_names(xml_path, &self.input) {
+                Ok(names) => names,
+                Err(error) => {
+                    self.input.latch(error);
+                    xml::FormNames::default()
+                }
+            }
         } else {
             xml::FormNames::default()
         };
@@ -651,7 +714,7 @@ fn parse_exports(module: &str, bytes: &[u8], ctx: ExecContext) -> Vec<AppMethodS
 
 impl ConfigScan {
     fn global_index(&self, ctx: ExecContext) -> Arc<HashMap<String, AppMethodSig>> {
-        if let Ok(cache) = self.global_index.lock()
+        if let Some(cache) = self.cache(&self.global_index)
             && let Some(v) = cache.get(&ctx)
         {
             return v.clone();
@@ -670,14 +733,14 @@ impl ConfigScan {
             }
         }
         let v = Arc::new(index);
-        if let Ok(mut cache) = self.global_index.lock() {
+        if let Some(mut cache) = self.cache(&self.global_index) {
             cache.insert(ctx, v.clone());
         }
         v
     }
 
     fn module_ctx(&self, module: &str) -> Option<Arc<ModuleCtx>> {
-        if let Ok(cache) = self.ctx_cache.lock()
+        if let Some(cache) = self.cache(&self.ctx_cache)
             && let Some(v) = cache.get(module)
         {
             return v.clone();
@@ -700,7 +763,7 @@ impl ConfigScan {
                 extension,
             })
         });
-        if let Ok(mut cache) = self.ctx_cache.lock() {
+        if let Some(mut cache) = self.cache(&self.ctx_cache) {
             cache.insert(module.to_string(), v.clone());
         }
         v

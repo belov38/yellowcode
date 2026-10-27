@@ -241,6 +241,37 @@ impl Atom {
         }
     }
 
+    pub(super) fn copy_bytes<R: Read>(
+        src: &mut Src<R>,
+        base: u8,
+        sink: &mut dyn std::io::Write,
+        limit: u64,
+    ) -> Result<u64, ErrorKind> {
+        let n = match base {
+            T_DIGIT0 => 0,
+            T_U8 => {
+                if limit == 0 {
+                    return Err(ErrorKind::Limit("streamed bytes"));
+                }
+                let b: [u8; 1] = fixed(src)?;
+                sink.write_all(&b).map_err(io)?;
+                return Ok(1);
+            }
+            T_BSTR8..=T_BSTR64 => length(src, base.saturating_sub(T_BSTR8))?,
+            _ => return Err(ErrorKind::InvalidBinary),
+        };
+        if n > limit {
+            return Err(ErrorKind::Limit("streamed bytes"));
+        }
+        if !src
+            .try_payload(n, |piece| sink.write_all(piece))
+            .map_err(io)?
+        {
+            return Err(ErrorKind::UnexpectedEof);
+        }
+        Ok(n)
+    }
+
     pub(super) fn read<R: Read>(src: &mut Src<R>, base: u8, skip: bool) -> Result<Atom, ErrorKind> {
         let value = match base {
             T_DIGIT0..=T_DIGIT9 => AtomValue::Int(i128::from(base.saturating_sub(T_DIGIT0))),

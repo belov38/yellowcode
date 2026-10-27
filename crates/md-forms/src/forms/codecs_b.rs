@@ -10,8 +10,8 @@ use super::py::{
 use super::section_codecs::{ZERO, flag, schema};
 use super::write::{Emit, FormCtx, Src};
 use crate::model::TypedValue;
-use crate::objects::codecs::{Ctx, color_str};
-use crate::objects::types::design_time_ref;
+use crate::objects::codecs::color_str;
+use crate::objects::types::{ReferenceLookup, design_time_ref_resolved};
 
 const T_DESTIME: &str = "0e704aa2-07bd-48b9-8223-a0212c4d5fc2";
 const T_DTREF: &str = "5c14e26f-099b-4d37-84a6-b433d87400da";
@@ -479,17 +479,24 @@ fn dtref(fc: &FormCtx<'_>, v: &Node) -> Py<Option<String>> {
     py_item(v, 2)?;
     let cfg = fc.cfg;
     if ou != ZERO && md_name(cfg, &ou).is_none() {
-        let tn = Guid::parse(&ou).and_then(|g| cfg.index.types.get(&g));
+        let tn = Guid::parse(&ou).and_then(|g| cfg.type_name(&g));
         if tn.is_some_and(|t| !t.contains('.')) {
             return Err(Raised);
         }
     }
-    let ctx = Ctx {
-        schema: schema()?,
-        index: &cfg.index,
-        predef: &cfg.predef,
-    };
-    Ok(design_time_ref(&ctx, v))
+    struct References<'a>(&'a dyn super::FormResolution);
+    impl ReferenceLookup for References<'_> {
+        fn name(&self, id: &Guid) -> Option<&str> {
+            self.0.name(id)
+        }
+        fn type_name(&self, id: &Guid) -> Option<&str> {
+            self.0.type_name(id)
+        }
+        fn predefined_name(&self, id: &Guid) -> Option<&str> {
+            self.0.predefined_name(id)
+        }
+    }
+    Ok(design_time_ref_resolved(&References(cfg), v))
 }
 
 fn tvalue(fc: &FormCtx<'_>, v: &Node) -> Py<Option<TypedValue>> {

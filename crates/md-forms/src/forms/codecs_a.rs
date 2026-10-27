@@ -669,12 +669,10 @@ pub(crate) fn c_command_name(
 
 pub(crate) fn md_order<'c>(fc: &FormCtx<'c>, full: &str) -> Vec<&'c str> {
     let pref = format!("{full}.");
-    let names = &fc.cfg.index.names;
     fc.shared
         .names_order()
         .iter()
-        .filter_map(|u| names.get(u))
-        .map(String::as_str)
+        .filter_map(|u| fc.cfg.name(u))
         .filter(|n| n.starts_with(&pref))
         .collect()
 }

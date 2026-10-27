@@ -5,6 +5,8 @@
 #![forbid(unsafe_code)]
 
 mod codec;
+mod managed;
+pub use managed::{ManagedCatalog, ManagedCatalogError, ManagedTypeNames, PropertyNames};
 mod index;
 mod installed;
 pub mod messages;

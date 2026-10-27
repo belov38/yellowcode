@@ -1,8 +1,30 @@
+mod managed;
+pub use managed::{ManagedModuleError, module_of_managed, modules_managed};
+
 use mdconf::{Configuration, Module, ModuleKind};
 
 use super::names::{fold_path_name, module_name};
 use super::out::Lang;
 use super::path::Target;
+
+pub fn view(m: &Module, lang: Lang, plain: bool, modules: Vec<String>) -> serde_json::Value {
+    let text = m.text();
+    let (items, syntax_error) = super::outline::outline(&text);
+    let source_lines = split_lines(text.strip_prefix('\u{feff}').unwrap_or(&text));
+    let line_count = source_lines.len();
+    let source_text = plain.then(|| source_lines.join("\n"));
+    let lines = (!plain).then(|| super::highlight::classified_lines(&text));
+    serde_json::json!({
+        "name": module_name(m.kind, lang),
+        "lines": lines,
+        "text": source_text,
+        "line_count": line_count,
+        "blocks": super::blocks::blocks_with(&text, &items, syntax_error.as_deref()),
+        "outline": items,
+        "syntax_error": syntax_error,
+        "modules": modules,
+    })
+}
 
 pub fn modules_of<'a>(t: &Target<'a>) -> Vec<&'a Module> {
     match t {

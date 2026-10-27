@@ -367,6 +367,7 @@ dependencies = [
  "platform-catalog",
  "quick-xml 0.37.5",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]
@@ -2340,6 +2341,7 @@ dependencies = [
  "brace",
  "md-model",
  "mdschema",
+ "memory-budget",
  "quick-xml 0.37.5",
  "regex",
  "thiserror 2.0.21",
@@ -2372,6 +2374,7 @@ dependencies = [
  "memory-budget",
  "quick-xml 0.37.5",
  "regex",
+ "serde",
  "sha1",
  "tempfile",
  "thiserror 2.0.21",
@@ -2760,7 +2763,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "onec-desktop"
-version = "0.1.0-alpha.10"
+version = "0.1.0-alpha.11"
 dependencies = [
  "cf-fixtures",
  "dunce",
@@ -2929,6 +2932,8 @@ version = "0.1.0"
 dependencies = [
  "bsl-prim",
  "flate2",
+ "memory-budget",
+ "zraw",
 ]
 
 [[package]]
@@ -5764,7 +5769,8 @@ dependencies = [
  "onecd",
  "platform-catalog",
  "query-console",
- "regex",
+ "regex-automata",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",
@@ -5774,6 +5780,8 @@ dependencies = [
  "unicode-normalization",
  "v8cont",
  "v8users",
+ "windows-sys 0.61.2",
+ "x-qbuilder",
 ]
 
 [[package]]

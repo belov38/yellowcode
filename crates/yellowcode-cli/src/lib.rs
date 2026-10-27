@@ -28,7 +28,7 @@ fn gui_has_cli_flag(args: &[OsString]) -> bool {
     while let Some(arg) = args.next() {
         let text = arg.to_string_lossy();
         match text.as_ref() {
-            "--lang" | "--names" => {
+            "--lang" | "--names" | "--memory-limit" => {
                 args.next();
             }
             "--smoke" => {}
@@ -46,7 +46,7 @@ pub fn is_cli(args: &[OsString]) -> bool {
         filtered.push(program.clone());
     }
     while let Some(arg) = tail.next() {
-        if arg == "--lang" || arg == "--names" {
+        if arg == "--lang" || arg == "--names" || arg == "--memory-limit" {
             filtered.push(arg.clone());
             if let Some(value) = tail.next() {
                 filtered.push(value.clone());
@@ -65,7 +65,9 @@ pub fn is_cli(args: &[OsString]) -> bool {
     };
     let text = arg.to_string_lossy();
     match text.as_ref() {
-        "--lang" | "--names" | "--smoke" => gui_has_cli_flag(args.get(1..).unwrap_or(&[])),
+        "--lang" | "--names" | "--memory-limit" | "--smoke" => {
+            gui_has_cli_flag(args.get(1..).unwrap_or(&[]))
+        }
         "open" => gui_has_cli_flag(args.get(2..).unwrap_or(&[])),
         "help" | "metadata" | "convert" | "query" | "serve" | "table" | "users" => true,
         flag if flag.starts_with('-') => true,
@@ -115,6 +117,9 @@ struct OpenArgs {
     lang: Option<String>,
     #[arg(long)]
     names: Option<std::path::PathBuf>,
+    /// Managed DT CONFIG extraction budget; decoded model memory is additional.
+    #[arg(long, allow_hyphen_values = true)]
+    memory_limit: Option<String>,
     #[arg(long)]
     smoke: bool,
 }

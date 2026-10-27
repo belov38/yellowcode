@@ -465,7 +465,7 @@ fn build_locations(
     Ok((locations, by_id))
 }
 
-fn name_of<'a>(index: &'a ManagedIndex, id: &Guid) -> Option<(MdKind, &'a str)> {
+pub(super) fn name_of<'a>(index: &'a ManagedIndex, id: &Guid) -> Option<(MdKind, &'a str)> {
     let (kind, name) = index.objs.get(id)?;
     Some((*kind, name.as_ref()?.as_str()))
 }
@@ -474,6 +474,34 @@ fn shell(
     kind: MdKind,
     id: Guid,
     name: &str,
+) -> Result<Charged<MdObject>, BudgetError> {
+    shell_with_capacity(
+        index,
+        kind,
+        id,
+        name,
+        index
+            .nested
+            .iter()
+            .filter(|(_, parent)| *parent == id)
+            .count(),
+    )
+}
+pub(super) fn selected_shell(
+    index: &ManagedIndex,
+    id: Guid,
+) -> Result<Option<Charged<MdObject>>, BudgetError> {
+    let Some((kind, name)) = name_of(index, &id) else {
+        return Ok(None);
+    };
+    shell_with_capacity(index, kind, id, name, 0).map(Some)
+}
+fn shell_with_capacity(
+    index: &ManagedIndex,
+    kind: MdKind,
+    id: Guid,
+    name: &str,
+    nested: usize,
 ) -> Result<Charged<MdObject>, BudgetError> {
     let budget = index.memory_budget();
     let name = text(budget, &[name])?.into_string()?;
@@ -517,14 +545,7 @@ fn shell(
             SubKind::Template => templates = push(templates, sub)?,
         }
     }
-    let subsystems = vector(
-        budget,
-        index
-            .nested
-            .iter()
-            .filter(|(_, parent)| *parent == id)
-            .count(),
-    )?;
+    let subsystems = vector(budget, nested)?;
     Ok(name
         .try_zip(forms)?
         .try_zip(templates)?
@@ -571,21 +592,21 @@ pub use managed_modules::{ManagedFormModule, ManagedModuleGraph};
 mod managed_forms;
 
 #[path = "pictures_graph.rs"]
-mod managed_pictures;
+pub(super) mod managed_pictures;
 pub use managed_pictures::ManagedPartsGraph;
 
 #[path = "help_graph.rs"]
-mod managed_help;
+pub(super) mod managed_help;
 
 #[path = "configuration_graph.rs"]
 mod managed_configuration;
 pub use managed_configuration::ManagedConfigurationGraph;
 
-#[path = "binary_parts.rs"]
-mod managed_binary_parts;
-
 #[path = "exchange_graph.rs"]
 mod managed_exchange_content;
+
+#[path = "binary_parts.rs"]
+pub(super) mod managed_binary_parts;
 
 #[path = "schedule_graph.rs"]
 mod managed_schedules;
@@ -601,4 +622,5 @@ mod managed_c6;
 
 #[path = "final_configuration.rs"]
 mod final_configuration;
+pub(super) use final_configuration::unsupported;
 pub use final_configuration::{GeneratedTypeView, ManagedConfiguration, ManagedConfigurationError};

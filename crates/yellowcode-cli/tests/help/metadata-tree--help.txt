@@ -8,11 +8,12 @@ Arguments:
   <SOURCE>  
 
 Options:
-      --depth <DEPTH>           
-      --platform-build <BUILD>  Exact emulated platform build (not the configuration compatibility mode) [default: 8.5.1.1529]
-      --path <PATH>             
-      --kind <KIND>             
-      --flat                    
-      --format <FORMAT>         [default: json] [possible values: json, text]
-  -h, --help                    Print help
+      --memory-limit <MEMORY_LIMIT>  Managed DT CONFIG extraction budget; decoded model memory is additional
+      --platform-build <BUILD>       Exact emulated platform build (not the configuration compatibility mode) [default: 8.5.1.1529]
+      --depth <DEPTH>                
+      --path <PATH>                  
+      --kind <KIND>                  
+      --flat                         
+      --format <FORMAT>              [default: json] [possible values: json, text]
+  -h, --help                         Print help
 --- stderr

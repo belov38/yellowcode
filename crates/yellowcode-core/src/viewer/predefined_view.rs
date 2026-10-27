@@ -170,3 +170,6 @@ impl Walk<'_> {
         Value::Object(o)
     }
 }
+
+mod managed;
+pub use managed::predefined_managed;

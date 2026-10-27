@@ -29,14 +29,31 @@ fn entry(cx: &LoadCtx, name: &str) -> Result<Option<Arc<EntryData>>> {
     Ok(d)
 }
 
-fn container_text(cx: &LoadCtx, name: &str) -> Result<Option<Vec<u8>>> {
-    Ok(match entry(cx, name)?.as_deref() {
-        Some(EntryData::Nested(items)) => items
+pub(crate) fn is_plain_module_text(bytes: &[u8]) -> bool {
+    let Some(body) = bytes.strip_prefix(BOM) else {
+        return false;
+    };
+    std::str::from_utf8(body).is_ok()
+        && !body.contains(&0)
+        && body.iter().find(|byte| !byte.is_ascii_whitespace()) != Some(&b'{')
+}
+
+pub(crate) fn separate_module_text(data: &EntryData) -> Option<&[u8]> {
+    match data {
+        EntryData::Nested(items) => items
             .iter()
-            .find(|(n, _)| n == "text")
-            .map(|(_, b)| b.clone()),
+            .find(|(name, _)| name == "text")
+            .map(|(_, bytes)| bytes.as_slice()),
+        EntryData::Bytes(bytes) if is_plain_module_text(bytes) => Some(bytes),
         _ => None,
-    })
+    }
+}
+
+fn module_text(cx: &LoadCtx, name: &str) -> Result<Option<Vec<u8>>> {
+    Ok(entry(cx, name)?
+        .as_deref()
+        .and_then(separate_module_text)
+        .map(<[u8]>::to_vec))
 }
 
 fn form_module(cx: &LoadCtx, id: Guid, diag: &mut Diagnostics) -> Result<Option<Module>> {
@@ -124,7 +141,7 @@ pub(crate) fn lenient_form_module(raw: &[u8]) -> Option<Module> {
 
 fn load_child(cx: &LoadCtx, c: &mut Child) -> Result<()> {
     if c.tag == crate::model::ChildTag::Command {
-        c.module = container_text(cx, &format!("{}.2", c.id))?.map(|source| Module {
+        c.module = module_text(cx, &format!("{}.2", c.id))?.map(|source| Module {
             kind: ModuleKind::CommandModule,
             source,
         });
@@ -137,7 +154,7 @@ fn load_object(cx: &LoadCtx, o: &mut MdObject, diag: &mut Diagnostics) -> Result
         let Some(kind) = kind_of_file(file) else {
             continue;
         };
-        if let Some(source) = container_text(cx, &format!("{}.{suf}", o.id))? {
+        if let Some(source) = module_text(cx, &format!("{}.{suf}", o.id))? {
             o.modules.push(Module { kind, source });
         }
     }
@@ -145,7 +162,7 @@ fn load_object(cx: &LoadCtx, o: &mut MdObject, diag: &mut Diagnostics) -> Result
         load_child(cx, c)?;
     }
     for r in &mut o.recalculations {
-        r.module = container_text(cx, &format!("{}.0", r.id))?.map(|source| Module {
+        r.module = module_text(cx, &format!("{}.0", r.id))?.map(|source| Module {
             kind: ModuleKind::RecordSetModule,
             source,
         });
@@ -219,7 +236,7 @@ pub fn load(cx: &LoadCtx, cfg: &mut Configuration) -> Result<()> {
     r?;
     let mut mods = Vec::new();
     for (suf, kind, _) in CONFIG_MODULES {
-        if let Some(source) = container_text(cx, &format!("{}.{suf}", cfg.header_id))? {
+        if let Some(source) = module_text(cx, &format!("{}.{suf}", cfg.header_id))? {
             mods.push(Module { kind, source });
         }
     }

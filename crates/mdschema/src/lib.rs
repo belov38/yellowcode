@@ -30,7 +30,8 @@ pub use static_view::{
     StaticConfigPath, StaticConfigProp, StaticFormContext, StaticFormProp, StaticFormTableValue,
     StaticFormTables, StaticKindSpec, StaticObjectIter, StaticPath, StaticPropSpec,
     StaticRightsTables, StaticSchema, StaticStrings, StaticTemplateTables, StaticValue,
-    static_form_tables, static_rights_tables, static_schema, static_template_tables,
+    static_form_tables, static_form_tables_mode, static_rights_tables, static_schema,
+    static_template_tables,
 };
 
 mod resource;

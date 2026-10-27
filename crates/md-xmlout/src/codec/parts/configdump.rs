@@ -27,7 +27,13 @@ fn child_index(cfg: &Configuration) -> HashMap<Guid, Vec<(Guid, &str)>> {
     let named = |u: &Guid| Some((ix.names.get(u)?.as_str(), *u));
     let owners: HashMap<&str, Guid> = ix.order.iter().filter_map(named).collect();
     let recalc_ids: HashSet<Guid> = ix.recalcs.values().flatten().copied().collect();
-    let recalcs: HashMap<&str, Guid> = recalc_ids.iter().filter_map(named).collect();
+    let mut recalcs: HashMap<&str, Guid> = HashMap::new();
+    for (name, id) in recalc_ids.iter().filter_map(named) {
+        recalcs
+            .entry(name)
+            .and_modify(|owner| *owner = (*owner).max(id))
+            .or_insert(id);
+    }
     let mut kids: HashMap<Guid, Vec<(Guid, &str)>> = HashMap::new();
     for (u, full) in &ix.names {
         if ix.objs.contains_key(u) || ix.sub_hdr.contains_key(u) || recalc_ids.contains(u) {

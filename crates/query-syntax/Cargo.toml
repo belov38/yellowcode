@@ -9,6 +9,9 @@ autotests = false
 autoexamples = false
 autobenches = false
 
+[features]
+stack-fault-probes = []
+
 [dependencies]
 memory-budget = { path = "../memory-budget" }
 

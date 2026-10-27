@@ -182,7 +182,7 @@ pub(crate) const DECODED_LIMIT: usize = 3 << 20;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RootInfo {
     meta: crate::EntryMeta,
-    stored: Vec<u8>,
+    stored: crate::StoredBytes,
     source: Vec<u8>,
     version: u32,
     id: Guid,
@@ -274,7 +274,7 @@ impl RootInfo {
         Ok(stored.try_zip(source)?.try_zip(meta)?.try_zip(binary)?.map(
             |(((stored, source), meta), binary)| Self {
                 meta,
-                stored,
+                stored: crate::EntryBacking::Native(stored),
                 source,
                 version,
                 id,
@@ -285,7 +285,10 @@ impl RootInfo {
             },
         ))
     }
-    pub(crate) fn read(meta: crate::EntryMeta, stored: Vec<u8>) -> crate::Result<Self> {
+    pub(crate) fn read_owned(
+        meta: crate::EntryMeta,
+        stored: crate::StoredBytes,
+    ) -> crate::Result<Self> {
         let fail = |what: String| crate::Error::Format {
             entry: "root".into(),
             what,

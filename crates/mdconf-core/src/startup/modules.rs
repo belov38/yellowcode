@@ -153,20 +153,7 @@ fn container<S: ManagedEntrySource + ?Sized>(
     let Some(data) = entry(entries, id, suffix, keep)? else {
         return Ok(None);
     };
-    let EntryData::Nested(items) = &*data else {
-        return Ok(None);
-    };
-    let Some((_, bytes)) = items.iter().find(|(name, _)| name == "text") else {
-        return Ok(None);
-    };
-    let mut source =
-        BudgetedVec::try_with_capacity(entries.memory_budget(), CATEGORY, bytes.len())?;
-    source.try_extend_from_slice(bytes)?;
-    Ok(Some(
-        source
-            .into_charged_vec()
-            .map(|source| Module { kind, source }),
-    ))
+    Ok(crate::startup::ModuleRead::separate(entries.memory_budget(), &data, kind)?.module)
 }
 fn form<S: ManagedEntrySource + ?Sized>(
     entries: &ManagedEntries<'_, S>,

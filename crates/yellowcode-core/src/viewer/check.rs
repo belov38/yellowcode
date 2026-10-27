@@ -233,12 +233,33 @@ pub fn check_items(
     items: &[Item<'_>],
     run: Run,
 ) -> crate::Result<Report> {
+    let scan = ConfigScan::load(names_dir).map_err(|e| e.to_string())?;
+    check_scanned(compat, names_dir, items, run, scan).map_err(|e| e.to_string().into())
+}
+
+pub(super) fn check_items_strict(
+    compat: CompatMode,
+    names_dir: &Path,
+    items: &[Item<'_>],
+    run: Run,
+) -> Result<Report, bsl_testhost::ScanError> {
+    let scan = ConfigScan::load_strict(names_dir)?;
+    check_scanned(compat, names_dir, items, run, scan)
+}
+
+fn check_scanned(
+    compat: CompatMode,
+    names_dir: &Path,
+    items: &[Item<'_>],
+    run: Run,
+    scan: ConfigScan,
+) -> Result<Report, bsl_testhost::ScanError> {
     let Run {
         ctxs,
         own_contexts,
         lang,
     } = run;
-    let scan = ConfigScan::load(names_dir).map_err(|e| e.to_string())?;
+    scan.check_io()?;
     let by_rel: HashMap<String, &ModuleFile> = scan
         .modules()
         .iter()
@@ -307,7 +328,9 @@ pub fn check_items(
                 app: &scan,
                 extension: None,
             };
-            if let Err(e) = compile(&src, &o) {
+            let result = compile(&src, &o);
+            scan.check_io()?;
+            if let Err(e) = result {
                 let text = e.cause_text(&mf.name, lang_of(lang));
                 let same = rep.diags.get_mut(first..).and_then(|d| {
                     d.iter_mut()
@@ -329,6 +352,7 @@ pub fn check_items(
             }
         }
     }
+    scan.verify_snapshot()?;
     Ok(rep)
 }
 

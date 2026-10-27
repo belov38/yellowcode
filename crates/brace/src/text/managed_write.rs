@@ -12,21 +12,63 @@ pub fn write_doc_budgeted(
     budget: &MemoryBudget,
     category: Category,
 ) -> Result<Charged<Vec<u8>>, BudgetError> {
+    write(
+        Source {
+            root: &doc.root,
+            bom: doc.bom,
+            lead: &doc.lead,
+            trailer: &doc.trailer,
+        },
+        budget,
+        category,
+    )
+}
+
+pub fn write_node_budgeted(
+    root: &Node,
+    budget: &MemoryBudget,
+    category: Category,
+) -> Result<Charged<Vec<u8>>, BudgetError> {
+    write(
+        Source {
+            root,
+            bom: false,
+            lead: "",
+            trailer: "",
+        },
+        budget,
+        category,
+    )
+}
+
+struct Source<'a> {
+    root: &'a Node,
+    bom: bool,
+    lead: &'a str,
+    trailer: &'a str,
+}
+fn write(
+    doc: Source<'_>,
+    budget: &MemoryBudget,
+    category: Category,
+) -> Result<Charged<Vec<u8>>, BudgetError> {
     let mut stack = BudgetedVec::new(budget, category)?;
     let mut length = 0usize;
-    visit(doc, &mut stack, |bytes| {
+    visit(&doc, &mut stack, |bytes| {
         length = length
             .checked_add(bytes.len())
             .ok_or(BudgetError::Overflow)?;
         Ok(())
     })?;
     let mut output = BudgetedVec::try_with_capacity(budget, category, length)?;
-    visit(doc, &mut stack, |bytes| output.try_extend_from_slice(bytes))?;
+    visit(&doc, &mut stack, |bytes| {
+        output.try_extend_from_slice(bytes)
+    })?;
     Ok(output.into_charged_vec())
 }
 
 fn visit<'a>(
-    doc: &'a Doc,
+    doc: &Source<'a>,
     stack: &mut BudgetedVec<Frame<'a>>,
     mut emit: impl FnMut(&[u8]) -> Result<(), BudgetError>,
 ) -> Result<(), BudgetError> {
@@ -34,7 +76,7 @@ fn visit<'a>(
         emit(b"\xef\xbb\xbf")?;
     }
     emit(doc.lead.as_bytes())?;
-    let mut node = Some(&doc.root);
+    let mut node = Some(doc.root);
     let mut first = true;
     loop {
         if let Some(value) = node.take() {

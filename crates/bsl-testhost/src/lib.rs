@@ -10,6 +10,7 @@ mod kinds;
 mod repr;
 mod runner;
 mod scan;
+mod scan_io;
 mod stand;
 pub mod wrapper;
 mod xml;
@@ -19,6 +20,6 @@ pub use http::{new_request, register_http, register_no_transactions, response_pa
 pub use kinds::module_kind_by_path;
 pub use repr::repr;
 pub use runner::{EVAL_MODULE, RunResult, RunnerError, VmRunner, stand_object};
-pub use scan::{ConfigScan, ModuleFile, ScanError};
+pub use scan::{ConfigScan, ModuleFile, ScanError, ScanErrorKind};
 pub use stand::StandHost;
 pub use wrapper::STAND_GLOBAL;

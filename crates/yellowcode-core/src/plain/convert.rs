@@ -71,8 +71,8 @@ impl v8cont::DataSource for RawData<'_> {
             .ok_or_else(|| v8cont::Error::LayoutMismatch("CONFIG entry index".into()))?;
         let bytes = self
             .source
-            .stored(name)
-            .map_err(|e| v8cont::Error::Io(std::io::Error::other(e.to_string())))?
+            .stored_owned(name)
+            .map_err(|e| v8cont::Error::Io(std::io::Error::other(e)))?
             .ok_or_else(|| {
                 v8cont::Error::LayoutMismatch(format!("CONFIG entry disappeared: {name}"))
             })?;
@@ -81,15 +81,16 @@ impl v8cont::DataSource for RawData<'_> {
     }
 }
 
-fn raw_cf(source: &Path, out: &mut dyn Write) -> Result<()> {
-    source::with_config_entries(source, |entries| {
+fn raw_cf(source: &Path, memory: Option<&source::OpenMemory>, out: &mut dyn Write) -> Result<()> {
+    let consume = |entries: &dyn EntrySource| {
+        let list = entries.list_owned()?;
         let mut specs = Vec::new();
-        for meta in entries.list()? {
+        for meta in list.iter() {
             let data = entries
-                .stored(&meta.name)?
+                .stored_owned(&meta.name)?
                 .ok_or_else(|| format!("CONFIG missing entry: {}", meta.name))?;
             specs.push(v8cont::EntrySpec {
-                name: meta.name,
+                name: meta.name.clone(),
                 ctime: meta.ctime,
                 mtime: meta.mtime,
                 attrs: meta.attrs,
@@ -110,7 +111,11 @@ fn raw_cf(source: &Path, out: &mut dyn Write) -> Result<()> {
             &v8cont::WriteOptions::top_level(v8cont::Format::F16),
         )?;
         Ok(())
-    })
+    };
+    match memory {
+        Some(memory) => source::with_config_entries_with_memory(source, memory, consume),
+        None => source::with_config_entries(source, consume),
+    }
 }
 
 pub fn run(args: Request, out: &mut dyn Write, err: &mut dyn Write) -> Result<i32> {
@@ -138,10 +143,13 @@ pub fn run(args: Request, out: &mut dyn Write, err: &mut dyn Write) -> Result<i3
         return Err("--users-layout applies only to 1CD to DT".into());
     }
     let restore = kind == SourceKind::Dt && matches!(args.to, Format::Infobase);
-    if !restore && (args.memory_limit.is_some() || args.without_users) {
-        return Err("--memory-limit and --without-users apply only to DT to 1CD".into());
+    if !restore && args.without_users {
+        return Err("--without-users applies only to DT to 1CD".into());
     }
-    let memory = if restore {
+    if kind != SourceKind::Dt && args.memory_limit.is_some() {
+        return Err("--memory-limit applies only to DT conversion".into());
+    }
+    let memory = if kind == SourceKind::Dt {
         Some(crate::service::memory::Settings::memory_only(args.memory_limit.clone()).resolve()?)
     } else {
         None
@@ -160,7 +168,10 @@ pub fn run(args: Request, out: &mut dyn Write, err: &mut dyn Write) -> Result<i3
     let mut report = None;
     match args.to {
         Format::Cf => {
-            file(&args.output, |out| raw_cf(&source, out))?;
+            let opening = memory
+                .as_ref()
+                .map(|(context, _)| source::OpenMemory::from_context(context));
+            file(&args.output, |out| raw_cf(&source, opening.as_ref(), out))?;
         }
         Format::Dt => {
             let layout = match args.users_layout.ok_or("missing --users-layout")? {

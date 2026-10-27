@@ -1,7 +1,7 @@
 use crate::{Configuration, startup::ManagedIndex};
 use brace::Guid;
 
-pub(crate) trait Lookup {
+pub trait Lookup {
     fn name(&self, id: &Guid) -> Option<&str>;
     fn type_name(&self, id: &Guid) -> Option<&str>;
     fn sub_header(&self, id: &Guid) -> Option<&[usize]>;

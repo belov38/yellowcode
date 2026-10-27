@@ -53,7 +53,71 @@ fn at(cfg: &Configuration, path: &str, module: &str, line: u32, col: u32) -> Opt
     let target = path::resolve(cfg, path).ok()?;
     let m = module_of(cfg, &target, Some(module)).ok()?;
     let text = text_of(m);
-    let src = SourceText::from_str("", &text);
+    match probe_at(&text, path, m.kind, line, col)? {
+        Candidate::Own { location } => Some(location),
+        Candidate::Common {
+            qualifier,
+            method: name,
+        } => {
+            let cm = cfg
+                .objects
+                .iter()
+                .find(|o| o.kind == MdKind::CommonModule && same(&o.name, &qualifier))?;
+            let cmod = cm.modules.iter().find(|m| m.kind == ModuleKind::Module)?;
+            method_location(
+                &text_of(cmod),
+                &format!("CommonModule.{}", cm.name),
+                ModuleKind::Module,
+                &name,
+                true,
+            )
+        }
+        Candidate::Missing => None,
+    }
+}
+
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum Candidate {
+    Missing,
+    Own { location: Location },
+    Common { qualifier: String, method: String },
+}
+pub(crate) fn probe(
+    text: &str,
+    path: &str,
+    kind: ModuleKind,
+    line: u32,
+    col: u32,
+) -> [Candidate; 2] {
+    let first = probe_at(text, path, kind, line, col).unwrap_or(Candidate::Missing);
+    let second = col
+        .checked_sub(1)
+        .filter(|&c| c != 0)
+        .and_then(|c| probe_at(text, path, kind, line, c))
+        .unwrap_or(Candidate::Missing);
+    [first, second]
+}
+
+pub(crate) fn method_location(
+    text: &str,
+    path: &str,
+    kind: ModuleKind,
+    name: &str,
+    exported_only: bool,
+) -> Option<Location> {
+    let (items, _) = outline(text);
+    let it = method(&items, name, exported_only)?;
+    Some(Location {
+        path: path.to_string(),
+        module: module_name(kind, Lang::En),
+        line: it.line,
+        name: it.name.clone(),
+    })
+}
+
+fn probe_at(text: &str, path: &str, kind: ModuleKind, line: u32, col: u32) -> Option<Candidate> {
+    let src = SourceText::from_str("", text);
     let units = src.units();
     let (ls, le) = *line_ranges(units).get(usize::try_from(line.checked_sub(1)?).ok()?)?;
     let off = ls.checked_add(usize::try_from(col.checked_sub(1)?).ok()?)?;
@@ -84,33 +148,15 @@ fn at(cfg: &Configuration, path: &str, module: &str, line: u32, col: u32) -> Opt
         }
         _ => None,
     };
-    let own = |name: &str| -> Option<Location> {
-        let (items, _) = outline(&text);
-        let it = method(&items, name, false)?;
-        Some(Location {
-            path: path.to_string(),
-            module: module_name(m.kind, Lang::En),
-            line: it.line,
-            name: it.name.clone(),
-        })
+    let own = |name: &str| -> Option<Candidate> {
+        method_location(text, path, kind, name, false).map(|location| Candidate::Own { location })
     };
     match qualifier {
         None => own(&name),
         Some(q) if SELF_NAMES.iter().any(|s| same(s, &q)) => own(&name),
-        Some(q) => {
-            let cm = cfg
-                .objects
-                .iter()
-                .find(|o| o.kind == MdKind::CommonModule && same(&o.name, &q))?;
-            let cmod = cm.modules.iter().find(|m| m.kind == ModuleKind::Module)?;
-            let (items, _) = outline(&text_of(cmod));
-            let it = method(&items, &name, true)?;
-            Some(Location {
-                path: format!("CommonModule.{}", cm.name),
-                module: module_name(ModuleKind::Module, Lang::En),
-                line: it.line,
-                name: it.name.clone(),
-            })
-        }
+        Some(qualifier) => Some(Candidate::Common {
+            qualifier,
+            method: name,
+        }),
     }
 }

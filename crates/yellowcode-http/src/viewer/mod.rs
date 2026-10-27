@@ -2,6 +2,7 @@ pub mod api;
 pub mod api_ext;
 pub mod form;
 pub mod front;
+pub mod managed;
 pub mod skin;
 mod users;
 pub mod x;
@@ -12,14 +13,15 @@ pub(crate) use yellowcode_core::viewer::state;
 
 use std::io::BufReader;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use crate::{DRAIN, guard, text};
 use http::{HttpError, MAX_BODY, Request, Response, read_request_with, write_response};
 use state::{State, Viewer};
 use yellowcode_core::Result;
+use yellowcode_core::viewer::body::ViewerBody;
 
 pub fn accepts_post(path: &str) -> bool {
     path.starts_with("/api/x/") || path == "/api/skins/select"
@@ -36,12 +38,12 @@ pub fn read_request(r: &mut dyn std::io::BufRead) -> std::result::Result<Request
 const MAX_CONNECTIONS: usize = 16;
 const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
-pub struct Server {
+pub struct Server<V = Arc<Viewer>> {
     pub addr: SocketAddr,
     listener: TcpListener,
-    viewer: Arc<Viewer>,
+    viewer: V,
     stop: AtomicBool,
-    active: Arc<AtomicUsize>,
+    connections: Arc<Connections>,
     read_timeout: Duration,
 }
 
@@ -50,11 +52,85 @@ pub fn bind_listener(port: u16) -> Result<TcpListener> {
         .map_err(|e| format!("127.0.0.1:{port}: {e}"))?)
 }
 
-struct Slot(Arc<AtomicUsize>);
+#[derive(Default)]
+struct Connections {
+    counts: Mutex<ConnectionCounts>,
+    changed: Condvar,
+}
+
+#[derive(Default)]
+struct ConnectionCounts {
+    active: usize,
+    draining: usize,
+    sockets: [Option<TcpStream>; MAX_CONNECTIONS],
+}
+
+struct Slot {
+    connections: Arc<Connections>,
+    draining: bool,
+    index: Option<usize>,
+}
+
+impl Connections {
+    fn acquire(self: &Arc<Self>) -> Option<Slot> {
+        self.acquire_locked(
+            self.counts
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()),
+        )
+    }
+
+    fn acquire_locked(
+        self: &Arc<Self>,
+        mut counts: MutexGuard<'_, ConnectionCounts>,
+    ) -> Option<Slot> {
+        while counts.active >= MAX_CONNECTIONS {
+            if counts.draining == 0 {
+                return None;
+            }
+            counts = self
+                .changed
+                .wait(counts)
+                .unwrap_or_else(|error| error.into_inner());
+        }
+        counts.active += 1;
+        Some(Slot {
+            connections: self.clone(),
+            draining: false,
+            index: None,
+        })
+    }
+}
+
+impl Slot {
+    fn begin_drain(&mut self) {
+        let mut counts = self
+            .connections
+            .counts
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        counts.draining += 1;
+        self.draining = true;
+    }
+}
 
 impl Drop for Slot {
     fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::SeqCst);
+        let mut counts = self
+            .connections
+            .counts
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(index) = self.index
+            && let Some(socket) = counts.sockets.get_mut(index)
+        {
+            *socket = None;
+        }
+        counts.active -= 1;
+        if self.draining {
+            counts.draining -= 1;
+        }
+        self.connections.changed.notify_one();
     }
 }
 
@@ -72,13 +148,67 @@ impl Server {
     }
 
     pub fn from_listener_viewer(viewer: Arc<Viewer>, listener: TcpListener) -> Result<Server> {
+        Server::with_backend(viewer, listener)
+    }
+
+    pub fn bind_managed<S: mdconf::ManagedEntrySource + Send + Sync>(
+        snapshot: yellowcode_core::viewer::snapshot::ManagedSnapshot<S>,
+        source: &str,
+        wire_limit: u64,
+        port: u16,
+    ) -> Result<Server<memory_budget::Shared<managed::Endpoint<S>>>>
+    where
+        S::Error: std::fmt::Display,
+    {
+        let endpoint = managed::Endpoint::new(snapshot, source, wire_limit)?;
+        Server::with_backend(endpoint, bind_listener(port)?)
+    }
+    pub fn bind_managed_with_analysis<S: mdconf::ManagedEntrySource + Send + Sync>(
+        snapshot: yellowcode_core::viewer::snapshot::ManagedSnapshot<S>,
+        source: &str,
+        wire_limit: u64,
+        port: u16,
+        paths: managed::AnalysisPaths<'_>,
+    ) -> Result<Server<memory_budget::Shared<managed::Endpoint<S>>>>
+    where
+        S::Error: std::fmt::Display,
+    {
+        let endpoint = managed::Endpoint::with_native(snapshot, source, wire_limit, Some(paths))?;
+        Server::with_backend(endpoint, bind_listener(port)?)
+    }
+}
+
+mod sealed {
+    pub trait Backend {}
+}
+
+pub trait HttpDispatch: sealed::Backend + Sync {
+    fn response(
+        &self,
+        req: &Request,
+        control: &managed::RequestControl<'_>,
+    ) -> std::result::Result<Response<ViewerBody>, managed::ManagedHttpError>;
+}
+impl sealed::Backend for Arc<Viewer> {}
+impl HttpDispatch for Arc<Viewer> {
+    fn response(
+        &self,
+        req: &Request,
+        _control: &managed::RequestControl<'_>,
+    ) -> std::result::Result<Response<ViewerBody>, managed::ManagedHttpError> {
+        Ok(managed::eager(dispatch(self, req)))
+    }
+}
+
+impl<V: HttpDispatch> Server<V> {
+    fn with_backend(viewer: V, listener: TcpListener) -> Result<Self> {
         let addr = listener.local_addr()?;
         Ok(Server {
             addr,
             listener,
             viewer,
             stop: AtomicBool::new(false),
-            active: Arc::new(AtomicUsize::new(0)),
+            connections: Arc::default(),
             read_timeout: DEFAULT_READ_TIMEOUT,
         })
     }
@@ -106,19 +236,44 @@ impl Server {
                 if self.stop.load(Ordering::SeqCst) {
                     return Ok(());
                 }
-                if self.active.fetch_add(1, Ordering::SeqCst) >= MAX_CONNECTIONS {
-                    self.active.fetch_sub(1, Ordering::SeqCst);
-                    let _ = std::thread::Builder::new().spawn(move || {
-                        let _ = stream.set_write_timeout(Some(DRAIN));
-                        let _ = respond_status(&stream, 503);
-                        close_gracefully(&stream);
-                    });
+                let Some(mut slot) = self.connections.acquire() else {
+                    let _ = stream.set_nonblocking(true);
+                    let mut writer = crate::conn::DeadlineWriter {
+                        stream: &stream,
+                        deadline: Instant::now() + DRAIN,
+                        wire_bytes: 0,
+                    };
+                    let _ = write_response(&mut writer, &text(503, "error\n"), false);
+                    close_gracefully(&stream);
                     continue;
+                };
+                {
+                    let mut counts = self
+                        .connections
+                        .counts
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner());
+                    if self.stop.load(Ordering::SeqCst) {
+                        return Ok(());
+                    }
+                    let Some((index, entry)) = counts
+                        .sockets
+                        .iter_mut()
+                        .enumerate()
+                        .find(|(_, socket)| socket.is_none())
+                    else {
+                        continue;
+                    };
+                    match stream.try_clone() {
+                        Ok(socket) => {
+                            *entry = Some(socket);
+                            slot.index = Some(index);
+                        }
+                        Err(_) => continue,
+                    }
                 }
-                let slot = Slot(self.active.clone());
                 let spawned = std::thread::Builder::new().spawn_scoped(scope, move || {
-                    let _slot = slot;
-                    self.serve_connection(&stream);
+                    self.serve_connection(&stream, &mut slot);
                 });
                 if spawned.is_err() {
                     continue;
@@ -129,26 +284,63 @@ impl Server {
 
     pub fn stop(&self) {
         self.stop.store(true, Ordering::SeqCst);
+        let connections = self
+            .connections
+            .counts
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        for stream in connections.sockets.iter().flatten() {
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+        }
+        drop(connections);
         let _ = TcpStream::connect(self.addr);
     }
 
-    fn serve_connection(&self, stream: &TcpStream) {
-        let _ = stream.set_write_timeout(Some(self.read_timeout));
-        let mut reader = BufReader::new(DeadlineReader {
-            stream,
-            deadline: Instant::now() + self.read_timeout,
-        });
+    fn serve_connection(&self, stream: &TcpStream, slot: &mut Slot) {
+        let deadline = Instant::now() + self.read_timeout;
+        let mut reader = BufReader::new(DeadlineReader { stream, deadline });
         match read_request(&mut reader) {
             Ok(req) => {
-                let resp = guard(&req, self.addr.port(), &is_api)
-                    .unwrap_or_else(|| dispatch(&self.viewer, &req));
-                let mut w = stream;
-                let _ = write_response(&mut w, &resp, req.method == "HEAD");
+                if stream.set_nonblocking(true).is_err() {
+                    return;
+                }
+                let canceled = AtomicBool::new(false);
+                let control = managed::RequestControl::with_shutdown(
+                    &canceled,
+                    &self.stop,
+                    Some(deadline),
+                    stream,
+                );
+                let resp = match guard(&req, self.addr.port(), &is_api) {
+                    Some(response) => Ok(managed::eager(response)),
+                    None => self.viewer.response(&req, &control),
+                };
+                let mut w = crate::conn::DeadlineWriter {
+                    stream,
+                    deadline,
+                    wire_bytes: 0,
+                };
+                match resp {
+                    Ok(response) => {
+                        let _ = managed::send(&mut w, response, req.method == "HEAD", &control);
+                    }
+                    Err(managed::ManagedHttpError::Memory(_)) => {
+                        let _ = managed::send(
+                            &mut w,
+                            managed::memory_refusal(),
+                            req.method == "HEAD",
+                            &control,
+                        );
+                    }
+                    Err(_) => {}
+                }
+                slot.begin_drain();
                 close_gracefully(stream);
             }
             Err(e) => {
                 if let Some(code) = e.status() {
                     let _ = respond_status(stream, code);
+                    slot.begin_drain();
                     close_gracefully(stream);
                 }
             }

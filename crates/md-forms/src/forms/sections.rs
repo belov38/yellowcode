@@ -462,7 +462,7 @@ fn settings(fc: &mut FormCtx<'_>, prop: &str, src: &Src<'_>) -> Py<Option<Emit>>
     else {
         return Ok(Some(Emit::Cannot));
     };
-    let r = crate::graph::form_settings_lines(fc.cfg, v, fc.prop_depth);
+    let r = crate::graph::form_settings_lines_resolved(fc.cfg, v, fc.prop_depth);
     graph_settings(fc, r).map(Some)
 }
 

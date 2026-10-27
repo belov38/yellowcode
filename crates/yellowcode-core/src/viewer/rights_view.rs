@@ -219,3 +219,6 @@ pub fn rights_table(
             .unwrap_or_default(),
     })
 }
+
+mod managed;
+pub use managed::{RightsQueryRef, rights_table_borrowed, rights_table_managed};

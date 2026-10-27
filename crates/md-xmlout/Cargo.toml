@@ -16,6 +16,7 @@ thiserror = "2"
 md-model = { path = "../md-model" }
 mdschema = { path = "../mdschema" }
 brace = { path = "../brace" }
+memory-budget = { path = "../memory-budget" }
 
 [lints.clippy]
 dbg_macro = "warn"

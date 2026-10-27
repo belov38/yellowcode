@@ -40,9 +40,9 @@ pub mod xml_in;
 pub mod xml_out;
 
 pub use entries::{
-    BudgetedEntries, CfFile, CfWriter, EntryData, EntryMeta, EntrySink, EntrySource, Inflated,
-    ManagedEntries, ManagedEntriesError, ManagedEntrySource, MemEntries, decode_inflated,
-    decode_stored, decode_stored_budgeted,
+    BudgetedEntries, CfFile, CfWriter, EntryBacking, EntryData, EntryList, EntryMeta, EntrySink,
+    EntrySource, Inflated, ManagedEntries, ManagedEntriesError, ManagedEntrySource, MemEntries,
+    StoredBytes, decode_inflated, decode_stored, decode_stored_budgeted,
 };
 pub use error::{Error, Result};
 pub use load::{ConfigurationInspection, LoadMeter, LoadOptions, LoadProfile, MeterRefusal};

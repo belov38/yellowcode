@@ -8,6 +8,16 @@ pub struct Source {
     stored: Vec<Vec<u8>>,
 }
 impl Source {
+    #[allow(dead_code)]
+    pub fn replace_stored(&mut self, name: &str, bytes: Vec<u8>) {
+        let at = self
+            .metadata
+            .iter()
+            .position(|meta| meta.name == name)
+            .expect("existing test entry");
+        self.stored[at] = bytes;
+    }
+
     pub fn from_native(native: &dyn EntrySource) -> Self {
         let metadata = native.list().unwrap();
         let stored = metadata

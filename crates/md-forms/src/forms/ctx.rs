@@ -3,11 +3,11 @@ use std::collections::{BTreeSet, HashMap};
 use brace::{Guid, Node};
 use mdschema::Schema;
 
+use super::FormResolution;
 use super::decode::{DecodedForm, FORMID, Item, Rec};
 use super::py::{Dict, Py, Raised, py_int, py_len, py_slice, py_str, str_at};
 use super::query::result_fields;
 use super::shared::Shared;
-use crate::Configuration;
 
 fn platform_type_name(t: &mdschema::PlatformType) -> TypeName {
     let (name, ns) = match t.legacy_qname() {
@@ -205,9 +205,8 @@ pub(crate) struct AddCols<'a> {
     pub cols: Dict<String, AddCol<'a>>,
 }
 
-#[derive(Debug)]
 pub(crate) struct FormInfo<'a> {
-    cfg: &'a Configuration,
+    cfg: &'a dyn FormResolution,
     shared: &'a Shared,
     schema: &'static Schema,
     pub form: &'a DecodedForm,
@@ -230,8 +229,8 @@ pub(crate) fn item_key(it: &Item) -> String {
     it.id_text.clone()
 }
 
-pub(crate) fn md_name<'c>(cfg: &'c Configuration, s: &str) -> Option<&'c str> {
-    cfg.index.names.get(&Guid::parse(s)?).map(String::as_str)
+pub(crate) fn md_name<'c>(cfg: &'c dyn FormResolution, s: &str) -> Option<&'c str> {
+    cfg.name(&Guid::parse(s)?)
 }
 
 fn last_part(full: &str) -> &str {
@@ -244,7 +243,7 @@ fn rpartition(k: &str) -> (&str, &str) {
 
 impl<'a> FormInfo<'a> {
     pub(crate) fn new(
-        cfg: &'a Configuration,
+        cfg: &'a dyn FormResolution,
         shared: &'a Shared,
         df: &'a DecodedForm,
         owner: Option<&'a str>,
@@ -386,7 +385,7 @@ impl<'a> FormInfo<'a> {
                 continue;
             }
             let g = str_at(it, 1)?;
-            if let Some(n) = Guid::parse(&g).and_then(|u| self.cfg.index.types.get(&u)) {
+            if let Some(n) = Guid::parse(&g).and_then(|u| self.cfg.type_name(&u)) {
                 let set = SET_CATEGORIES.contains(&n.split('.').next().unwrap_or_default());
                 out.push(TypeName {
                     kind: if set { "TypeSet" } else { "Type" }.into(),

@@ -17,3 +17,9 @@ todo = "warn"
 unimplemented = "warn"
 undocumented_unsafe_blocks = "warn"
 unused_result_ok = "warn"
+
+[[bin]]
+name = "sealed-heap-probe"
+path = "tests/support/sealed_heap_probe.rs"
+test = false
+bench = false

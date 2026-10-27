@@ -1,3 +1,6 @@
+mod managed;
+pub use managed::{ManagedPathError, ManagedResolveError, ManagedTarget, resolve_managed};
+
 use std::fmt;
 
 use mdconf::{Child, ChildTag, Configuration, MdKind, MdObject, Recalculation, SubKind, SubObject};

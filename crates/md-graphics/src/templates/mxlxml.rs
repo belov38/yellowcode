@@ -280,7 +280,7 @@ pub(crate) struct Writer<'a> {
 }
 
 impl<'a> Writer<'a> {
-    pub(crate) fn from_view(cfg: &'a Configuration, d: MoxelView<'a>) -> R<Self> {
+    pub(crate) fn from_view(cfg: &'a dyn Lookup, d: MoxelView<'a>) -> R<Self> {
         Self::construct(cfg, d, Read::new(Allocation::Native)).map_err(native_error)
     }
     pub(crate) fn construct(cfg: &'a dyn Lookup, d: MoxelView<'a>, read: Read<'a>) -> F<Self> {

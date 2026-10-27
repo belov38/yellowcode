@@ -11,6 +11,8 @@
 
 pub mod build;
 mod facade;
+mod selected_codecs;
+mod selected_form_facts;
 pub mod startup;
 pub mod xml_out;
 
@@ -21,9 +23,9 @@ pub mod xml_in;
 
 pub mod entries {
     pub use mdconf_core::entries::{
-        BudgetedEntries, CfFile, CfWriter, EntryData, EntryMeta, EntrySink, EntrySource, Inflated,
-        ManagedEntries, ManagedEntriesError, ManagedEntrySource, MemEntries, decode_inflated,
-        decode_stored, decode_stored_budgeted,
+        BudgetedEntries, CfFile, CfWriter, EntryBacking, EntryData, EntryList, EntryMeta,
+        EntrySink, EntrySource, Inflated, ManagedEntries, ManagedEntriesError, ManagedEntrySource,
+        MemEntries, StoredBytes, decode_inflated, decode_stored, decode_stored_budgeted,
     };
 }
 
@@ -32,9 +34,9 @@ pub mod xml {
 }
 
 pub use entries::{
-    BudgetedEntries, CfFile, CfWriter, EntryData, EntryMeta, EntrySink, EntrySource, Inflated,
-    ManagedEntries, ManagedEntriesError, ManagedEntrySource, MemEntries, decode_inflated,
-    decode_stored, decode_stored_budgeted,
+    BudgetedEntries, CfFile, CfWriter, EntryBacking, EntryData, EntryList, EntryMeta, EntrySink,
+    EntrySource, Inflated, ManagedEntries, ManagedEntriesError, ManagedEntrySource, MemEntries,
+    StoredBytes, decode_inflated, decode_stored, decode_stored_budgeted,
 };
 pub use facade::{CfFileExt, ConfigurationExt};
 pub use md_model::*;

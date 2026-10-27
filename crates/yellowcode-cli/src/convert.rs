@@ -11,7 +11,7 @@ pub(crate) struct Args {
     /// Explicit DT users layout; automatic selection awaits D4b.
     #[arg(long, value_enum)]
     users_layout: Option<Layout>,
-    /// DT to 1CD only: managed memory budget, auto or integer bytes with B/KiB/MiB/GiB suffix
+    /// DT conversion: managed memory budget, auto or integer bytes with B/KiB/MiB/GiB suffix
     /// (as for query and serve; YELLOWCODE_MEMORY_LIMIT).
     #[arg(long, allow_hyphen_values = true)]
     memory_limit: Option<String>,

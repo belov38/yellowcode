@@ -17,10 +17,10 @@ testing = []
 thiserror = "2"
 unicode-normalization = "0.1"
 base64 = "0.22"
-regex = "1"
 sha2 = "0.10"
 tempfile = "3"
 v8users = { path = "../v8users" }
+x-qbuilder = { path = "../x-qbuilder" }
 brace = { path = "../brace" }
 code-console = { path = "../code-console" }
 bsl-compiler = { path = "../bsl-compiler" }
@@ -39,6 +39,7 @@ onecd = { path = "../onecd", default-features = false }
 platform-catalog = { path = "../platform-catalog" }
 ui-style = { path = "../ui-style", features = ["font-files", "skin", "packages"] }
 v8cont = { path = "../v8cont" }
+regex-automata = { version = "0.4.18", default-features = false, features = ["std", "syntax", "meta", "hybrid", "unicode", "perf-literal"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 clap = { version = "4", features = ["derive"], optional = true }
@@ -48,6 +49,12 @@ serde_json = "1"
 
 [target."cfg(target_os = \"linux\")".dependencies]
 libc = "0.2"
+
+[target."cfg(unix)".dependencies]
+rustix = { version = "1", features = ["fs", "process"] }
+
+[target."cfg(windows)".dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Security"] }
 
 [lints.clippy]
 dbg_macro = "warn"

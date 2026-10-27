@@ -31,21 +31,62 @@ pub enum ManagedEntriesError<E> {
 }
 type Result<T, E> = std::result::Result<T, ManagedEntriesError<E>>;
 
+enum Lookup<'a> {
+    Owned(BudgetedVec<usize>),
+    Borrowed(&'a [usize]),
+}
+impl Lookup<'_> {
+    fn as_slice(&self) -> &[usize] {
+        match self {
+            Self::Owned(index) => index,
+            Self::Borrowed(index) => index,
+        }
+    }
+}
 pub struct ManagedEntries<'a, S: ManagedEntrySource + ?Sized> {
     source: &'a S,
-    by_name: BudgetedVec<usize>,
+    retain: bool,
+    by_name: Lookup<'a>,
     cache: RefCell<BudgetedVec<Option<Shared<EntryData>>>>,
     root: RefCell<Option<Shared<RootInfo>>>,
 }
 impl<'a, S: ManagedEntrySource + ?Sized> ManagedEntries<'a, S> {
     pub fn new(source: &'a S) -> Result<Self, S::Error> {
+        Self::with_cache(source, true)
+    }
+    pub fn uncached(source: &'a S) -> Result<Self, S::Error> {
+        Self::with_cache(source, false)
+    }
+    fn with_cache(source: &'a S, retain: bool) -> Result<Self, S::Error> {
         let budget = source.memory_budget();
         let count = source.list().len();
-        let mut by_name = BudgetedVec::try_with_capacity(budget, Category::Metadata, count)?;
-        let mut cache = BudgetedVec::try_with_capacity(budget, Category::Metadata, count)?;
-        for index in 0..count {
+        let by_name = Self::build_index(source)?;
+        let mut cache = BudgetedVec::try_with_capacity(
+            budget,
+            Category::Metadata,
+            if retain { count } else { 0 },
+        )?;
+        if retain {
+            for _ in 0..count {
+                cache.try_push(None)?;
+            }
+        }
+        Ok(Self {
+            source,
+            retain,
+            by_name: Lookup::Owned(by_name),
+            cache: RefCell::new(cache),
+            root: RefCell::new(None),
+        })
+    }
+    pub(crate) fn build_index(source: &S) -> Result<BudgetedVec<usize>, S::Error> {
+        let mut by_name = BudgetedVec::try_with_capacity(
+            source.memory_budget(),
+            Category::Metadata,
+            source.list().len(),
+        )?;
+        for index in 0..source.list().len() {
             by_name.try_push(index)?;
-            cache.try_push(None)?;
         }
         by_name.sort_unstable_by(|a, b| {
             source
@@ -55,10 +96,17 @@ impl<'a, S: ManagedEntrySource + ?Sized> ManagedEntries<'a, S> {
                 .cmp(&source.list().get(*b).map(|meta| meta.name.as_str()))
                 .then_with(|| a.cmp(b))
         });
+        Ok(by_name)
+    }
+    pub(crate) fn uncached_indexed(source: &'a S, index: &'a [usize]) -> Result<Self, S::Error> {
         Ok(Self {
             source,
-            by_name,
-            cache: RefCell::new(cache),
+            retain: false,
+            by_name: Lookup::Borrowed(index),
+            cache: RefCell::new(BudgetedVec::new(
+                source.memory_budget(),
+                Category::Metadata,
+            )?),
             root: RefCell::new(None),
         })
     }
@@ -105,12 +153,13 @@ impl<'a, S: ManagedEntrySource + ?Sized> ManagedEntries<'a, S> {
         self.source.memory_budget()
     }
     fn find(&self, name: &str) -> Option<usize> {
-        let at = self.by_name.partition_point(|&index| {
+        let by_name = self.by_name.as_slice();
+        let at = by_name.partition_point(|&index| {
             self.list()
                 .get(index)
                 .is_some_and(|meta| meta.name.as_str() < name)
         });
-        self.by_name
+        by_name
             .get(at)
             .copied()
             .filter(|&index| self.list().get(index).is_some_and(|meta| meta.name == name))
@@ -173,6 +222,9 @@ impl<'a, S: ManagedEntrySource + ?Sized> ManagedEntries<'a, S> {
             zraw::DEFAULT_LIMIT,
         )?
         .try_into_shared()?;
+        if !self.retain {
+            return Ok(Some(data));
+        }
         let mut cache = self.cache.borrow_mut();
         let slot = cache
             .get_mut(index)

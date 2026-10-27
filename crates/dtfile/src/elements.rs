@@ -89,6 +89,7 @@ enum State {
     Top,
     Rows { db: bool },
     Db,
+    FolderData,
 }
 
 pub struct RawReader<R: Read> {
@@ -321,6 +322,67 @@ impl<R: Read> RawReader<R> {
         self.table_start(Source::DataBase, true, "DataBase table")
     }
 
+    pub fn folder_header(&mut self) -> Result<Option<Vec<BinNode>>> {
+        if let Some(e) = &self.failed {
+            return Err(e.again());
+        }
+        if let Some(limits) = self.limits {
+            self.rd.begin_budget(limits);
+        }
+        let result = self.folder_header_inner();
+        if let Err(e) = &result {
+            self.failed = Some(e.again());
+        }
+        result
+    }
+
+    fn folder_header_inner(&mut self) -> Result<Option<Vec<BinNode>>> {
+        if !matches!(self.state, State::Rows { db: false }) {
+            return self.fail("streamed folder header out of order");
+        }
+        if self.at_close()? {
+            self.rows(false)?;
+            return Ok(None);
+        }
+        self.expect_open("folder row")?;
+        let mut fields = Vec::with_capacity(10);
+        for _ in 0..5 {
+            let flag = self.value("folder NULL flag")?;
+            if !matches!(&flag, BinNode::Atom(a) if a.as_int() == Some(1)) {
+                return self.fail("folder field must have non-null flag 1");
+            }
+            fields.push(flag);
+            fields.push(self.value("folder field")?);
+        }
+        if !matches!(self.value("folder binary flag")?, BinNode::Atom(a) if a.as_int() == Some(1)) {
+            return self.fail("folder binary field must have non-null flag 1");
+        }
+        self.state = State::FolderData;
+        Ok(Some(fields))
+    }
+
+    pub fn copy_folder_binary(&mut self, sink: &mut impl Write, limit: u64) -> Result<u64> {
+        if let Some(e) = &self.failed {
+            return Err(e.again());
+        }
+        let result = (|| {
+            if !matches!(self.state, State::FolderData) {
+                return self.fail("folder binary field out of order");
+            }
+            let len = self
+                .rd
+                .copy_binary(sink, limit)
+                .map_err(|e| bin_err(e, &self.trace))?;
+            self.expect_close("folder row")?;
+            self.state = State::Rows { db: false };
+            Ok(len)
+        })();
+        if let Err(e) = &result {
+            self.failed = Some(e.again());
+        }
+        result
+    }
+
     #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Result<Option<RawEvent>> {
         if let Some(e) = &self.failed {
@@ -333,6 +395,7 @@ impl<R: Read> RawReader<R> {
             State::Top => self.top(),
             State::Rows { db } => self.rows(db).map(Some),
             State::Db => self.db().map(Some),
+            State::FolderData => self.fail("folder binary field is pending"),
         };
         if let Err(e) = &r {
             self.failed = Some(e.again());
