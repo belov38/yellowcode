@@ -82,6 +82,21 @@ impl<'a> ConfigTxnSource<'a> {
         })
     }
 
+    pub fn read_bounded(
+        txn: &'a ReadTxn,
+        table: &str,
+        max_rows: usize,
+        max_name: usize,
+    ) -> Result<Self> {
+        let index = FolderTxnIndex::read_bounded(txn, table, max_rows, max_name)?;
+        let (metas, by_name) = entry_metas(&index.entries, table)?;
+        Ok(Self {
+            index,
+            metas,
+            by_name,
+        })
+    }
+
     pub fn is_empty(&self) -> bool {
         self.metas.is_empty()
     }
@@ -100,6 +115,15 @@ impl EntrySource for ConfigTxnSource<'_> {
             .data(i)
             .map(Some)
             .map_err(|e| mdconf::Error::Io(std::io::Error::other(format!("{name}: {e}"))))
+    }
+
+    fn stored_len(&self, name: &str) -> mdconf::Result<Option<u64>> {
+        let Some(&i) = self.by_name.get(name) else {
+            return Ok(None);
+        };
+        self.index.data_len(i).map(Some).map_err(|_| {
+            mdconf::Error::Io(std::io::Error::other("CONFIG stored length unavailable"))
+        })
     }
 
     fn stored_bounded(&self, name: &str, limit: usize) -> mdconf::Result<Option<Vec<u8>>> {

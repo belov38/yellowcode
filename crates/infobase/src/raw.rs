@@ -181,6 +181,65 @@ impl<'a> FolderTxnIndex<'a> {
         })
     }
 
+    pub fn read_bounded(
+        txn: &'a ReadTxn,
+        name: &str,
+        max_rows: usize,
+        max_name: usize,
+    ) -> Result<Self> {
+        let table = txn.table(name)?;
+        let column = table
+            .descr()
+            .field("FILENAME")
+            .ok_or_else(|| bad(name, "no column FILENAME"))?
+            .0;
+        for (i, row) in table.scan().enumerate() {
+            if i >= max_rows {
+                return Err(bad(name, "folder row limit"));
+            }
+            let (_, row) = row?;
+            match row.get(column) {
+                Some(Value::VarChar(s) | Value::Char(s)) if s.len() <= max_name => {}
+                _ => return Err(bad(name, "folder name limit or type")),
+            }
+        }
+        let entries = folder_entries(&table, name)?;
+        Ok(Self {
+            table,
+            name: name.to_string(),
+            entries,
+        })
+    }
+
+    pub fn data_len(&self, i: usize) -> Result<u64> {
+        let e = self
+            .entries
+            .get(i)
+            .ok_or_else(|| bad(&self.name, "no such entry"))?;
+        let column = self
+            .table
+            .descr()
+            .field("BINARYDATA")
+            .ok_or_else(|| bad(&self.name, "no column BINARYDATA"))?
+            .0;
+        let mut total = 0u64;
+        for &slot in &e.parts {
+            let row = self
+                .table
+                .get(slot)?
+                .ok_or_else(|| bad(&self.name, "part vanished"))?;
+            let len = match row.get(column) {
+                Some(Value::Image(BlobVal::Ref(r))) => u64::from(r.len),
+                Some(Value::Image(BlobVal::Data(b)) | Value::Binary(b)) => b.len() as u64,
+                _ => return Err(bad(&self.name, "BINARYDATA type")),
+            };
+            total = total
+                .checked_add(len)
+                .ok_or_else(|| bad(&self.name, "entry length overflow"))?;
+        }
+        Ok(total)
+    }
+
     pub fn data(&self, i: usize) -> Result<Vec<u8>> {
         folder_data(&self.table, &self.name, &self.entries, i)
     }

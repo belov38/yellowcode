@@ -111,6 +111,10 @@ impl Drop for Release<'_> {
 }
 
 impl CodeConsole {
+    pub fn file_close_observer(&self) -> Option<onecd::FileCloseObserver> {
+        self._ib.raw().db().file_close_observer()
+    }
+
     pub fn open(path: &Path) -> Result<CodeConsole, String> {
         CodeConsole::open_guarded(path, |_| ())
     }

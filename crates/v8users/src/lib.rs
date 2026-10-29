@@ -11,6 +11,7 @@
 
 pub mod card;
 pub mod data;
+pub mod edit;
 mod error;
 mod layout;
 pub use layout::MAX_DATA_BYTES;

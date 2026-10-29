@@ -229,7 +229,12 @@ impl AppState {
             } else {
                 match loaded {
                     Ok((viewer, name)) => {
-                        *self.current.write().unwrap_or_else(|e| e.into_inner()) = Some(viewer);
+                        let mut current = self.current.write().unwrap_or_else(|e| e.into_inner());
+                        if let Some(old) = current.as_ref() {
+                            old.shutdown();
+                        }
+                        *current = Some(viewer);
+                        drop(current);
                         {
                             let mut r = lock(&self.recent);
                             r.touch(Path::new(path));
@@ -610,7 +615,22 @@ fn serve_scheme(
         .get("content-type")
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
-    let body = request.body().clone();
+    let header = |name| {
+        request
+            .headers()
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned)
+    };
+    let origin = header("origin");
+    let fetch_site = header("sec-fetch-site");
+    let permission = header("x-user-write-permission");
+    let authority = request
+        .uri()
+        .authority()
+        .map(|a| a.as_str().to_owned())
+        .unwrap_or_default();
+    let body = request.into_body();
     let st = app.state::<AppState>();
     let current = st.current.read().unwrap_or_else(|e| e.into_inner()).clone();
     let gate = st.gate.clone();
@@ -621,13 +641,19 @@ fn serve_scheme(
             return;
         }
         let reply = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            bridge::respond_with_skins(
+            bridge::respond_local(
                 &skins,
                 current.as_deref(),
                 &method,
                 &target,
                 content_type.as_deref(),
                 &body,
+                bridge::LocalRequestHeaders {
+                    authority: &authority,
+                    origin: origin.as_deref(),
+                    fetch_site: fetch_site.as_deref(),
+                    permission: permission.as_deref(),
+                },
             )
         }))
         .unwrap_or_else(|_| bridge::internal_error());
@@ -849,10 +875,23 @@ fn run(
         })
         .build(tauri::generate_context!())?;
     app.run(|handle, event| {
-        if let tauri::RunEvent::ExitRequested { api, .. } = event
+        if let tauri::RunEvent::ExitRequested { ref api, .. } = event
             && handle.state::<convert::Jobs>().running()
         {
             api.prevent_exit();
+        } else if matches!(
+            event,
+            tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
+        ) {
+            let state = handle.state::<AppState>();
+            if let Some(viewer) = state
+                .current
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+            {
+                viewer.shutdown();
+            }
         }
     });
     Ok(())

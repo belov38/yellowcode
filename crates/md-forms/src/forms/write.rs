@@ -243,6 +243,7 @@ pub(crate) const CUSTOM: &[(&str, &str, &str, Custom)] = {
         ("Page", "TitleDataPath", "c_dp_at", a::c_dp_page_title),
         ("UsualGroup", "TitleDataPath", "c_dp_at", a::c_dp_group_title),
         ("Table", "RowPictureDataPath", "c_rowpicture", a::c_rowpicture),
+        ("Table", "RowFilter", "c_row_filter", a::c_row_filter),
         ("*", "AdditionSource", "c_addition_source", a::c_addition_source),
         ("Table", "UserSettingsGroup", "c_user_settings_group", a::c_user_settings_group),
         ("ButtonGroup", "CommandSource", "c_cmd_source", a::c_cmd_source),
@@ -539,7 +540,7 @@ pub(crate) fn form_to_xml(
     let src = Src::Form(&df);
     let mut lines = vec![match shared.compat() {
         FormCompat::V8_3_12 => HEAD.replacen(DCSSCH, "", 1),
-        FormCompat::Base => HEAD.to_string(),
+        FormCompat::Base | FormCompat::V8_5_1 => HEAD.to_string(),
     }];
     for el in shared.order("Form").iter() {
         if fc.raised() {

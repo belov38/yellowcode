@@ -2763,7 +2763,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "onec-desktop"
-version = "0.1.0-alpha.12"
+version = "0.1.0-alpha.13"
 dependencies = [
  "cf-fixtures",
  "dunce",
@@ -5782,6 +5782,7 @@ dependencies = [
  "v8users",
  "windows-sys 0.61.2",
  "x-qbuilder",
+ "zraw",
 ]
 
 [[package]]

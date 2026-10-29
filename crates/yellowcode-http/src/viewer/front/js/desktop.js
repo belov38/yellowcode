@@ -79,14 +79,17 @@ export function initDesktop() {
     }));
   };
 
-  const stop = () => {
+  const sourceState = (state) => document.dispatchEvent(new CustomEvent("viewer-source-state", { detail: { state } }));
+  const stop = (state = "retained") => {
     busy = false;
+    sourceState(state);
     document.dispatchEvent(new Event("commands-changed"));
     if (timer !== null) clearInterval(timer);
     timer = null;
   };
   const loading = (path, elapsed) => {
     busy = true;
+    sourceState("loading");
     document.dispatchEvent(new Event("commands-changed"));
     const t0 = Date.now() - (elapsed || 0);
     const show = () =>
@@ -104,7 +107,7 @@ export function initDesktop() {
     banner(null);
   });
   listen("source-ready", () => {
-    stop();
+    stop("replaced");
     history.replaceState(null, "", "/");
     location.reload();
   });

@@ -5,6 +5,7 @@ mod common;
 mod ctx;
 mod document;
 mod exchange;
+mod external;
 mod fields;
 mod index;
 mod registers;
@@ -291,6 +292,10 @@ pub(crate) type KindFn = fn(&Ctx, &mut Names) -> Result<Vec<(Table, TableRole)>>
 
 enum Rules {
     NoTables,
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "reserved for future metadata kinds without rules")
+    )]
     Unsupported,
     Kind(KindFn),
 }
@@ -314,7 +319,8 @@ fn rules_of(kind: MdKind) -> Rules {
         Sequence => Rules::Kind(document::sequence),
         BusinessProcess => Rules::Kind(document::business_process),
         Task => Rules::Kind(document::task),
-        ExternalDataSource | IntegrationService => Rules::Unsupported,
+        ExternalDataSource => Rules::Kind(external::external_data_source),
+        IntegrationService => Rules::Kind(external::integration_service),
         Configuration
         | Subsystem
         | CommonModule
@@ -405,10 +411,32 @@ fn build_with(
             Rules::Kind(f) => f,
         };
         let cx = Ctx::new(&md, obj)?;
-        let made = f(&cx, &mut nm).map_err(|e| in_object(&cx.full_name, e))?;
+        let checkpoint = nm.db.allocation_checkpoint();
+        let allocated = nm.allocated.len();
+        let made = match f(&cx, &mut nm) {
+            Ok(made) => made,
+            Err(Error::Unsupported(_)) if skip_unsupported => {
+                nm.db.rollback_allocations(checkpoint);
+                nm.allocated.truncate(allocated);
+                skipped.push(cx.full_name);
+                continue;
+            }
+            Err(e) => return Err(in_object(&cx.full_name, e)),
+        };
         let mut roles = Vec::new();
         for (t, role) in made {
-            tables.push(t);
+            if t.name == purpose::EXT_DATA_SRC_PRMS
+                && let Some(existing) = schema.iter().find(|old| old.name == t.name)
+            {
+                if existing != &t {
+                    return Err(Error::Unsupported(format!(
+                        "{}: base shared parameters differ from the supported layout",
+                        cx.full_name
+                    )));
+                }
+            } else {
+                tables.push(t);
+            }
             roles.push(role);
         }
         let enum_values = obj

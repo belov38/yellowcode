@@ -479,6 +479,19 @@ body > #tabbar .tab:not(.cur):hover { background: linear-gradient(#e0eeff, #cce3
 .dialog-caption strong { flex: 1; }
 .dialog-caption-buttons { display: flex; }
 .dialog-users-actions { position: absolute; z-index: 5; left: 0; top: 22px; padding: 3px; border: 1px solid var(--cfg-border-control); background: var(--cfg-surface-form); }
+.dialog-users-actions:not([hidden]) { display: flex; flex-direction: column; align-items: stretch; }
+.dialog-users-actions button { text-align: left; white-space: nowrap; padding: 2px 6px; }
+.service-dialog[data-dialog=users] tbody tr[aria-selected=true] { background: var(--cfg-selection-bg); color: var(--cfg-text-selected); }
+.service-dialog[data-dialog=users] th button { width: 100%; border: 0; background: transparent; text-align: left; padding: 0; font: inherit; }
+.users-status { max-width: 356px; white-space: pre-wrap; overflow-wrap: anywhere; padding: 5px; }
+.users-status:empty { display: none; }
+.users-clear { position: absolute; left: 6px; top: 130px; max-width: 333px; }
+.users-public-info { position: absolute; top: 322px; left: 6px; right: 6px; margin: 0; font-size: 10px; }
+.users-public-info dt { font-weight: bold; }
+.users-public-info dd { margin: 0 0 3px; overflow-wrap: anywhere; }
+.users-confirm { max-width: 420px; padding: 12px; }
+.users-confirm p { white-space: pre-wrap; overflow-wrap: anywhere; }
+.users-confirm-buttons { display: flex; justify-content: flex-end; gap: 6px; }
 .mpop {
   background: linear-gradient(to right, var(--cfg-menu-strip) 0, var(--cfg-menu-strip) var(--cfg-menu-strip-width), var(--cfg-menu-bg) var(--cfg-menu-strip-width), var(--cfg-menu-bg) 100%);
   color: var(--cfg-menu-text); border: 1px solid var(--cfg-menu-border); padding: 2px;

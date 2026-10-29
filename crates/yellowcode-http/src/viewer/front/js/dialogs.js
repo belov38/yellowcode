@@ -1,4 +1,5 @@
 import { mountDcsRenderer } from "./dcs.js";
+import { mountUsers } from "./users.js";
 import { el, fill } from "./dom.js";
 import { api } from "./api.js";
 import { icon } from "./icon.js";
@@ -124,7 +125,7 @@ function renderControls(controls, parent, form, ctx) {
       case "group": node = el("fieldset", null, label ? el("legend", null, label) : null); break;
       case "label": node = el("span", null, /^<<.*>>$/.test(label) ? "" : label); break;
       case "button": {
-        const closes = /^(ОК|OK|Отмена|Cancel|Закрыть|Close)$/i.test(label);
+        const closes = /^(ОК|OK|Отмена|Cancel|Закрыть|Close)$/i.test(label) && !(form === "user" && c.name === "BtnOK");
         node = el("button", { type: "button", onclick: () => handler ? ctx.run(handler) : closes && ctx.close() }, label);
         if (!handler && !closes) disable(node);
         if (/^(ОК|OK)$/i.test(label)) node.dataset.dialogDefault = "";
@@ -135,7 +136,7 @@ function renderControls(controls, parent, form, ctx) {
         if (!handler) disable(node);
         break;
       case "input": case "file_input": case "font": case "reference": case "color":
-        node = el("input", { type: c.type === "color" ? "color" : /password|pswd/i.test(c.name) ? "password" : "text", "aria-label": label || c.name });
+        node = form === "user" && /^EditPassword[12]$/.test(c.name) ? el("span") : el("input", { type: c.type === "color" ? "color" : /password|pswd/i.test(c.name) ? "password" : "text", "aria-label": label || c.name });
         if (!handler) disable(node);
         break;
       case "choice": node = el("select", { "aria-label": label || c.name }, el("option", null, typeof c.value === "object" ? caption(c.value) : c.value)); if (!handler) disable(node); break;
@@ -309,27 +310,10 @@ export async function openDialog(key, context = {}) {
   ctx.schema = context.schema || null;
   renderControls(form.controls, ctx.body, key, ctx);
   if (key === "windows") windowList(ctx);
-  if (key === "users") {
-    ctx.nodes.get("users/TotalUsersCntSt").textContent = "0";
-    const toolbar = el("div", { class: "dialog-users-toolbar" });
-    const details = () => ctx.run(() => openDialog("user"));
-    const menu = el("div", { class: "dialog-users-actions", hidden: true },
-      el("button", { type: "button", onclick: () => { menu.hidden = true; details(); } }, tr("Добавить…", "Add…")));
-    toolbar.append(el("button", { type: "button", onclick: () => { menu.hidden = !menu.hidden; } }, tr("Действия ▾", "Actions ▾")), menu);
-    for (const [pic, ru, english, run] of [
-      ["CreateListItem", "Добавить", "Add", details], ["CloneObject", "Скопировать", "Copy"],
-      ["Change", "Изменить", "Edit"], ["Delete", "Удалить", "Delete"],
-      ["FilterAndSort", "Отбор", "Filter"], ["FilterByCurrentValue", "Отбор по текущему значению", "Filter by current value"],
-      ["ClearFilter", "Отключить отбор", "Clear filter"], ["Refresh", "Обновить", "Refresh"],
-    ]) {
-      const handler = actions.get("users/" + pic) || run;
-      const button = el("button", { type: "button", "aria-label": tr(ru, english), title: tr(ru, english), onclick: handler ? () => ctx.run(handler) : null }, icon("pic/" + pic));
-      ctx.nodes.set("users/" + pic, button);
-      if (!handler) disable(button);
-      toolbar.append(button);
-    }
-    ctx.body.append(toolbar);
-  }
+  if (key === "users") mountUsers(ctx, { tr, icon,
+    openCard: (users) => ctx.run(() => openDialog("user", { users })),
+  });
+  if (key === "user") context.users?.mount(ctx);
   ctx.dialog.querySelector("[data-dialog-default]")?.focus({ preventScroll: true });
   ctx.dialog.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.target.closest("textarea,button,select")) {

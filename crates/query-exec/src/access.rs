@@ -4,14 +4,36 @@ use ibschema::names::StdField;
 use ibschema::storage::{StorageMap, TableId};
 use ibschema::store::{ReadTxn, Row};
 use query_ir::convert::row_to_q;
+use query_ir::host::HostError;
 use query_ir::{
-    AccessPredicate, BindCtx, BindHost, ExecError, PExpr, ParamValue, ParamValues, QValue,
-    QuerySchema, RelL, SessionValues, StorageBinding,
+    AccessPredicate, BindCtx, BindHost, ExecError, PExpr, ParamValue, ParamValues, QTableId,
+    QValue, QuerySchema, RelL, SessionValues, StorageBinding,
 };
+use query_syntax::{Lang, MsgId};
 
 use crate::exec::execute;
 use crate::source::ExecEnv;
 use crate::store::StoreSource;
+
+pub fn compile_restriction(
+    schema: &QuerySchema,
+    table: QTableId,
+    text: &str,
+    context: &str,
+    lang: Lang,
+) -> Result<AccessPredicate, HostError> {
+    query_syntax::parse_access_condition(text)
+        .and_then(|parsed| query_ir::compile_access_condition(&parsed, text, schema, table))
+        .map_err(|error| {
+            let detail = error.render(text, lang, schema.script());
+            let restriction = HostError::new(format!(
+                "{}\n{context}\n{detail}",
+                MsgId::DBERROR_SECURITYINSTR.text(lang)
+            ))
+            .with_cause(HostError::new(detail));
+            HostError::new(MsgId::SELECT_ERROR_RUNTIMEERROR.text(lang)).with_cause(restriction)
+        })
+}
 
 pub struct RowView<'r> {
     table: TableId,

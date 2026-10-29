@@ -5,7 +5,7 @@ exit 0
 Usage: yellowcode users show [OPTIONS] <BASE> <NAME>
 
 Arguments:
-  <BASE>  Каталог информационной базы или её файл 1Cv8.1CD (открывается только для чтения)
+  <BASE>  Каталог информационной базы или её файл 1Cv8.1CD
   <NAME>  Имя или UUID пользователя
 
 Options:
@@ -25,4 +25,16 @@ Options:
 
   # Карточка по UUID, если имена повторяются в разных областях данных
   yellowcode users show base 11111111-1111-1111-1111-111111111111
+
+  # Создать пользователя с пустым паролем и явно указанной ролью
+  yellowcode users create base --name Оператор --roles 11111111-1111-1111-1111-111111111111
+
+  # Изменить полное имя, сохранив пароль
+  yellowcode users edit base Оператор --full-name "Сергей Иванов"
+
+  # Удалить выбранного пользователя с подтверждением
+  yellowcode users delete base Оператор --confirm
+
+  # Очистить пароль выбранного пользователя с подтверждением
+  yellowcode users clear-password base Администратор --confirm
 --- stderr

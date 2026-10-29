@@ -282,5 +282,7 @@ pub fn read_http_request(
             body,
             host: None,
             sec_fetch_site: None,
+            origin: None,
+            user_write_permission: None,
         }))
 }

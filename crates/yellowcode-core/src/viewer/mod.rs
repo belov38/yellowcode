@@ -33,6 +33,7 @@ pub mod stats;
 pub mod template_view;
 pub mod tree;
 pub mod types;
+pub mod users_control;
 
 pub use out::{Color, Lang};
 pub use state::{Loader, Need, State, Unavailable, Viewer, source_loader};

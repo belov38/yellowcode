@@ -48,7 +48,11 @@ pub fn write_form_facts_checked<S: ManagedEntrySource, E: From<BudgetError>>(
     out.raw(b"YCF1")?;
     out.raw(&[
         u8::from(v85),
-        u8::from(compat == mdschema::forms::FormCompat::V8_3_12),
+        match compat {
+            mdschema::forms::FormCompat::Base => 0,
+            mdschema::forms::FormCompat::V8_3_12 => 1,
+            mdschema::forms::FormCompat::V8_5_1 => 2,
+        },
         0,
         0,
     ])?;

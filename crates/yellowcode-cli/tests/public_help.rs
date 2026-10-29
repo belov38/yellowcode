@@ -24,6 +24,13 @@ const CASES: &[(&str, &[&str], &str)] = cases![
     ("users--help", ["users", "--help"]),
     ("users-list--help", ["users", "list", "--help"]),
     ("users-show--help", ["users", "show", "--help"]),
+    ("users-create--help", ["users", "create", "--help"]),
+    ("users-edit--help", ["users", "edit", "--help"]),
+    ("users-delete--help", ["users", "delete", "--help"]),
+    (
+        "users-clear-password--help",
+        ["users", "clear-password", "--help"]
+    ),
     ("metadata--help", ["metadata", "--help"]),
     ("metadata-h", ["metadata", "-h"]),
     ("metadata-tree--help", ["metadata", "tree", "--help"]),

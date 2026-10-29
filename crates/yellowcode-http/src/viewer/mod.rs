@@ -5,6 +5,7 @@ pub mod front;
 pub mod managed;
 pub mod skin;
 mod users;
+mod users_control;
 pub mod x;
 
 pub(crate) use crate::transport as http;
@@ -18,13 +19,13 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use crate::{DRAIN, guard, text};
-use http::{HttpError, MAX_BODY, Request, Response, read_request_with, write_response};
+use http::{HttpError, MAX_BODY, Request, Response, read_request_with_body_limit, write_response};
 use state::{State, Viewer};
 use yellowcode_core::Result;
 use yellowcode_core::viewer::body::ViewerBody;
 
 pub fn accepts_post(path: &str) -> bool {
-    path.starts_with("/api/x/") || path == "/api/skins/select"
+    path.starts_with("/api/x/") || path == "/api/skins/select" || path == "/api/users/apply"
 }
 
 pub fn is_api(path: &str) -> bool {
@@ -32,7 +33,13 @@ pub fn is_api(path: &str) -> bool {
 }
 
 pub fn read_request(r: &mut dyn std::io::BufRead) -> std::result::Result<Request, HttpError> {
-    read_request_with(r, &accepts_post, MAX_BODY)
+    read_request_with_body_limit(r, &accepts_post, &|path| {
+        if path == "/api/users/apply" {
+            64 * 1024
+        } else {
+            MAX_BODY
+        }
+    })
 }
 
 const MAX_CONNECTIONS: usize = 16;
@@ -183,6 +190,7 @@ mod sealed {
 }
 
 pub trait HttpDispatch: sealed::Backend + Sync {
+    fn shutdown(&self) {}
     fn response(
         &self,
         req: &Request,
@@ -191,6 +199,9 @@ pub trait HttpDispatch: sealed::Backend + Sync {
 }
 impl sealed::Backend for Arc<Viewer> {}
 impl HttpDispatch for Arc<Viewer> {
+    fn shutdown(&self) {
+        Viewer::shutdown(self);
+    }
     fn response(
         &self,
         req: &Request,
@@ -284,6 +295,7 @@ impl<V: HttpDispatch> Server<V> {
 
     pub fn stop(&self) {
         self.stop.store(true, Ordering::SeqCst);
+        self.viewer.shutdown();
         let connections = self
             .connections
             .counts
@@ -355,7 +367,18 @@ fn respond_status(stream: &TcpStream, status: u16) -> std::io::Result<()> {
 }
 
 pub fn handle(state: &State, req: &Request) -> Response {
-    guarded(|| route(state, req))
+    guarded(|| {
+        let Ok(_read) = state.users_control.admission.read() else {
+            return users_control::busy();
+        };
+        if state.users_control.closed() {
+            return users_control::source_closed();
+        }
+        if users_control::is_write_route(req) {
+            return users_control::without_viewer(state, req);
+        }
+        route(state, req)
+    })
 }
 
 fn guarded(f: impl FnOnce() -> Response) -> Response {
@@ -384,6 +407,16 @@ const WAIT: Duration = Duration::from_secs(1);
 
 pub fn dispatch(viewer: &Viewer, req: &Request) -> Response {
     guarded(|| {
+        if users_control::is_write_route(req) {
+            return users_control::handle(viewer, req);
+        }
+        let control = viewer.snapshot().users_control.clone();
+        let Ok(_read) = control.admission.read() else {
+            return users_control::busy();
+        };
+        if control.closed() {
+            return users_control::source_closed();
+        }
         let snap = viewer.snapshot();
         let Some(need) = need(req, &snap) else {
             return route(&snap, req);

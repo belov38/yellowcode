@@ -10,6 +10,8 @@ pub struct Request {
     pub query: Vec<(String, String)>,
     pub host: Option<String>,
     pub sec_fetch_site: Option<String>,
+    pub origin: Option<String>,
+    pub user_write_permission: Option<String>,
     pub body: Vec<u8>,
 }
 
@@ -75,10 +77,16 @@ fn read_line(
             }
             match buf.iter().position(|&b| b == b'\n') {
                 Some(i) => {
+                    if line.len().saturating_add(i) > limit {
+                        return Err(too_long());
+                    }
                     line.extend_from_slice(buf.get(..i).unwrap_or_default());
                     (i + 1, true)
                 }
                 None => {
+                    if line.len().saturating_add(buf.len()) > limit {
+                        return Err(too_long());
+                    }
                     line.extend_from_slice(buf);
                     (buf.len(), false)
                 }
@@ -106,6 +114,14 @@ pub fn read_request_with(
     accepts_post: &dyn Fn(&str) -> bool,
     max_body: usize,
 ) -> Result<Request, HttpError> {
+    read_request_with_body_limit(r, accepts_post, &|_| max_body)
+}
+
+pub(crate) fn read_request_with_body_limit(
+    r: &mut dyn BufRead,
+    accepts_post: &dyn Fn(&str) -> bool,
+    max_body: &dyn Fn(&str) -> usize,
+) -> Result<Request, HttpError> {
     let line =
         read_line(r, MAX_REQUEST_LINE, || HttpError::UriTooLong)?.ok_or(HttpError::BadRequest)?;
     let line = String::from_utf8(line).map_err(|_| HttpError::BadRequest)?;
@@ -120,6 +136,8 @@ pub fn read_request_with(
     let mut total = 0usize;
     let mut host = None;
     let mut sec_fetch_site = None;
+    let mut origin = None;
+    let mut user_write_permission = None;
     let mut lengths: Vec<String> = Vec::new();
     let mut content_type = None;
     let mut chunked = false;
@@ -136,8 +154,10 @@ pub fn read_request_with(
         if let Some((name, value)) = String::from_utf8_lossy(&h).split_once(':') {
             let value = value.trim().to_string();
             match name.trim().to_ascii_lowercase().as_str() {
-                "host" => host = Some(value),
-                "sec-fetch-site" => sec_fetch_site = Some(value),
+                "host" => set_unique(&mut host, value)?,
+                "sec-fetch-site" => set_unique(&mut sec_fetch_site, value)?,
+                "origin" => set_unique(&mut origin, value)?,
+                "x-user-write-permission" => set_unique(&mut user_write_permission, value)?,
                 "content-length" => lengths.push(value),
                 "content-type" => content_type = Some(value),
                 "transfer-encoding" => chunked = true,
@@ -168,7 +188,13 @@ pub fn read_request_with(
         query.push((query_decode(k)?, query_decode(v)?));
     }
     let body = if method == "POST" {
-        read_body(r, &lengths, content_type.as_deref(), chunked, max_body)?
+        read_body(
+            r,
+            &lengths,
+            content_type.as_deref(),
+            chunked,
+            max_body(&path),
+        )?
     } else {
         Vec::new()
     };
@@ -178,8 +204,18 @@ pub fn read_request_with(
         query,
         host,
         sec_fetch_site,
+        origin,
+        user_write_permission,
         body,
     })
+}
+
+fn set_unique(slot: &mut Option<String>, value: String) -> Result<(), HttpError> {
+    if slot.is_some() || value.bytes().any(|b| b < 32 || b == 127) {
+        return Err(HttpError::BadRequest);
+    }
+    *slot = Some(value);
+    Ok(())
 }
 
 fn read_body(

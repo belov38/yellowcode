@@ -396,6 +396,28 @@ pub(crate) fn c_datapath(
     Some(dp_at(fc, prop, src, &[Seg::Int(at)]).unwrap_or(Emit::Cannot))
 }
 
+pub(crate) fn c_row_filter(
+    fc: &mut FormCtx<'_>,
+    _ctx: &str,
+    prop: &str,
+    src: &Src<'_>,
+    _ent: Option<PropRef<'_>>,
+) -> Option<Emit> {
+    if fc.shared.compat() != mdschema::forms::FormCompat::V8_5_1 || src.bag("13").is_some() {
+        return None;
+    }
+    let item = src.item()?;
+    if table_cat(fc, item) != "ValueTable" {
+        return None;
+    }
+    Some(Emit::El(E::new(
+        prop,
+        None,
+        vec![("xsi:nil".into(), "true".into())],
+        Vec::new(),
+    )))
+}
+
 pub(crate) fn c_dp_footer(
     fc: &mut FormCtx<'_>,
     _ctx: &str,

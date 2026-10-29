@@ -33,7 +33,7 @@ fn help_version_and_open_help_do_not_start_gui() {
         "{}",
         String::from_utf8_lossy(&open.stderr)
     );
-    assert!(String::from_utf8_lossy(&open.stdout).contains("source"));
+    assert!(String::from_utf8_lossy(&open.stdout).contains("[SOURCE]"));
 }
 #[test]
 fn metadata_and_query_route_without_display() {

@@ -68,7 +68,15 @@ pub fn respond_with_body(
     content_type: Option<&str>,
     body: &[u8],
 ) -> Reply {
-    respond_internal(None, state, method, path_and_query, content_type, body)
+    respond_internal(
+        None,
+        state,
+        method,
+        path_and_query,
+        content_type,
+        body,
+        None,
+    )
 }
 
 pub fn respond_with_skins(
@@ -86,6 +94,34 @@ pub fn respond_with_skins(
         path_and_query,
         content_type,
         body,
+        None,
+    )
+}
+
+pub struct LocalRequestHeaders<'a> {
+    pub authority: &'a str,
+    pub origin: Option<&'a str>,
+    pub fetch_site: Option<&'a str>,
+    pub permission: Option<&'a str>,
+}
+
+pub fn respond_local(
+    skins: &yellowcode_core::viewer::skin::Store,
+    state: Option<&Viewer>,
+    method: &str,
+    target: &str,
+    content_type: Option<&str>,
+    body: &[u8],
+    headers: LocalRequestHeaders<'_>,
+) -> Reply {
+    respond_internal(
+        Some(skins),
+        state,
+        method,
+        target,
+        content_type,
+        body,
+        Some(headers),
     )
 }
 
@@ -96,6 +132,7 @@ fn respond_internal(
     path_and_query: &str,
     content_type: Option<&str>,
     body: &[u8],
+    headers: Option<LocalRequestHeaders<'_>>,
 ) -> Reply {
     let odd = |s: &str| s.chars().any(|c| c.is_control() || c == ' ');
     if odd(method)
@@ -105,13 +142,36 @@ fn respond_internal(
         return Reply::text(400, "error\n");
     }
     let mut raw = format!("{method} {path_and_query} HTTP/1.1\r\n");
+    if let Some(headers) = headers {
+        if !matches!(headers.authority, "localhost" | "onec.localhost") {
+            return Reply::text(403, "local viewer required\n");
+        }
+        raw.push_str("Host: onec.localhost\r\n");
+        for (name, value) in [
+            ("Origin", headers.origin),
+            ("Sec-Fetch-Site", headers.fetch_site),
+            ("X-User-Write-Permission", headers.permission),
+        ] {
+            if let Some(value) = value {
+                if value.chars().any(char::is_control) || value.len() > 4096 {
+                    return Reply::text(400, "error\n");
+                }
+                raw.push_str(&format!("{name}: {value}\r\n"));
+            }
+        }
+    }
     let mut tail: &[u8] = &[];
     if method == "POST" {
         if let Some(c) = content_type {
             raw.push_str(&format!("Content-Type: {c}\r\n"));
         }
         raw.push_str(&format!("Content-Length: {}\r\n", body.len()));
-        if body.len() <= yellowcode_http::transport::MAX_BODY {
+        let limit = if path_and_query.split('?').next() == Some("/api/users/apply") {
+            64 * 1024
+        } else {
+            yellowcode_http::transport::MAX_BODY
+        };
+        if body.len() <= limit {
             tail = body;
         }
     }

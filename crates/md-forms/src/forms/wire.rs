@@ -109,10 +109,11 @@ pub fn decode_facts(bytes: &[u8]) -> Result<Facts> {
         return Err(ProtocolError);
     }
     let v85 = cur.flag()?;
-    let compat = if cur.flag()? {
-        FormCompat::V8_3_12
-    } else {
-        FormCompat::Base
+    let compat = match cur.byte()? {
+        0 => FormCompat::Base,
+        1 => FormCompat::V8_3_12,
+        2 if !v85 => FormCompat::V8_5_1,
+        _ => return Err(ProtocolError),
     };
     if cur.take(2)? != [0, 0] {
         return Err(ProtocolError);

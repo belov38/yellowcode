@@ -136,6 +136,20 @@ std_fields! {
     DimCode = DIM_CODE, "DimCode", "";
     MdObjId = MD_OBJ_ID, "MDObjID", "";
     FileName = FILE_NAME, "FileName", "";
+    UserId = USER_ID, "UserId", "";
+    ExtDataSrcId = EXT_DATA_SRC_ID, "ExtDataSrcId", "";
+    ConnectPrms = CONNECT_PRMS, "ConnectPrms", "";
+    Content = CONTENT, "Content", "";
+    MessageBodyId = MESSAGE_BODY_ID, "MessageBodyId", "";
+    MessageBodyPartPosition = MESSAGE_BODY_PART_POSITION, "MessageBodyPartPosition", "";
+    MessageBodyPart = MESSAGE_BODY_PART, "MessageBodyPart", "";
+    ExpirationDate = EXPIRATION_DATE, "ExpirationDate", "";
+    MessageBodyKey = MESSAGE_BODY_KEY, "MessageBodyKey", "";
+    MessageId = MESSAGE_ID, "MessageId", "";
+    Position = POSITION, "Position", "";
+    Processed = PROCESSED, "Processed", "";
+    MessageHeader = MESSAGE_HEADER, "MessageHeader", "";
+    MessageBody = MESSAGE_BODY, "MessageBody", "";
     JobKey = JOB_KEY, "JobKey", "";
     MetadataId = METADATA_ID, "MetadataID", "";
     PredefinedFlag = PREDEFINED, "Predefined", "";
@@ -184,6 +198,13 @@ impl Side {
 }
 
 pub mod purpose {
+    pub const EXT_DATA_SRC_PRMS: &str = "ExtDataSrcPrms";
+    pub const EDBT: &str = "EDBT";
+    pub const INTEG_SERVICE_SETTINGS: &str = "IntegServiceSettings";
+    pub const INTEG_SERVICE_MSG_BODY: &str = "IntegServiceMsgBody";
+    pub const INTEG_SERVICE_EXT_MSG_BODY: &str = "IntegServiceExtMsgBody";
+    pub const INTEG_CHANNEL_IN_QUEUE: &str = "IntegChannelInQueue";
+    pub const INTEG_CHANNEL_OUT_QUEUE: &str = "IntegChannelOutQueue";
     pub const REFERENCE: &str = "Reference";
     pub const DOCUMENT: &str = "Document";
     pub const ENUM: &str = "Enum";

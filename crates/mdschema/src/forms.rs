@@ -10,6 +10,7 @@ pub enum FormCompat {
     #[default]
     Base,
     V8_3_12,
+    V8_5_1,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -282,6 +283,23 @@ fn build(
         }
     }
     apply_overlay(&mut learned, &ov, v85, "learned")?;
+    if compat == FormCompat::V8_5_1 && !v85 {
+        let source = ov
+            .get("UsualGroup")
+            .and_then(|c| c.get("props"))
+            .ok_or_else(|| err("learned85", "UsualGroup props missing"))?;
+        let target = learned
+            .get_mut("UsualGroup")
+            .and_then(|c| c.get_mut("props"))
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| err("learned", "UsualGroup props missing"))?;
+        for prop in ["ShowTitle", "Group", "Representation"] {
+            let entry = source
+                .get(prop)
+                .ok_or_else(|| err("learned85", format!("UsualGroup.{prop} missing")))?;
+            target.insert(prop.into(), entry.clone());
+        }
+    }
     let mut types = parse("types", resource.json("forms/types.json")?)?;
     if compat == FormCompat::V8_3_12 {
         let c = parse("compat8312", resource.json("forms/compat8312.json")?)?;

@@ -8,7 +8,7 @@
         clippy::indexing_slicing
     )
 )]
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use std::{
     ffi::OsString,
     io::{Read, Write},
@@ -187,10 +187,24 @@ pub fn run(
     err: &mut dyn Write,
     tty: bool,
 ) -> i32 {
-    let cli = match Cli::try_parse_from(args) {
+    let args: Vec<OsString> = args.into_iter().collect();
+    let cli = match Cli::try_parse_from(&args) {
         Ok(cli) => cli,
         Err(error) => {
             if error.use_stderr() {
+                let partial = Cli::command()
+                    .ignore_errors(true)
+                    .try_get_matches_from(&args);
+                if partial.ok().is_some_and(|matches| {
+                    matches.subcommand_matches("users").is_some_and(|users| {
+                        matches!(
+                            users.subcommand_name(),
+                            Some("create" | "edit" | "delete" | "clear-password")
+                        )
+                    })
+                }) {
+                    users::write_notice(err);
+                }
                 let _ = write!(err, "{error}");
             } else {
                 let _ = write!(out, "{error}");
@@ -198,6 +212,13 @@ pub fn run(
             return error.exit_code();
         }
     };
+    let user_mutation = matches!(
+        &cli.command,
+        Some(Command::Users(command)) if command.is_mutation()
+    );
+    if user_mutation {
+        users::write_notice(err);
+    }
     if let Err(error) = yellowcode_core::platform::select(&cli.platform_build) {
         let _ = writeln!(err, "yellowcode: {error}");
         return 2;
@@ -214,22 +235,20 @@ pub fn run(
         Some(Command::Query(args)) => query::run(args, input, &mut output, err, tty),
         Some(Command::Serve(args)) => serve::run(args, cli.platform_build, err).map(|()| 0),
         Some(Command::Table(args)) => table::run(args, &mut output, err, tty),
-        None => {
-            use clap::CommandFactory;
-            Cli::command()
-                .write_long_help(&mut output)
-                .map(|()| 0)
-                .map_err(Into::into)
-        }
+        None => Cli::command()
+            .write_long_help(&mut output)
+            .map(|()| 0)
+            .map_err(Into::into),
     }
     .and_then(|code| match output.flush() {
+        Err(_) if user_mutation => Err(users::committed_output_error()),
         Err(_) if output.closed => Ok(code),
         Err(error) => Err(error.into()),
         Ok(()) => Ok(code),
     });
     match result {
         Ok(code) => code,
-        Err(_) if output.closed => 0,
+        Err(_) if output.closed && !user_mutation => 0,
         Err(error) => {
             let _ = writeln!(err, "yellowcode: {error}");
             if error

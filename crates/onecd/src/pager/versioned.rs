@@ -386,6 +386,10 @@ fn file_corrupt(what: String) -> Error {
 }
 
 impl Pager {
+    pub(crate) fn file_close_observer(&self) -> Option<super::FileCloseObserver> {
+        self.storage.file_close_observer()
+    }
+
     pub fn open(
         storage: impl Into<super::storage::StorageOwner>,
         opts: &OpenOptions,

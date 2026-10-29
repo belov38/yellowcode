@@ -2,8 +2,9 @@ use std::fs::{File, OpenOptions};
 use std::io;
 use std::path::Path;
 #[cfg(any(test, feature = "testing"))]
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use crate::db::Mode;
 use crate::error::Result;
@@ -16,6 +17,18 @@ pub trait Storage: Send + Sync {
     fn write_at(&self, off: u64, buf: &[u8]) -> io::Result<()>;
     fn set_len(&self, len: u64) -> io::Result<()>;
     fn sync(&self) -> io::Result<()>;
+    fn file_close_observer(&self) -> Option<FileCloseObserver> {
+        None
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct FileCloseObserver(Arc<AtomicBool>);
+
+impl FileCloseObserver {
+    pub fn is_closed(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
 }
 
 pub(crate) enum StorageOwner {
@@ -44,7 +57,8 @@ impl std::ops::Deref for StorageOwner {
 
 #[derive(Debug)]
 pub struct FileStorage {
-    handle: Handle,
+    handle: Option<Handle>,
+    closed: OnceLock<Arc<AtomicBool>>,
 }
 
 #[derive(Debug)]
@@ -57,20 +71,32 @@ impl FileStorage {
     pub fn open(path: &Path, write: bool) -> io::Result<Self> {
         let file = OpenOptions::new().read(true).write(write).open(path)?;
         Ok(FileStorage {
-            handle: Handle::Plain(file),
+            handle: Some(Handle::Plain(file)),
+            closed: OnceLock::new(),
         })
     }
 
     pub(crate) fn open_locked(path: &Path, mode: Mode) -> Result<Self> {
         Ok(FileStorage {
-            handle: Handle::Locked(DbLock::acquire(path, mode)?),
+            handle: Some(Handle::Locked(DbLock::acquire(path, mode)?)),
+            closed: OnceLock::new(),
         })
     }
 
     fn file(&self) -> io::Result<&File> {
         match &self.handle {
-            Handle::Plain(f) => Ok(f),
-            Handle::Locked(lock) => lock.file(),
+            Some(Handle::Plain(f)) => Ok(f),
+            Some(Handle::Locked(lock)) => lock.file(),
+            None => Err(io::Error::other("the database file is closed")),
+        }
+    }
+}
+
+impl Drop for FileStorage {
+    fn drop(&mut self) {
+        drop(self.handle.take());
+        if let Some(closed) = self.closed.get() {
+            closed.store(true, Ordering::Release);
         }
     }
 }
@@ -125,6 +151,12 @@ fn file_write_all_at(file: &File, mut buf: &[u8], mut off: u64) -> io::Result<()
 }
 
 impl Storage for FileStorage {
+    fn file_close_observer(&self) -> Option<FileCloseObserver> {
+        Some(FileCloseObserver(Arc::clone(
+            self.closed.get_or_init(|| Arc::new(AtomicBool::new(false))),
+        )))
+    }
+
     fn len(&self) -> io::Result<u64> {
         Ok(self.file()?.metadata()?.len())
     }

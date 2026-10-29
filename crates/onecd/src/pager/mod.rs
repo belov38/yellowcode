@@ -10,7 +10,7 @@ pub(crate) mod versioned;
 
 #[cfg(any(test, feature = "testing"))]
 pub use storage::FailingStorage;
-pub use storage::{FileStorage, MemStorage, Storage};
+pub use storage::{FileCloseObserver, FileStorage, MemStorage, Storage};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ReaderStats {

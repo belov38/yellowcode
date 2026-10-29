@@ -20,6 +20,7 @@ base64 = "0.22"
 sha2 = "0.10"
 tempfile = "3"
 v8users = { path = "../v8users" }
+zraw = { path = "../zraw" }
 x-qbuilder = { path = "../x-qbuilder" }
 brace = { path = "../brace" }
 code-console = { path = "../code-console" }
@@ -54,7 +55,7 @@ libc = "0.2"
 rustix = { version = "1", features = ["fs", "process"] }
 
 [target."cfg(windows)".dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Security"] }
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_System_JobObjects", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_Security"] }
 
 [lints.clippy]
 dbg_macro = "warn"

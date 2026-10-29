@@ -152,6 +152,10 @@ impl Console {
         self.base.evictor()
     }
 
+    pub fn file_close_observer(&self) -> Option<onecd::FileCloseObserver> {
+        self.base.evictor().file_close_observer()
+    }
+
     pub fn info(&self) -> &Info {
         &self.info
     }

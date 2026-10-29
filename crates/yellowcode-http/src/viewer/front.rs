@@ -24,6 +24,7 @@ const FILES: &[(&str, &str, &str)] = &[
         include_str!("../../../../NOTICE"),
     ),
     ("js/dialogs.js", JS, include_str!("front/js/dialogs.js")),
+    ("js/users.js", JS, include_str!("front/js/users.js")),
     ("js/dcs.js", JS, include_str!("front/js/dcs.js")),
     (
         "js/dcs_settings.js",

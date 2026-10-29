@@ -278,6 +278,10 @@ impl OpenOptions {
 }
 
 impl Database {
+    pub fn file_close_observer(&self) -> Option<crate::FileCloseObserver> {
+        self.inner.pager.file_close_observer()
+    }
+
     pub fn open(path: &Path, opts: OpenOptions) -> Result<Database> {
         if opts.memory_budget.is_some() && opts.locking != Locking::None {
             return Err(Error::Unsupported(Unsupported::ManagedLocking));

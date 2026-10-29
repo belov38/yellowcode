@@ -129,6 +129,7 @@ pub struct StaticFormContext {
     overlay: Option<&'static StaticValue>,
     compatibility: Option<&'static StaticValue>,
     v85: bool,
+    compat851: bool,
 }
 impl StaticFormContext {
     pub fn order(&self) -> impl Iterator<Item = &'static str> + use<> {
@@ -144,13 +145,18 @@ impl StaticFormContext {
         let base = self.base.and_then(|value| value.get("props"));
         let overlay = self.overlay.and_then(|value| value.get("props"));
         let v85 = self.v85;
+        let compat851 = self.compat851;
         let compatibility = self.compatibility;
         pairs(base)
             .iter()
             .map(move |(key, value)| {
                 let replacement = overlay
                     .and_then(|overlay| overlay.get(key))
-                    .filter(|value| v85 || !truthy(value.get("moved")));
+                    .filter(|value| {
+                        v85 || !truthy(value.get("moved"))
+                            || (compat851
+                                && matches!(*key, "ShowTitle" | "Group" | "Representation"))
+                    });
                 (
                     *key,
                     StaticFormProp(
@@ -202,6 +208,7 @@ impl StaticFormTables {
     }
     pub fn contexts(&self) -> impl Iterator<Item = (&'static str, StaticFormContext)> + use<> {
         let v85 = self.v85;
+        let compat851 = !v85 && self.compat == FormCompat::V8_5_1;
         let compatibility = self.compatibility();
         MergeObjects {
             base: sorted(Some(table("forms/learned.json"))).peekable(),
@@ -214,6 +221,7 @@ impl StaticFormTables {
                     base,
                     overlay,
                     v85,
+                    compat851: compat851 && key == "UsualGroup",
                     compatibility: compatibility.and_then(|value| value.get(key)),
                 },
             )
@@ -226,6 +234,7 @@ impl StaticFormTables {
             base,
             overlay,
             v85: self.v85,
+            compat851: !self.v85 && self.compat == FormCompat::V8_5_1 && name == "UsualGroup",
             compatibility: self.compatibility().and_then(|value| value.get(name)),
         })
     }

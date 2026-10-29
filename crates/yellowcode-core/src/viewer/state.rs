@@ -18,6 +18,7 @@ pub struct FlatNode {
 }
 
 pub struct State {
+    pub users_control: Arc<super::users_control::UsersControl>,
     pub skins: super::skin::Store,
     pub cfg: Configuration,
     pub source: PathBuf,
@@ -176,6 +177,7 @@ impl State {
             serde_json::to_value(stats::stats(&cfg))?
         };
         Ok(State {
+            users_control: Arc::new(super::users_control::UsersControl::new(source)),
             skins: super::skin::Skins::store(),
             cfg,
             source: source.to_path_buf(),
@@ -450,6 +452,48 @@ impl Viewer {
         self.inner.snapshot()
     }
 
+    pub fn shutdown(&self) {
+        let control = self.snapshot().users_control.clone();
+        match control.admission.write() {
+            Ok(_exclusive) => control.revoke(),
+            Err(poisoned) => {
+                let _exclusive = poisoned.into_inner();
+                control.revoke();
+                control.admission.clear_poison();
+            }
+        };
+    }
+
+    pub fn refresh_after_users_write(&self) -> Result<()> {
+        let old = self.snapshot();
+        let mut next = match State::load_stages_inner(
+            &old.source,
+            old.names.as_deref(),
+            old.lang,
+            old.stages,
+            old.memory.as_ref(),
+            &mut |_| Ok(()),
+        ) {
+            Ok(next) => next,
+            Err(_) => {
+                old.users_control.revoke();
+                return Err("viewer refresh failed".into());
+            }
+        };
+        next.users_control = old.users_control.clone();
+        next.skins = old.skins.clone();
+        *self
+            .inner
+            .current
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = Arc::new(next);
+        let mut up = lock(&self.inner.up);
+        up.changed = false;
+        up.failures.clear();
+        up.names_failure = None;
+        Ok(())
+    }
+
     pub fn loads(&self) -> usize {
         lock(&self.inner.up).loads
     }
@@ -602,6 +646,11 @@ impl Inner {
             armed: true,
         };
         loop {
+            let control = self.snapshot().users_control.clone();
+            let admission = control.admission.read().unwrap_or_else(|e| e.into_inner());
+            if control.closed() {
+                return;
+            }
             let cur = self.snapshot();
             let (todo, names_job) = {
                 let mut g = lock(&self.up);
@@ -681,6 +730,7 @@ impl Inner {
             match result {
                 Ok((cfg, fp)) => {
                     let next = Arc::new(State {
+                        users_control: Arc::clone(&cur.users_control),
                         skins: cur.skins.clone(),
                         cfg,
                         source: cur.source.clone(),
@@ -713,6 +763,7 @@ impl Inner {
                     }
                     drop(next);
                     drop(cur);
+                    drop(admission);
                     let t = Instant::now();
                     while Arc::strong_count(&old) > 1 {
                         if t.elapsed() >= OLD_SNAPSHOT_WAIT {

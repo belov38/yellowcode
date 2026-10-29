@@ -3,7 +3,8 @@ use std::sync::Arc;
 
 use super::tables::{PropRef, StringsRef, TableView};
 use brace::{Guid, Node};
-use mdschema::forms::{FormCompat, FormTables, KindStdAttrs};
+pub use mdschema::forms::FormCompat;
+use mdschema::forms::{FormTables, KindStdAttrs};
 use mdschema::{ChildSpec, KindSpec};
 
 use super::query::STD_RU;
@@ -421,10 +422,10 @@ impl Walk {
 }
 
 pub fn form_compat(compatibility_mode: u32, v85: bool) -> FormCompat {
-    if compatibility_mode == 80312 && !v85 {
-        FormCompat::V8_3_12
-    } else {
-        FormCompat::Base
+    match (compatibility_mode, v85) {
+        (80312, false) => FormCompat::V8_3_12,
+        (80501, false) => FormCompat::V8_5_1,
+        _ => FormCompat::Base,
     }
 }
 

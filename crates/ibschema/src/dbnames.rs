@@ -25,6 +25,12 @@ pub struct DbNames {
     top: u32,
 }
 
+pub(crate) struct AllocationCheckpoint {
+    entries: usize,
+    counter: u32,
+    top: u32,
+}
+
 #[derive(Debug, Clone)]
 enum Lookup {
     Native {
@@ -180,6 +186,34 @@ impl DbNames {
 
     pub fn counter(&self) -> u32 {
         self.counter
+    }
+
+    pub(crate) fn allocation_checkpoint(&self) -> AllocationCheckpoint {
+        AllocationCheckpoint {
+            entries: self.entries.len(),
+            counter: self.counter,
+            top: self.top,
+        }
+    }
+
+    pub(crate) fn rollback_allocations(&mut self, checkpoint: AllocationCheckpoint) {
+        match &mut self.lookup {
+            Lookup::Native { by_key, by_num } => {
+                for entry in self.entries.drain(checkpoint.entries..) {
+                    by_key.remove(&(entry.uuid, entry.purpose));
+                    by_num.remove(&entry.number);
+                }
+            }
+            Lookup::Managed { by_key, by_num } => {
+                if self.entries.len() != checkpoint.entries {
+                    by_key.retain(|&index| index < checkpoint.entries);
+                    by_num.retain(|&index| index < checkpoint.entries);
+                    self.entries.truncate(checkpoint.entries);
+                }
+            }
+        }
+        self.counter = checkpoint.counter;
+        self.top = checkpoint.top;
     }
 
     pub fn entries(&self) -> &[DbName] {
