@@ -6,6 +6,8 @@
 
 mod binary;
 pub mod bind;
+#[cfg(feature = "collate")]
+pub mod collate;
 pub mod collections;
 mod convert;
 pub mod enums;
@@ -63,3 +65,9 @@ pub fn register(reg: &mut Registry) {
     xdto::register(reg);
     values::placeholder::register(reg);
 }
+
+#[cfg(all(test, feature = "collate"))]
+extern crate self as bsl_stdlib;
+#[cfg(all(test, feature = "collate"))]
+#[path = "../tests/support/mod.rs"]
+mod collate_test_support;

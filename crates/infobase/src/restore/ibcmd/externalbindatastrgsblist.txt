@@ -1,0 +1,17 @@
+{"EXTERNALBINDATASTRGSBLIST",0,
+{"Fields",
+{"STORAGEID","B",0,16,0,"CS"},
+{"BLOBID","B",0,16,0,"CS"},
+{"TIMESTAMP","DT",0,0,0,"CS"},
+{"BLOBSIZE","N",0,10,0,"CS"},
+{"ISDELETED","L",0,0,0,"CS"}
+},
+{"Indexes",
+{"EXTERNALBINDATASTRGSBLISTIND",1,
+{"STORAGEID",16},
+{"BLOBID",16}
+}
+},
+{"Recordlock","0"},
+{"Files",0,0,0}
+}

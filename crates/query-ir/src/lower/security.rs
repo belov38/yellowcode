@@ -1,7 +1,7 @@
 use super::layout::{R, Row, p16};
 use super::rel::Lower;
 use super::{AggL, Dec, PExpr, RelL};
-use crate::ir::SrcId;
+use crate::ir::{ColSel, ExprKind, SrcId, SrcKind};
 use crate::{QType, QValue};
 use query_syntax::Func;
 
@@ -60,6 +60,28 @@ impl Lower<'_> {
         let Some(condition) = self.b.security.conditions.get(&from) else {
             return Ok(row);
         };
+        if let Some(SrcKind::Virtual { cols, .. }) =
+            self.stmt.sources.get(to.0 as usize).map(|s| &s.kind)
+        {
+            let mut missing = false;
+            crate::ir::visit_expr_in_place(condition, true, &mut |e| {
+                if let ExprKind::Col {
+                    src,
+                    col: ColSel::Field(field),
+                } = e.kind
+                    && src == from
+                    && !cols.contains(&Some(field))
+                {
+                    missing = true;
+                }
+            });
+            if missing {
+                return Err(crate::ExecError::Later {
+                    what: "Q7b-VtRestrictionField",
+                    stage: "Q5/Q6",
+                });
+            }
+        }
         self.applied_security.insert(from);
         let condition =
             crate::bind::security::reanchor(condition, from, to, self.stmt.sources.len())?;

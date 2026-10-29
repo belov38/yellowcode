@@ -230,7 +230,7 @@ impl Lower<'_> {
                     );
                 }
                 let l = self.exprs(l, row)?;
-                let (q, correlated) = self.expr_query(q)?;
+                let (q, correlated) = self.expr_query(q, true)?;
                 self.added += 1;
                 PExpr::InQuery {
                     l,
@@ -241,7 +241,7 @@ impl Lower<'_> {
             }
             ExprKind::SectionAgg { f, owner, rel } => {
                 let owner = self.boxed(owner, row)?;
-                let (q, _) = self.expr_query(rel)?;
+                let (q, _) = self.expr_query(rel, false)?;
                 self.added += 1;
                 PExpr::SectionAgg {
                     owner,

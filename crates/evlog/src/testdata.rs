@@ -8,6 +8,15 @@ use crate::reader::LogData;
 use crate::{Error, Event, Period, SeparatorValue, TxStatus, TxnToken, Writer, WriterOptions};
 
 pub fn out_dir() -> Option<PathBuf> {
+    if let Some(value) = std::env::var_os("ONEC_EVLOG_OUT") {
+        let path = PathBuf::from(value);
+        assert!(
+            !path.as_os_str().is_empty() && path.is_dir(),
+            "ONEC_EVLOG_OUT must name an existing evlog corpus directory: {}",
+            path.display()
+        );
+        return Some(path);
+    }
     let p = match std::env::var_os("ONEC_OUT") {
         Some(p) => PathBuf::from(p),
         None => Path::new(env!("CARGO_MANIFEST_DIR"))

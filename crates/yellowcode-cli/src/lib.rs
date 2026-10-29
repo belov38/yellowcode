@@ -79,11 +79,43 @@ pub fn is_cli(args: &[OsString]) -> bool {
     }
 }
 
+const EXAMPLES: &str = "\
+Примеры:
+  # Выполнить запрос к файловой базе (каталог с 1Cv8.1CD)
+  yellowcode query base --text \"ВЫБРАТЬ ПЕРВЫЕ 10 Наименование ИЗ Справочник.Контрагенты\"
+
+  # Прочитать первую страницу таблицы документа
+  yellowcode table base Документ Счет --limit 100
+
+  # Показать справочники и документы конфигурации
+  yellowcode metadata tree configuration.cf --kind Справочник,Документ --depth 2 --format text
+
+  # Сохранить конфигурацию из DT в CF
+  yellowcode convert backup.dt --to cf --output configuration.cf
+
+  # Список пользователей базы
+  yellowcode users list base
+
+  # HTTP-сервис запросов на 127.0.0.1:8080
+  yellowcode serve base
+
+Справка по команде: yellowcode <команда> --help";
+
 #[derive(Parser)]
-#[command(name = "yellowcode", version = VERSION, about = "Yellowcode configuration and infobase tools")]
+#[command(
+    name = "yellowcode",
+    version = VERSION,
+    about = "Yellowcode: конфигурации и информационные базы 1С",
+    after_help = EXAMPLES
+)]
 struct Cli {
-    /// Exact emulated platform build (not the configuration compatibility mode).
-    #[arg(long, global = true, value_name = "BUILD", default_value = yellowcode_core::platform::DEFAULT_BUILD)]
+    #[arg(
+        long,
+        global = true,
+        value_name = "BUILD",
+        default_value = yellowcode_core::platform::DEFAULT_BUILD,
+        help = "Точная версия эмулируемой платформы (не режим совместимости конфигурации)"
+    )]
     platform_build: String,
     #[command(subcommand)]
     command: Option<Command>,
@@ -91,36 +123,60 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Convert a configuration or export an infobase without changing the source.
+    #[command(
+        about = "Преобразовать конфигурацию или выгрузить информационную базу; исходный файл не меняется"
+    )]
     Convert(convert::Args),
-    /// Open a configuration or infobase in the installed desktop application.
+    #[command(about = "Открыть конфигурацию или информационную базу в установленном приложении")]
     Open(OpenArgs),
-    /// Execute a read-only query against an infobase.
+    #[command(about = "Выполнить запрос к информационной базе (только чтение)")]
     Query(query::Args),
-    /// Serve read-only queries and paged stored tables over HTTP.
+    #[command(about = "HTTP-сервис запросов и постраничного чтения таблиц (только чтение)")]
     Serve(serve::Args),
-    /// Read one page of a stored table, optionally through an index.
+    #[command(about = "Прочитать одну страницу таблицы базы, при необходимости по индексу")]
     Table(table::Args),
-    /// Read infobase users and their cards without secrets.
-    #[command(subcommand)]
+    #[command(
+        subcommand,
+        about = "Пользователи информационной базы и их карточки (без паролей и других секретов)",
+        after_help = users::EXAMPLES
+    )]
     Users(users::Command),
-    /// Inspect configuration metadata.
-    #[command(subcommand)]
+    #[command(
+        subcommand,
+        about = "Метаданные конфигурации",
+        after_help = metadata::EXAMPLES
+    )]
     Metadata(metadata::Command),
 }
 
 #[derive(clap::Args)]
+#[command(after_help = "\
+Примеры:
+  # Открыть конфигурацию
+  yellowcode open configuration.cf
+
+  # Открыть файловую базу с английским интерфейсом
+  yellowcode open base --lang en
+
+  # Открыть DT, выделив 3 ГиБ на чтение конфигурации
+  yellowcode open backup.dt --memory-limit 3GiB")]
 struct OpenArgs {
-    /// Configuration or infobase source to open.
+    #[arg(help = "Что открыть: CF, DT, файл 1Cv8.1CD или каталог базы")]
     source: Option<std::path::PathBuf>,
-    #[arg(long, value_parser = ["ru", "en"])]
+    #[arg(long, value_parser = ["ru", "en"], help = "Язык интерфейса")]
     lang: Option<String>,
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "Готовая выгрузка конфигурации в XML для проверки модулей; без параметра приложение делает её само"
+    )]
     names: Option<std::path::PathBuf>,
-    /// Managed DT CONFIG extraction budget; decoded model memory is additional.
-    #[arg(long, allow_hyphen_values = true)]
+    #[arg(
+        long,
+        allow_hyphen_values = true,
+        help = "Бюджет памяти на чтение конфигурации из DT; память самой модели расходуется сверх него"
+    )]
     memory_limit: Option<String>,
-    #[arg(long)]
+    #[arg(long, help = "Проверочный запуск: открыть источник и выйти")]
     smoke: bool,
 }
 

@@ -121,6 +121,57 @@ fn run(args: &[&str]) -> String {
     }
 }
 
+fn subcommands(help: &str) -> Vec<String> {
+    let Some((_, block)) = help.split_once("\nCommands:\n") else {
+        return Vec::new();
+    };
+    block
+        .lines()
+        .take_while(|l| !l.trim().is_empty())
+        .filter_map(|l| l.strip_prefix("  "))
+        .filter(|l| !l.starts_with(' '))
+        .filter_map(|l| l.split_whitespace().next())
+        .filter(|name| *name != "help")
+        .map(str::to_owned)
+        .collect()
+}
+
+#[test]
+fn every_command_has_a_help_snapshot() {
+    let mut missing = Vec::new();
+    let mut queue: Vec<Vec<String>> = vec![Vec::new()];
+    while let Some(path) = queue.pop() {
+        let mut args: Vec<&str> = path.iter().map(String::as_str).collect();
+        args.push("--help");
+        let help = run(&args);
+        assert!(
+            help.starts_with("exit 0\n"),
+            "yellowcode {}:\n{help}",
+            args.join(" ")
+        );
+        for sub in subcommands(&help) {
+            let mut next = path.clone();
+            next.push(sub);
+            let name = format!("{}--help", next.join("-"));
+            if !CASES.iter().any(|(case, _, _)| *case == name) {
+                let args: Vec<String> = next
+                    .iter()
+                    .chain([&"--help".to_owned()])
+                    .map(|a| format!("{a:?}"))
+                    .collect();
+                missing.push(format!("({name:?}, [{}]),", args.join(", ")));
+            }
+            queue.push(next);
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "commands without a help snapshot: create an empty tests/help/<name>.txt, add the line to CASES and \
+         fill the file with HELP_SNAPSHOTS_WRITE=<dir>:\n{}",
+        missing.join("\n")
+    );
+}
+
 #[test]
 fn help_and_usage_errors_match_the_snapshots() {
     if let Some(dir) = std::env::var_os("HELP_SNAPSHOTS_WRITE") {

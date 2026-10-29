@@ -1,21 +1,42 @@
 exit 0
 --- stdout
-Yellowcode configuration and infobase tools
+Yellowcode: конфигурации и информационные базы 1С
 
 Usage: yellowcode [OPTIONS] [COMMAND]
 
 Commands:
-  convert   Convert a configuration or export an infobase without changing the source
-  open      Open a configuration or infobase in the installed desktop application
-  query     Execute a read-only query against an infobase
-  serve     Serve read-only queries and paged stored tables over HTTP
-  table     Read one page of a stored table, optionally through an index
-  users     Read infobase users and their cards without secrets
-  metadata  Inspect configuration metadata
+  convert   Преобразовать конфигурацию или выгрузить информационную базу; исходный файл не меняется
+  open      Открыть конфигурацию или информационную базу в установленном приложении
+  query     Выполнить запрос к информационной базе (только чтение)
+  serve     HTTP-сервис запросов и постраничного чтения таблиц (только чтение)
+  table     Прочитать одну страницу таблицы базы, при необходимости по индексу
+  users     Пользователи информационной базы и их карточки (без паролей и других секретов)
+  metadata  Метаданные конфигурации
   help      Print this message or the help of the given subcommand(s)
 
 Options:
-      --platform-build <BUILD>  Exact emulated platform build (not the configuration compatibility mode) [default: 8.5.1.1529]
+      --platform-build <BUILD>  Точная версия эмулируемой платформы (не режим совместимости конфигурации) [default: 8.5.1.1529]
   -h, --help                    Print help
   -V, --version                 Print version
+
+Примеры:
+  # Выполнить запрос к файловой базе (каталог с 1Cv8.1CD)
+  yellowcode query base --text "ВЫБРАТЬ ПЕРВЫЕ 10 Наименование ИЗ Справочник.Контрагенты"
+
+  # Прочитать первую страницу таблицы документа
+  yellowcode table base Документ Счет --limit 100
+
+  # Показать справочники и документы конфигурации
+  yellowcode metadata tree configuration.cf --kind Справочник,Документ --depth 2 --format text
+
+  # Сохранить конфигурацию из DT в CF
+  yellowcode convert backup.dt --to cf --output configuration.cf
+
+  # Список пользователей базы
+  yellowcode users list base
+
+  # HTTP-сервис запросов на 127.0.0.1:8080
+  yellowcode serve base
+
+Справка по команде: yellowcode <команда> --help
 --- stderr

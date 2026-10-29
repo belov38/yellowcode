@@ -1,18 +1,36 @@
 exit 0
 --- stdout
-Convert a configuration or export an infobase without changing the source
+Преобразовать конфигурацию или выгрузить информационную базу; исходный файл не меняется
 
 Usage: yellowcode convert [OPTIONS] --to <TO> --output <OUTPUT> <SOURCE>
 
 Arguments:
-  <SOURCE>  
+  <SOURCE>  Исходный файл: CF, DT, файл 1Cv8.1CD или каталог базы; формат определяется по содержимому
 
 Options:
-      --platform-build <BUILD>       Exact emulated platform build (not the configuration compatibility mode) [default: 8.5.1.1529]
-      --to <TO>                      [possible values: cf, dt, 1cd]
-      --output <OUTPUT>              
-      --users-layout <USERS_LAYOUT>  Explicit DT users layout; automatic selection awaits D4b [possible values: users8, users-spr11]
-      --memory-limit <MEMORY_LIMIT>  DT conversion: managed memory budget, auto or integer bytes with B/KiB/MiB/GiB suffix (as for query and serve; YELLOWCODE_MEMORY_LIMIT)
-      --without-users                DT to 1CD only: restore without users (needed when they cannot be transferred as they are). The base then opens without login, with full rights
+      --platform-build <BUILD>       Точная версия эмулируемой платформы (не режим совместимости конфигурации) [default: 8.5.1.1529]
+      --to <TO>                      Формат результата [possible values: cf, dt, 1cd]
+      --output <OUTPUT>              Путь к новому файлу; его каталог должен существовать, существующий файл не перезаписывается
+      --users-layout <USERS_LAYOUT>  Формат таблицы пользователей в DT при выгрузке 1CD -> DT (обязателен, сам не выбирается): users8 — таблица Users из 8 колонок, users-spr11 — таблица UsersSpr из 11 колонок (пользователи разделены по областям данных) [possible values: users8, users-spr11]
+      --memory-limit <MEMORY_LIMIT>  Бюджет памяти для преобразования с DT: auto или целое число байт с суффиксом B/KiB/MiB/GiB (как у query и serve; переменная YELLOWCODE_MEMORY_LIMIT)
+      --without-users                Только DT -> 1CD: загрузить базу без пользователей (если их нельзя перенести как есть). Такая база открывается без входа, с полными правами
   -h, --help                         Print help
+
+Поддерживаемые преобразования: DT -> CF, 1CD -> CF, 1CD -> DT, DT -> 1CD.
+
+Примеры:
+  # Сохранить конфигурацию из DT в CF
+  yellowcode convert backup.dt --to cf --output configuration.cf
+
+  # Сохранить конфигурацию файловой базы в CF
+  yellowcode convert base --to cf --output configuration.cf
+
+  # Выгрузить файловую базу в DT
+  yellowcode convert base/1Cv8.1CD --to dt --output backup.dt --users-layout users8
+
+  # Загрузить DT в новую файловую базу (каталог new-base создать заранее), выделив 4 ГиБ памяти
+  yellowcode convert backup.dt --to 1cd --output new-base/1Cv8.1CD --memory-limit 4GiB
+
+  # Загрузить DT без пользователей (база откроется без входа, с полными правами)
+  yellowcode convert backup.dt --to 1cd --output new-base/1Cv8.1CD --without-users
 --- stderr

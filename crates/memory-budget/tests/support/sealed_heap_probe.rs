@@ -68,7 +68,7 @@ fn main() {
         "exhaust" => {
             assert_eq!(RESOURCE_EXIT_CODE, 72);
             let layout = std::alloc::Layout::from_size_align(2 << 20, 16).unwrap();
-            let _pointer = unsafe { std::alloc::alloc(layout) };
+            let _pointer = unsafe { std::alloc::GlobalAlloc::alloc(&HEAP, layout) };
             std::process::exit(99);
         }
         "second" => {

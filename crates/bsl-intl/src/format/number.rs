@@ -81,6 +81,16 @@ pub(crate) fn format_number(n: &Number, spec: &FormatSpec, loc: &Locale) -> Stri
     if let Some(d) = decimals {
         round_to(&mut int, &mut frac, d);
     }
+    if decimals == Some(0)
+        && width.is_none()
+        && spec.nz.is_none()
+        && spec.ns.unwrap_or(0) == 0
+        && spec.nf.is_none()
+        && spec.nn.is_none()
+        && int.iter().chain(&frac).all(|&c| c == b'0')
+    {
+        return String::new();
+    }
     if let Some(w) = width {
         let d = decimals.unwrap_or(0);
         let room = w - d;

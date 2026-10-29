@@ -204,6 +204,7 @@ impl ValueTree {
         ex.reserve(live)?;
         let state = Rc::new(TreeState {
             columns: copied_columns,
+            producer_text_slack: Cell::new(None),
             arena: RefCell::new(std::mem::take(&mut arena.0)),
             roots: RefCell::new(roots),
             revision: Cell::new(0),

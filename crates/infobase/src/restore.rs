@@ -20,6 +20,7 @@ use crate::raw::FolderFile;
 use crate::seed::seed;
 use crate::{Error, Infobase, OpenMode, OpenOptions, Result, SchemaCheck, Warning, folder};
 
+mod ibcmd;
 mod users;
 
 const SYSTEM: [&str; 14] = [
@@ -239,7 +240,11 @@ fn system_descriptors() -> Result<Vec<TableDescr>> {
         .collect()
 }
 
-fn descriptors(schema: &LogicalSchema, users: &TableDescr) -> Result<Vec<TableDescr>> {
+fn descriptors(
+    schema: &LogicalSchema,
+    users: &TableDescr,
+    configured: bool,
+) -> Result<Vec<TableDescr>> {
     let mut all: Vec<TableDescr> = system_descriptors()?
         .into_iter()
         .map(|d| {
@@ -251,6 +256,9 @@ fn descriptors(schema: &LogicalSchema, users: &TableDescr) -> Result<Vec<TableDe
         })
         .collect();
     all.extend(descrs(schema, NameCase::Upper)?);
+    if configured || ibcmd::matches(schema)? {
+        all.extend(ibcmd::extra_tables()?);
+    }
     Ok(all)
 }
 
@@ -1064,7 +1072,7 @@ fn stream<R: Read>(
         .find(|d| d.name == "V8USERS")
         .ok_or_else(|| bad("seed V8USERS"))?;
     let mut users_descr = seed_users.clone();
-    let mut facts = users::Facts::default();
+    let mut facts = users::Facts::without_configuration();
     if counts.first().is_some_and(|&n| n != 0) {
         batches.commit()?;
         commits += batches.commits;
@@ -1150,13 +1158,21 @@ fn stream<R: Read>(
         return Err(bad("schema table limit"));
     }
     let heads = TableHead::database(&schema)?;
-    let logical = descrs(&schema, NameCase::Upper)?;
+    let mut logical = descrs(&schema, NameCase::Upper)?;
     let mut names: HashSet<String> = SYSTEM.into_iter().map(str::to_owned).collect();
     for d in &logical {
         if d.name.to_ascii_uppercase().contains("BINARYDATA")
             || !names.insert(d.name.to_uppercase())
         {
             return Err(bad("unsupported or duplicate physical table"));
+        }
+    }
+    if counts.first().is_some_and(|&n| n != 0) || ibcmd::matches(&schema)? {
+        for descriptor in ibcmd::extra_tables()? {
+            if !names.insert(descriptor.name.to_uppercase()) {
+                return Err(bad("unsupported or duplicate physical table"));
+            }
+            logical.push(descriptor);
         }
     }
     batches.commit()?;
@@ -1336,8 +1352,14 @@ fn check_metadata(
             }
         }
         None => {
-            if expected.compat != 80501 || expected.schema != seed().schema {
+            if expected.compat != 80501 {
                 return Err(bad("unqualified no-config schema/data"));
+            }
+            if expected.schema != seed().schema {
+                if !ibcmd::matches(&expected.schema)? {
+                    return Err(bad("unqualified no-config schema/data"));
+                }
+                ibcmd::check_metadata(&ib)?;
             }
         }
     }
@@ -1365,7 +1387,7 @@ fn final_checks(
     if !report.violations.is_empty() {
         return Err(bad("engine verification"));
     }
-    let expected_descrs = descriptors(&expected.schema, &expected.users_descr)?;
+    let expected_descrs = descriptors(&expected.schema, &expected.users_descr, configured)?;
     let mut names: Vec<_> = expected_descrs.iter().map(|d| d.name.clone()).collect();
     names.sort();
     let mut actual = db.info().tables;
@@ -1381,6 +1403,13 @@ fn final_checks(
             .map(|(_, c)| *c)
             .ok_or_else(|| bad(format!("final count of {name}")))
     };
+    if configured || ibcmd::matches(&expected.schema)? {
+        for table in ibcmd::extra_tables()? {
+            if rows_of(&table.name)? != 0 {
+                return Err(bad("unexpected binary-data storage rows"));
+            }
+        }
+    }
     let read = db.read();
     let mut actual_counts = Vec::new();
     for name in FOLDERS {

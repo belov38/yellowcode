@@ -1,33 +1,74 @@
 use std::{io::Write, path::PathBuf};
 use yellowcode_core::plain::metadata::{self, Format};
 
+pub(crate) const EXAMPLES: &str = "\
+Пути к объектам — русские или английские имена через точку: Справочник.Номенклатура
+или Catalog.Номенклатура, реквизит — Справочник.Номенклатура.Реквизит.Артикул.
+
+Примеры:
+  # Всё дерево метаданных в JSON
+  yellowcode metadata tree configuration.cf > tree.json
+
+  # Справочники и документы, два уровня, текстом
+  yellowcode metadata tree configuration.cf --kind Справочник,Документ --depth 2 --format text
+
+  # Один справочник с реквизитами и табличными частями
+  yellowcode metadata tree base --path Справочник.Контрагенты --depth 2 --format text
+
+  # Плоский список узлов с parentId и depth
+  yellowcode metadata tree backup.dt --flat
+
+  # Свойства реквизита
+  yellowcode metadata show configuration.cf Справочник.Контрагенты.Реквизит.ИНН --format text";
+
 #[derive(clap::Subcommand)]
 pub(crate) enum Command {
-    /// List metadata, optionally rooted at one object.
+    #[command(about = "Дерево метаданных, целиком или от одного объекта", after_help = EXAMPLES)]
     Tree {
+        #[arg(help = "Конфигурация: CF, DT, файл 1Cv8.1CD или каталог базы")]
         source: PathBuf,
-        /// Managed DT CONFIG extraction budget; decoded model memory is additional.
-        #[arg(long, allow_hyphen_values = true)]
+        #[arg(
+            long,
+            allow_hyphen_values = true,
+            help = "Бюджет памяти на чтение конфигурации из DT; память самой модели расходуется сверх него"
+        )]
         memory_limit: Option<String>,
-        #[arg(long)]
+        #[arg(
+            long,
+            help = "Глубина от выбранного корня: 0 — только корень, 1 — с дочерними; без параметра — вся ветка"
+        )]
         depth: Option<usize>,
-        #[arg(long)]
+        #[arg(
+            long,
+            help = "Объект, от которого строить дерево, например Справочник.Номенклатура"
+        )]
         path: Option<String>,
-        #[arg(long)]
+        #[arg(
+            long,
+            help = "Только объекты этих видов через запятую, например Справочник,Документ"
+        )]
         kind: Option<String>,
-        #[arg(long)]
+        #[arg(
+            long,
+            help = "JSON плоским списком узлов (с parentId и depth) вместо вложенного дерева"
+        )]
         flat: bool,
-        #[arg(long, value_enum, default_value = "json")]
+        #[arg(long, value_enum, default_value = "json", help = "Формат вывода")]
         format: Format,
     },
-    /// Show the typed properties of a metadata object.
+    #[command(about = "Свойства объекта метаданных", after_help = EXAMPLES)]
     Show {
+        #[arg(help = "Конфигурация: CF, DT, файл 1Cv8.1CD или каталог базы")]
         source: PathBuf,
-        /// Managed DT CONFIG extraction budget; decoded model memory is additional.
-        #[arg(long, allow_hyphen_values = true)]
+        #[arg(
+            long,
+            allow_hyphen_values = true,
+            help = "Бюджет памяти на чтение конфигурации из DT; память самой модели расходуется сверх него"
+        )]
         memory_limit: Option<String>,
+        #[arg(help = "Путь к объекту, например Справочник.Контрагенты.Реквизит.ИНН")]
         object: String,
-        #[arg(long, value_enum, default_value = "json")]
+        #[arg(long, value_enum, default_value = "json", help = "Формат вывода")]
         format: Format,
     },
 }

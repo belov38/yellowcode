@@ -4,6 +4,33 @@ pub fn msvc_sort<T>(v: &mut [T], less: &mut impl FnMut(&T, &T) -> bool) {
     sort_with_ideal(v, v.len(), less);
 }
 
+pub fn msvc_sort_with_scratch<T>(
+    v: &mut [T],
+    permutation: &mut [usize],
+    less: &mut impl FnMut(&T, &T) -> bool,
+) -> bool {
+    if permutation.len() != v.len() {
+        return false;
+    }
+    let n = v.len();
+    for (i, slot) in permutation.iter_mut().enumerate() {
+        *slot = i;
+    }
+    if n < 2 {
+        return true;
+    }
+    {
+        let items: &[T] = v;
+        let mut lt = |x: usize, y: usize| match (items.get(x), items.get(y)) {
+            (Some(a), Some(b)) => less(a, b),
+            _ => false,
+        };
+        sort_range(permutation, 0, n, n, &mut lt);
+    }
+    apply_permutation(v, permutation);
+    true
+}
+
 pub(crate) fn sort_with_ideal<T>(v: &mut [T], ideal: usize, less: &mut impl FnMut(&T, &T) -> bool) {
     let n = v.len();
     if n < 2 {

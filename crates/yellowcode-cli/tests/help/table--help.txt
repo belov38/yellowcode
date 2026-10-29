@@ -1,51 +1,73 @@
 exit 0
 --- stdout
-Read one page of a stored table, optionally through an index
+Прочитать одну страницу таблицы базы, при необходимости по индексу
 
 Usage: yellowcode table [OPTIONS] <BASE> <KIND> <NAME>
 
 Arguments:
-  <BASE>  Infobase directory or its 1Cv8.1CD file (opened read-only)
-  <KIND>  Metadata kind, for example Document or AccumulationRegister
-  <NAME>  Metadata object name, for example РеализацияТоваров
+  <BASE>  Каталог информационной базы или её файл 1Cv8.1CD (открывается только для чтения)
+  <KIND>  Вид объекта метаданных, например Документ, Справочник, AccumulationRegister
+  <NAME>  Имя объекта метаданных, например РеализацияТоваров
 
 Options:
       --memory-limit <MEMORY_LIMIT>
-          Managed memory budget: auto or integer bytes with B/KiB/MiB/GiB suffix. Without a container limit the fixed fallback is 1GiB; UNF-class configurations need --memory-limit >= 1792MiB, ERP-class about 3GiB
+          Общий бюджет памяти: auto или целое число байт с суффиксом B/KiB/MiB/GiB. Без лимита контейнера — 1GiB; конфигурациям уровня УНФ нужно --memory-limit не меньше 1792MiB, уровня ERP — около 3GiB
       --platform-build <BUILD>
-          Exact emulated platform build (not the configuration compatibility mode) [default: 8.5.1.1529]
+          Точная версия эмулируемой платформы (не режим совместимости конфигурации) [default: 8.5.1.1529]
       --cache-limit <CACHE_LIMIT>
-          Clean cache category cap; 0 disables caching
+          Предел кэша страниц; 0 отключает кэш
       --query-memory-limit <QUERY_MEMORY_LIMIT>
-          Execution, compilation, batch and temporary-table cap
+          Предел памяти на компиляцию, выполнение, пакет и временные таблицы запроса
       --result-memory-limit <RESULT_MEMORY_LIMIT>
-          Retained canonical result cap shared by all statements
+          Предел памяти на хранимые результаты всех операторов запроса
       --response-limit <RESPONSE_LIMIT>
-          Complete serialized output cap, including escaping and schema
+          Предел размера всего ответа, включая экранирование и схему
       --index <INDEX>
-          Read through this index in key order; without it the table is scanned in storage order
+          Читать по этому индексу в порядке ключа; без него таблица читается в порядке хранения
       --eq <VALUE>
-          Equality condition on the next index field; repeat in index field order
+          Значение очередного поля индекса; повторять в порядке полей индекса
       --gt <VALUE>
-          Lower bound (exclusive) on the index field after the equalities
+          Нижняя граница (не включая) поля индекса после полей из --eq
       --gte <VALUE>
-          Lower bound (inclusive) on the index field after the equalities
+          Нижняя граница (включая) поля индекса после полей из --eq
       --lt <VALUE>
-          Upper bound (exclusive) on the index field after the equalities
+          Верхняя граница (не включая) поля индекса после полей из --eq
       --lte <VALUE>
-          Upper bound (inclusive) on the index field after the equalities
+          Верхняя граница (включая) поля индекса после полей из --eq
       --order <ORDER>
-          Index key order (default asc) [possible values: asc, desc]
+          Порядок ключа индекса (по умолчанию asc) [possible values: asc, desc]
       --posted <true|false>
-          Keep posted (true) or unposted (false) rows; documents and document journals
+          Только проведённые (true) или непроведённые (false) строки; для документов и журналов документов
       --deletion-mark <true|false>
-          Keep rows marked (true) or not marked (false) for deletion, folders and items alike
+          Только помеченные (true) или непомеченные (false) на удаление строки, и группы, и элементы
       --limit <LIMIT>
-          Rows per page [default: 1000]
+          Строк на странице [default: 1000]
       --cursor <CURSOR>
-          Continue after the page that reported this cursor; valid while the 1CD file is unchanged
+          Продолжить после страницы, которая вернула этот курсор; курсор действует, пока файл 1CD не менялся
       --format <FORMAT>
-          Defaults to table on a terminal and JSON when redirected [possible values: table, json, csv]
+          Формат вывода; по умолчанию таблица в терминале и JSON при перенаправлении [possible values: table, json, csv]
   -h, --help
           Print help
+
+Индекс читается так: --eq задаёт значения первых полей индекса по порядку, затем на следующее поле
+можно задать диапазон (--gt или --gte снизу, --lt или --lte сверху). Даты: 2024-01-31 или
+2024-01-31T12:00:00. Если указать несуществующий индекс, ошибка перечислит доступные индексы и их поля.
+Курсор следующей страницы выводится в stderr строкой «yellowcode: next cursor: ...».
+
+Примеры:
+  # Первые 100 строк документа в порядке хранения
+  yellowcode table base Документ Счет --limit 100
+
+  # Документы за январь 2024 по индексу даты, от новых к старым
+  # (первое поле индекса ByDocDate здесь — разделитель данных, поэтому --eq 0)
+  yellowcode table base Документ Счет --index ByDocDate --eq 0 --gte 2024-01-01 --lt 2024-02-01 --order desc
+
+  # Только проведённые документы без пометки удаления
+  yellowcode table base Document Счет --posted true --deletion-mark false
+
+  # Справочник в CSV
+  yellowcode table base Справочник Контрагенты --format csv > contractors.csv
+
+  # Следующая страница: та же команда и курсор из предыдущего вывода
+  yellowcode table base Документ Счет --limit 100 --cursor <курсор>
 --- stderr

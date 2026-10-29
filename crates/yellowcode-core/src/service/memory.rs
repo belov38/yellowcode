@@ -13,19 +13,56 @@ pub struct Settings {
     /// Managed memory budget: auto or integer bytes with B/KiB/MiB/GiB suffix. Without a container
     /// limit the fixed fallback is 1GiB; UNF-class configurations need --memory-limit >= 1792MiB,
     /// ERP-class about 3GiB.
-    #[cfg_attr(feature = "clap", arg(long, allow_hyphen_values = true))]
+    #[cfg_attr(
+        feature = "clap",
+        arg(
+            long,
+            allow_hyphen_values = true,
+            help = "Общий бюджет памяти: auto или целое число байт с суффиксом B/KiB/MiB/GiB. Без лимита \
+                    контейнера — 1GiB; конфигурациям уровня УНФ нужно --memory-limit не меньше 1792MiB, \
+                    уровня ERP — около 3GiB"
+        )
+    )]
     memory_limit: Option<String>,
     /// Clean cache category cap; 0 disables caching.
-    #[cfg_attr(feature = "clap", arg(long, allow_hyphen_values = true))]
+    #[cfg_attr(
+        feature = "clap",
+        arg(
+            long,
+            allow_hyphen_values = true,
+            help = "Предел кэша страниц; 0 отключает кэш"
+        )
+    )]
     cache_limit: Option<String>,
     /// Execution, compilation, batch and temporary-table cap.
-    #[cfg_attr(feature = "clap", arg(long, allow_hyphen_values = true))]
+    #[cfg_attr(
+        feature = "clap",
+        arg(
+            long,
+            allow_hyphen_values = true,
+            help = "Предел памяти на компиляцию, выполнение, пакет и временные таблицы запроса"
+        )
+    )]
     query_memory_limit: Option<String>,
     /// Retained canonical result cap shared by all statements.
-    #[cfg_attr(feature = "clap", arg(long, allow_hyphen_values = true))]
+    #[cfg_attr(
+        feature = "clap",
+        arg(
+            long,
+            allow_hyphen_values = true,
+            help = "Предел памяти на хранимые результаты всех операторов запроса"
+        )
+    )]
     result_memory_limit: Option<String>,
     /// Complete serialized output cap, including escaping and schema.
-    #[cfg_attr(feature = "clap", arg(long, allow_hyphen_values = true))]
+    #[cfg_attr(
+        feature = "clap",
+        arg(
+            long,
+            allow_hyphen_values = true,
+            help = "Предел размера всего ответа, включая экранирование и схему"
+        )
+    )]
     response_limit: Option<String>,
     /// Only the budget B is a setting (`convert` DT to 1CD): the other variables are not read.
     #[cfg_attr(feature = "clap", arg(skip))]

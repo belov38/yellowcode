@@ -12,6 +12,8 @@ mod value_table;
 mod value_tree;
 #[allow(unused_imports, reason = "internal producer type for Task14 API")]
 pub(crate) use value_table::ValueTable;
+#[allow(unused_imports, reason = "internal producer type for Task14 API")]
+pub(crate) use value_tree::ValueTree;
 mod xdto;
 pub use value_list::{new_value_list, value_list_items};
 

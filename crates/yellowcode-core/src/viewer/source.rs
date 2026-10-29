@@ -324,12 +324,6 @@ fn read_infobase(path: &Path) -> std::result::Result<infobase::config::ConfigSou
     let ib = RawIb::open_with(path, o).map_err(|e| classify(path, &e))?;
     let src =
         infobase::config::ConfigSource::read(&ib, "CONFIG").map_err(|e| classify(path, &e))?;
-    if src.is_empty() {
-        return Err(OpenError::Decode(format!(
-            "{}: the infobase has no configuration",
-            path.display()
-        )));
-    }
     Ok(src)
 }
 
@@ -413,8 +407,12 @@ fn open_snapshot_inner(
                 return Err(OpenError::Changed);
             }
             progress("metadata").map_err(stop)?;
-            let cfg = Configuration::load(&src, &infobase_options(opts))
-                .map_err(|e| classify(path, &e))?;
+            let cfg = if src.is_empty() {
+                Configuration::default()
+            } else {
+                Configuration::load(&src, &infobase_options(opts))
+                    .map_err(|e| classify(path, &e))?
+            };
             Ok((cfg, fp))
         }
         SourceKind::XmlDir => Err(OpenError::Decode(
@@ -449,7 +447,7 @@ fn open_infobase(path: &Path, opts: &LoadOptions) -> Result<Configuration> {
     let src = infobase::config::ConfigSource::read(&ib, "CONFIG")
         .map_err(|e| format!("{}: {e}", path.display()))?;
     if src.is_empty() {
-        return Err(format!("{}: the infobase has no configuration", path.display()).into());
+        return Ok(Configuration::default());
     }
     Configuration::load(&src, &infobase_options(opts)).map_err(|e| {
         let e = infobase::Error::ConfigTable {

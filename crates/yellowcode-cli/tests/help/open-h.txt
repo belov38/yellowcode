@@ -1,17 +1,27 @@
 exit 0
 --- stdout
-Open a configuration or infobase in the installed desktop application
+Открыть конфигурацию или информационную базу в установленном приложении
 
 Usage: yellowcode open [OPTIONS] [SOURCE]
 
 Arguments:
-  [SOURCE]  Configuration or infobase source to open
+  [SOURCE]  Что открыть: CF, DT, файл 1Cv8.1CD или каталог базы
 
 Options:
-      --lang <LANG>                  [possible values: ru, en]
-      --platform-build <BUILD>       Exact emulated platform build (not the configuration compatibility mode) [default: 8.5.1.1529]
-      --names <NAMES>                
-      --memory-limit <MEMORY_LIMIT>  Managed DT CONFIG extraction budget; decoded model memory is additional
-      --smoke                        
+      --lang <LANG>                  Язык интерфейса [possible values: ru, en]
+      --platform-build <BUILD>       Точная версия эмулируемой платформы (не режим совместимости конфигурации) [default: 8.5.1.1529]
+      --names <NAMES>                Готовая выгрузка конфигурации в XML для проверки модулей; без параметра приложение делает её само
+      --memory-limit <MEMORY_LIMIT>  Бюджет памяти на чтение конфигурации из DT; память самой модели расходуется сверх него
+      --smoke                        Проверочный запуск: открыть источник и выйти
   -h, --help                         Print help
+
+Примеры:
+  # Открыть конфигурацию
+  yellowcode open configuration.cf
+
+  # Открыть файловую базу с английским интерфейсом
+  yellowcode open base --lang en
+
+  # Открыть DT, выделив 3 ГиБ на чтение конфигурации
+  yellowcode open backup.dt --memory-limit 3GiB
 --- stderr

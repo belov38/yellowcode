@@ -1,27 +1,45 @@
 exit 0
 --- stdout
-Serve read-only queries and paged stored tables over HTTP
+HTTP-сервис запросов и постраничного чтения таблиц (только чтение)
 
 Usage: yellowcode serve [OPTIONS] <BASE>
 
 Arguments:
-  <BASE>  Immutable infobase copy: directory or its 1Cv8.1CD file, opened once read-only
+  <BASE>  Неизменяемая копия базы: каталог или файл 1Cv8.1CD; открывается один раз только для чтения
 
 Options:
       --memory-limit <MEMORY_LIMIT>
-          Managed memory budget: auto or integer bytes with B/KiB/MiB/GiB suffix. Without a container limit the fixed fallback is 1GiB; UNF-class configurations need --memory-limit >= 1792MiB, ERP-class about 3GiB
+          Общий бюджет памяти: auto или целое число байт с суффиксом B/KiB/MiB/GiB. Без лимита контейнера — 1GiB; конфигурациям уровня УНФ нужно --memory-limit не меньше 1792MiB, уровня ERP — около 3GiB
       --platform-build <BUILD>
-          Exact emulated platform build (not the configuration compatibility mode) [default: 8.5.1.1529]
+          Точная версия эмулируемой платформы (не режим совместимости конфигурации) [default: 8.5.1.1529]
       --cache-limit <CACHE_LIMIT>
-          Clean cache category cap; 0 disables caching
+          Предел кэша страниц; 0 отключает кэш
       --query-memory-limit <QUERY_MEMORY_LIMIT>
-          Execution, compilation, batch and temporary-table cap
+          Предел памяти на компиляцию, выполнение, пакет и временные таблицы запроса
       --result-memory-limit <RESULT_MEMORY_LIMIT>
-          Retained canonical result cap shared by all statements
+          Предел памяти на хранимые результаты всех операторов запроса
       --response-limit <RESPONSE_LIMIT>
-          Complete serialized output cap, including escaping and schema
+          Предел размера всего ответа, включая экранирование и схему
       --listen <LISTEN>
-          HTTP address (infrastructure owns access control and TLS) [default: 127.0.0.1:8080]
+          Адрес HTTP (контроль доступа и TLS — на стороне инфраструктуры) [default: 127.0.0.1:8080]
   -h, --help
           Print help
+
+Сервис открывает базу один раз и не видит последующих изменений: запускайте его на неизменной копии
+и перезапускайте после её обновления.
+
+Примеры:
+  # Сервис на 127.0.0.1:8080
+  yellowcode serve base
+
+  # Другой адрес и порт, 3 ГиБ памяти (конфигурации уровня ERP)
+  yellowcode serve base --listen 0.0.0.0:9000 --memory-limit 3GiB
+
+  # Запрос к сервису
+  curl http://127.0.0.1:8080/query -H "Content-Type: application/json" \
+    --data '{"text": "ВЫБРАТЬ &Число * 2 КАК Ответ", "params": [{"name": "Число", "repr": "21"}]}'
+
+  # Страница таблицы справочника
+  curl --get http://127.0.0.1:8080/table/Справочник \
+    --data-urlencode "name=Контрагенты" --data-urlencode "limit=100"
 --- stderr

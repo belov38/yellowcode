@@ -22,6 +22,9 @@ pub fn parse_number(s: &[u16], loc: &Locale) -> Result<Number, LibError> {
         .iter()
         .rposition(|&u| !is_space(u))
         .map_or(start, |p| p + 1);
+    if start == end && !s.is_empty() {
+        return Ok(Number::zero());
+    }
     let s = &s[start..end];
     let group: Vec<u16> = loc.data().group.encode_utf16().collect();
     let decimal: Vec<u16> = loc.data().decimal.encode_utf16().collect();

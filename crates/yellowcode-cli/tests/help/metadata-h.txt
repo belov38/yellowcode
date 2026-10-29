@@ -1,15 +1,34 @@
 exit 0
 --- stdout
-Inspect configuration metadata
+Метаданные конфигурации
 
 Usage: yellowcode metadata [OPTIONS] <COMMAND>
 
 Commands:
-  tree  List metadata, optionally rooted at one object
-  show  Show the typed properties of a metadata object
+  tree  Дерево метаданных, целиком или от одного объекта
+  show  Свойства объекта метаданных
   help  Print this message or the help of the given subcommand(s)
 
 Options:
-      --platform-build <BUILD>  Exact emulated platform build (not the configuration compatibility mode) [default: 8.5.1.1529]
+      --platform-build <BUILD>  Точная версия эмулируемой платформы (не режим совместимости конфигурации) [default: 8.5.1.1529]
   -h, --help                    Print help
+
+Пути к объектам — русские или английские имена через точку: Справочник.Номенклатура
+или Catalog.Номенклатура, реквизит — Справочник.Номенклатура.Реквизит.Артикул.
+
+Примеры:
+  # Всё дерево метаданных в JSON
+  yellowcode metadata tree configuration.cf > tree.json
+
+  # Справочники и документы, два уровня, текстом
+  yellowcode metadata tree configuration.cf --kind Справочник,Документ --depth 2 --format text
+
+  # Один справочник с реквизитами и табличными частями
+  yellowcode metadata tree base --path Справочник.Контрагенты --depth 2 --format text
+
+  # Плоский список узлов с parentId и depth
+  yellowcode metadata tree backup.dt --flat
+
+  # Свойства реквизита
+  yellowcode metadata show configuration.cf Справочник.Контрагенты.Реквизит.ИНН --format text
 --- stderr

@@ -7,24 +7,49 @@ enum Format {
     Json,
 }
 
+pub(crate) const EXAMPLES: &str = "\
+Примеры:
+  # Список пользователей
+  yellowcode users list base
+
+  # Список в JSON-файл
+  yellowcode users list base --format json > users.json
+
+  # Карточка пользователя по имени (регистр не важен)
+  yellowcode users show base Администратор
+
+  # Карточка по UUID, если имена повторяются в разных областях данных
+  yellowcode users show base 11111111-1111-1111-1111-111111111111";
+
 #[derive(clap::Args)]
 pub(crate) struct Base {
-    /// Infobase directory or its 1Cv8.1CD file (opened read-only).
+    #[arg(
+        help = "Каталог информационной базы или её файл 1Cv8.1CD (открывается только для чтения)"
+    )]
     base: PathBuf,
-    /// Defaults to text on a terminal and JSON when redirected.
-    #[arg(long, value_enum)]
+    #[arg(
+        long,
+        value_enum,
+        help = "Формат вывода; по умолчанию текст в терминале и JSON при перенаправлении"
+    )]
     format: Option<Format>,
 }
 
 #[derive(clap::Subcommand)]
 pub(crate) enum Command {
-    /// List infobase users without the service row or secrets.
+    #[command(
+        about = "Список пользователей базы без служебной строки и секретов",
+        after_help = EXAMPLES
+    )]
     List(Base),
-    /// Show a user by name or UUID; use UUID when names repeat across data areas.
+    #[command(
+        about = "Карточка пользователя по имени или UUID; UUID нужен, если имена повторяются в разных областях данных",
+        after_help = EXAMPLES
+    )]
     Show {
         #[command(flatten)]
         base: Base,
-        /// User name or UUID.
+        #[arg(help = "Имя или UUID пользователя")]
         name: String,
     },
 }

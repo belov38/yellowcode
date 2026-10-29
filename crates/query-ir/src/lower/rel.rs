@@ -40,6 +40,7 @@ pub(super) struct Lower<'a> {
     pub vt_used: Vec<Vec<QFieldId>>,
     pub slice_cols: HashMap<SrcId, Vec<QFieldId>>,
     pub inner: u32,
+    pub membership: bool,
     pub policy_depth: u32,
     pub applied_security: std::collections::HashSet<SrcId>,
 }
@@ -132,6 +133,7 @@ impl<'a> Lower<'a> {
             vt_used: vec![Vec::new(); n],
             slice_cols: HashMap::new(),
             inner: 0,
+            membership: false,
             policy_depth: 0,
             applied_security: Default::default(),
         }
@@ -384,6 +386,10 @@ impl<'a> Lower<'a> {
                     });
                 }
                 self.agg_decs = decs;
+                if self.membership && row.signal.is_some() {
+                    row = row.checked();
+                    self.added += 1;
+                }
                 let signal = row
                     .signal
                     .map(|signal| {
@@ -464,6 +470,15 @@ impl<'a> Lower<'a> {
                 let mut ks = Vec::with_capacity(keys.len());
                 for k in keys {
                     ks.push((self.expr(&k.expr, &mut row)?, k.desc));
+                }
+                if self.membership
+                    && let Some(signal) = row.signal
+                {
+                    row.rel = RelL::CheckAccess {
+                        input: row.take(),
+                        signal,
+                    };
+                    self.added += 1;
                 }
                 row.rel = RelL::Sort {
                     input: row.take(),
@@ -972,9 +987,9 @@ impl<'a> Lower<'a> {
         for (s, tables) in semis {
             let l = self.exprs(s.l, &mut row)?;
             let (q, correlated) = match s.src {
-                SemiSrc::Query(q) => self.semi_query(q)?,
+                SemiSrc::Query(q) => self.semi_query(q, true)?,
                 SemiSrc::HierQuery(q) => {
-                    let (q, correlated) = self.semi_query(q)?;
+                    let (q, correlated) = self.semi_query(q, true)?;
                     let seeds = HierSeeds::Rel(Box::new(q));
                     (RelL::HierarchyClosure { tables, seeds }, correlated)
                 }
@@ -1008,10 +1023,10 @@ impl<'a> Lower<'a> {
 }
 
 impl Lower<'_> {
-    pub(super) fn expr_query(&mut self, q: &Rel) -> R<(RelL, bool)> {
+    pub(super) fn expr_query(&mut self, q: &Rel, membership: bool) -> R<(RelL, bool)> {
         let frozen = std::mem::replace(&mut self.frozen, false);
         let outer_log = self.chain_log.replace(Vec::new());
-        let res = self.semi_query(q);
+        let res = self.semi_query(q, membership);
         let log = std::mem::replace(&mut self.chain_log, outer_log).unwrap_or_default();
         for (node, old) in log.into_iter().rev() {
             match old {
@@ -1027,12 +1042,14 @@ impl Lower<'_> {
         res
     }
 
-    pub(super) fn semi_query(&mut self, q: &Rel) -> R<(RelL, bool)> {
+    pub(super) fn semi_query(&mut self, q: &Rel, membership: bool) -> R<(RelL, bool)> {
         self.level += 1;
         self.min_ref.push(self.level);
         let outer_decs = self.agg_decs.clone();
         self.inner += 1;
+        let outer_membership = std::mem::replace(&mut self.membership, membership);
         let q = self.rel(q);
+        self.membership = outer_membership;
         self.inner -= 1;
         self.agg_decs = outer_decs;
         let correlated = self.min_ref.pop().is_some_and(|m| m < self.level);

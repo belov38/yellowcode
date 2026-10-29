@@ -1,3 +1,4 @@
+mod bridge;
 mod column_data;
 mod copy;
 mod row;
@@ -81,6 +82,7 @@ struct TreeState {
     records_bytes: Cell<u64>,
     hash: i32,
     rows_hash: i32,
+    producer_text_slack: Cell<Option<(u64, u64, u64)>>,
 }
 fn changed() -> HostError {
     HostError::not_implemented("ДеревоЗначений", "Рекурсивная операция")
@@ -297,6 +299,7 @@ pub(super) fn ctor(ex: &mut Execution, _: &mut [Arg]) -> CallResult<Value> {
     let columns = Columns::new(ex, idx("ValueTreeColumnCollection"), idx("ValueTreeColumn"))?;
     let state = Rc::new(TreeState {
         columns,
+        producer_text_slack: Cell::new(None),
         arena: RefCell::new(Vec::new()),
         roots: RefCell::new(Vec::new()),
         revision: Cell::new(0),

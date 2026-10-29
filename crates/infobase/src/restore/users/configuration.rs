@@ -240,6 +240,7 @@ pub(in crate::restore) fn facts(path: &Path, supplied: Option<&MemoryBudget>) ->
         Ok((roles, max_name as u64, bounds_lease))
     })?;
     if facts.administration.is_none() {
+        facts.administration = Some(Vec::new());
         return Ok(facts);
     }
     let right = mdconf::parts::Right::from_guid(

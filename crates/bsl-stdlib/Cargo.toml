@@ -8,8 +8,12 @@ autotests = false
 autoexamples = false
 autobenches = false
 
+[features]
+collate = ["dep:icu46-sys"]
+
 [dependencies]
 rand = "0.9"
+icu46-sys = { path = "../icu46-sys", optional = true }
 bsl-vm = { path = "../bsl-vm" }
 bsl-prim = { path = "../bsl-prim", default-features = false }
 platform-catalog = { path = "../platform-catalog" }

@@ -134,10 +134,7 @@ pub fn run(args: Request, out: &mut dyn Write, err: &mut dyn Write) -> Result<i3
         _ => return Err("unsupported conversion direction".into()),
     }
     if matches!(args.to, Format::Dt) && args.users_layout.is_none() {
-        return Err(
-            "1CD to DT requires --users-layout users8|users-spr11; automatic layout awaits D4b"
-                .into(),
-        );
+        return Err("1CD to DT requires --users-layout users8|users-spr11".into());
     }
     if !matches!(args.to, Format::Dt) && args.users_layout.is_some() {
         return Err("--users-layout applies only to 1CD to DT".into());

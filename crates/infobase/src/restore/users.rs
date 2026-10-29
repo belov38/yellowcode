@@ -35,6 +35,13 @@ pub(super) struct Facts {
     _lease: Option<Reservation>,
 }
 impl Facts {
+    pub(super) fn without_configuration() -> Self {
+        Self {
+            administration: Some(Vec::new()),
+            ..Self::default()
+        }
+    }
+
     fn scratch_bytes(&self, data: usize) -> Result<u64> {
         let names = self
             .names

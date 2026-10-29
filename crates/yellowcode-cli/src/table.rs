@@ -6,77 +6,125 @@ use yellowcode_core::service::{
 };
 
 #[derive(clap::Args)]
+#[command(after_help = "\
+Индекс читается так: --eq задаёт значения первых полей индекса по порядку, затем на следующее поле
+можно задать диапазон (--gt или --gte снизу, --lt или --lte сверху). Даты: 2024-01-31 или
+2024-01-31T12:00:00. Если указать несуществующий индекс, ошибка перечислит доступные индексы и их поля.
+Курсор следующей страницы выводится в stderr строкой «yellowcode: next cursor: ...».
+
+Примеры:
+  # Первые 100 строк документа в порядке хранения
+  yellowcode table base Документ Счет --limit 100
+
+  # Документы за январь 2024 по индексу даты, от новых к старым
+  # (первое поле индекса ByDocDate здесь — разделитель данных, поэтому --eq 0)
+  yellowcode table base Документ Счет --index ByDocDate --eq 0 --gte 2024-01-01 --lt 2024-02-01 --order desc
+
+  # Только проведённые документы без пометки удаления
+  yellowcode table base Document Счет --posted true --deletion-mark false
+
+  # Справочник в CSV
+  yellowcode table base Справочник Контрагенты --format csv > contractors.csv
+
+  # Следующая страница: та же команда и курсор из предыдущего вывода
+  yellowcode table base Документ Счет --limit 100 --cursor <курсор>")]
 pub(crate) struct Args {
     #[command(flatten)]
     memory: memory::Settings,
-    /// Infobase directory or its 1Cv8.1CD file (opened read-only).
+    #[arg(
+        help = "Каталог информационной базы или её файл 1Cv8.1CD (открывается только для чтения)"
+    )]
     base: PathBuf,
-    /// Metadata kind, for example Document or AccumulationRegister.
+    #[arg(help = "Вид объекта метаданных, например Документ, Справочник, AccumulationRegister")]
     kind: String,
-    /// Metadata object name, for example РеализацияТоваров.
+    #[arg(help = "Имя объекта метаданных, например РеализацияТоваров")]
     name: String,
-    /// Read through this index in key order; without it the table is scanned in storage order.
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "Читать по этому индексу в порядке ключа; без него таблица читается в порядке хранения"
+    )]
     index: Option<String>,
-    /// Equality condition on the next index field; repeat in index field order.
     #[arg(
         long,
         value_name = "VALUE",
         requires = "index",
-        allow_hyphen_values = true
+        allow_hyphen_values = true,
+        help = "Значение очередного поля индекса; повторять в порядке полей индекса"
     )]
     eq: Vec<String>,
-    /// Lower bound (exclusive) on the index field after the equalities.
     #[arg(
         long,
         value_name = "VALUE",
         requires = "index",
         conflicts_with = "gte",
-        allow_hyphen_values = true
+        allow_hyphen_values = true,
+        help = "Нижняя граница (не включая) поля индекса после полей из --eq"
     )]
     gt: Option<String>,
-    /// Lower bound (inclusive) on the index field after the equalities.
     #[arg(
         long,
         value_name = "VALUE",
         requires = "index",
-        allow_hyphen_values = true
+        allow_hyphen_values = true,
+        help = "Нижняя граница (включая) поля индекса после полей из --eq"
     )]
     gte: Option<String>,
-    /// Upper bound (exclusive) on the index field after the equalities.
     #[arg(
         long,
         value_name = "VALUE",
         requires = "index",
         conflicts_with = "lte",
-        allow_hyphen_values = true
+        allow_hyphen_values = true,
+        help = "Верхняя граница (не включая) поля индекса после полей из --eq"
     )]
     lt: Option<String>,
-    /// Upper bound (inclusive) on the index field after the equalities.
     #[arg(
         long,
         value_name = "VALUE",
         requires = "index",
-        allow_hyphen_values = true
+        allow_hyphen_values = true,
+        help = "Верхняя граница (включая) поля индекса после полей из --eq"
     )]
     lte: Option<String>,
-    /// Index key order (default asc).
-    #[arg(long, value_enum, requires = "index")]
+    #[arg(
+        long,
+        value_enum,
+        requires = "index",
+        help = "Порядок ключа индекса (по умолчанию asc)"
+    )]
     order: Option<Order>,
-    /// Keep posted (true) or unposted (false) rows; documents and document journals.
-    #[arg(long, value_name = "true|false", value_parser = table::filter_value)]
+    #[arg(
+        long,
+        value_name = "true|false",
+        value_parser = table::filter_value,
+        help = "Только проведённые (true) или непроведённые (false) строки; для документов и журналов документов"
+    )]
     posted: Option<bool>,
-    /// Keep rows marked (true) or not marked (false) for deletion, folders and items alike.
-    #[arg(long, value_name = "true|false", value_parser = table::filter_value)]
+    #[arg(
+        long,
+        value_name = "true|false",
+        value_parser = table::filter_value,
+        help = "Только помеченные (true) или непомеченные (false) на удаление строки, и группы, и элементы"
+    )]
     deletion_mark: Option<bool>,
-    /// Rows per page.
-    #[arg(long, default_value = table::DEFAULT_LIMIT, value_parser = table::page_limit)]
+    #[arg(
+        long,
+        default_value = table::DEFAULT_LIMIT,
+        value_parser = table::page_limit,
+        help = "Строк на странице"
+    )]
     limit: usize,
-    /// Continue after the page that reported this cursor; valid while the 1CD file is unchanged.
-    #[arg(long, allow_hyphen_values = true)]
+    #[arg(
+        long,
+        allow_hyphen_values = true,
+        help = "Продолжить после страницы, которая вернула этот курсор; курсор действует, пока файл 1CD не менялся"
+    )]
     cursor: Option<String>,
-    /// Defaults to table on a terminal and JSON when redirected.
-    #[arg(long, value_enum)]
+    #[arg(
+        long,
+        value_enum,
+        help = "Формат вывода; по умолчанию таблица в терминале и JSON при перенаправлении"
+    )]
     format: Option<Format>,
 }
 
