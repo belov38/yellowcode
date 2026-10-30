@@ -2,6 +2,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error(transparent)]
+    Seed(#[from] crate::seed::SeedMemoryError),
     #[error("writer busy")]
     WriterBusy,
     #[error("{0}")]

@@ -56,8 +56,33 @@ impl<K: BoostKey, V> BoostMap<K, V> {
         self.first.len()
     }
 
+    pub fn try_with_buckets(bucket_count: usize, entries: usize) -> Option<Self> {
+        if bucket_count < MIN_BUCKETS || !bucket_count.is_power_of_two() || entries > bucket_count {
+            return None;
+        }
+        let mut nodes = Vec::new();
+        nodes.try_reserve_exact(entries).ok()?;
+        let mut first = Vec::new();
+        first.try_reserve_exact(bucket_count).ok()?;
+        first.resize(bucket_count, NIL);
+        Some(Self {
+            nodes,
+            free: Vec::new(),
+            head: NIL,
+            first,
+            len: 0,
+        })
+    }
+
     pub fn storage_slots(&self) -> usize {
         self.nodes.len().saturating_add(self.first.len())
+    }
+
+    pub fn backing_bytes(&self) -> u64 {
+        (self.nodes.capacity() as u64)
+            .saturating_mul(std::mem::size_of::<Node<K, V>>() as u64)
+            .saturating_add((self.free.capacity() as u64).saturating_mul(4))
+            .saturating_add((self.first.capacity() as u64).saturating_mul(4))
     }
 
     fn find(&self, k: &K) -> Option<u32> {

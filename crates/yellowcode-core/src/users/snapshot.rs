@@ -3,7 +3,6 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::VecDeque,
     fs::File,
-    io::Read,
     path::PathBuf,
     sync::{Mutex, OnceLock},
 };
@@ -19,7 +18,32 @@ struct Binding {
     path: PathBuf,
     witness: Witness,
 }
+#[cfg(all(feature = "testing", unix))]
+pub(super) fn matches_pin(witness: &Witness, pin: &str) -> bool {
+    witness
+        .digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>()
+        == pin
+}
 static BINDINGS: OnceLock<Mutex<VecDeque<Binding>>> = OnceLock::new();
+pub(super) fn supported_actions() -> &'static [&'static str] {
+    actions_for(std::env::consts::OS, super::qualification::public_clear())
+}
+pub(super) fn actions_for(platform: &str, qualified: bool) -> &'static [&'static str] {
+    if platform == "windows" {
+        if qualified {
+            &["create", "update", "clear_password", "delete"]
+        } else {
+            &["create", "update", "delete"]
+        }
+    } else if matches!(platform, "linux" | "macos") && qualified {
+        &["clear_password"]
+    } else {
+        &[]
+    }
+}
 fn bindings() -> &'static Mutex<VecDeque<Binding>> {
     BINDINGS.get_or_init(|| Mutex::new(VecDeque::with_capacity(128)))
 }
@@ -73,9 +97,12 @@ pub(super) fn identity(file: &File) -> Result<(u64, u64), UserWriteError> {
 pub(super) fn identity(_: &File) -> Result<(u64, u64), UserWriteError> {
     Err(UserWriteError::UnsupportedSource)
 }
+#[cfg(not(unix))]
 pub(super) fn witness(path: &Path) -> Result<Witness, UserWriteError> {
-    let mut f = File::open(path).map_err(|_| UserWriteError::StorageBeforeCommit)?;
-    let identity = identity(&f)?;
+    witness_file(&File::open(path).map_err(|_| UserWriteError::StorageBeforeCommit)?)
+}
+pub(super) fn witness_file(f: &File) -> Result<Witness, UserWriteError> {
+    let identity = identity(f)?;
     if identity == (0, 0) {
         return Err(UserWriteError::UnsupportedSource);
     }
@@ -86,10 +113,21 @@ pub(super) fn witness(path: &Path) -> Result<Witness, UserWriteError> {
     let mut digest = Sha256::new();
     let mut buf = [0u8; 65536];
     let mut read = 0u64;
-    let mut bounded = (&mut f).take(length);
-    loop {
-        let n = bounded
-            .read(&mut buf)
+    #[cfg(not(unix))]
+    let mut reader = f
+        .try_clone()
+        .map_err(|_| UserWriteError::StorageBeforeCommit)?;
+    while read < length {
+        let count = usize::try_from((length - read).min(buf.len() as u64))
+            .map_err(|_| UserWriteError::StorageBeforeCommit)?;
+        let block = buf
+            .get_mut(..count)
+            .ok_or(UserWriteError::StorageBeforeCommit)?;
+        #[cfg(unix)]
+        let n = std::os::unix::fs::FileExt::read_at(f, block, read)
+            .map_err(|_| UserWriteError::StorageBeforeCommit)?;
+        #[cfg(not(unix))]
+        let n = std::io::Read::read(&mut reader, block)
             .map_err(|_| UserWriteError::StorageBeforeCommit)?;
         if n == 0 {
             break;
@@ -138,15 +176,34 @@ pub(super) fn consume(nonce: &str, path: &Path, current: &Witness) -> Result<(),
         .position(|b| b.nonce == nonce)
         .ok_or(UserWriteError::StaleRevision)?;
     let b = b.remove(i).ok_or(UserWriteError::StaleRevision)?;
-    if b.path != path || &b.witness != current {
+    if !same_path(&b.path, path) || &b.witness != current {
         return Err(UserWriteError::StaleRevision);
     }
     Ok(())
 }
+fn same_path(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    #[cfg(target_os = "macos")]
+    if let (Some(left), Some(right)) = (left.to_str(), right.to_str()) {
+        use unicode_normalization::UnicodeNormalization;
+        return left.nfc().eq(right.nfc());
+    }
+    false
+}
 pub(super) fn load(base: &Path) -> Result<UserWriteSnapshot, UserWriteError> {
     let path = path(base)?;
+    #[cfg(unix)]
+    let source = super::source::Source::open(&path, onecd::Mode::ReadOnly)?;
+    #[cfg(unix)]
+    let db = source.database(onecd::Mode::ReadOnly)?;
+    #[cfg(not(unix))]
     let db = Database::open(&path, OpenOptions::read_only())
         .map_err(|_| UserWriteError::StorageBeforeCommit)?;
+    #[cfg(unix)]
+    let before = source.witness()?;
+    #[cfg(not(unix))]
     let before = witness(&path)?;
     let tx = db.read();
     let facts = Facts::read(&tx)?;
@@ -155,7 +212,14 @@ pub(super) fn load(base: &Path) -> Result<UserWriteSnapshot, UserWriteError> {
         .map_err(|_| UserWriteError::UnsupportedLayout("user DATA or collection limit"))?;
     resolve_roles(&mut users, &facts.cfg)
         .map_err(|_| UserWriteError::UnsupportedLayout("public output limit"))?;
-    if witness(&path)? != before {
+    #[cfg(unix)]
+    let after = {
+        source.verify_path()?;
+        source.witness()?
+    };
+    #[cfg(not(unix))]
+    let after = witness(&path)?;
+    if after != before {
         return Err(UserWriteError::StaleRevision);
     }
     let revision = nonce();
@@ -164,10 +228,11 @@ pub(super) fn load(base: &Path) -> Result<UserWriteSnapshot, UserWriteError> {
         revision,
         users,
         roles: facts.roles,
-        writable: cfg!(windows) && !facts.separated && source_refusal.is_none(),
+        writable: !supported_actions().is_empty() && !facts.separated && source_refusal.is_none(),
+        supported_actions: supported_actions(),
         reason: if let Some(error) = source_refusal {
             Some(error.to_string())
-        } else if !cfg!(windows) {
+        } else if supported_actions().is_empty() {
             Some(UserWriteError::UnsupportedPlatform.to_string())
         } else if facts.separated {
             Some(

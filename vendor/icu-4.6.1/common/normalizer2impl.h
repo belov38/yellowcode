@@ -199,7 +199,7 @@ public:
     }
     ~Normalizer2Impl();
 
-    void load(const char *packageName, const char *name, UErrorCode &errorCode);
+    void load(const char *packageName, const char *name, UErrorCode &errorCode, int32_t role = 0);
 
     void addPropertyStarts(const USetAdder *sa, UErrorCode &errorCode) const;
     void addCanonIterPropertyStarts(const USetAdder *sa, UErrorCode &errorCode) const;

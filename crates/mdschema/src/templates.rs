@@ -1,14 +1,14 @@
 use crate::tables::SchemaError;
-use std::collections::HashMap;
+use crate::{FactJson, FactMap};
 
 pub use serde_json::Value;
 
 #[derive(Debug)]
 pub struct TemplateTables {
-    pub mxl: Value,
-    pub chart: Value,
-    pub type_guid: HashMap<String, String>,
-    types: HashMap<String, crate::PlatformType>,
+    pub mxl: FactJson,
+    pub chart: FactJson,
+    pub type_guid: FactMap<String, String>,
+    pub(crate) types: FactMap<String, crate::PlatformType>,
 }
 
 pub fn template_tables() -> Result<&'static TemplateTables, SchemaError> {
@@ -16,10 +16,12 @@ pub fn template_tables() -> Result<&'static TemplateTables, SchemaError> {
 }
 impl crate::SchemaResource {
     pub fn template_tables(&'static self) -> Result<&'static TemplateTables, SchemaError> {
-        self.templates
-            .get_or_init(|| TemplateTables::load(self).map_err(|e| e.0))
-            .as_ref()
-            .map_err(|e| SchemaError(e.clone()))
+        if self.require_embedded().is_ok() {
+            return self
+                .embedded_templates()
+                .map_err(|e| SchemaError(e.to_string()));
+        }
+        self.templates.legacy_plain(|| TemplateTables::load(self))
     }
 }
 
@@ -45,10 +47,13 @@ impl TemplateTables {
     }
     fn load(resource: &'static crate::SchemaResource) -> Result<TemplateTables, SchemaError> {
         let raw = resource.json("types.json")?;
-        let types = crate::type_names::parse_platform_types(raw)?;
+        let types: FactMap<String, crate::PlatformType> =
+            crate::type_names::parse_platform_types(raw)?
+                .into_iter()
+                .collect();
         let rows: crate::spec::Ordered<Value> =
             serde_json::from_str(raw).map_err(|e| SchemaError(e.to_string()))?;
-        let mut type_guid = HashMap::new();
+        let mut type_guid = FactMap::new();
         for (guid, row) in rows.0 {
             if !guid.starts_with('_')
                 && row.get(2).is_none_or(Value::is_null)
@@ -60,11 +65,12 @@ impl TemplateTables {
         Ok(TemplateTables {
             type_guid,
             types,
-            mxl: parse("tables.json", resource.json("templates/tables.json")?)?,
+            mxl: parse("tables.json", resource.json("templates/tables.json")?)?.into(),
             chart: parse(
                 "chart_tables.json",
                 resource.json("templates/chart_tables.json")?,
-            )?,
+            )?
+            .into(),
         })
     }
 }

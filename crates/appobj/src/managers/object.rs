@@ -133,6 +133,7 @@ impl HostObject for ObjMgr {
             && (VALUE_BASE..EXPORT_BASE).contains(&m.0)
             && let Some(name) = predefined::item_name(&self.app, self.obj, i)
         {
+            crate::read::admit_data_read(ex)?;
             let r =
                 self.app
                     .predefined()
@@ -201,6 +202,9 @@ impl HostObject for ObjMgr {
         }
         let ru = self.member(ex, m).map_or("", |n| n.1);
         match ru {
+            "СоздатьЭлемент" if self.kind() == ObjKind::Catalog => {
+                crate::objects::create_item(ex, &self.app, self.obj)
+            }
             "ПустаяСсылка" => Ok(empty_ref(&self.app, self.obj)?),
             "ПолучитьСсылку" => self.get_ref(ex, args),
             "Количество" if self.is_enum() => Ok(Value::from(

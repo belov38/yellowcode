@@ -8,7 +8,7 @@ use query_ir::{ExecError, PExpr, QValue};
 use query_syntax::ast::CmpOp;
 
 use super::{Force, Plan, Planner, fatal, wrap};
-use crate::key::{Key, key_of};
+use crate::key::Key;
 use crate::ops::access::{fetch_by_id, project_fields};
 use crate::ops::{Cx, Op, eval};
 use crate::source::{Row, RowIter};
@@ -521,7 +521,7 @@ impl<'a> IndexPoints<'a> {
             let v = row
                 .get(*pos)
                 .ok_or_else(|| fatal("field out of range of a stored row"))?;
-            if key_of(v, cx.env.collation) != *key {
+            if crate::key::try_key_of(v, cx.coll)? != *key {
                 return Ok(false);
             }
         }
@@ -584,8 +584,8 @@ impl<'a> Op<'a> for IndexPoints<'a> {
                 .iter()
                 .zip(&self.point_fields)
                 .filter(|(v, _)| matches!(v, QValue::String(_)))
-                .map(|(v, f)| (usize::from(f.0), key_of(v, cx.env.collation)))
-                .collect();
+                .map(|(v, f)| Ok((usize::from(f.0), crate::key::try_key_of(v, cx.coll)?)))
+                .collect::<Result<_, ExecError>>()?;
             let src = cx.src;
             self.cur = Some(src.range_fields(
                 self.table,

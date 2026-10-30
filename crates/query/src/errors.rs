@@ -72,9 +72,12 @@ pub(crate) fn batch_error(ex: &Execution, text: &str, e: BatchError) -> CallErro
             HostError::not_implemented("Запрос", what).into()
         }
         BatchError::Exec(ExecError::Fatal(s)) => fatal(FatalKind::Internal, s),
-        BatchError::Exec(e @ (ExecError::Memory(_) | ExecError::Structure(_))) => {
-            fatal(FatalKind::Memory, e.to_string())
-        }
+        BatchError::Exec(
+            e @ (ExecError::Memory(_)
+            | ExecError::Structure(_)
+            | ExecError::Native(query_ir::NativeError::RestartRequired { .. })),
+        ) => fatal(FatalKind::Memory, e.to_string()),
+        BatchError::Exec(e @ ExecError::Native(_)) => fatal(FatalKind::Internal, e.to_string()),
     }
 }
 

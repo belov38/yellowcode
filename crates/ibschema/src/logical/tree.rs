@@ -18,7 +18,26 @@ pub(crate) trait TreeBuild: Sized {
 pub(crate) const MAX_TABLE_DEPTH: usize = 8;
 
 pub(crate) fn decode<T: TreeNode>(root: &T, what: &'static str) -> Result<LogicalSchema> {
-    let d = Dec { what };
+    decode_with(root, what, false)
+}
+
+pub(crate) fn decode_legacy_indexes<T: TreeNode>(
+    root: &T,
+    what: &'static str,
+) -> Result<LogicalSchema> {
+    decode_with(root, what, true)
+}
+
+fn decode_with<T: TreeNode>(
+    root: &T,
+    what: &'static str,
+    legacy_indexes: bool,
+) -> Result<LogicalSchema> {
+    let d = Dec {
+        what,
+        legacy_indexes,
+        saw_legacy: std::cell::Cell::new(false),
+    };
     let header = At::root("header");
     let items = d.list(root, &header, "document")?;
     let [zero, tables] = items else {
@@ -40,6 +59,9 @@ pub(crate) fn decode<T: TreeNode>(root: &T, what: &'static str) -> Result<Logica
         .enumerate()
         .map(|(i, t)| d.table(t, None, "tables", i, 1))
         .collect::<Result<_>>()?;
+    if legacy_indexes && !d.saw_legacy.get() {
+        return Err(d.err(&header, "no short legacy indexes"));
+    }
     Ok(LogicalSchema { tables })
 }
 
@@ -117,6 +139,8 @@ impl fmt::Display for At<'_> {
 
 struct Dec {
     what: &'static str,
+    legacy_indexes: bool,
+    saw_legacy: std::cell::Cell<bool>,
 }
 
 impl Dec {
@@ -337,8 +361,21 @@ impl Dec {
         let bare = up.item("indexes", idx);
         let (items, name) = self.named_items(n, &bare, "index", 9)?;
         let at = bare.named(&name);
-        let [_, unique, fields, clustered, flag2, n3, list, n4, n5] = items else {
-            return Err(self.len_err(&at, 9, items.len()));
+        let (unique, fields, clustered, flag2, n3, tail) = match items {
+            [_, unique, fields, clustered, flag2, n3] if self.legacy_indexes => {
+                self.saw_legacy.set(true);
+                (unique, fields, clustered, flag2, n3, None)
+            }
+            [_, unique, fields, clustered, flag2, n3, list, n4, n5] if !self.legacy_indexes => {
+                (unique, fields, clustered, flag2, n3, Some((list, n4, n5)))
+            }
+            _ => {
+                return Err(self.len_err(
+                    &at,
+                    if self.legacy_indexes { 6 } else { 9 },
+                    items.len(),
+                ));
+            }
         };
         let unique = self.flag(unique, &at, "unique")?;
         let fields = self
@@ -350,14 +387,20 @@ impl Dec {
         let clustered = self.flag(clustered, &at, "clustered")?;
         let flag2 = self.flag(flag2, &at, "flag2")?;
         let n3 = self.int(n3, &at, "n3")?;
-        let list = self
-            .list(list, &at.key("list"), "list")?
-            .iter()
-            .enumerate()
-            .map(|(i, x)| self.int(x, &at.item("list", i), "list item"))
-            .collect::<Result<_>>()?;
-        let n4 = self.int(n4, &at, "n4")?;
-        let n5 = self.int(n5, &at, "n5")?;
+        let (list, n4, n5) = if let Some((list, n4, n5)) = tail {
+            let list = self
+                .list(list, &at.key("list"), "list")?
+                .iter()
+                .enumerate()
+                .map(|(i, x)| self.int(x, &at.item("list", i), "list item"))
+                .collect::<Result<_>>()?;
+            (list, self.int(n4, &at, "n4")?, self.int(n5, &at, "n5")?)
+        } else {
+            if n3 != 0 {
+                return Err(self.err(&at, "unverified legacy index flag"));
+            }
+            (vec![0], 0, 0)
+        };
         Ok(Index {
             name,
             unique,

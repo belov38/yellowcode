@@ -21,6 +21,7 @@
 #include "unicode/rbbi.h"
 #include "uassert.h"
 #include "cmemory.h"
+#include "managed_memory.h"
 #include "uvector.h"
 #include "uvectr32.h"
 #include "uvectr64.h"
@@ -231,6 +232,10 @@ void RegexMatcher::init(UErrorCode &status) {
     fWordBreakItr      = NULL;
     
     fStack             = new UVector64(status);
+    if (fStack == NULL && U_SUCCESS(status)) {
+        /* A refused stack object is a memory error, never a NULL stack. */
+        status = U_MEMORY_ALLOCATION_ERROR;
+    }
     fInputText         = NULL;
     fAltInputText      = NULL;
     fInput             = NULL;
@@ -868,8 +873,13 @@ UBool RegexMatcher::find(int64_t start, UErrorCode &status) {
         status = U_INDEX_OUTOFBOUNDS_ERROR;
         return FALSE;
     }
-    fMatchEnd = nativeStart;  
-    return find();
+    fMatchEnd = nativeStart;
+    UBool result = find();
+    if (U_FAILURE(fDeferredStatus)) {
+        status = fDeferredStatus;
+        return FALSE;
+    }
+    return result;
 }
 
 
@@ -1924,7 +1934,12 @@ RegexMatcher &RegexMatcher::reset(const UnicodeString &input) {
 RegexMatcher &RegexMatcher::reset(UText *input) {
     if (fInputText != input) {
         fInputText = utext_clone(fInputText, input, FALSE, TRUE, &fDeferredStatus);
-        if (fPattern->fNeedsAltInput) fAltInputText = utext_clone(fAltInputText, fInputText, FALSE, TRUE, &fDeferredStatus);
+        if (U_SUCCESS(fDeferredStatus) && fPattern->fNeedsAltInput) fAltInputText = utext_clone(fAltInputText, fInputText, FALSE, TRUE, &fDeferredStatus);
+        if (U_FAILURE(fDeferredStatus)) {
+            /* As in later ICU: a matcher with a deferred error keeps it and takes no input.
+               It is checked before fPattern, which a failed constructor leaves NULL. */
+            return *this;
+        }
         fInputLength = utext_nativeLength(fInputText);
     
         delete fInput;
@@ -2449,6 +2464,10 @@ REStackFrame *RegexMatcher::resetStack() {
     fStack->removeAllElements();
 
     REStackFrame *iFrame = (REStackFrame *)fStack->reserveBlock(fPattern->fFrameSize, fDeferredStatus);
+    if (U_FAILURE(fDeferredStatus)) {
+        /* As in later ICU: the caller reports the refused first frame. */
+        return NULL;
+    }
     int32_t i;
     for (i=0; i<fPattern->fFrameSize-RESTACKFRAME_HDRCOUNT; i++) {
         iFrame->fExtra[i] = -1;
@@ -2564,8 +2583,10 @@ UBool RegexMatcher::isUWordBoundary(int64_t pos) {
     
     // If we haven't yet created a break iterator for this matcher, do it now.
     if (fWordBreakItr == NULL) {
-        fWordBreakItr = 
-            (RuleBasedBreakIterator *)BreakIterator::createWordInstance(Locale::getEnglish(), fDeferredStatus);
+        const Locale *english = (const Locale *)locale_english_checked_46(&fDeferredStatus);
+        if (english == NULL) return FALSE;
+        fWordBreakItr =
+            (RuleBasedBreakIterator *)BreakIterator::createWordInstance(*english, fDeferredStatus);
         if (U_FAILURE(fDeferredStatus)) {
             return FALSE;
         }
@@ -2665,7 +2686,11 @@ inline REStackFrame *RegexMatcher::StateSave(REStackFrame *fp, int64_t savePatId
         // Failure on attempted stack expansion.
         //   Stack function set some other error code, change it to a more
         //   specific one for regular expressions.
-        status = U_REGEX_STACK_OVERFLOW;
+        //   A refused allocation stays a memory error: only the stack limit
+        //   (U_BUFFER_OVERFLOW_ERROR) is an overflow.
+        if (status != U_MEMORY_ALLOCATION_ERROR) {
+            status = U_REGEX_STACK_OVERFLOW;
+        }
         // We need to return a writable stack frame, so just return the
         //    previous frame.  The match operation will stop quickly
         //    because of the error status, after which the frame will never
@@ -2753,6 +2778,10 @@ void RegexMatcher::MatchAt(int64_t startIdx, UBool toEnd, UErrorCode &status) {
 
     fFrameSize = fPattern->fFrameSize;
     REStackFrame        *fp            = resetStack();
+    if (U_FAILURE(fDeferredStatus)) {
+        status = fDeferredStatus;
+        return;
+    }
 
     fp->fPatIdx   = 0;
     fp->fInputIdx = startIdx;
@@ -4462,6 +4491,10 @@ void RegexMatcher::MatchChunkAt(int32_t startIdx, UBool toEnd, UErrorCode &statu
     
     fFrameSize = fPattern->fFrameSize;
     REStackFrame        *fp            = resetStack();
+    if (U_FAILURE(fDeferredStatus)) {
+        status = fDeferredStatus;
+        return;
+    }
     
     fp->fPatIdx   = 0;
     fp->fInputIdx = startIdx;

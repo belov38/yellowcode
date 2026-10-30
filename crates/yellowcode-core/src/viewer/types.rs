@@ -1,24 +1,76 @@
-use std::collections::HashMap;
-use std::sync::OnceLock;
+use super::resources::{self, Graph, GuiResourceError};
+use memory_budget::{BudgetError, MemoryBudget};
 
 use mdconf::{DateFractions, TypeDescription, TypeRef};
 use platform_catalog::catalog;
 
 use super::out::Lang;
 
-fn category_ru() -> &'static HashMap<String, String> {
-    static MAP: OnceLock<HashMap<String, String>> = OnceLock::new();
-    MAP.get_or_init(|| {
-        let mut m = HashMap::new();
-        for t in catalog().types() {
-            if let (Some((en, _)), Some((ru, _))) =
-                (t.name_en.split_once(".<"), t.name_ru.split_once(".<"))
-            {
-                m.entry(en.to_string()).or_insert_with(|| ru.to_string());
-            }
-        }
-        m
-    })
+#[doc(hidden)]
+#[derive(Clone, Copy)]
+pub struct CategoryEntry {
+    pub en: &'static str,
+    pub ru: &'static str,
+    ordinal: usize,
+}
+static CATEGORIES: Graph<Vec<CategoryEntry>> = Graph::new();
+fn category_map(
+    cat: &'static platform_catalog::Catalog,
+    root: Option<&MemoryBudget>,
+) -> Result<&'static Vec<CategoryEntry>, BudgetError> {
+    let source = || {
+        cat.types().iter().enumerate().filter_map(|(ordinal, t)| {
+            let (en, _) = t.name_en.split_once(".<")?;
+            let (ru, _) = t.name_ru.split_once(".<")?;
+            Some(CategoryEntry { en, ru, ordinal })
+        })
+    };
+    CATEGORIES.prepare(
+        root,
+        || {
+            let mut n = 0;
+            resources::rows::<CategoryEntry>(&mut n, source().count())?;
+            Ok(n)
+        },
+        |rows| {
+            let mut n = 0;
+            resources::rows::<CategoryEntry>(&mut n, rows.capacity())?;
+            Ok(n)
+        },
+        || {
+            let mut rows = resources::vec(source().count())?;
+            rows.extend(source());
+            rows.sort_unstable_by(|a, b| a.en.cmp(b.en).then(a.ordinal.cmp(&b.ordinal)));
+            Ok(rows)
+        },
+    )
+}
+#[allow(
+    clippy::panic,
+    reason = "legacy infallible accessor; managed readiness is fallible"
+)]
+fn category_ru() -> &'static [CategoryEntry] {
+    match category_map(catalog(), None) {
+        Ok(rows) => rows,
+        Err(e) => panic!("type categories: {e}"),
+    }
+}
+fn category_name(name: &str) -> Option<&'static str> {
+    category_lookup(category_ru(), name)
+}
+fn category_lookup(rows: &[CategoryEntry], name: &str) -> Option<&'static str> {
+    let i = rows.partition_point(|r| r.en < name);
+    rows.get(i).filter(|r| r.en == name).map(|r| r.ru)
+}
+pub fn prepare_with_memory(budget: &MemoryBudget) -> Result<(), GuiResourceError> {
+    let (cat, root) = platform_catalog::catalog_with_memory(budget)?;
+    category_map(cat, Some(&root))?;
+    Ok(())
+}
+#[cfg(feature = "testing")]
+#[doc(hidden)]
+pub fn diagnostic_categories() -> &'static [CategoryEntry] {
+    category_ru()
 }
 
 pub(super) const FALLBACK_RU: &[(&str, &str)] = &[
@@ -100,9 +152,8 @@ fn one(t: &TypeDescription, r: &TypeRef, lang: Lang) -> String {
                 Some((p, r)) => (p, Some(r)),
                 None => (local, None),
             };
-            let ru_prefix = category_ru()
-                .get(prefix)
-                .cloned()
+            let ru_prefix = category_name(prefix)
+                .map(str::to_owned)
                 .or_else(|| plain_ru(prefix));
             match (ru_prefix, rest) {
                 (Some(p), Some(r)) => format!("{p}.{r}"),

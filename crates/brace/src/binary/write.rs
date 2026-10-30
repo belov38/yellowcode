@@ -193,6 +193,11 @@ impl<W: Write> Writer<W> {
         flush(&mut self.enc, &mut self.w)
     }
 
+    pub fn atom_joined(&mut self, a: &Atom) -> io::Result<()> {
+        self.enc.has_prev = false;
+        self.atom(a)
+    }
+
     pub fn int(&mut self, v: i128) -> io::Result<()> {
         self.atom(&Atom::int(v))
     }

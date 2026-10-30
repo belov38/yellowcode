@@ -7,10 +7,11 @@ mod strings;
 
 pub(crate) use cast::load_cast_with_budget;
 pub use cast::{cast, load_cast};
-pub use compare::{cmp, compare, eq3, rank};
+pub(crate) use compare::compare_cmp_with;
+pub use compare::{cmp, compare, eq3, rank, try_cmp, try_compare, try_eq3};
 pub use dates::{unit_arg, unit_of, week_begin, week_call};
 pub use like::{LIKE_CP_KEY, like_cost};
-pub use like::{LikePattern, like};
+pub use like::{LikePattern, like, try_like};
 pub use logic::{and3, case_truth, not3, or3, to_value, truth};
 pub use strings::present as text_of;
 
@@ -107,6 +108,22 @@ pub fn func(
     env: &ExecEnv<'_>,
     mem: &MemBudget<'_>,
 ) -> Result<QValue, ExecError> {
+    func_with(
+        f,
+        args,
+        ty,
+        crate::coll::ExecCollation::Legacy(env.collation),
+        mem,
+    )
+}
+
+pub fn func_with(
+    f: Func,
+    args: &[QValue],
+    ty: &QType,
+    coll: crate::coll::ExecCollation<'_>,
+    mem: &MemBudget<'_>,
+) -> Result<QValue, ExecError> {
     if f == Func::IsNull {
         return match args {
             [a, b] => Ok(if matches!(a, QValue::Null) {
@@ -136,7 +153,7 @@ pub fn func(
         | Func::StrFind
         | Func::Upper
         | Func::Lower
-        | Func::StrReplace => strings::call(f, args, env, mem)?,
+        | Func::StrReplace => strings::call(f, args, coll, mem)?,
         Func::Year
         | Func::Quarter
         | Func::Month

@@ -5,6 +5,10 @@ pub type UErrorCode = i32;
 pub const U_ZERO_ERROR: UErrorCode = 0;
 pub const U_ILLEGAL_ARGUMENT_ERROR: UErrorCode = 1;
 pub const U_MEMORY_ALLOCATION_ERROR: UErrorCode = 7;
+#[cfg(feature = "managed")]
+pub const U_INVALID_STATE_ERROR: UErrorCode = 27;
+#[cfg(all(feature = "managed", feature = "regex"))]
+pub const U_REGEX_STOPPED_BY_CALLER: UErrorCode = 0x10313;
 
 pub const UDATA_NO_FILES: i32 = 3;
 
@@ -48,6 +52,10 @@ unsafe extern "C" {
         status: *mut UErrorCode,
     ) -> *mut URegularExpression;
     pub fn uregex_close_46(regex: *mut URegularExpression);
+    pub fn uregex_clone_46(
+        regex: *const URegularExpression,
+        status: *mut UErrorCode,
+    ) -> *mut URegularExpression;
     pub fn uregex_setText_46(
         regex: *mut URegularExpression,
         text: *const u16,
@@ -55,6 +63,12 @@ unsafe extern "C" {
         status: *mut UErrorCode,
     );
     pub fn uregex_find_46(
+        regex: *mut URegularExpression,
+        start: i32,
+        status: *mut UErrorCode,
+    ) -> i8;
+    pub fn uregex_findNext_46(regex: *mut URegularExpression, status: *mut UErrorCode) -> i8;
+    pub fn uregex_lookingAt_46(
         regex: *mut URegularExpression,
         start: i32,
         status: *mut UErrorCode,

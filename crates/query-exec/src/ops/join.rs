@@ -8,9 +8,9 @@ use query_syntax::ast::JoinKind;
 use super::access::{fetch_by_id, project_fields};
 use super::{BoxOp, Cx, Op, concat, eval, fatal, nulls, rows_push_growth};
 use crate::eval::{and3, not3, truth};
-use crate::key::{Key, key_of};
+use crate::key::Key;
 use crate::model::{
-    HashModel, block, charge_key, keys_model, row_cap_model, vec_block, vec_push_growth,
+    HashModel, block, keys_model, row_cap_model, try_charge_key, vec_block, vec_push_growth,
 };
 use crate::source::{Row, RowIter};
 
@@ -407,9 +407,9 @@ fn keys_of(xs: &[PExpr], row: &[QValue], cx: &Cx<'_>) -> Result<Option<Vec<Key>>
 }
 
 pub(crate) fn key_charged(v: &QValue, cx: &Cx<'_>) -> Result<Key, ExecError> {
-    let coll = cx.env.collation;
-    charge_key(v, coll, &mut |n| cx.mem.grow_scratch(n))?;
-    Ok(key_of(v, coll))
+    let coll = cx.coll;
+    try_charge_key(v, coll, &mut |n| cx.mem.grow_scratch(n))?;
+    crate::key::try_key_of(v, coll)
 }
 
 pub(crate) const CORRELATED_TREE: u64 = 4096;

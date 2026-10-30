@@ -252,18 +252,18 @@ fn run_with_memory(
             return Ok(1);
         }
     };
-    if let Some(error) = &report.error {
+    if let Some(error) = report.error() {
         if timed_out {
             let _ = writeln!(
                 err,
                 "yellowcode: query execution timed out (cooperative cancellation)"
             );
         }
-        for cause in &error.chain {
+        for cause in error.chain() {
             let _ = writeln!(err, "yellowcode: {cause}");
         }
     }
-    let code = i32::from(report.error.is_some());
+    let code = i32::from(report.error().is_some());
     diagnostic.reason = super::memory::report_reason(&report, timed_out);
     let format = args
         .format

@@ -144,11 +144,13 @@ fn limit(error: MemoryLimit) -> Error {
 
 fn to_mdconf(name: &str, error: Error) -> mdconf::Error {
     match error {
-        Error::Memory(BudgetError::Limit(m))
-        | Error::Inflate(zraw::ManagedInflateError::Memory(BudgetError::Limit(m))) => {
-            mdconf::Error::Memory(m)
-        }
-        Error::Engine(onecd::Error::Memory(BudgetError::Limit(m))) => mdconf::Error::Memory(m),
+        Error::Config(error) => error,
+        Error::Memory(error)
+        | Error::Inflate(zraw::ManagedInflateError::Memory(error))
+        | Error::Engine(onecd::Error::Memory(error)) => match error {
+            BudgetError::Limit(limit) => mdconf::Error::Memory(limit),
+            error => mdconf::Error::Io(std::io::Error::new(std::io::ErrorKind::OutOfMemory, error)),
+        },
         other => mdconf::Error::Io(std::io::Error::other(format!("{name}: {other}"))),
     }
 }
@@ -184,8 +186,27 @@ impl<'a> MeteredConfigSource<'a> {
 }
 
 impl EntrySource for MeteredConfigSource<'_> {
+    fn list_checked(
+        &self,
+        check: &dyn Fn() -> mdconf::Result<()>,
+    ) -> mdconf::Result<Vec<EntryMeta>> {
+        self.inner
+            .list()
+            .iter()
+            .map(|m| {
+                check()?;
+                Ok(m.clone())
+            })
+            .collect()
+    }
     fn list(&self) -> mdconf::Result<Vec<EntryMeta>> {
         Ok(self.inner.list().to_vec())
+    }
+    fn list_owned_checked(
+        &self,
+        check: &dyn Fn() -> mdconf::Result<()>,
+    ) -> mdconf::Result<mdconf::EntryList> {
+        self.list_checked(check).map(mdconf::EntryBacking::Native)
     }
 
     fn stored(&self, name: &str) -> mdconf::Result<Option<Vec<u8>>> {
@@ -202,12 +223,37 @@ impl EntrySource for MeteredConfigSource<'_> {
     }
 
     fn stored_inflated_bounded(&self, name: &str, limit: u64) -> mdconf::Result<Option<Inflated>> {
-        let Some(stored) = self.stored_charged(name, limit)? else {
+        self.stored_inflated_checked(name, limit, &|| Ok(()))
+    }
+    fn stored_inflated_checked(
+        &self,
+        name: &str,
+        limit: u64,
+        check: &dyn Fn() -> mdconf::Result<()>,
+    ) -> mdconf::Result<Option<Inflated>> {
+        check()?;
+        let cap = usize::try_from(limit.min(zraw::DEFAULT_LIMIT)).unwrap_or(usize::MAX);
+        let Some(stored) = self
+            .inner
+            .stored_bounded_checked(name, cap, &|| check().map_err(crate::Error::Config))
+            .map_err(|e| to_mdconf(name, e))?
+        else {
             return Ok(None);
         };
         let limit = limit.min(zraw::DEFAULT_LIMIT);
-        match zraw::inflate_budgeted(&stored, limit, &self.budget, Category::Metadata) {
-            Ok(bytes) => Ok(Some(Inflated {
+        check()?;
+        match zraw::inflate_budgeted_checked(
+            &stored,
+            limit,
+            &self.budget,
+            Category::Metadata,
+            || check().is_ok(),
+        ) {
+            Ok(None) => Err(mdconf::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "opening cancelled",
+            ))),
+            Ok(Some(bytes)) => Ok(Some(Inflated {
                 bytes,
                 was_deflated: true,
             })),

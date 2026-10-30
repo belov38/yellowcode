@@ -26,6 +26,7 @@
 #include "normalizer2impl.h"
 #include "uassert.h"
 #include "uhash.h"
+#include "udatamem.h"
 #include "uset_imp.h"
 #include "utrie2.h"
 #include "uvector.h"
@@ -281,11 +282,12 @@ Normalizer2Impl::isAcceptable(void *context,
 }
 
 void
-Normalizer2Impl::load(const char *packageName, const char *name, UErrorCode &errorCode) {
+Normalizer2Impl::load(const char *packageName, const char *name, UErrorCode &errorCode, int32_t role) {
     if(U_FAILURE(errorCode)) {
         return;
     }
-    memory=udata_openChoice(packageName, "nrm", name, isAcceptable, this, &errorCode);
+    UManagedOwner46 dataOwner = { role, role == 0 ? 0 : 502 };
+    memory=managed_udata_openChoice_46(packageName, "nrm", name, isAcceptable, this, dataOwner, &errorCode);
     if(U_FAILURE(errorCode)) {
         return;
     }
@@ -307,9 +309,10 @@ Normalizer2Impl::load(const char *packageName, const char *name, UErrorCode &err
 
     int32_t offset=inIndexes[IX_NORM_TRIE_OFFSET];
     int32_t nextOffset=inIndexes[IX_EXTRA_DATA_OFFSET];
-    normTrie=utrie2_openFromSerialized(UTRIE2_16_VALUE_BITS,
+    UManagedOwner46 trieOwner = { role, role == 0 ? 0 : 503 };
+    normTrie=managed_utrie2_openFromSerialized_46(UTRIE2_16_VALUE_BITS,
                                        inBytes+offset, nextOffset-offset, NULL,
-                                       &errorCode);
+                                       trieOwner, &errorCode);
     if(U_FAILURE(errorCode)) {
         return;
     }
@@ -1423,7 +1426,9 @@ U_CDECL_END
 
 void *FCDTrieSingleton::createInstance(const void *context, UErrorCode &errorCode) {
     FCDTrieSingleton *me=(FCDTrieSingleton *)context;
-    me->newFCDTrie=utrie2_open(0, 0, &errorCode);
+    UManagedOwner46 wrapperOwner = { 6, 601 };
+    UManagedOwner46 frozenOwner = { 6, 602 };
+    me->newFCDTrie=managed_utrie2_open_46(0, 0, wrapperOwner, frozenOwner, &errorCode);
     if(U_SUCCESS(errorCode)) {
         utrie2_enum(me->impl.getNormTrie(), NULL, enumRangeHandler, me);
         for(UChar lead=0xd800; lead<0xdc00; ++lead) {
@@ -1696,40 +1701,53 @@ const UChar *Normalizer2Impl::findNextFCDBoundary(const UChar *p, const UChar *l
 
 // CanonicalIterator data -------------------------------------------------- ***
 
+static UManagedOwner46 canonOwner(int32_t site) {
+    UManagedOwner46 owner = { 6, site };
+    return owner;
+}
+
 CanonIterData::CanonIterData(UErrorCode &errorCode) :
-        trie(utrie2_open(0, 0, &errorCode)),
-        canonStartSets(uhash_deleteUObject, NULL, errorCode) {}
+        trie(managed_utrie2_open_46(0, 0, canonOwner(604), canonOwner(605), &errorCode)),
+        canonStartSets(uhash_deleteUObject, NULL, 8, errorCode, canonOwner(606)) {}
 
 CanonIterData::~CanonIterData() {
     utrie2_close(trie);
 }
 
 void CanonIterData::addToStartSet(UChar32 origin, UChar32 decompLead, UErrorCode &errorCode) {
+    if (U_FAILURE(errorCode)) return;
     uint32_t canonValue=utrie2_get32(trie, decompLead);
     if((canonValue&(CANON_HAS_SET|CANON_VALUE_MASK))==0 && origin!=0) {
-        // origin is the first character whose decomposition starts with
-        // the character for which we are setting the value.
         utrie2_set32(trie, decompLead, canonValue|origin, &errorCode);
     } else {
-        // origin is not the first character, or it is U+0000.
         UnicodeSet *set;
         if((canonValue&CANON_HAS_SET)==0) {
-            set=new UnicodeSet;
-            if(set==NULL) {
+            void *backing = managed_malloc_46(sizeof(UnicodeSet), 6, 607);
+            set = backing == NULL ? NULL : new (backing) UnicodeSet(canonOwner(608));
+            if(set==NULL || set->isBogus()) {
+                delete set;
                 errorCode=U_MEMORY_ALLOCATION_ERROR;
                 return;
             }
-            UChar32 firstOrigin=(UChar32)(canonValue&CANON_VALUE_MASK);
-            canonValue=(canonValue&~CANON_VALUE_MASK)|CANON_HAS_SET|(uint32_t)canonStartSets.size();
-            utrie2_set32(trie, decompLead, canonValue, &errorCode);
+            // The vector adopts only after successful insertion. Publish the
+            // trie index afterwards; a failed insertion still belongs to us.
+            int32_t index = canonStartSets.size();
             canonStartSets.addElement(set, errorCode);
-            if(firstOrigin!=0) {
-                set->add(firstOrigin);
+            if (U_FAILURE(errorCode)) {
+                delete set;
+                return;
             }
+            UChar32 firstOrigin=(UChar32)(canonValue&CANON_VALUE_MASK);
+            canonValue=(canonValue&~CANON_VALUE_MASK)|CANON_HAS_SET|(uint32_t)index;
+            utrie2_set32(trie, decompLead, canonValue, &errorCode);
+            if (U_FAILURE(errorCode)) return;
+            if(firstOrigin!=0) set->add(firstOrigin);
         } else {
             set=(UnicodeSet *)canonStartSets[(int32_t)(canonValue&CANON_VALUE_MASK)];
         }
-        set->add(origin);
+        // UnicodeSet reports allocation failure via bogus state, not status.
+        if (!set->isBogus()) set->add(origin);
+        if (set->isBogus()) errorCode=U_MEMORY_ALLOCATION_ERROR;
     }
 }
 
@@ -1771,7 +1789,8 @@ U_CDECL_END
 
 void *CanonIterDataSingleton::createInstance(const void *context, UErrorCode &errorCode) {
     CanonIterDataSingleton *me=(CanonIterDataSingleton *)context;
-    me->newData=new CanonIterData(errorCode);
+    void *backing = managed_malloc_46(sizeof(CanonIterData), 6, 603);
+    me->newData = backing == NULL ? NULL : new (backing) CanonIterData(errorCode);
     if(me->newData==NULL) {
         errorCode=U_MEMORY_ALLOCATION_ERROR;
         return NULL;
@@ -1799,7 +1818,7 @@ void Normalizer2Impl::makeCanonIterDataFromNorm16(UChar32 start, UChar32 end, ui
         // "maybe" characters.
         return;
     }
-    for(UChar32 c=start; c<=end; ++c) {
+    for(UChar32 c=start; c<=end && U_SUCCESS(errorCode); ++c) {
         uint32_t oldValue=utrie2_get32(newData.trie, c);
         uint32_t newValue=oldValue;
         if(norm16>=minMaybeYes) {

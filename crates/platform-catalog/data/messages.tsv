@@ -133,12 +133,15 @@ IDS_TYPE_PRESENTATION_BSLENUMHOLDER	Итератор	Iterator
 IDS_TYPE_PRESENTATION_BSLEXCEPTION	Информация об ошибке	Error information
 IDS_UNKNOWN_MODULE_NAME	Неизвестный модуль	Unknown module
 backbas:IDS_BECAUSE	по причине:	Reason:
+backbas:IDS_ERR_BSL_LIBRARY_INIT	Ошибка инициализации библиотеки модулей	Module library initialization error
 backbas:IDS_ERR_BSL_MODULE_INIT_1	Ошибка инициализации модуля: %s	Module initialization error: %s
 backend:IDS_ERR_CONVERSION_ERROR	Ошибка преобразования	Conversion error
 backend:IDS_ERR_PRIVILEGEDNOTACTIVE	В данной процедуре/ функции не был установлен привилегированный режим	This procedure/function has not set privileged mode
 backend:IDS_ERR_SAFENOTACTIVE	В данной процедуре/ функции не был установлен безопасный режим	Safe mode was not set in this procedure or function
 backend:IDS_ERR_STACKOVERFLOW	Переполнение стека встроенного языка на сервере	1C:Enterprise language stack overflow on the server
+backend:IDS_IBERROR_CANTSETLOCALE	Ошибка установки или изменения национальных настроек информационной базы	Error setting or changing Infobase regional settings
 core85:IDS_ASYNC_METHOD_USAGE	Использование асинхронных методов допустимо только на клиенте!	Asynchronous methods are available only on the client
+core85:IDS_BADLOCALENAME	Ошибочное имя локализации	Incorrect localization name
 core85:IDS_BADTIMEZONEID	Ошибочный идентификатор часового пояса	Invalid time zone identifier
 core85:IDS_CNVERROR_BADNAME	Неправильное имя кодировки	Invalid encoding name
 core85:IDS_DISP_E_GETPICTURETYPE	Невозможно определить тип картинки	Cannot determine picture type
@@ -168,6 +171,7 @@ core85:IDS_PARAMETER_N_TYPE_MISMATCH	Несоответствие типов (п
 core85:IDS_PARAMETER_N_VALUE_MISMATCH	Недопустимое значение параметра (параметр номер '%d')	Invalid parameter value (parameter number '%d')
 core85:IDS_PROPERTY_TYPE_MISMATCH	Несоответствие типов	Type mismatch
 core85:IDS_PROPERTY_VALUE_MISMATCH	Недопустимое значение	Invalid value
+core85:IDS_REGEX_ERROR	Ошибка при работе с регулярными выражениями. Код ошибки - %s (%s)	Regular expression error. Error code: %s (%s)
 core85:IDS_TEMPLATE_PARAMS_TOOMANY	Слишком много фактических параметров	Too many actual parameters
 core85:IDS_TEMPLATE_PARAM_WRONG	Ошибка синтаксиса шаблона в позиции 	Template syntax error at position 
 core85:IDS_TYPE_PRESENTATION_VALUEPAIR	Ключ и значение	Key and value

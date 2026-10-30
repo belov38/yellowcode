@@ -29,6 +29,14 @@ U_NAMESPACE_BEGIN
 class  UnicodeSet;
 
 
+// Embedded retained receivers choose their owner before their base constructor.
+class RegexStaticSet46 : public UnicodeSet {
+public:
+    RegexStaticSet46() : UnicodeSet(owner()) {}
+private:
+    static UManagedOwner46 owner() { UManagedOwner46 value = {9, 903}; return value; }
+};
+
 class RegexStaticSets : public UMemory {
 public:
     static RegexStaticSets *gStaticSets;  // Ptr to all lazily initialized constant
@@ -42,8 +50,8 @@ public:
     UnicodeSet    *fPropSets[URX_LAST_SET];     // The sets for common regex items, e.g. \s
     Regex8BitSet   fPropSets8[URX_LAST_SET];    // Fast bitmap sets for latin-1 range for above.
 
-    UnicodeSet    fRuleSets[10];               // Sets used while parsing regexp patterns.
-    UnicodeSet    fUnescapeCharSet;            // Set of chars handled by unescape when
+    RegexStaticSet46 fRuleSets[10];               // Sets used while parsing regexp patterns.
+    RegexStaticSet46 fUnescapeCharSet;            // Set of chars handled by unescape when
                                                //   encountered with a \ in a pattern.
     UnicodeSet    *fRuleDigitsAlias;
     UText         *fEmptyText;                 // An empty string, to be used when a matcher

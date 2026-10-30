@@ -1,5 +1,7 @@
+use crate::coll::{ExecCollation, Keys, infallible};
 use bsl_prim::{Collation, Number, Strength};
 use ibschema::values::type_code;
+use query_ir::ExecError;
 use query_ir::QValue;
 
 const NULL: u8 = 0;
@@ -60,6 +62,14 @@ fn moment_body(m: &query_ir::value::Moment, out: &mut Vec<u8>) {
 }
 
 pub fn key_of(v: &QValue, coll: &dyn Collation) -> Key {
+    infallible(key_with(v, coll))
+}
+
+pub fn try_key_of(v: &QValue, coll: ExecCollation<'_>) -> Result<Key, ExecError> {
+    key_with(v, coll)
+}
+
+pub(crate) fn key_with<C: Keys>(v: &QValue, coll: C) -> Result<Key, C::Error> {
     let mut k = Vec::new();
     match v {
         QValue::Null => k.push(NULL),
@@ -78,7 +88,7 @@ pub fn key_of(v: &QValue, coll: &dyn Collation) -> Key {
         }
         QValue::String(s) => {
             k.push(type_code::STRING);
-            k.extend(coll.sort_key(Strength::Secondary, key_text(&s.0)));
+            k.extend(coll.key(Strength::Secondary, key_text(&s.0))?);
         }
         QValue::Uuid(u) => {
             k.push(type_code::UUID);
@@ -114,19 +124,27 @@ pub fn key_of(v: &QValue, coll: &dyn Collation) -> Key {
         QValue::Boundary(b) => {
             k.push(BOUNDARY);
             k.push(u8::from(b.include));
-            k.extend(key_of(&b.point, coll).0);
+            k.extend(key_with(&b.point, coll)?.0);
         }
     }
-    Key(k)
+    Ok(Key(k))
 }
 
 pub fn key_of_totals(v: &QValue, coll: &dyn Collation) -> Key {
+    infallible(key_of_totals_with(v, coll))
+}
+
+pub fn try_key_of_totals(v: &QValue, coll: ExecCollation<'_>) -> Result<Key, ExecError> {
+    key_of_totals_with(v, coll)
+}
+
+fn key_of_totals_with<C: Keys>(v: &QValue, coll: C) -> Result<Key, C::Error> {
     match v {
         QValue::String(s) => {
             let mut k = vec![type_code::STRING];
-            k.extend(coll.sort_key(Strength::Secondary, &s.0));
-            Key(k)
+            k.extend(coll.key(Strength::Secondary, &s.0)?);
+            Ok(Key(k))
         }
-        _ => key_of(v, coll),
+        _ => key_with(v, coll),
     }
 }

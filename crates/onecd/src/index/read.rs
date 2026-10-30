@@ -131,9 +131,9 @@ impl<'a> IndexRead<'a> {
             return Self::open_managed(table, name);
         }
         let descr = table.descr();
-        let (pos, idx) = descr
-            .index(name)
-            .ok_or_else(|| Error::NotFound(NotFound::Index(name.to_string())))?;
+        let (pos, idx) = descr.index(name).ok_or_else(|| {
+            Error::NotFound(NotFound::Index(crate::error::brief(name).to_owned()))
+        })?;
         let at_table = |what: String| Error::corrupt(Location::Table(descr.name.clone()), what);
         let key_len = index_key_len(descr, idx).map_err(|e| match e {
             Error::Constraint(crate::error::Constraint::BadDescr(why)) => at_table(why),
@@ -330,6 +330,21 @@ impl<'a> IndexRead<'a> {
 
     pub fn key(&self, vals: &[Value]) -> Result<Vec<u8>> {
         encode_key_values(self.table.descr(), self.idx, vals, &self.table.key_ctx())
+    }
+
+    #[cfg(feature = "icu")]
+    pub fn key_budgeted(
+        &self,
+        vals: &[Value],
+        keys: &crate::collate::KeyRequest,
+    ) -> Result<memory_budget::BudgetedVec<u8>> {
+        crate::format::key::encode_key_values_budgeted(
+            self.table.descr(),
+            self.idx,
+            vals,
+            self.table.key_ctx().locale,
+            keys,
+        )
     }
 
     fn start_leaf(&self, bounds: &Bounds, dir: Direction) -> Result<Option<(u32, LeafPage)>> {

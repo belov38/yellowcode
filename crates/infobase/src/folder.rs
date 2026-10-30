@@ -224,6 +224,51 @@ fn insert_new_inner(txn: &mut WriteTxn<'_>, table: &str, f: &FolderFile) -> Resu
     Ok(())
 }
 
+pub(crate) fn insert_new_part(
+    txn: &mut WriteTxn<'_>,
+    table: &str,
+    f: &FolderFile,
+    part: u64,
+    bytes: Vec<u8>,
+) -> Result<()> {
+    let result = (|| {
+        let t = txn.read_table(table)?;
+        let c = Columns::read(t.descr())?;
+        let size = unsigned(&f.data_size, table)?;
+        let start = part
+            .checked_mul(PART_SIZE as u64)
+            .ok_or_else(|| bad(table, "part offset overflow"))?;
+        let expected = size.saturating_sub(start).min(PART_SIZE as u64);
+        if start > size
+            || (start == size && (size != 0 || part != 0))
+            || bytes.len() as u64 != expected
+        {
+            return Err(bad(table, "invalid folder part length"));
+        }
+        let part = i64::try_from(part).map_err(|_| bad(table, "PARTNO overflow"))?;
+        let mut row = vec![Value::Null; t.descr().fields.len()];
+        for (index, value) in [
+            (c.name, Value::VarChar(f.name.clone())),
+            (c.creation, Value::DateTime(f.creation)),
+            (c.modified, Value::DateTime(f.modified)),
+            (c.attributes, Value::Numeric(f.attributes.clone())),
+            (c.size, Value::Numeric(f.data_size.clone())),
+            (c.data, Value::Image(BlobVal::Data(bytes))),
+            (c.part, Value::Numeric(Numeric::from_i64(part))),
+        ] {
+            *row.get_mut(index)
+                .ok_or_else(|| bad(table, "folder column outside row"))? = value;
+        }
+        drop(t);
+        txn.table(table)?.insert(&row)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        txn.abort();
+    }
+    result
+}
+
 pub fn part_count(len: usize) -> usize {
     len.div_ceil(PART_SIZE).max(1)
 }

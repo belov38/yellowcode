@@ -1,11 +1,63 @@
 use super::super::columns::COLUMN_BASE;
 use super::*;
 use bsl_vm::MemberKind;
-pub(super) struct TreeRow {
+pub(in crate::collections) struct TreeRow {
     pub(super) state: Rc<TreeState>,
     pub(super) record: Rc<Node>,
 }
 impl TreeRow {
+    pub(in crate::collections) fn prepare_fill(
+        &self,
+        ex: &mut Execution,
+        member: MemberId,
+        value: Value,
+        retained: u64,
+    ) -> CallResult<(Value, [u64; 2])> {
+        self.record.writable()?;
+        let stamp = [self.state.revision.get(), self.state.columns.revision()];
+        let column = self.member_column(ex, member)?;
+        ex.charge(self.record.cells.borrow().0.len() as u64)?;
+        let adjusted = adjust(ex, &column.value_type(), value, retained)?;
+        self.check_fill(member, stamp)?;
+        Ok((adjusted, stamp))
+    }
+
+    pub(in crate::collections) fn check_fill(
+        &self,
+        member: MemberId,
+        stamp: [u64; 2],
+    ) -> CallResult<()> {
+        self.state.check_source(stamp[0], stamp[1])?;
+        self.record.writable()?;
+        if !self
+            .record
+            .cells
+            .borrow()
+            .0
+            .iter()
+            .any(|(id, _)| Some(*id) == member.0.checked_sub(COLUMN_BASE))
+        {
+            return Err(changed().into());
+        }
+        Ok(())
+    }
+
+    pub(in crate::collections) fn publish_fill(&self, member: MemberId, value: &mut Value) {
+        let mut cells = self.record.cells.borrow_mut();
+        if let Some((_, cell)) = cells
+            .0
+            .iter_mut()
+            .find(|(id, _)| Some(*id) == member.0.checked_sub(COLUMN_BASE))
+        {
+            std::mem::swap(cell, value);
+        } else {
+            unreachable!("prepared tree cell disappeared")
+        }
+        drop(cells);
+        self.state.update_bytes(&self.record);
+        self.state.bump();
+    }
+
     fn live(&self, ex: &mut Execution, extra: u64) -> CallResult<u64> {
         let live = self.state.live(ex)?.saturating_add(extra).saturating_add(
             if self.record.active.get() {
@@ -153,6 +205,28 @@ impl TreeRow {
     }
 }
 impl HostObject for TreeRow {
+    fn property_names(&self, ex: &mut Execution, retained: u64) -> CallResult<Option<Vec<Str>>> {
+        self.state.columns.property_names(ex, retained).map(Some)
+    }
+    fn session_edges(&self, visit: &mut dyn bsl_vm::SessionEdges) -> bool {
+        visit.backing(self.state.clone()) && visit.backing(self.record.clone())
+    }
+    fn session_clear(&self) {}
+    fn session_transfer_supported(&self) -> bool {
+        true
+    }
+    fn session_transfer(
+        &self,
+        out: &mut dyn bsl_vm::SessionExport,
+    ) -> Result<Option<Box<dyn bsl_vm::SessionObject>>, bsl_vm::Exception> {
+        super::session::capture(&self.state, Some(&self.record), 1, out).map(Some)
+    }
+    fn retained_memory(
+        &self,
+        visit: &mut dyn bsl_vm::RetainedMemory,
+    ) -> Result<bool, bsl_vm::Exception> {
+        crate::collections::accounting::project(self, visit)
+    }
     fn type_id(&self) -> TypeId {
         TypeId::of_catalog(idx("ValueTreeRow"))
     }
@@ -167,6 +241,26 @@ impl HostObject for TreeRow {
                 let column = self.member_column(ex, m)?;
                 self.read(ex, column.id, 0)
             }
+        }
+    }
+    fn get_with_retained(
+        &self,
+        ex: &mut Execution,
+        m: MemberId,
+        retained: u64,
+    ) -> CallResult<Value> {
+        if matches!(
+            property_name(idx("ValueTreeRow"), m),
+            Some("Parent" | "Rows")
+        ) {
+            return self.get(ex, m);
+        }
+        let column = self.member_column(ex, m)?;
+        let cells = self.record.cells.borrow();
+        ex.charge(cells.0.len() as u64)?;
+        match cells.0.iter().find(|(key, _)| *key == column.id) {
+            Some((_, value)) => clone_cell(ex, value, retained),
+            None => Ok(Value::Undefined),
         }
     }
     fn set(&self, ex: &mut Execution, m: MemberId, value: Value) -> CallResult<()> {

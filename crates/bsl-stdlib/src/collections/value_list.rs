@@ -16,6 +16,25 @@ use std::{
 
 type Policy = Rc<RefCell<Option<TypeDescription>>>;
 
+fn retained_policy(
+    policy: &Policy,
+    revision: &Rc<Cell<u64>>,
+    visit: &mut dyn bsl_vm::RetainedMemory,
+) -> Result<(), Exception> {
+    let policy_bytes = (std::mem::size_of::<RefCell<Option<TypeDescription>>>()
+        + 2 * std::mem::size_of::<usize>()) as u64;
+    if visit.allocation(Rc::as_ptr(policy) as usize, policy_bytes)?
+        && let Some(policy) = &*policy.borrow()
+    {
+        visit.bytes(policy.backing_bytes())?;
+    }
+    visit.allocation(
+        Rc::as_ptr(revision) as usize,
+        (std::mem::size_of::<Cell<u64>>() + 2 * std::mem::size_of::<usize>()) as u64,
+    )?;
+    Ok(())
+}
+
 #[derive(Clone)]
 struct ItemData {
     value: Value,
@@ -42,6 +61,49 @@ pub(crate) struct ValueListItem {
     revision: Rc<Cell<u64>>,
     id: u64,
     hash: i32,
+}
+
+pub(super) struct PreparedType {
+    policy: Option<TypeDescription>,
+    items: Vec<Rc<ValueListItem>>,
+    values: Vec<Value>,
+}
+
+impl PreparedType {
+    pub(super) fn retained(&self, visit: &mut dyn bsl_vm::RetainedMemory) -> Result<(), Exception> {
+        if let Some(policy) = &self.policy {
+            visit.bytes(policy.backing_bytes())?;
+        }
+        visit.bytes(
+            (self.items.capacity() as u64)
+                .saturating_mul(std::mem::size_of::<Rc<ValueListItem>>() as u64)
+                .saturating_add(
+                    (self.values.capacity() as u64)
+                        .saturating_mul(std::mem::size_of::<Value>() as u64),
+                ),
+        )?;
+        for item in &self.items {
+            visit.value(&Value::Object(item.clone()))?;
+        }
+        for value in &self.values {
+            visit.value(value)?;
+        }
+        Ok(())
+    }
+    pub(super) fn visit_values(
+        &self,
+        visit: &mut super::retire::Visitor<'_>,
+    ) -> Result<(), Exception> {
+        for value in &self.values {
+            visit(value)?;
+        }
+        Ok(())
+    }
+    pub(super) fn retire(self, out: &mut Vec<Value>) {
+        for value in self.values {
+            super::retire::push(out, value);
+        }
+    }
 }
 
 pub(crate) struct ValueList {
@@ -591,18 +653,28 @@ impl ValueList {
         bump(&self.revision);
         Ok(Value::Object(item))
     }
-    fn set_type(&self, ex: &mut Execution, value: Value) -> CallResult<()> {
+    fn prepare_type(
+        &self,
+        ex: &mut Execution,
+        value: &Value,
+        retained: u64,
+    ) -> CallResult<PreparedType> {
         let td = value
             .as_object()
             .and_then(|o| o.as_any().downcast_ref::<TypeDescription>())
             .ok_or_else(|| type_mismatch(1))?;
-        ex.reserve((td.types().len() as u64).saturating_mul(std::mem::size_of::<TypeId>() as u64))?;
+        ex.reserve(retained.saturating_add(td.backing_bytes()).saturating_add(
+            (self.len() as u64).saturating_mul(std::mem::size_of::<Rc<ValueListItem>>() as u64),
+        ))?;
         ex.charge(td.types().len() as u64 / 64)?;
         let td = td.clone();
         let items = self.snapshot(ex)?;
         let revision = self.revision.get();
-        let mut bytes = (items.len() as u64).saturating_mul(
-            (2 * std::mem::size_of::<Value>() + std::mem::size_of::<Rc<ValueListItem>>()) as u64,
+        let mut bytes = retained.saturating_add(td.backing_bytes()).saturating_add(
+            (items.len() as u64).saturating_mul(
+                (2 * std::mem::size_of::<Value>() + std::mem::size_of::<Rc<ValueListItem>>())
+                    as u64,
+            ),
         );
         ex.reserve(bytes)?;
         let mut prepared = vec_with_capacity(ex, items.len() as u64)?;
@@ -621,14 +693,73 @@ impl ValueList {
             ex.reserve(bytes)?;
             prepared.push(v);
         }
-        let mut old = vec_with_capacity(ex, items.len() as u64)?;
-        for (item, v) in items.iter().zip(prepared) {
-            old.push(std::mem::replace(&mut item.data.borrow_mut().value, v));
+        Ok(PreparedType {
+            policy: Some(td),
+            items,
+            values: prepared,
+        })
+    }
+    fn publish_type(&self, prepared: &mut PreparedType) {
+        for (item, value) in prepared.items.iter().zip(&mut prepared.values) {
+            std::mem::swap(&mut item.data.borrow_mut().value, value);
         }
-        *self.policy.borrow_mut() = Some(td);
+        std::mem::swap(&mut *self.policy.borrow_mut(), &mut prepared.policy);
         bump(&self.revision);
+    }
+    fn set_type(&self, ex: &mut Execution, value: Value) -> CallResult<()> {
+        let mut prepared = self.prepare_type(ex, &value, 0)?;
+        let mut old = vec_with_capacity(ex, prepared.values.len() as u64)?;
+        self.publish_type(&mut prepared);
+        for value in prepared.values {
+            old.push(value);
+        }
         release(old);
         Ok(())
+    }
+    pub(super) fn prepare_fill(
+        &self,
+        ex: &mut Execution,
+        member: MemberId,
+        value: Value,
+        retained: u64,
+    ) -> CallResult<(Value, [u64; 2], Option<PreparedType>)> {
+        let stamp = [self.revision.get(), 0];
+        let prepared = match property_name(idx("ValueList"), member) {
+            Some("ValueType") => Some(self.prepare_type(ex, &value, retained)?),
+            Some("AvailableValues") => {
+                if !matches!(value, Value::Undefined) && Self::of(&value).is_none() {
+                    return Err(type_mismatch(1).into());
+                }
+                None
+            }
+            _ => return Err(not_implemented(idx("ValueList"), member).into()),
+        };
+        self.check_fill(member, stamp)?;
+        Ok((value, stamp, prepared))
+    }
+    pub(super) fn check_fill(&self, _member: MemberId, stamp: [u64; 2]) -> CallResult<()> {
+        self.check_revision(stamp[0])
+    }
+    pub(super) fn publish_fill(
+        &self,
+        member: MemberId,
+        value: &mut Value,
+        prepared: &mut Option<PreparedType>,
+    ) {
+        match property_name(idx("ValueList"), member) {
+            Some("ValueType") => {
+                if let Some(prepared) = prepared {
+                    self.publish_type(prepared);
+                } else {
+                    unreachable!("unprepared list policy")
+                }
+            }
+            Some("AvailableValues") => {
+                std::mem::swap(&mut *self.available.borrow_mut(), value);
+                bump(&self.revision);
+            }
+            _ => unreachable!("unprepared list property"),
+        }
     }
     fn copy(&self, ex: &mut Execution) -> CallResult<Value> {
         let count = self.len() as u64;
@@ -769,6 +900,53 @@ impl Drop for ValueList {
 }
 
 impl HostObject for ValueList {
+    fn to_shared(&self) -> Option<bsl_vm::SharedValue> {
+        bsl_vm::SharedValue::from_object(self)
+    }
+
+    fn session_edges(&self, visit: &mut dyn bsl_vm::SessionEdges) -> bool {
+        visit.value(&self.available.borrow())
+            && self.items.borrow().iter().all(|item| {
+                let object: bsl_vm::ObjRef = item.clone();
+                visit.object(&object)
+            })
+    }
+    fn session_clear(&self) {
+        self.items.borrow_mut().clear();
+        *self.available.borrow_mut() = Value::Undefined;
+    }
+    fn session_transfer_supported(&self) -> bool {
+        true
+    }
+    fn session_transfer(
+        &self,
+        out: &mut dyn bsl_vm::SessionExport,
+    ) -> Result<Option<Box<dyn bsl_vm::SessionObject>>, Exception> {
+        let Some(backing) = session_policy(out, &self.policy, &self.revision)? else {
+            return Ok(None);
+        };
+        out.reserve(std::mem::size_of::<SessionList>() as u64)?;
+        out.value(&self.available.borrow())?;
+        for item in self.items.borrow().iter() {
+            out.value(&Value::Object(item.clone()))?;
+        }
+        Ok(Some(Box::new(SessionList {
+            backing,
+            hash: self.hash,
+            id: self.next_id.get(),
+            item: None,
+        })))
+    }
+    fn retained_memory(&self, visit: &mut dyn bsl_vm::RetainedMemory) -> Result<bool, Exception> {
+        visit.mutable();
+        retained_policy(&self.policy, &self.revision, visit)?;
+        visit.bytes(
+            (self.items.borrow().capacity() as u64)
+                .saturating_mul(std::mem::size_of::<Rc<ValueListItem>>() as u64),
+        )?;
+        self.visit_values(&mut |value| visit.value(value))?;
+        Ok(true)
+    }
     fn type_id(&self) -> TypeId {
         TypeId::of_catalog(idx("ValueList"))
     }
@@ -787,7 +965,7 @@ impl HostObject for ValueList {
         }
     }
     fn set(&self, ex: &mut Execution, m: MemberId, value: Value) -> CallResult<()> {
-        match property_name(idx("ValueList"), m) {
+        ex.with_reuse_check(|ex| match property_name(idx("ValueList"), m) {
             Some("ValueType") => self.set_type(ex, value),
             Some("AvailableValues") => {
                 if !matches!(value, Value::Undefined) && Self::of(&value).is_none() {
@@ -799,123 +977,125 @@ impl HostObject for ValueList {
                 Ok(())
             }
             _ => Err(not_implemented(idx("ValueList"), m).into()),
-        }
+        })
     }
     fn call(&self, ex: &mut Execution, m: MemberId, args: &mut [Arg]) -> CallResult<Value> {
-        match method_name(idx("ValueList"), m) {
-            Some("Add") => return self.add(ex, args, false),
-            Some("Insert") => return self.add(ex, args, true),
-            Some("Count") => return Ok(Value::from(self.len() as i64)),
-            Some("Get") => {
-                let v = arg_value(ex, args.first())?;
-                return self.item_at(self.checked_number(ex, &v, false, 0)?);
-            }
-            Some("IndexOf") => {
-                let v = arg_value(ex, args.first())?;
-                return Ok(Value::from(
-                    self.find_item(ex, &v)?.map_or(-1, |i| i as i64),
-                ));
-            }
-            Some("FindByValue") => {
-                let v = arg_value(ex, args.first())?;
-                let live = scalar_clone_bytes(&v).saturating_add(
-                    (self.len() as u64)
-                        .saturating_mul(std::mem::size_of::<Rc<ValueListItem>>() as u64),
-                );
-                ex.reserve(live)?;
-                let items = self.snapshot(ex)?;
-                for item in items {
-                    let value = {
-                        let data = item.data.borrow();
-                        ex.reserve(live.saturating_add(scalar_clone_bytes(&data.value)))?;
-                        clone_value(ex, &data.value)?
-                    };
-                    guard_equal(ex, &value, &v, live)?;
-                    if same_value(&value, &v) {
-                        return Ok(Value::Object(item));
+        ex.with_reuse_check(|ex| {
+            match method_name(idx("ValueList"), m) {
+                Some("Add") => return self.add(ex, args, false),
+                Some("Insert") => return self.add(ex, args, true),
+                Some("Count") => return Ok(Value::from(self.len() as i64)),
+                Some("Get") => {
+                    let v = arg_value(ex, args.first())?;
+                    return self.item_at(self.checked_number(ex, &v, false, 0)?);
+                }
+                Some("IndexOf") => {
+                    let v = arg_value(ex, args.first())?;
+                    return Ok(Value::from(
+                        self.find_item(ex, &v)?.map_or(-1, |i| i as i64),
+                    ));
+                }
+                Some("FindByValue") => {
+                    let v = arg_value(ex, args.first())?;
+                    let live = scalar_clone_bytes(&v).saturating_add(
+                        (self.len() as u64)
+                            .saturating_mul(std::mem::size_of::<Rc<ValueListItem>>() as u64),
+                    );
+                    ex.reserve(live)?;
+                    let items = self.snapshot(ex)?;
+                    for item in items {
+                        let value = {
+                            let data = item.data.borrow();
+                            ex.reserve(live.saturating_add(scalar_clone_bytes(&data.value)))?;
+                            clone_value(ex, &data.value)?
+                        };
+                        guard_equal(ex, &value, &v, live)?;
+                        if same_value(&value, &v) {
+                            return Ok(Value::Object(item));
+                        }
                     }
+                    return Ok(Value::Undefined);
                 }
-                return Ok(Value::Undefined);
-            }
-            Some("FindByID") => {
-                let id = arg_i64(ex, args.first(), 1)?;
-                ex.charge(self.len() as u64)?;
-                let result = self
-                    .items
-                    .borrow()
-                    .iter()
-                    .find(|item| i64::try_from(item.id).ok() == Some(id))
-                    .cloned();
-                return Ok(result.map_or(Value::Undefined, |item| Value::Object(item)));
-            }
-            Some("Clear") => {
-                ex.charge(self.len() as u64)?;
-                self.reserve_cleanup(ex, 0)?;
-                let old = std::mem::take(&mut *self.items.borrow_mut());
-                bump(&self.revision);
-                release(old.into_iter().map(|item| Value::Object(item)).collect());
-            }
-            Some("Delete") => {
-                let v = arg_value(ex, args.first())?;
-                let i = self.selector(ex, &v)?;
-                ex.charge((self.len() - i) as u64)?;
-                let old = self.items.borrow_mut().remove(i);
-                bump(&self.revision);
-                release(vec![Value::Object(old)]);
-            }
-            Some("Move") => {
-                let v = arg_value(ex, args.first())?;
-                let offset = arg_i64_cached(ex, args.get(1), scalar_clone_bytes(&v))?;
-                let i = self.selector(ex, &v)?;
-                let dest = (i as i64)
-                    .checked_add(offset)
-                    .and_then(|n| usize::try_from(n).ok())
-                    .filter(|n| *n < self.len())
-                    .ok_or_else(|| value_mismatch(2))?;
-                ex.charge(self.len() as u64)?;
-                let mut items = self.items.borrow_mut();
-                let item = items.remove(i);
-                items.insert(dest, item);
-                bump(&self.revision);
-            }
-            Some("FillChecks") => {
-                let check = arg_bool(ex, args.first())?;
-                ex.charge(self.len() as u64)?;
-                for item in self.items.borrow().iter() {
-                    item.data.borrow_mut().check = check;
-                }
-                bump(&self.revision);
-            }
-            Some("UnloadValues") => {
-                ex.charge(self.len() as u64)?;
-                let mut bytes =
-                    (self.len() as u64).saturating_mul(std::mem::size_of::<Value>() as u64);
-                for item in self.items.borrow().iter() {
-                    if let Value::Number(n) = &item.data.borrow().value {
-                        ex.charge(n.size_hint_limbs() / 64)?;
-                        bytes = bytes.saturating_add(n.size_hint_limbs().saturating_mul(4));
-                    }
-                }
-                ex.reserve(bytes)?;
-                let mut values = vec_with_capacity(ex, self.len() as u64)?;
-                values.extend(
-                    self.items
+                Some("FindByID") => {
+                    let id = arg_i64(ex, args.first(), 1)?;
+                    ex.charge(self.len() as u64)?;
+                    let result = self
+                        .items
                         .borrow()
                         .iter()
-                        .map(|item| item.data.borrow().value.clone()),
-                );
-                return Ok(super::new_array(values));
+                        .find(|item| i64::try_from(item.id).ok() == Some(id))
+                        .cloned();
+                    return Ok(result.map_or(Value::Undefined, |item| Value::Object(item)));
+                }
+                Some("Clear") => {
+                    ex.charge(self.len() as u64)?;
+                    self.reserve_cleanup(ex, 0)?;
+                    let old = std::mem::take(&mut *self.items.borrow_mut());
+                    bump(&self.revision);
+                    release(old.into_iter().map(|item| Value::Object(item)).collect());
+                }
+                Some("Delete") => {
+                    let v = arg_value(ex, args.first())?;
+                    let i = self.selector(ex, &v)?;
+                    ex.charge((self.len() - i) as u64)?;
+                    let old = self.items.borrow_mut().remove(i);
+                    bump(&self.revision);
+                    release(vec![Value::Object(old)]);
+                }
+                Some("Move") => {
+                    let v = arg_value(ex, args.first())?;
+                    let offset = arg_i64_cached(ex, args.get(1), scalar_clone_bytes(&v))?;
+                    let i = self.selector(ex, &v)?;
+                    let dest = (i as i64)
+                        .checked_add(offset)
+                        .and_then(|n| usize::try_from(n).ok())
+                        .filter(|n| *n < self.len())
+                        .ok_or_else(|| value_mismatch(2))?;
+                    ex.charge(self.len() as u64)?;
+                    let mut items = self.items.borrow_mut();
+                    let item = items.remove(i);
+                    items.insert(dest, item);
+                    bump(&self.revision);
+                }
+                Some("FillChecks") => {
+                    let check = arg_bool(ex, args.first())?;
+                    ex.charge(self.len() as u64)?;
+                    for item in self.items.borrow().iter() {
+                        item.data.borrow_mut().check = check;
+                    }
+                    bump(&self.revision);
+                }
+                Some("UnloadValues") => {
+                    ex.charge(self.len() as u64)?;
+                    let mut bytes =
+                        (self.len() as u64).saturating_mul(std::mem::size_of::<Value>() as u64);
+                    for item in self.items.borrow().iter() {
+                        if let Value::Number(n) = &item.data.borrow().value {
+                            ex.charge(n.size_hint_limbs() / 64)?;
+                            bytes = bytes.saturating_add(n.size_hint_limbs().saturating_mul(4));
+                        }
+                    }
+                    ex.reserve(bytes)?;
+                    let mut values = vec_with_capacity(ex, self.len() as u64)?;
+                    values.extend(
+                        self.items
+                            .borrow()
+                            .iter()
+                            .map(|item| item.data.borrow().value.clone()),
+                    );
+                    return Ok(super::new_array(values));
+                }
+                Some("LoadValues") => {
+                    let value = arg_value(ex, args.first())?;
+                    self.load(ex, value)?;
+                }
+                Some("Copy") => return self.copy(ex),
+                Some("SortByValue") => self.sort(ex, args, false)?,
+                Some("SortByPresentation") => self.sort(ex, args, true)?,
+                _ => return Err(not_implemented(idx("ValueList"), m).into()),
             }
-            Some("LoadValues") => {
-                let value = arg_value(ex, args.first())?;
-                self.load(ex, value)?;
-            }
-            Some("Copy") => return self.copy(ex),
-            Some("SortByValue") => self.sort(ex, args, false)?,
-            Some("SortByPresentation") => self.sort(ex, args, true)?,
-            _ => return Err(not_implemented(idx("ValueList"), m).into()),
-        }
-        Ok(Value::Undefined)
+            Ok(Value::Undefined)
+        })
     }
     fn index_get(&self, ex: &mut Execution, key: &Value) -> CallResult<Value> {
         let Value::Number(n) = key else {
@@ -985,7 +1165,87 @@ impl HostObject for ValueList {
     }
 }
 
+impl ValueListItem {
+    pub(super) fn prepare_fill(
+        &self,
+        ex: &mut Execution,
+        member: MemberId,
+        value: Value,
+        retained: u64,
+    ) -> CallResult<(Value, [u64; 2])> {
+        let stamp = [self.revision.get(), 0];
+        let value = match property_name(idx("ValueListItem"), member) {
+            Some("Value") => adjust(ex, &self.policy, value, retained)?,
+            Some("Presentation") => Value::String(guarded_present(ex, &value, retained)?),
+            Some("Check") => Value::Bool(bool_value(ex, &value)?),
+            Some("Picture") => value,
+            _ => return Err(not_implemented(idx("ValueListItem"), member).into()),
+        };
+        self.check_fill(member, stamp)?;
+        Ok((value, stamp))
+    }
+
+    pub(super) fn check_fill(&self, _member: MemberId, stamp: [u64; 2]) -> CallResult<()> {
+        if self.revision.get() != stamp[0] {
+            return Err(reentrant().into());
+        }
+        Ok(())
+    }
+
+    pub(super) fn publish_fill(&self, member: MemberId, value: &mut Value) {
+        let mut data = self.data.borrow_mut();
+        match (property_name(idx("ValueListItem"), member), &mut *value) {
+            (Some("Value"), value) => std::mem::swap(&mut data.value, value),
+            (Some("Picture"), value) => std::mem::swap(&mut data.picture, value),
+            (Some("Presentation"), Value::String(text)) => {
+                std::mem::swap(&mut data.presentation, text)
+            }
+            (Some("Check"), Value::Bool(check)) => std::mem::swap(&mut data.check, check),
+            _ => unreachable!("unprepared list item property"),
+        }
+        bump(&self.revision);
+    }
+}
+
 impl HostObject for ValueListItem {
+    fn session_edges(&self, visit: &mut dyn bsl_vm::SessionEdges) -> bool {
+        let data = self.data.borrow();
+        visit.value(&data.value) && visit.value(&data.picture)
+    }
+    fn session_clear(&self) {
+        let mut data = self.data.borrow_mut();
+        data.value = Value::Undefined;
+        data.picture = Value::Undefined;
+    }
+    fn session_transfer_supported(&self) -> bool {
+        true
+    }
+    fn session_transfer(
+        &self,
+        out: &mut dyn bsl_vm::SessionExport,
+    ) -> Result<Option<Box<dyn bsl_vm::SessionObject>>, Exception> {
+        let Some(backing) = session_policy(out, &self.policy, &self.revision)? else {
+            return Ok(None);
+        };
+        out.reserve(std::mem::size_of::<SessionList>() as u64)?;
+        let data = self.data.borrow();
+        out.value(&data.value)?;
+        out.value(&Value::String(data.presentation.clone()))?;
+        out.value(&data.picture)?;
+        Ok(Some(Box::new(SessionList {
+            backing,
+            hash: self.hash,
+            id: self.id,
+            item: Some(data.check),
+        })))
+    }
+    fn retained_memory(&self, visit: &mut dyn bsl_vm::RetainedMemory) -> Result<bool, Exception> {
+        visit.mutable();
+        retained_policy(&self.policy, &self.revision, visit)?;
+        visit.string(&self.data.borrow().presentation)?;
+        self.visit_values(&mut |value| visit.value(value))?;
+        Ok(true)
+    }
     fn type_id(&self) -> TypeId {
         TypeId::of_catalog(idx("ValueListItem"))
     }
@@ -993,49 +1253,65 @@ impl HostObject for ValueListItem {
         self
     }
     fn get(&self, ex: &mut Execution, m: MemberId) -> CallResult<Value> {
+        self.get_with_retained(ex, m, 0)
+    }
+    fn get_with_retained(
+        &self,
+        ex: &mut Execution,
+        m: MemberId,
+        retained: u64,
+    ) -> CallResult<Value> {
         let data = self.data.borrow();
         Ok(match property_name(idx("ValueListItem"), m) {
-            Some("Value") => clone_value(ex, &data.value)?,
+            Some("Value") => {
+                ex.reserve(retained.saturating_add(scalar_clone_bytes(&data.value)))?;
+                clone_value(ex, &data.value)?
+            }
             Some("Presentation") => Value::String(data.presentation.clone()),
             Some("Check") => Value::Bool(data.check),
-            Some("Picture") => clone_value(ex, &data.picture)?,
+            Some("Picture") => {
+                ex.reserve(retained.saturating_add(scalar_clone_bytes(&data.picture)))?;
+                clone_value(ex, &data.picture)?
+            }
             _ => return Err(not_implemented(idx("ValueListItem"), m).into()),
         })
     }
     fn set(&self, ex: &mut Execution, m: MemberId, value: Value) -> CallResult<()> {
-        let revision = self.revision.get();
-        let (value, property) = match property_name(idx("ValueListItem"), m) {
-            Some("Value") => (adjust(ex, &self.policy, value, 0)?, "Value"),
-            Some("Presentation") => (
-                Value::String(guarded_present(ex, &value, 0)?),
-                "Presentation",
-            ),
-            Some("Check") => (Value::Bool(bool_value(ex, &value)?), "Check"),
-            Some("Picture") => (value, "Picture"),
-            _ => return Err(not_implemented(idx("ValueListItem"), m).into()),
-        };
-        if self.revision.get() != revision {
-            return Err(reentrant().into());
-        }
-        let old = {
-            let mut data = self.data.borrow_mut();
-            match (property, value) {
-                ("Value", v) => std::mem::replace(&mut data.value, v),
-                ("Picture", v) => std::mem::replace(&mut data.picture, v),
-                ("Presentation", Value::String(s)) => {
-                    data.presentation = s;
-                    Value::Undefined
-                }
-                ("Check", Value::Bool(b)) => {
-                    data.check = b;
-                    Value::Undefined
-                }
-                _ => Value::Undefined,
+        ex.with_reuse_check(|ex| {
+            let revision = self.revision.get();
+            let (value, property) = match property_name(idx("ValueListItem"), m) {
+                Some("Value") => (adjust(ex, &self.policy, value, 0)?, "Value"),
+                Some("Presentation") => (
+                    Value::String(guarded_present(ex, &value, 0)?),
+                    "Presentation",
+                ),
+                Some("Check") => (Value::Bool(bool_value(ex, &value)?), "Check"),
+                Some("Picture") => (value, "Picture"),
+                _ => return Err(not_implemented(idx("ValueListItem"), m).into()),
+            };
+            if self.revision.get() != revision {
+                return Err(reentrant().into());
             }
-        };
-        bump(&self.revision);
-        release(vec![old]);
-        Ok(())
+            let old = {
+                let mut data = self.data.borrow_mut();
+                match (property, value) {
+                    ("Value", v) => std::mem::replace(&mut data.value, v),
+                    ("Picture", v) => std::mem::replace(&mut data.picture, v),
+                    ("Presentation", Value::String(s)) => {
+                        data.presentation = s;
+                        Value::Undefined
+                    }
+                    ("Check", Value::Bool(b)) => {
+                        data.check = b;
+                        Value::Undefined
+                    }
+                    _ => Value::Undefined,
+                }
+            };
+            bump(&self.revision);
+            release(vec![old]);
+            Ok(())
+        })
     }
     fn call(&self, _: &mut Execution, m: MemberId, _: &mut [Arg]) -> CallResult<Value> {
         match method_name(idx("ValueListItem"), m) {
@@ -1093,4 +1369,156 @@ pub fn value_list_items(value: &Value) -> Option<Vec<(Value, String, bool)>> {
             })
             .collect(),
     )
+}
+
+struct SessionPolicy {
+    policy: Option<TypeDescription>,
+    revision: u64,
+}
+struct ImportedPolicy {
+    policy: Policy,
+    revision: Rc<Cell<u64>>,
+}
+struct SessionList {
+    backing: std::sync::Arc<SessionPolicy>,
+    hash: i32,
+    id: u64,
+    item: Option<bool>,
+}
+fn session_policy(
+    out: &mut dyn bsl_vm::SessionExport,
+    policy: &Policy,
+    revision: &Rc<Cell<u64>>,
+) -> Result<Option<std::sync::Arc<SessionPolicy>>, Exception> {
+    let backing = out.backing(
+        std::any::TypeId::of::<SessionPolicy>(),
+        Rc::as_ptr(policy) as usize,
+        &mut |out| {
+            let policy = policy.borrow();
+            out.reserve(
+                bsl_vm::session_shared_bytes::<SessionPolicy>()
+                    + policy.as_ref().map_or(0, TypeDescription::backing_bytes),
+            )?;
+            Ok(std::sync::Arc::new(SessionPolicy {
+                policy: policy
+                    .as_ref()
+                    .map(TypeDescription::session_copy)
+                    .transpose()
+                    .map_err(|_| out.memory_error())?,
+                revision: revision.get(),
+            }))
+        },
+    )?;
+    Ok(backing.downcast::<SessionPolicy>().ok())
+}
+impl bsl_vm::SessionObject for SessionList {
+    fn retained_memory(&self, visit: &mut dyn bsl_vm::RetainedMemory) -> Result<(), Exception> {
+        visit
+            .allocation(
+                std::sync::Arc::as_ptr(&self.backing) as usize,
+                bsl_vm::session_shared_bytes::<SessionPolicy>()
+                    + self
+                        .backing
+                        .policy
+                        .as_ref()
+                        .map_or(0, TypeDescription::backing_bytes),
+            )
+            .map(|_| ())
+    }
+    fn create(
+        &self,
+        ex: &mut Execution,
+        imports: &mut bsl_vm::SessionImports,
+    ) -> Result<Value, Exception> {
+        let backing =
+            imports.backing(ex, std::sync::Arc::as_ptr(&self.backing) as usize, |ex| {
+                Ok(Rc::new(ImportedPolicy {
+                    policy: Rc::new(RefCell::new(
+                        self.backing
+                            .policy
+                            .as_ref()
+                            .map(TypeDescription::session_copy)
+                            .transpose()
+                            .map_err(|_| ex.out_of_memory())?,
+                    )),
+                    revision: Rc::new(Cell::new(self.backing.revision)),
+                }))
+            })?;
+        Ok(match self.item {
+            Some(check) => Value::Object(Rc::new(ValueListItem {
+                data: RefCell::new(ItemData {
+                    value: Value::Undefined,
+                    presentation: Str::new(),
+                    check,
+                    picture: Value::Undefined,
+                }),
+                policy: backing.policy.clone(),
+                revision: backing.revision.clone(),
+                id: self.id,
+                hash: self.hash,
+            })),
+            None => Value::Object(Rc::new(ValueList {
+                items: RefCell::new(Vec::new()),
+                policy: backing.policy.clone(),
+                available: RefCell::new(Value::Undefined),
+                next_id: Cell::new(self.id),
+                revision: backing.revision.clone(),
+                hash: self.hash,
+            })),
+        })
+    }
+    fn fill(
+        &self,
+        ex: &mut Execution,
+        shell: &Value,
+        children: Vec<Value>,
+    ) -> Result<(), Exception> {
+        let mut children = children.into_iter();
+        let object = shell.as_object().ok_or_else(|| ex.out_of_memory())?;
+        if let Some(list) = object.as_any().downcast_ref::<ValueList>() {
+            *list.available.borrow_mut() = children.next().ok_or_else(|| ex.out_of_memory())?;
+            let mut items = list.items.borrow_mut();
+            items
+                .try_reserve_exact(children.len())
+                .map_err(|_| ex.out_of_memory())?;
+            for value in children {
+                let Value::Object(object) = value else {
+                    return Err(ex.out_of_memory());
+                };
+                let object: Rc<dyn Any> = object;
+                items.push(
+                    object
+                        .downcast::<ValueListItem>()
+                        .map_err(|_| ex.out_of_memory())?,
+                );
+            }
+        } else if let Some(item) = object.as_any().downcast_ref::<ValueListItem>() {
+            let mut data = item.data.borrow_mut();
+            data.value = children.next().ok_or_else(|| ex.out_of_memory())?;
+            let Some(Value::String(text)) = children.next() else {
+                return Err(ex.out_of_memory());
+            };
+            data.presentation = text;
+            data.picture = children.next().ok_or_else(|| ex.out_of_memory())?;
+        }
+        Ok(())
+    }
+    fn clear(&self, shell: &Value) {
+        if let Some(object) = shell.as_object() {
+            if let Some(list) = object.as_any().downcast_ref::<ValueList>() {
+                drop(list.take_values());
+            }
+            if let Some(item) = object.as_any().downcast_ref::<ValueListItem>() {
+                drop(item.take_values());
+            }
+        }
+    }
+    fn restore_bytes(&self, children: usize) -> u64 {
+        512 + (children as u64).saturating_mul(32)
+            + self
+                .backing
+                .policy
+                .as_ref()
+                .map_or(0, TypeDescription::backing_bytes)
+    }
 }

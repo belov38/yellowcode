@@ -508,6 +508,48 @@ pub(crate) fn totals(t: &mut ast::Totals) {
     }
 }
 
+pub(crate) fn totals_aliases(t: &mut ast::Totals, selected: &[ast::SelectItem]) {
+    for it in &mut t.items {
+        let redundant = it.alias.as_ref().is_some_and(|alias| {
+            let ExprKind::Func {
+                func,
+                args: FuncArgs::List(args),
+                ..
+            } = &it.expr.kind
+            else {
+                return false;
+            };
+            let [
+                Expr {
+                    kind: ExprKind::Path(path),
+                    ..
+                },
+            ] = args.as_slice()
+            else {
+                return false;
+            };
+            let [name] = path.parts.as_slice() else {
+                return false;
+            };
+            let name = fold_name(&name.text);
+            func.is_aggregate()
+                && fold_name(&alias.name.text) == name
+                && selected
+                    .iter()
+                    .filter(|item| {
+                        item.alias
+                            .as_ref()
+                            .is_some_and(|alias| fold_name(&alias.name.text) == name)
+                    })
+                    .count()
+                    == 1
+        });
+        if redundant {
+            it.alias = None;
+        }
+    }
+}
+
 pub(crate) fn has_aggregate(e: &Expr) -> bool {
     match &e.kind {
         ExprKind::Func { func, args, .. } => {
@@ -668,15 +710,83 @@ pub(crate) fn regroup(op: &mut Operator, dcs: bool) {
             .map(|e| query_syntax::print::expr_sexpr(&expr(e)))
             .collect();
         let mut group = written.clone();
-        for c in columns {
+        for c in &columns {
             let mut read = Vec::new();
-            leaves(&c, &mut read);
+            leaves(c, &mut read);
             let covered = !read.is_empty() && read.iter().all(|p| plain.contains(p));
-            if !covered && seen.insert(query_syntax::print::expr_sexpr(&c)) {
-                group.push(c);
+            if !covered && seen.insert(query_syntax::print::expr_sexpr(c)) {
+                group.push(c.clone());
+            }
+        }
+        if !dcs
+            && group
+                .iter()
+                .any(|e| matches!(e.kind, ExprKind::Value { .. } | ExprKind::Lit(_)))
+            && group.iter().any(has_field)
+        {
+            let selected: HashSet<String> = op
+                .fields
+                .iter()
+                .filter_map(|it| match &it.kind {
+                    ItemKind::Expr(e)
+                        if matches!(e.kind, ExprKind::Value { .. } | ExprKind::Lit(_)) =>
+                    {
+                        Some(query_syntax::print::expr_sexpr(&expr(e)))
+                    }
+                    _ => None,
+                })
+                .collect();
+            group.retain(|e| {
+                !matches!(e.kind, ExprKind::Value { .. } | ExprKind::Lit(_))
+                    || !selected.contains(&query_syntax::print::expr_sexpr(&expr(e)))
+            });
+        }
+        if !dcs {
+            let key = |e: &Expr| query_syntax::print::expr_sexpr(&expr(e));
+            let mut remaining = std::collections::HashMap::<String, usize>::new();
+            for e in group.iter().filter(|e| matches!(e.kind, ExprKind::Path(_))) {
+                *remaining.entry(key(e)).or_default() += 1;
+            }
+            for c in columns
+                .into_iter()
+                .filter(|c| matches!(c.kind, ExprKind::Path(_)))
+            {
+                if let Some(count) = remaining.get_mut(&key(&c)) {
+                    if *count == 0 {
+                        group.push(c);
+                    } else {
+                        *count -= 1;
+                    }
+                }
             }
         }
         group
+    } else if !dcs
+        && op.having.is_empty()
+        && written.iter().all(|e| matches!(e.kind, ExprKind::Path(_)))
+        && op.fields.iter().all(|it| {
+            matches!(
+                &it.kind,
+                ItemKind::Expr(Expr {
+                    kind: ExprKind::Path(_)
+                        | ExprKind::Lit(_)
+                        | ExprKind::Param(_)
+                        | ExprKind::Value { .. },
+                    ..
+                })
+            )
+        })
+        && {
+            let keys: HashSet<String> = written
+                .iter()
+                .map(|e| query_syntax::print::expr_sexpr(&expr(e)))
+                .collect();
+            columns
+                .iter()
+                .all(|e| keys.contains(&query_syntax::print::expr_sexpr(e)))
+        }
+    {
+        written.clone()
     } else {
         let own: HashSet<String> = columns
             .iter()

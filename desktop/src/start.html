@@ -34,7 +34,7 @@ dialog::backdrop { background: #00000018; }
 #wizard .content { min-height: 180px; }
 .field { display: block; margin: 0 0 20px; }
 .field input { display: block; width: 100%; margin-top: 6px; min-height: 23px; }
-input[type="text"], select { border: 1px solid var(--cfg-border-control); background: var(--cfg-surface-field); color: var(--cfg-text-field); padding: 3px; }
+input[type="text"], input[type="number"], select { border: 1px solid var(--cfg-border-control); background: var(--cfg-surface-field); color: var(--cfg-text-field); padding: 3px; }
 .path-row { display: flex; gap: 4px; margin-top: 6px; }
 .path-row input { flex: 1; min-width: 0; margin: 0; }
 .footer { display: flex; justify-content: flex-end; gap: 6px; padding: 8px 12px 12px; }
@@ -70,9 +70,13 @@ dialog { color: #555; background: white; border-color: #b5b5b5; max-height: calc
 dialog::backdrop { background: transparent; }
 .caption { background: white; color: #111; font-size: 18px; font-weight: normal; padding: 10px 12px; display: flex; justify-content: space-between; }
 .caption button { padding: 0; width: 20px; border: 0; background: transparent; font-size: 20px; }
-#wizard { width: 448px; height: 464px; }
-#wizard .content { padding: 8px; }
-#wizard .footer { position: absolute; bottom: 0; right: 0; }
+#wizard { width: 448px; height: 604px; }
+#wizard .content { padding: 8px; min-height: 0; flex: 1; overflow-y: auto; }
+#wizard .footer { margin-top: auto; flex-shrink: 0; }
+#wizard .caption { flex-shrink: 0; }
+#wizard[open] { display: flex; flex-direction: column; overflow: auto; }
+#memory-preview, #memory-help { margin: 10px 0; line-height: 1.4; }
+#memory-preview[data-invalid=true] { color: #a02020; }
 .footer { padding: 8px; gap: 8px; }
 .footer button { min-width: 80px; height: 25px; }
 input[type=text], select { border-color: #b5b5b5; background: white; color: #555; }
@@ -121,10 +125,10 @@ input[type=text], select { border-color: #b5b5b5; background: white; color: #555
 <section id="sources" role="tabpanel" aria-labelledby="nav-recent"><label id="list-title" for="recent"></label><input id="source-search" type="search"><p id="source-empty" hidden></p><ul id="recent" role="listbox" tabindex="0" aria-labelledby="list-title"></ul><div id="source-path"></div><div id="source-mode" role="status"></div></section>
 <aside id="actions"><button id="enterprise" disabled></button><button id="open" disabled></button><button id="add"></button><button id="edit" disabled></button><button id="remove" disabled></button><button id="setup"></button><button id="follow-link" disabled></button><button id="quit"></button></aside>
 </main>
-<dialog id="wizard" aria-labelledby="wizard-title"><h2 class="caption"><span id="wizard-title"></span><button id="wizard-close" type="button" aria-label="Close">×</button></h2><div class="content"><label class="field"><span id="name-label"></span><input id="source-name" type="text" maxlength="256"></label><div class="field"><label id="path-label" for="source-input"></label><span class="path-row"><input id="source-input" type="text"><button id="pick-file" type="button"></button><button id="pick-folder" type="button"></button></span></div><label class="field"><span id="origin-label"></span><select id="source-origin"><option value="one_c" id="origin-onec"></option><option value="yellowcode" id="origin-yellowcode"></option></select></label><p id="source-hint"></p></div><div class="footer"><button id="finish"></button><button id="wizard-cancel"></button></div></dialog>
+<dialog id="wizard" aria-labelledby="wizard-title"><h2 class="caption"><span id="wizard-title"></span><button id="wizard-close" type="button" aria-label="Close">×</button></h2><div class="content"><label class="field"><span id="name-label"></span><input id="source-name" type="text" maxlength="256"></label><div class="field"><label id="path-label" for="source-input"></label><span class="path-row"><input id="source-input" type="text"><button id="pick-file" type="button"></button><button id="pick-folder" type="button"></button></span></div><label class="field"><span id="origin-label"></span><select id="source-origin"><option value="one_c" id="origin-onec"></option><option value="yellowcode" id="origin-yellowcode"></option></select></label><p id="source-hint"></p><label class="field"><span id="memory-label"></span><select id="memory-mode" aria-describedby="memory-help"><option value="auto" id="memory-auto"></option><option value="limited" id="memory-limited"></option></select></label><label class="field"><span id="memory-mib-label"></span><input id="memory-mib" type="number" min="256" step="1" value="1024" disabled aria-describedby="memory-preview memory-help"></label><div id="memory-preview" role="status" aria-live="polite"></div><p id="memory-help"></p></div><div class="footer"><button id="finish"></button><button id="wizard-cancel"></button></div></dialog>
 <dialog id="launch-settings" aria-labelledby="launch-settings-title"><h2 class="caption"><span id="launch-settings-title"></span><button data-launch-close aria-label="Close">×</button></h2><div class="content" id="launch-settings-content"></div><div class="footer"><button id="skin-settings-open"></button><button data-launch-close>OK</button><button data-launch-close id="launch-settings-cancel"></button></div></dialog>
 <dialog id="settings" aria-labelledby="settings-title"><h2 class="caption" id="settings-title"></h2><div class="content"><label class="field"><span id="skin-label"></span> <select id="skins"></select></label><button id="skin-file"></button><button id="skin-folder"></button></div><div class="footer"><button id="settings-close"></button></div></dialog>
-<dialog id="error" aria-labelledby="error-title"><h2 class="caption" id="error-title">Yellowcode</h2><div class="content" id="error-text"></div><div class="footer"><button id="error-close">OK</button></div></dialog>
+<dialog id="error" aria-labelledby="error-title"><h2 class="caption" id="error-title">Yellowcode</h2><div class="content" id="error-text"></div><div class="footer"><button id="error-restart" hidden></button><button id="error-close">OK</button></div></dialog>
 <dialog id="confirm" aria-labelledby="confirm-title"><h2 class="caption" id="confirm-title">Yellowcode</h2><div class="content" id="confirm-text"></div><div class="footer"><button id="confirm-ok"></button><button id="confirm-cancel"></button></div></dialog>
 <section id="splash" hidden><img id="splash-art" src="/skin/icon/pic/splash" alt=""><h1 id="splash-title"></h1><div id="loading-path"></div><div id="stage" role="status"></div><div id="loading-controls"><div id="progress" role="progressbar" aria-valuemin="0" aria-valuemax="4"><div id="progress-fill"></div></div><button id="cancel"></button></div><footer id="splash-footer"><div id="splash-product">Yellowcode <span id="app-version"></span></div><div id="splash-description"></div></footer></section>
 <script src="/start.js"></script>

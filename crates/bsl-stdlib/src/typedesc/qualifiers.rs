@@ -53,7 +53,7 @@ pub(super) enum Qualifier {
     Binary(BinaryQualifiers),
 }
 impl Qualifier {
-    fn id(self) -> &'static str {
+    pub(super) fn id(self) -> &'static str {
         match self {
             Self::Number(_) => "NumberQualifiers",
             Self::String(_) => "StringQualifiers",
@@ -72,6 +72,25 @@ fn enumeration(ty: &str, name: &str) -> Value {
     crate::enums::enum_value(idx(ty), name).unwrap_or_default()
 }
 impl HostObject for Qualifier {
+    fn session_edges(&self, _: &mut dyn bsl_vm::SessionEdges) -> bool {
+        true
+    }
+    fn session_transfer_supported(&self) -> bool {
+        true
+    }
+    fn retained_memory(&self, _: &mut dyn bsl_vm::RetainedMemory) -> Result<bool, Exception> {
+        Ok(true)
+    }
+    fn session_transfer(
+        &self,
+        out: &mut dyn bsl_vm::SessionExport,
+    ) -> Result<Option<Box<dyn bsl_vm::SessionObject>>, Exception> {
+        out.reserve(std::mem::size_of::<crate::session::Leaf<Self>>() as u64)?;
+        Ok(Some(Box::new(crate::session::Leaf {
+            value: *self,
+            restore_bytes: crate::collections::retained_rc_size::<Self>(),
+        })))
+    }
     fn type_id(&self) -> TypeId {
         TypeId::of_catalog(idx(self.id()))
     }

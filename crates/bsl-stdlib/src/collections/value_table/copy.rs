@@ -147,6 +147,7 @@ impl TableState {
             revision: Cell::new(0),
             next_id: Cell::new(next_id),
             records_bytes: Cell::new(total),
+            producer_capacity_extra: Cell::new(None),
             hash: creation_number(),
         });
         let observer: Rc<dyn SchemaRows> = state.clone();

@@ -68,6 +68,23 @@ enum Handle {
 }
 
 impl FileStorage {
+    #[cfg(unix)]
+    #[doc(hidden)]
+    pub fn from_locked_file(path: &Path, file: File, mode: Mode) -> Result<Self> {
+        if mode == Mode::ReadWrite && crate::fsinfo::is_network_fs(path)? {
+            return Err(crate::Error::Unsupported(crate::Unsupported::NetworkFs));
+        }
+        Ok(Self {
+            handle: Some(Handle::Locked(DbLock::acquire_file(path, file, mode)?)),
+            closed: OnceLock::new(),
+        })
+    }
+
+    #[cfg(unix)]
+    #[doc(hidden)]
+    pub fn as_file(&self) -> io::Result<&File> {
+        self.file()
+    }
     pub fn open(path: &Path, write: bool) -> io::Result<Self> {
         let file = OpenOptions::new().read(true).write(write).open(path)?;
         Ok(FileStorage {

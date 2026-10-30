@@ -31,6 +31,12 @@ UStack::UStack(UObjectDeleter *d, UKeyComparator *c, int32_t initialCapacity, UE
 {
 }
 
+UStack::UStack(UObjectDeleter *d, UKeyComparator *c, int32_t initialCapacity,
+               UErrorCode &status, UManagedOwner46 owner) :
+    UVector(d, c, initialCapacity, status, owner)
+{
+}
+
 UStack::~UStack() {}
 
 void* UStack::pop(void) {

@@ -1,4 +1,5 @@
 use super::*;
+pub(super) mod session;
 use crate::collections::columns::{PreparedSchemaChange, SchemaIndexes};
 use bsl_prim::Number;
 
@@ -363,6 +364,24 @@ impl SchemaIndexes for IndexState {
     }
 }
 impl HostObject for Indexes {
+    fn session_edges(&self, visit: &mut dyn bsl_vm::SessionEdges) -> bool {
+        visit.backing(self.state.clone())
+    }
+    fn session_transfer_supported(&self) -> bool {
+        true
+    }
+    fn session_transfer(
+        &self,
+        out: &mut dyn bsl_vm::SessionExport,
+    ) -> Result<Option<Box<dyn bsl_vm::SessionObject>>, bsl_vm::Exception> {
+        session::capture_object(self, None, out).map(Some)
+    }
+    fn retained_memory(
+        &self,
+        visit: &mut dyn bsl_vm::RetainedMemory,
+    ) -> Result<bool, bsl_vm::Exception> {
+        crate::collections::accounting::project(self, visit)
+    }
     fn type_id(&self) -> TypeId {
         TypeId::of_catalog(idx("CollectionIndexes"))
     }
@@ -414,6 +433,31 @@ impl CollectionIndex {
     }
 }
 impl HostObject for CollectionIndex {
+    fn session_edges(&self, visit: &mut dyn bsl_vm::SessionEdges) -> bool {
+        visit.backing(self.state.clone()) && visit.backing(self.record.clone())
+    }
+    fn session_transfer_supported(&self) -> bool {
+        true
+    }
+    fn session_transfer(
+        &self,
+        out: &mut dyn bsl_vm::SessionExport,
+    ) -> Result<Option<Box<dyn bsl_vm::SessionObject>>, bsl_vm::Exception> {
+        session::capture_object(
+            &Indexes {
+                state: self.state.clone(),
+            },
+            Some(&self.record),
+            out,
+        )
+        .map(Some)
+    }
+    fn retained_memory(
+        &self,
+        visit: &mut dyn bsl_vm::RetainedMemory,
+    ) -> Result<bool, bsl_vm::Exception> {
+        crate::collections::accounting::project(self, visit)
+    }
     fn type_id(&self) -> TypeId {
         TypeId::of_catalog(idx("CollectionIndex"))
     }
@@ -451,4 +495,58 @@ impl HostObject for CollectionIndex {
             }),
         )
     }
+}
+
+impl Indexes {
+    pub(in crate::collections) fn retained_rc(
+        value: &Rc<Self>,
+        a: &mut impl crate::collections::accounting::Charge,
+    ) -> crate::collections::accounting::Result<()> {
+        a.shared_object(value)
+    }
+}
+pub(super) fn retained_object(
+    actual: &dyn Any,
+    a: &mut impl crate::collections::accounting::Charge,
+) -> Option<crate::collections::accounting::Result<()>> {
+    if let Some(indexes) = actual.downcast_ref::<Indexes>() {
+        Some(retained_state(&indexes.state, a))
+    } else {
+        actual.downcast_ref::<CollectionIndex>().map(|index| {
+            (|| {
+                retained_state(&index.state, a)?;
+                retained_definition(&index.record, a)
+            })()
+        })
+    }
+}
+fn retained_state(
+    value: &Rc<IndexState>,
+    a: &mut impl crate::collections::accounting::Charge,
+) -> crate::collections::accounting::Result<()> {
+    if !a.rc(value)? {
+        return Ok(());
+    }
+    Columns::retained_rc(&value.columns, a)?;
+    let entries = value
+        .entries
+        .try_borrow()
+        .map_err(|_| crate::collections::RetainedChargeError::Borrowed)?;
+    a.vector(&entries)?;
+    for record in entries.iter() {
+        retained_definition(record, a)?;
+    }
+    Ok(())
+}
+fn retained_definition(
+    value: &Rc<Definition>,
+    a: &mut impl crate::collections::accounting::Charge,
+) -> crate::collections::accounting::Result<()> {
+    if a.rc(value)? {
+        a.vector(&value.columns)?;
+        for column in &value.columns {
+            ColumnRecord::retained_rc(column, a)?;
+        }
+    }
+    Ok(())
 }

@@ -1,17 +1,11 @@
 pub mod borrowed;
 
-use std::collections::HashMap;
-use std::sync::OnceLock;
+use super::resources::{self, Graph, GuiResourceError};
+use memory_budget::{BudgetError, MemoryBudget};
 
 use mdconf::MdKind;
-use serde::Deserialize;
 
 use super::out::Lang;
-
-const WINDOWS: &str = include_str!("configurator/windows.json");
-const PROPS: &str = include_str!("configurator/props.json");
-const RIGHTS: &str = include_str!("configurator/rights.json");
-const EDITOR: &str = include_str!("configurator/editor.json");
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TabItem {
@@ -64,80 +58,50 @@ impl PaletteProp {
     }
 }
 
-#[derive(Deserialize)]
-struct RawItem {
-    t: String,
-    #[serde(default)]
-    name: String,
-    #[serde(default)]
-    kind: String,
-    #[serde(default)]
-    ru: String,
-    #[serde(default)]
-    en: String,
-    #[serde(default)]
-    control: String,
-}
-
-#[derive(Deserialize)]
-struct RawTab {
-    ru: String,
-    en: String,
-    items: Vec<RawItem>,
-}
-
-#[derive(Deserialize)]
-struct RawProp {
-    name: String,
-    ru: String,
-    en: String,
-    #[serde(default)]
-    tip: String,
-    #[serde(default)]
-    view: String,
-    #[serde(default)]
-    tab: Option<String>,
-    cat: String,
-}
-
-#[derive(Deserialize)]
-struct RawCategory {
-    en: String,
-    ru: String,
-}
-
-#[derive(Deserialize)]
-struct RawProps {
-    categories: Vec<RawCategory>,
-    contexts: HashMap<String, Vec<RawProp>>,
-}
-
-#[derive(Deserialize)]
-struct RawRight {
+struct Right {
     ru: String,
     en: String,
     ru_hint: String,
     en_hint: String,
 }
-
-#[derive(Deserialize)]
-struct RawColor {
-    key: String,
-    color: String,
+mod descriptors {
+    pub(super) enum Item {
+        Prop(&'static str),
+        List(&'static str),
+        Caption(&'static str, &'static str, &'static str),
+    }
+    pub(super) struct Tab {
+        pub ru: &'static str,
+        pub en: &'static str,
+        pub items: &'static [Item],
+    }
+    pub(super) struct Prop {
+        pub name: &'static str,
+        pub ru: &'static str,
+        pub en: &'static str,
+        pub tip: &'static str,
+        pub view: &'static str,
+        pub tab: Option<&'static str>,
+        pub cat: &'static str,
+    }
+    include!("configurator/descriptors.rs");
 }
-
-#[derive(Deserialize)]
-struct RawFont {
-    face: String,
-    size_pt: f64,
+struct FlatMap<V>(Vec<(String, V)>);
+impl<V> FlatMap<V> {
+    fn get(&self, key: &str) -> Option<&V> {
+        let i = self.0.partition_point(|(k, _)| k.as_str() < key);
+        self.0.get(i).filter(|(k, _)| k == key).map(|(_, v)| v)
+    }
+    fn contains_key(&self, key: &str) -> bool {
+        self.get(key).is_some()
+    }
 }
-
-#[derive(Deserialize)]
-struct RawEditor {
-    colors: Vec<RawColor>,
-    font: RawFont,
-    tab_size: u32,
-    replace_tab_on_input: bool,
+impl<'a, V> IntoIterator for &'a FlatMap<V> {
+    type Item = &'a (String, V);
+    type IntoIter = std::slice::Iter<'a, (String, V)>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -149,111 +113,238 @@ pub struct EditorSettings {
 }
 
 struct Data {
-    windows: HashMap<String, Vec<WindowTab>>,
+    windows: FlatMap<Vec<WindowTab>>,
     main_tab: Vec<WindowTab>,
-    props: HashMap<String, Vec<PaletteProp>>,
+    props: FlatMap<Vec<PaletteProp>>,
     categories: Vec<(String, String)>,
-    rights: HashMap<String, RawRight>,
+    rights: FlatMap<Right>,
     colors: Vec<(String, String)>,
     editor: EditorSettings,
 }
 
-fn parse<'a, T: Deserialize<'a>>(text: &'a str, what: &str) -> Option<T> {
-    serde_json::from_str(text)
-        .map_err(|e| eprintln!("onec: embedded {what}: {e}"))
-        .ok()
-}
+static DATA: Graph<Data> = Graph::new();
 
-fn data() -> &'static Data {
-    static DATA: OnceLock<Data> = OnceLock::new();
-    DATA.get_or_init(|| {
-        let windows = parse::<HashMap<String, Vec<RawTab>>>(WINDOWS, "windows.json")
-            .unwrap_or_default()
-            .into_iter()
-            .map(|(k, tabs)| {
-                let tabs = tabs
-                    .into_iter()
-                    .map(|t| WindowTab {
-                        title_ru: t.ru,
-                        title_en: t.en,
-                        items: t.items.into_iter().filter_map(item).collect(),
-                    })
-                    .collect();
-                (k, tabs)
-            })
-            .collect();
-        let raw = parse::<RawProps>(PROPS, "props.json");
-        let (categories, props) = match raw {
-            Some(r) => (
-                r.categories.into_iter().map(|c| (c.en, c.ru)).collect(),
-                r.contexts
-                    .into_iter()
-                    .map(|(k, v)| {
-                        let v = v
-                            .into_iter()
-                            .map(|p| PaletteProp {
-                                name: p.name,
-                                caption_ru: p.ru,
-                                caption_en: p.en,
-                                tooltip_ru: p.tip,
-                                view: p.view,
-                                tab: p.tab,
-                                category: p.cat,
-                            })
-                            .collect();
-                        (k, v)
-                    })
-                    .collect(),
-            ),
-            None => Default::default(),
-        };
-        let rights = parse(RIGHTS, "rights.json").unwrap_or_default();
-        let (colors, editor) = match parse::<RawEditor>(EDITOR, "editor.json") {
-            Some(e) => (
-                e.colors.into_iter().map(|c| (c.key, c.color)).collect(),
-                EditorSettings {
-                    font_face: e.font.face,
-                    font_pt: e.font.size_pt,
-                    tab_size: e.tab_size,
-                    replace_tab_on_input: e.replace_tab_on_input,
-                },
-            ),
-            None => (
-                Vec::new(),
-                EditorSettings {
-                    font_face: "Courier New".into(),
-                    font_pt: 10.0,
-                    tab_size: 4,
-                    replace_tab_on_input: false,
-                },
-            ),
-        };
-        Data {
-            windows,
-            main_tab: vec![WindowTab {
-                title_ru: "Основные".into(),
-                title_en: "Main".into(),
-                items: Vec::new(),
-            }],
-            props,
-            categories,
-            rights,
-            colors,
-            editor,
+fn descriptor_bytes() -> Result<u64, BudgetError> {
+    use descriptors as d;
+    let mut n = 0;
+    resources::rows::<(String, Vec<WindowTab>)>(&mut n, d::WINDOWS.len())?;
+    resources::rows::<WindowTab>(&mut n, 1)?;
+    for s in ["Основные", "Main", d::FONT] {
+        resources::add(&mut n, s.len())?;
+    }
+    for (key, tabs) in d::WINDOWS {
+        resources::add(&mut n, key.len())?;
+        resources::rows::<WindowTab>(&mut n, tabs.len())?;
+        for tab in *tabs {
+            resources::add(&mut n, tab.ru.len())?;
+            resources::add(&mut n, tab.en.len())?;
+            resources::rows::<TabItem>(&mut n, tab.items.len())?;
+            for item in tab.items {
+                match item {
+                    d::Item::Prop(s) | d::Item::List(s) => resources::add(&mut n, s.len())?,
+                    d::Item::Caption(ru, en, control) => {
+                        for s in [ru, en, control] {
+                            resources::add(&mut n, s.len())?;
+                        }
+                    }
+                }
+            }
         }
+    }
+    resources::rows::<(String, Vec<PaletteProp>)>(&mut n, d::PROPS.len())?;
+    for (key, props) in d::PROPS {
+        resources::add(&mut n, key.len())?;
+        resources::rows::<PaletteProp>(&mut n, props.len())?;
+        for p in *props {
+            for s in [p.name, p.ru, p.en, p.tip, p.view, p.cat] {
+                resources::add(&mut n, s.len())?;
+            }
+            if let Some(s) = p.tab {
+                resources::add(&mut n, s.len())?;
+            }
+        }
+    }
+    resources::rows::<(String, Right)>(&mut n, d::RIGHTS.len())?;
+    for (key, fields) in d::RIGHTS {
+        resources::add(&mut n, key.len())?;
+        for s in fields {
+            resources::add(&mut n, s.len())?;
+        }
+    }
+    for pairs in [d::CATEGORIES, d::COLORS] {
+        resources::rows::<(String, String)>(&mut n, pairs.len())?;
+        for (a, b) in pairs {
+            resources::add(&mut n, a.len())?;
+            resources::add(&mut n, b.len())?;
+        }
+    }
+    Ok(n)
+}
+fn pairs(source: &[(&str, &str)]) -> Result<Vec<(String, String)>, BudgetError> {
+    let mut v = resources::vec(source.len())?;
+    for (a, b) in source {
+        v.push((resources::text(a)?, resources::text(b)?));
+    }
+    Ok(v)
+}
+fn build() -> Result<Data, BudgetError> {
+    use descriptors as d;
+    let mut windows = resources::vec(d::WINDOWS.len())?;
+    for (key, source) in d::WINDOWS {
+        let mut tabs = resources::vec(source.len())?;
+        for tab in *source {
+            let mut items = resources::vec(tab.items.len())?;
+            for item in tab.items {
+                items.push(match item {
+                    d::Item::Prop(s) => TabItem::Prop(resources::text(s)?),
+                    d::Item::List(s) => TabItem::List(resources::text(s)?),
+                    d::Item::Caption(ru, en, control) => TabItem::Caption {
+                        ru: resources::text(ru)?,
+                        en: resources::text(en)?,
+                        control: resources::text(control)?,
+                    },
+                });
+            }
+            tabs.push(WindowTab {
+                title_ru: resources::text(tab.ru)?,
+                title_en: resources::text(tab.en)?,
+                items,
+            });
+        }
+        windows.push((resources::text(key)?, tabs));
+    }
+    let mut props = resources::vec(d::PROPS.len())?;
+    for (key, source) in d::PROPS {
+        let mut values = resources::vec(source.len())?;
+        for p in *source {
+            values.push(PaletteProp {
+                name: resources::text(p.name)?,
+                caption_ru: resources::text(p.ru)?,
+                caption_en: resources::text(p.en)?,
+                tooltip_ru: resources::text(p.tip)?,
+                view: resources::text(p.view)?,
+                tab: p.tab.map(resources::text).transpose()?,
+                category: resources::text(p.cat)?,
+            });
+        }
+        props.push((resources::text(key)?, values));
+    }
+    let mut rights = resources::vec(d::RIGHTS.len())?;
+    for (key, [ru, en, ru_hint, en_hint]) in d::RIGHTS {
+        rights.push((
+            resources::text(key)?,
+            Right {
+                ru: resources::text(ru)?,
+                en: resources::text(en)?,
+                ru_hint: resources::text(ru_hint)?,
+                en_hint: resources::text(en_hint)?,
+            },
+        ));
+    }
+    let mut main_tab = resources::vec(1)?;
+    main_tab.push(WindowTab {
+        title_ru: resources::text("Основные")?,
+        title_en: resources::text("Main")?,
+        items: Vec::new(),
+    });
+    Ok(Data {
+        windows: FlatMap(windows),
+        main_tab,
+        props: FlatMap(props),
+        categories: pairs(d::CATEGORIES)?,
+        rights: FlatMap(rights),
+        colors: pairs(d::COLORS)?,
+        editor: EditorSettings {
+            font_face: resources::text(d::FONT)?,
+            font_pt: d::FONT_PT,
+            tab_size: d::TAB_SIZE,
+            replace_tab_on_input: d::REPLACE_TAB,
+        },
     })
 }
-
-fn item(r: RawItem) -> Option<TabItem> {
-    match r.t.as_str() {
-        "prop" => Some(TabItem::Prop(r.name)),
-        "list" => Some(TabItem::List(r.kind)),
-        "cap" => Some(TabItem::Caption {
-            ru: r.ru,
-            en: r.en,
-            control: r.control,
-        }),
-        _ => None,
+impl Data {
+    fn backing_bytes(&self) -> Result<u64, BudgetError> {
+        let mut n = 0;
+        resources::rows::<(String, Vec<WindowTab>)>(&mut n, self.windows.0.capacity())?;
+        for (key, _) in &self.windows {
+            resources::add(&mut n, key.capacity())?;
+        }
+        for tabs in self
+            .windows
+            .0
+            .iter()
+            .map(|(_, v)| v)
+            .chain(std::iter::once(&self.main_tab))
+        {
+            resources::rows::<WindowTab>(&mut n, tabs.capacity())?;
+            for tab in tabs {
+                resources::add(&mut n, tab.title_ru.capacity())?;
+                resources::add(&mut n, tab.title_en.capacity())?;
+                resources::rows::<TabItem>(&mut n, tab.items.capacity())?;
+                for item in &tab.items {
+                    match item {
+                        TabItem::Prop(s) | TabItem::List(s) => {
+                            resources::add(&mut n, s.capacity())?
+                        }
+                        TabItem::Caption { ru, en, control } => {
+                            for s in [ru, en, control] {
+                                resources::add(&mut n, s.capacity())?;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        resources::rows::<(String, Vec<PaletteProp>)>(&mut n, self.props.0.capacity())?;
+        for (key, props) in &self.props {
+            resources::add(&mut n, key.capacity())?;
+            resources::rows::<PaletteProp>(&mut n, props.capacity())?;
+            for p in props {
+                for s in [
+                    &p.name,
+                    &p.caption_ru,
+                    &p.caption_en,
+                    &p.tooltip_ru,
+                    &p.view,
+                    &p.category,
+                ] {
+                    resources::add(&mut n, s.capacity())?;
+                }
+                if let Some(s) = &p.tab {
+                    resources::add(&mut n, s.capacity())?;
+                }
+            }
+        }
+        resources::rows::<(String, Right)>(&mut n, self.rights.0.capacity())?;
+        for (key, r) in &self.rights {
+            for s in [key, &r.ru, &r.en, &r.ru_hint, &r.en_hint] {
+                resources::add(&mut n, s.capacity())?;
+            }
+        }
+        for pairs in [&self.categories, &self.colors] {
+            resources::rows::<(String, String)>(&mut n, pairs.capacity())?;
+            for (a, b) in pairs {
+                resources::add(&mut n, a.capacity())?;
+                resources::add(&mut n, b.capacity())?;
+            }
+        }
+        resources::add(&mut n, self.editor.font_face.capacity())?;
+        Ok(n)
+    }
+}
+pub fn prepare_with_memory(budget: &MemoryBudget) -> Result<(), GuiResourceError> {
+    let root = budget.root_budget();
+    DATA.prepare(Some(&root), descriptor_bytes, Data::backing_bytes, build)?;
+    Ok(())
+}
+#[allow(
+    clippy::panic,
+    reason = "legacy infallible accessor; managed preparation is typed and fallible"
+)]
+fn data() -> &'static Data {
+    match DATA.prepare(None, descriptor_bytes, Data::backing_bytes, build) {
+        Ok(d) => d,
+        Err(e) => panic!("configurator data: {e}"),
     }
 }
 
@@ -318,4 +409,10 @@ pub fn editor_colors() -> &'static [(String, String)] {
 
 pub fn editor_settings() -> &'static EditorSettings {
     &data().editor
+}
+
+#[cfg(feature = "testing")]
+#[doc(hidden)]
+pub fn diagnostic_window_tabs(kind: &str) -> Option<&'static [WindowTab]> {
+    data().windows.get(kind).map(Vec::as_slice)
 }

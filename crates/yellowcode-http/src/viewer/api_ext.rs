@@ -6,13 +6,8 @@ use yellowcode_core::viewer::{
     definition, helper, object_window, predefined_view, rights_view, template_view,
 };
 
-fn reply(status: u16, body: &Value) -> Response {
-    Response {
-        status,
-        content_type: "application/json; charset=utf-8",
-        body: serde_json::to_vec(body).unwrap_or_else(|_| b"null".to_vec()),
-        ..Default::default()
-    }
+fn reply<T: serde::Serialize + ?Sized>(status: u16, body: &T) -> Response {
+    super::memory::json(status, body)
 }
 
 fn error(status: u16, msg: &str) -> Response {
@@ -53,7 +48,9 @@ fn icon(req: &Request) -> Response {
     Response {
         status: 200,
         content_type: "image/png",
-        body: if want2x { png2.unwrap_or(png) } else { png }.to_vec(),
+        body: if want2x { png2.unwrap_or(png) } else { png }
+            .to_vec()
+            .into(),
         cache_control: Some(
             if param(req, "v") == Some(yellowcode_core::viewer::icons::version()) {
                 "max-age=31536000, immutable"
@@ -81,7 +78,7 @@ fn find_definition(state: &State, req: &Request) -> Response {
         (Err(e), _) | (_, Err(e)) => return e,
     };
     match definition::definition(&state.cfg, path, module, line, col) {
-        Some(loc) => reply(200, &serde_json::to_value(loc).unwrap_or(Value::Null)),
+        Some(loc) => reply(200, &loc),
         None => error(404, "no definition"),
     }
 }
@@ -202,7 +199,7 @@ fn rights(state: &State, req: &Request) -> Response {
         return error(400, "limit: must be positive");
     }
     match rights_view::rights_table(&state.cfg, path, state.lang, &query) {
-        Some(t) => reply(200, &serde_json::to_value(t).unwrap_or(Value::Null)),
+        Some(t) => reply(200, &t),
         None => error(404, "no rights for this path"),
     }
 }
@@ -228,7 +225,7 @@ fn template(state: &State, req: &Request) -> Response {
         return error(400, "rows: must be positive");
     }
     match template_view::template_view_range(&state.cfg, path, from, rows) {
-        Some(v) => reply(200, &serde_json::to_value(v).unwrap_or(Value::Null)),
+        Some(v) => reply(200, &v),
         None => error(404, "no such template"),
     }
 }
@@ -252,7 +249,7 @@ fn helper_type(state: &State, req: &Request) -> Response {
         return error(400, "name is required");
     };
     match helper::helper_type(name, state.lang) {
-        Some(t) => reply(200, &serde_json::to_value(t).unwrap_or(Value::Null)),
+        Some(t) => reply(200, &t),
         None => error(404, "no such type"),
     }
 }

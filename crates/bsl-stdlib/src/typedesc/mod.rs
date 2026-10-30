@@ -1,6 +1,7 @@
 mod cast;
 mod order;
 mod qualifiers;
+mod xdto;
 use crate::bind::{arg_value, type_mismatch, value_mismatch};
 use crate::collections::{method_name, not_implemented, property_name};
 use crate::enums::type_by_id;
@@ -16,6 +17,7 @@ pub use qualifiers::{
     StringQualifiers,
 };
 use std::{any::Any, rc::Rc, sync::Arc};
+pub(crate) use xdto::codecs as xdto_codecs;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TypeDescription {
@@ -27,6 +29,19 @@ pub struct TypeDescription {
     binary: Option<BinaryQualifiers>,
 }
 impl TypeDescription {
+    pub(crate) fn session_copy(&self) -> Result<Self, std::collections::TryReserveError> {
+        Ok(Self {
+            types: crate::session::copy(&self.types)?,
+            keeps_undefined: self.keeps_undefined,
+            number: self.number,
+            string: self.string,
+            date: self.date,
+            binary: self.binary,
+        })
+    }
+    pub(crate) fn backing_bytes(&self) -> u64 {
+        (self.types.capacity() as u64).saturating_mul(std::mem::size_of::<TypeId>() as u64)
+    }
     pub fn new(
         types: &[TypeId],
         number: Option<NumberQualifiers>,
@@ -128,6 +143,31 @@ pub fn type_description_of(v: &Value) -> Option<TypeDescription> {
 }
 
 impl HostObject for TypeDescription {
+    fn session_edges(&self, _: &mut dyn bsl_vm::SessionEdges) -> bool {
+        true
+    }
+    fn session_transfer_supported(&self) -> bool {
+        true
+    }
+    fn session_transfer(
+        &self,
+        out: &mut dyn bsl_vm::SessionExport,
+    ) -> Result<Option<Box<dyn bsl_vm::SessionObject>>, Exception> {
+        out.reserve(
+            self.backing_bytes()
+                .saturating_add(std::mem::size_of::<Self>() as u64),
+        )?;
+        Ok(Some(Box::new(SessionType(
+            self.session_copy().map_err(|_| out.memory_error())?,
+        ))))
+    }
+    fn retained_memory(
+        &self,
+        visit: &mut dyn bsl_vm::RetainedMemory,
+    ) -> Result<bool, bsl_vm::Exception> {
+        visit.bytes(self.backing_bytes())?;
+        Ok(true)
+    }
     fn type_id(&self) -> TypeId {
         TypeId::of_catalog(idx("TypeDescription"))
     }
@@ -193,6 +233,31 @@ impl HostObject for TypeDescription {
     }
     fn to_shared(&self) -> Option<SharedValue> {
         Some(SharedValue::Object(Arc::new(self.clone())))
+    }
+}
+
+struct SessionType(TypeDescription);
+impl bsl_vm::SessionObject for SessionType {
+    fn retained_memory(&self, visit: &mut dyn bsl_vm::RetainedMemory) -> Result<(), Exception> {
+        visit.bytes(self.0.backing_bytes())
+    }
+    fn create(
+        &self,
+        ex: &mut Execution,
+        _: &mut bsl_vm::SessionImports,
+    ) -> Result<Value, Exception> {
+        Ok(new_type_description(
+            self.0.session_copy().map_err(|_| ex.out_of_memory())?,
+        ))
+    }
+    fn fill(&self, _: &mut Execution, _: &Value, _: Vec<Value>) -> Result<(), Exception> {
+        Ok(())
+    }
+    fn clear(&self, _: &Value) {}
+    fn restore_bytes(&self, _: usize) -> u64 {
+        self.0
+            .backing_bytes()
+            .saturating_add(bsl_vm::session_shared_bytes::<TypeDescription>())
     }
 }
 impl SharedObject for TypeDescription {
@@ -304,4 +369,13 @@ fn ctor(ex: &mut Execution, args: &mut [Arg]) -> CallResult<Value> {
     }
     td.normalize();
     Ok(new_type_description(td))
+}
+
+impl TypeDescription {
+    pub(crate) fn retained(
+        &self,
+        a: &mut impl crate::collections::accounting::Charge,
+    ) -> crate::collections::accounting::Result<()> {
+        a.vector(&self.types)
+    }
 }

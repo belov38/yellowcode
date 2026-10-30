@@ -227,6 +227,11 @@ impl State {
     }
     fn add(&mut self, category: Category, bytes: u64) -> Result<(), MemoryLimit> {
         self.mutations = self.mutations.wrapping_add(1);
+        let (current, category_current) = self.checked_add(category, bytes)?;
+        self.commit_add(category, current, category_current);
+        Ok(())
+    }
+    fn checked_add(&self, category: Category, bytes: u64) -> Result<(u64, u64), MemoryLimit> {
         let error = |reason| MemoryLimit {
             category,
             requested: bytes,
@@ -243,15 +248,18 @@ impl State {
         if bytes != 0 && (self.over_budget() || current > self.limits.admission) {
             return Err(error(LimitReason::Global));
         }
-        let counter = &mut self.categories[category as usize];
+        let counter = &self.categories[category as usize];
         if bytes != 0 && category_current > counter.limit {
             return Err(error(LimitReason::Category));
         }
+        Ok((current, category_current))
+    }
+    fn commit_add(&mut self, category: Category, current: u64, category_current: u64) {
+        let counter = &mut self.categories[category as usize];
         self.current = current;
         self.peak = self.peak.max(current);
         counter.current = category_current;
         counter.peak = counter.peak.max(category_current);
-        Ok(())
     }
     fn release(&mut self, category: Category, bytes: u64) {
         self.mutations = self.mutations.wrapping_add(1);
@@ -261,6 +269,14 @@ impl State {
 }
 
 impl MemoryBudget {
+    pub fn root_budget(&self) -> Self {
+        let root = self.inner.parent().unwrap_or(self);
+        Self {
+            inner: root.inner.clone(),
+            local: None,
+        }
+    }
+
     pub fn same_instance(&self, other: &Self) -> bool {
         LedgerRef::ptr_eq(&self.inner, &other.inner)
     }
@@ -273,6 +289,20 @@ impl MemoryBudget {
     pub fn try_new(limits: Limits) -> Result<Self, crate::BudgetError> {
         Ok(Self {
             inner: LedgerRef::try_new(limits)?,
+            local: None,
+        })
+    }
+    pub fn try_child(&self, limits: Limits) -> Result<Self, crate::BudgetError> {
+        if self.scope().is_some() || self.inner.parent().is_some() {
+            return Err(MemoryLimit {
+                category: Category::Metadata,
+                requested: 0,
+                reason: LimitReason::InvalidSize,
+            }
+            .into());
+        }
+        Ok(Self {
+            inner: LedgerRef::try_child(limits, self)?,
             local: None,
         })
     }
@@ -355,6 +385,17 @@ impl MemoryBudget {
     pub fn scope_snapshot(&self) -> Option<ScopeSnapshot> {
         self.scope().map(|scope| *lock(scope))
     }
+    pub fn set_scope_limit(&self, limit: u64) -> Result<(), MemoryLimit> {
+        let Some(scope) = self.scope() else {
+            return Err(MemoryLimit {
+                category: Category::Execution,
+                requested: limit,
+                reason: LimitReason::InvalidSize,
+            });
+        };
+        lock(scope).limit = limit;
+        Ok(())
+    }
     pub fn try_borrow_scope(&self, bytes: u64) -> Result<ScopeBorrow, MemoryLimit> {
         let scope = self.scope().ok_or(MemoryLimit {
             category: Category::Row,
@@ -413,9 +454,13 @@ impl MemoryBudget {
         };
         {
             let mut state = lock(&self.inner);
-            let added = state.add(category, bytes);
+            state.mutations = state.mutations.wrapping_add(1);
+            let (current, category_current) = state.checked_add(category, bytes)?;
+            if let Some(parent) = self.inner.parent() {
+                parent.account_add(category, bytes)?;
+            }
+            state.commit_add(category, current, category_current);
             self.publish_over(&state);
-            added?;
         }
         if let (Some(scope), Some(next)) = (local.as_mut(), next) {
             scope.current = next;
@@ -431,6 +476,9 @@ impl MemoryBudget {
         {
             let mut state = lock(&self.inner);
             state.release(category, bytes);
+            if let Some(parent) = self.inner.parent() {
+                parent.account_release(category, bytes);
+            }
             self.publish_over(&state);
         }
         if let Some(scope) = local.as_mut() {
@@ -442,6 +490,17 @@ impl MemoryBudget {
             Err(error) if self.evict_for(&error) => self.account_add(category, bytes)?,
             other => other?,
         }
+        Ok(Reservation {
+            budget: self.clone(),
+            record: Mutex::new(Record { category, bytes }),
+        })
+    }
+    pub fn try_reserve_no_evict(
+        &self,
+        category: Category,
+        bytes: u64,
+    ) -> Result<Reservation, MemoryLimit> {
+        self.account_add(category, bytes)?;
         Ok(Reservation {
             budget: self.clone(),
             record: Mutex::new(Record { category, bytes }),
@@ -471,6 +530,12 @@ impl MemoryBudget {
         }
         Ok(())
     }
+    pub fn current_bytes(&self) -> u64 {
+        self.inner
+            .current()
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
     pub fn set_limits(&self, limits: Limits) {
         let mut state = lock(&self.inner);
         state.mutations = state.mutations.wrapping_add(1);
@@ -482,9 +547,11 @@ impl MemoryBudget {
     }
     pub fn over_budget(&self) -> bool {
         self.inner.over().load(std::sync::atomic::Ordering::Acquire)
+            || self.inner.parent().is_some_and(MemoryBudget::over_budget)
     }
     fn publish_over(&self, state: &State) {
         use std::sync::atomic::Ordering;
+        self.inner.current().store(state.current, Ordering::Release);
         let over = state.over_budget();
         let flag = self.inner.over();
         if flag.load(Ordering::Relaxed) != over {
@@ -505,9 +572,41 @@ impl MemoryBudget {
             current: state.current,
             peak: state.peak,
             admission: state.limits.admission,
-            over_budget: state.over_budget(),
+            over_budget: state.over_budget()
+                || self.inner.parent().is_some_and(MemoryBudget::over_budget),
             categories: state.categories,
         }
+    }
+    fn account_transfer(
+        &self,
+        from: Category,
+        to: Category,
+        bytes: u64,
+    ) -> Result<(), MemoryLimit> {
+        let mut state = lock(&self.inner);
+        state.mutations = state.mutations.wrapping_add(1);
+        let target = &state.categories[to as usize];
+        let current = target.current.checked_add(bytes).ok_or(MemoryLimit {
+            category: to,
+            requested: bytes,
+            reason: LimitReason::Overflow,
+        })?;
+        if current > target.limit {
+            return Err(MemoryLimit {
+                category: to,
+                requested: bytes,
+                reason: LimitReason::Category,
+            });
+        }
+        if let Some(parent) = self.inner.parent() {
+            parent.account_transfer(from, to, bytes)?;
+        }
+        state.categories[from as usize].current -= bytes;
+        let target = &mut state.categories[to as usize];
+        target.current = current;
+        target.peak = target.peak.max(current);
+        self.publish_over(&state);
+        Ok(())
     }
 }
 
@@ -592,30 +691,9 @@ impl Reservation {
         if category == record.category {
             return Ok(());
         }
-        let mut state = lock(&self.budget.inner);
-        state.mutations = state.mutations.wrapping_add(1);
-        let target = &state.categories[category as usize];
-        let current = target
-            .current
-            .checked_add(record.bytes)
-            .ok_or(MemoryLimit {
-                category,
-                requested: record.bytes,
-                reason: LimitReason::Overflow,
-            })?;
-        if current > target.limit {
-            return Err(MemoryLimit {
-                category,
-                requested: record.bytes,
-                reason: LimitReason::Category,
-            });
-        }
-        state.categories[record.category as usize].current -= record.bytes;
-        let target = &mut state.categories[category as usize];
-        target.current = current;
-        target.peak = target.peak.max(current);
+        self.budget
+            .account_transfer(record.category, category, record.bytes)?;
         record.category = category;
-        self.budget.publish_over(&state);
         Ok(())
     }
     pub fn shrink(&self, bytes: u64) -> Result<(), MemoryLimit> {

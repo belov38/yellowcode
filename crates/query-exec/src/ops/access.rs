@@ -6,7 +6,7 @@ use ibschema::storage::{FieldId, IndexId, TableId};
 use query_ir::{ExecError, PExpr, QValue};
 
 use super::{Cx, Op, eval, fatal};
-use crate::key::key_of;
+use crate::key::try_key_of;
 use crate::model::{VALUE_SIZE, vec_block};
 use crate::source::{IndexPrefixes, Row, RowIter, SKIP_MAX_AREAS};
 
@@ -62,9 +62,10 @@ pub(crate) fn fetch_by_id(
         return Ok(None);
     };
     if let Some(f) = id_field(cx, table)? {
-        let same = row
-            .get(usize::from(f.0))
-            .is_some_and(|v| key_of(v, cx.env.collation) == key_of(id, cx.env.collation));
+        let same = match row.get(usize::from(f.0)) {
+            Some(v) => try_key_of(v, cx.coll)? == try_key_of(id, cx.coll)?,
+            None => false,
+        };
         if !same {
             return Ok(None);
         }

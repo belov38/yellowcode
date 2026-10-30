@@ -254,6 +254,7 @@ ucnv_safeClone(const UConverter* cnv, void *stackBuffer, int32_t *pBufferSize, U
 
     /* Copy initial state */
     uprv_memcpy(localConverter, cnv, sizeof(UConverter));
+    localConverter->managedRole = 0;
     localConverter->isCopyLocal = localConverter->isExtraLocal = FALSE;
 
     /* copy the substitution string */
@@ -529,7 +530,8 @@ ucnv_setSubstString(UConverter *cnv,
         /* Use a separate buffer for the string. Outside UConverter to not make it too large. */
         if (cnv->subChars == (uint8_t *)cnv->subUChars) {
             /* Allocate a new buffer for the string. */
-            cnv->subChars = (uint8_t *)uprv_malloc(UCNV_ERROR_BUFFER_LENGTH * U_SIZEOF_UCHAR);
+            cnv->subChars = (uint8_t *)managed_malloc_46(UCNV_ERROR_BUFFER_LENGTH * U_SIZEOF_UCHAR,
+                cnv->managedRole, cnv->managedRole==0 ? 0 : 1207);
             if (cnv->subChars == NULL) {
                 cnv->subChars = (uint8_t *)cnv->subUChars;
                 *err = U_MEMORY_ALLOCATION_ERROR;

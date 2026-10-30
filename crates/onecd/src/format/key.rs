@@ -2,9 +2,9 @@ use std::fmt;
 use std::ops::Range;
 
 use crate::collate::{Collate, Strength};
-use crate::error::{Constraint, Error, Location, Result, Unsupported};
+use crate::error::{Constraint, Error, Location, Result, Unsupported, brief};
 use crate::format::bytes::{sub, u16le};
-use crate::format::descr::{FieldDescr, FieldType, IndexDescr, TableDescr};
+use crate::format::descr::{FieldDescr, FieldType, IndexDescr, IndexField, TableDescr};
 use crate::format::layout::{FieldSlot, RecordLayout, value_size};
 use crate::format::value::{Value, cp1251_decode};
 
@@ -30,13 +30,13 @@ fn bad_descr(why: impl Into<String>) -> Error {
 }
 
 fn table_loc(d: &TableDescr) -> Location {
-    Location::Table(d.name.clone())
+    Location::Table(brief(&d.name).to_owned())
 }
 
 fn misfit(d: &TableDescr, f: &FieldDescr, why: impl Into<String>) -> Error {
     Error::Constraint(Constraint::ValueDoesNotFit {
-        table: d.name.clone(),
-        field: f.name.clone(),
+        table: brief(&d.name).to_owned(),
+        field: brief(&f.name).to_owned(),
         why: why.into(),
     })
 }
@@ -65,8 +65,12 @@ pub fn key_slot_size(f: &FieldDescr, prefix_len: u32) -> Result<u32> {
             )));
         }
     };
-    u32::try_from(size)
-        .map_err(|_| bad_descr(format!("field {} has a key slot of {size} bytes", f.name)))
+    u32::try_from(size).map_err(|_| {
+        bad_descr(format!(
+            "field {} has a key slot of {size} bytes",
+            brief(&f.name)
+        ))
+    })
 }
 
 struct KeyField<'a> {
@@ -82,30 +86,36 @@ impl KeyField<'_> {
     }
 }
 
+fn key_field<'a>(d: &'a TableDescr, idx: &IndexDescr, fld: &IndexField) -> Result<KeyField<'a>> {
+    let (index, f) = d.field(&fld.name).ok_or_else(|| {
+        bad_descr(format!(
+            "index {} refers to the unknown field {}",
+            brief(&idx.name),
+            brief(&fld.name)
+        ))
+    })?;
+    let slot = key_slot_size(f, fld.prefix_len)?;
+    Ok(KeyField {
+        index,
+        f,
+        prefix_len: fld.prefix_len,
+        slot: slot as usize,
+    })
+}
+
 fn key_fields<'a>(d: &'a TableDescr, idx: &IndexDescr) -> Result<Vec<KeyField<'a>>> {
     let mut total = 0u64;
     let mut out = Vec::with_capacity(idx.fields.len());
     for fld in &idx.fields {
-        let (index, f) = d.field(&fld.name).ok_or_else(|| {
-            bad_descr(format!(
-                "index {} refers to the unknown field {}",
-                idx.name, fld.name
-            ))
-        })?;
-        let slot = key_slot_size(f, fld.prefix_len)?;
-        total += u64::from(slot) + u64::from(f.nullable);
+        let kf = key_field(d, idx, fld)?;
+        total += kf.slot as u64 + u64::from(kf.f.nullable);
         if total > u64::from(MAX_KEY_LEN) {
             return Err(bad_descr(format!(
                 "index {}: key is longer than {MAX_KEY_LEN} bytes",
                 idx.name
             )));
         }
-        out.push(KeyField {
-            index,
-            f,
-            prefix_len: fld.prefix_len,
-            slot: slot as usize,
-        });
+        out.push(kf);
     }
     Ok(out)
 }
@@ -149,7 +159,7 @@ pub fn has_text(d: &TableDescr, l: &RecordLayout, idx: &IndexDescr, rec: &[u8]) 
         let slot = l.slots.get(kf.index).ok_or_else(|| {
             Error::corrupt(
                 table_loc(d),
-                format!("the layout has no slot for field {}", kf.f.name),
+                format!("the layout has no slot for field {}", brief(&kf.f.name)),
             )
         })?;
         if let Some(Part::Text(units)) = part_of_record(d, kf, slot, rec)?
@@ -192,18 +202,33 @@ fn push_part(kf: &KeyField, part: Option<Part>, cx: &KeyCtx, out: &mut Vec<u8>) 
             } else {
                 Strength::Secondary
             };
-            let mut key = collate.sort_key(cx.locale, strength, &units)?;
-            key.truncate(kf.slot);
-            while key.last() == Some(&0) {
-                key.pop();
+            #[cfg(feature = "icu")]
+            if let Some(key) = collate.paid_sort_key(cx.locale, strength, &units) {
+                push_slot(&key?, kf.slot, out);
+                return Ok(());
             }
-            if key.len() < kf.slot {
-                key.push(0);
-            }
-            out.extend_from_slice(&key);
+            push_slot(
+                &collate.sort_key(cx.locale, strength, &units)?,
+                kf.slot,
+                out,
+            );
         }
     }
     Ok(())
+}
+
+fn push_slot(key: &[u8], slot: usize, out: &mut Vec<u8>) {
+    let (bytes, terminated) = slot_form(key, slot);
+    out.extend_from_slice(bytes);
+    if terminated {
+        out.push(0);
+    }
+}
+
+fn slot_form(key: &[u8], slot: usize) -> (&[u8], bool) {
+    let cut = key.get(..slot).unwrap_or(key);
+    let end = cut.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
+    (cut.get(..end).unwrap_or_default(), end < slot)
 }
 
 fn part_of_record(
@@ -213,7 +238,8 @@ fn part_of_record(
     rec: &[u8],
 ) -> Result<Option<Part>> {
     let f = kf.f;
-    let bad = |what: &str| Error::corrupt(table_loc(d), format!("field {}: {what}", f.name));
+    let bad =
+        |what: &str| Error::corrupt(table_loc(d), format!("field {}: {what}", brief(&f.name)));
     let stored = (slot.value_size as usize)
         .checked_add(usize::from(f.nullable))
         .and_then(|len| sub(rec, slot.offset as usize, len))
@@ -264,8 +290,8 @@ fn part_of_value(d: &TableDescr, kf: &KeyField, v: &Value) -> Result<Option<Part
     let f = kf.f;
     let mismatch = || {
         Error::Constraint(Constraint::TypeMismatch {
-            table: d.name.clone(),
-            field: f.name.clone(),
+            table: brief(&d.name).to_owned(),
+            field: brief(&f.name).to_owned(),
         })
     };
     let text = |s: &str| -> Result<Part> {
@@ -283,8 +309,8 @@ fn part_of_value(d: &TableDescr, kf: &KeyField, v: &Value) -> Result<Option<Part
         (_, Value::Null) if f.nullable => return Ok(None),
         (_, Value::Null) => {
             return Err(Error::Constraint(Constraint::NullNotAllowed {
-                table: d.name.clone(),
-                field: f.name.clone(),
+                table: brief(&d.name).to_owned(),
+                field: brief(&f.name).to_owned(),
             }));
         }
         (FieldType::N, Value::Numeric(n)) => {
@@ -337,7 +363,7 @@ pub fn build_key(
         let slot = l.slots.get(kf.index).ok_or_else(|| {
             Error::corrupt(
                 table_loc(d),
-                format!("the layout has no slot for field {}", kf.f.name),
+                format!("the layout has no slot for field {}", brief(&kf.f.name)),
             )
         })?;
         let part = part_of_record(d, kf, slot, rec)?;
@@ -366,7 +392,7 @@ pub fn encode_key_values(
     let fields = key_fields(d, idx)?;
     if vals.len() > fields.len() {
         return Err(Error::Constraint(Constraint::WrongArity {
-            table: d.name.clone(),
+            table: brief(&d.name).to_owned(),
             expected: fields.len(),
             got: vals.len(),
         }));
@@ -377,6 +403,173 @@ pub fn encode_key_values(
         push_part(kf, part, cx, &mut out)?;
     }
     Ok(out)
+}
+
+#[cfg(feature = "icu")]
+pub fn encode_key_values_budgeted(
+    d: &TableDescr,
+    idx: &IndexDescr,
+    vals: &[Value],
+    locale: &str,
+    request: &crate::collate::KeyRequest,
+) -> Result<memory_budget::BudgetedVec<u8>> {
+    use crate::collate::prepared;
+    use memory_budget::{BudgetedVec, Category};
+    if vals.len() > idx.fields.len() {
+        return Err(Error::Constraint(Constraint::WrongArity {
+            table: brief(&d.name).to_owned(),
+            expected: idx.fields.len(),
+            got: vals.len(),
+        }));
+    }
+    index_key_len(d, idx)?;
+    let mut capacity = 0;
+    for fld in idx.fields.iter().take(vals.len()) {
+        let kf = key_field(d, idx, fld)?;
+        capacity += kf.slot + usize::from(kf.f.nullable);
+    }
+    let mut out = prepared(BudgetedVec::try_with_capacity(
+        request.budget(),
+        Category::Execution,
+        capacity,
+    ))?;
+    for (fld, v) in idx.fields.iter().zip(vals) {
+        let kf = key_field(d, idx, fld)?;
+        push_value_budgeted(d, &kf, v, locale, request, &mut out)?;
+    }
+    Ok(out)
+}
+
+#[cfg(feature = "icu")]
+fn push_value_budgeted(
+    d: &TableDescr,
+    kf: &KeyField,
+    v: &Value,
+    locale: &str,
+    request: &crate::collate::KeyRequest,
+    out: &mut memory_budget::BudgetedVec<u8>,
+) -> Result<()> {
+    use crate::collate::prepared;
+    use memory_budget::{BudgetedVec, Category};
+    let f = kf.f;
+    let mismatch = || {
+        Error::Constraint(Constraint::TypeMismatch {
+            table: brief(&d.name).to_owned(),
+            field: brief(&f.name).to_owned(),
+        })
+    };
+    let pad = |out: &mut BudgetedVec<u8>, n: usize| prepared(out.try_resize(out.len() + n, 0));
+    if matches!(v, Value::Null) {
+        if !f.nullable {
+            return Err(Error::Constraint(Constraint::NullNotAllowed {
+                table: brief(&d.name).to_owned(),
+                field: brief(&f.name).to_owned(),
+            }));
+        }
+        prepared(out.try_extend_from_slice(&[0, 1]))?;
+        return pad(
+            out,
+            if kf.is_string() {
+                1
+            } else {
+                kf.slot.saturating_sub(1)
+            },
+        );
+    }
+    let start = out.len() + usize::from(f.nullable);
+    let flag = |out: &mut BudgetedVec<u8>| -> Result<()> {
+        if f.nullable {
+            prepared(out.try_push(1))?;
+        }
+        Ok(())
+    };
+    match (f.ty, v) {
+        (FieldType::N, Value::Numeric(n)) => {
+            flag(out)?;
+            pad(out, kf.slot)?;
+            let bcd = out.as_mut_slice().get_mut(start..).unwrap_or_default();
+            n.write_bcd(f.length, f.precision, bcd)
+                .map_err(|why| misfit(d, f, why))?;
+            numeric_key_in_place(bcd, f.length);
+        }
+        (FieldType::L, Value::Bool(x)) => {
+            flag(out)?;
+            prepared(out.try_push(u8::from(*x)))?;
+        }
+        (FieldType::DT, Value::DateTime(dt)) if dt.is_valid() => {
+            flag(out)?;
+            prepared(out.try_extend_from_slice(&dt.to_bcd()))?;
+        }
+        (FieldType::DT, Value::DateTime(_)) => {
+            return Err(misfit(d, f, "not a valid date and time"));
+        }
+        (FieldType::D, Value::Date(raw)) => {
+            flag(out)?;
+            prepared(out.try_extend_from_slice(&raw.0))?;
+        }
+        (FieldType::B, Value::Binary(b)) if b.len() != f.length as usize => {
+            return Err(misfit(
+                d,
+                f,
+                format!("expected exactly {} bytes, got {}", f.length, b.len()),
+            ));
+        }
+        (FieldType::VB, Value::Binary(b)) if b.len() > f.length as usize => {
+            return Err(misfit(
+                d,
+                f,
+                format!("at most {} bytes allowed, got {}", f.length, b.len()),
+            ));
+        }
+        (FieldType::B | FieldType::VB, Value::Binary(b)) => {
+            flag(out)?;
+            let take = b.len().min(kf.slot);
+            prepared(out.try_extend_from_slice(b.get(..take).unwrap_or_default()))?;
+            pad(out, kf.slot - take)?;
+        }
+        (FieldType::C | FieldType::NC, Value::Char(s))
+        | (FieldType::VC | FieldType::NVC, Value::VarChar(s)) => {
+            if s.encode_utf16().count() > f.length as usize {
+                return Err(misfit(
+                    d,
+                    f,
+                    format!("string is longer than {} UTF-16 units", f.length),
+                ));
+            }
+            let cut = if kf.prefix_len == 0 {
+                f.length
+            } else {
+                kf.prefix_len
+            } as usize;
+            let len = s.encode_utf16().take(cut).count();
+            let mut units = prepared(BudgetedVec::try_with_capacity(
+                request.budget(),
+                Category::Execution,
+                len,
+            ))?;
+            for unit in s.encode_utf16().take(cut) {
+                prepared(units.try_push(unit))?;
+            }
+            while units.as_slice().last() == Some(&0x20) {
+                units.pop();
+            }
+            let strength = if f.case_sensitive {
+                Strength::Tertiary
+            } else {
+                Strength::Secondary
+            };
+            let key = request.sort_key(locale, strength, units.as_slice())?;
+            drop(units);
+            flag(out)?;
+            let (bytes, terminated) = slot_form(key.as_slice(), kf.slot);
+            prepared(out.try_extend_from_slice(bytes))?;
+            if terminated {
+                prepared(out.try_push(0))?;
+            }
+        }
+        _ => return Err(mismatch()),
+    }
+    Ok(())
 }
 
 fn nibble(b: &[u8], i: usize) -> u8 {
@@ -400,17 +593,22 @@ fn set_nibble(b: &mut [u8], i: usize, v: u8) {
 }
 
 pub fn numeric_key(bcd: &[u8], len: u32) -> Vec<u8> {
-    let Some(&first) = bcd.first() else {
-        return Vec::new();
+    let mut out = bcd.to_vec();
+    numeric_key_in_place(&mut out, len);
+    out
+}
+
+fn numeric_key_in_place(out: &mut [u8], len: u32) {
+    let Some(&first) = out.first() else {
+        return;
     };
     if first >> 4 != 0 {
-        return bcd.to_vec();
+        return;
     }
-    let end = (len as usize).saturating_add(1).min(bcd.len() * 2);
-    let mut out = bcd.to_vec();
+    let end = (len as usize).saturating_add(1).min(out.len() * 2);
     let mut borrow = false;
     for i in (1..end).rev() {
-        let d = nibble(bcd, i);
+        let d = nibble(out, i);
         let k = if borrow {
             9u8.wrapping_sub(d)
         } else if d != 0 {
@@ -419,7 +617,7 @@ pub fn numeric_key(bcd: &[u8], len: u32) -> Vec<u8> {
         } else {
             0
         };
-        set_nibble(&mut out, i, k & 0x0F);
+        set_nibble(out, i, k & 0x0F);
     }
     if !borrow {
         out.fill(0);
@@ -427,14 +625,17 @@ pub fn numeric_key(bcd: &[u8], len: u32) -> Vec<u8> {
             *sign = 0x10;
         }
     }
-    out
 }
 
 pub fn split_key(d: &TableDescr, idx: &IndexDescr, key: &[u8]) -> Result<Vec<Range<usize>>> {
     let bad = |what: &str, f: &FieldDescr| {
         Error::corrupt(
             table_loc(d),
-            format!("index {}: key part of {}: {what}", idx.name, f.name),
+            format!(
+                "index {}: key part of {}: {what}",
+                brief(&idx.name),
+                brief(&f.name)
+            ),
         )
     };
     let mut pos = 0usize;

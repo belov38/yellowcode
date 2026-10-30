@@ -15,7 +15,7 @@ query-syntax = { path = "../query-syntax" }
 ibschema = { path = "../ibschema" }
 bsl-prim = { path = "../bsl-prim" }
 memory-budget = { path = "../memory-budget" }
-icu46-sys = { path = "../icu46-sys" }
+icu46-sys = { path = "../icu46-sys", features = ["managed"] }
 platform-catalog = { path = "../platform-catalog" }
 
 [lints.clippy]

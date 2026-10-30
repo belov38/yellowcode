@@ -2,15 +2,18 @@ use std::collections::{BTreeMap, HashMap};
 use std::ops::Bound;
 use std::sync::Arc;
 
-use bsl_prim::{Collation, fold_name};
+use bsl_prim::fold_name;
 use memory_budget::{Evictor, Reservation};
 use query_ir::host::TxnId;
 use query_ir::{ExecError, RuntimeError, TempSchema, TempSchemas};
 
-use crate::key::{Key, key_of};
-use crate::model::{key_sizes, keys_model, rows_model, vec_block};
+use crate::coll::ExecCollation;
+use crate::key::{Key, try_key_of};
+use crate::model::{keys_model, rows_model, try_key_sizes, vec_block};
 use crate::ops::row_bytes;
 use crate::source::{ExecEnv, Row};
+
+type Entries = Vec<(Vec<Key>, u32)>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TempTableId(pub u32);
@@ -40,7 +43,12 @@ impl TempIndex {
         }
     }
 
-    fn entries_bound(&self, rows: &[Row], first: usize, coll: &dyn Collation) -> u64 {
+    fn entries_bound(
+        &self,
+        rows: &[Row],
+        first: usize,
+        coll: ExecCollation<'_>,
+    ) -> Result<u64, ExecError> {
         let null = query_ir::QValue::Null;
         let n = rows.len().saturating_sub(first);
         let mut kept = vec_block(n, std::mem::size_of::<(Vec<Key>, u32)>());
@@ -48,21 +56,21 @@ impl TempIndex {
         for row in rows.iter().skip(first) {
             kept += vec_block(self.cols.len(), std::mem::size_of::<Key>());
             for c in &self.cols {
-                let (k, p) = key_sizes(row.get(usize::from(*c)).unwrap_or(&null), coll);
+                let (k, p) = try_key_sizes(row.get(usize::from(*c)).unwrap_or(&null), coll)?;
                 kept += k;
                 peak = peak.max(p);
             }
         }
-        kept + peak
+        Ok(kept + peak)
     }
 
     fn entries_of(
         &self,
         rows: &[Row],
         first: usize,
-        coll: &dyn Collation,
-    ) -> (Vec<(Vec<Key>, u32)>, u64) {
-        let null = key_of(&query_ir::QValue::Null, coll);
+        coll: ExecCollation<'_>,
+    ) -> Result<(Entries, u64), ExecError> {
+        let null = try_key_of(&query_ir::QValue::Null, coll)?;
         let n = rows.len().saturating_sub(first);
         let mut bytes = vec_block(n, std::mem::size_of::<(Vec<Key>, u32)>());
         let mut out = Vec::with_capacity(n);
@@ -70,15 +78,15 @@ impl TempIndex {
             let keys: Vec<Key> = self
                 .cols
                 .iter()
-                .map(|c| {
-                    row.get(usize::from(*c))
-                        .map_or_else(|| null.clone(), |v| key_of(v, coll))
+                .map(|c| match row.get(usize::from(*c)) {
+                    Some(v) => try_key_of(v, coll),
+                    None => Ok(null.clone()),
                 })
-                .collect();
+                .collect::<Result<_, ExecError>>()?;
             bytes += keys_model(&keys);
             out.push((keys, u32::try_from(i).unwrap_or(u32::MAX)));
         }
-        (out, bytes)
+        Ok((out, bytes))
     }
 
     fn has_duplicate(&self, new: &mut [(Vec<Key>, u32)]) -> bool {
@@ -403,6 +411,12 @@ impl TempTables {
                 schema.name
             )));
         }
+        let managed = if index_sets.is_empty() {
+            None
+        } else {
+            crate::coll::open(env)?
+        };
+        let coll = crate::coll::route(env, managed.as_ref());
         let rows_bytes = if self.lease.is_some() {
             rows_model(&rows)
         } else {
@@ -418,13 +432,25 @@ impl TempTables {
         let mut indexes = Vec::with_capacity(index_sets.len());
         for (set, unique) in index_sets {
             let mut ix = TempIndex::new(column_numbers(set), *unique, &schema);
-            let bound = ix.entries_bound(&rows, 0, env.collation) + 64;
+            let bound = match ix.entries_bound(&rows, 0, coll) {
+                Ok(bound) => bound + 64,
+                Err(e) => {
+                    self.give(taken);
+                    return Err(e);
+                }
+            };
             if let Err(e) = self.take(bound, env) {
                 self.give(taken);
                 return Err(e);
             }
             taken += bound;
-            let (mut entries, b) = ix.entries_of(&rows, 0, env.collation);
+            let (mut entries, b) = match ix.entries_of(&rows, 0, coll) {
+                Ok(built) => built,
+                Err(e) => {
+                    self.give(taken);
+                    return Err(e);
+                }
+            };
             if ix.has_duplicate(&mut entries) {
                 self.give(taken);
                 return Err(ExecError::Runtime(RuntimeError::unique_index()));
@@ -478,6 +504,12 @@ impl TempTables {
         let Some(t) = self.tables.get_mut(&id) else {
             return Err(ExecError::Fatal("временная таблица пропала".to_string()));
         };
+        let managed = if index_sets.is_empty() && t.indexes.is_empty() {
+            None
+        } else {
+            crate::coll::open(env)?
+        };
+        let coll = crate::coll::route(env, managed.as_ref());
         let first = t.rows.len();
         let n = rows.len() as u64;
         let rows_bytes = if leased {
@@ -537,15 +569,20 @@ impl TempTables {
         }
         let mut new_entries = Vec::with_capacity(t.indexes.len());
         for ix in &t.indexes {
-            let bound =
-                ix.entries_bound(&all, first, env.collation) + ix.apply_growth(all.len() - first);
-            if let Err(e) = take(bound, &mut taken) {
-                all.truncate(first);
-                t.rows = all;
-                give(taken - kept_growth);
-                return Err(e);
-            }
-            let (mut e, b) = ix.entries_of(&all, first, env.collation);
+            let built = ix
+                .entries_bound(&all, first, coll)
+                .map(|bound| bound + ix.apply_growth(all.len() - first))
+                .and_then(|bound| take(bound, &mut taken).map(|()| bound))
+                .and_then(|bound| Ok((bound, ix.entries_of(&all, first, coll)?)));
+            let (bound, (mut e, b)) = match built {
+                Ok(built) => built,
+                Err(e) => {
+                    all.truncate(first);
+                    t.rows = all;
+                    give(taken - kept_growth);
+                    return Err(e);
+                }
+            };
             if ix.has_duplicate(&mut e) {
                 all.truncate(first);
                 t.rows = all;
@@ -560,14 +597,20 @@ impl TempTables {
         let mut fresh = Vec::with_capacity(index_sets.len());
         for (set, unique) in index_sets {
             let ix = TempIndex::new(column_numbers(set), *unique, &t.schema);
-            let bound = ix.entries_bound(&all, 0, env.collation) + 64;
-            if let Err(e) = take(bound, &mut taken) {
-                all.truncate(first);
-                t.rows = all;
-                give(taken - kept_growth);
-                return Err(e);
-            }
-            let (mut e, b) = ix.entries_of(&all, 0, env.collation);
+            let built = ix
+                .entries_bound(&all, 0, coll)
+                .map(|bound| bound + 64)
+                .and_then(|bound| take(bound, &mut taken).map(|()| bound))
+                .and_then(|bound| Ok((bound, ix.entries_of(&all, 0, coll)?)));
+            let (bound, (mut e, b)) = match built {
+                Ok(built) => built,
+                Err(e) => {
+                    all.truncate(first);
+                    t.rows = all;
+                    give(taken - kept_growth);
+                    return Err(e);
+                }
+            };
             if ix.has_duplicate(&mut e) {
                 all.truncate(first);
                 t.rows = all;

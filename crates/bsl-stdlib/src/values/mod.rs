@@ -1,6 +1,9 @@
 mod binary;
+pub(crate) mod boundary;
+pub(crate) mod moment;
 pub(crate) mod period;
 pub mod placeholder;
+mod regional;
 mod system_info;
 mod uuid;
 pub(crate) mod xml_type;
@@ -49,9 +52,14 @@ pub(crate) fn register(reg: &mut Registry) {
     system_info::register(reg);
     xml_type::register(reg);
     period::register(reg);
+    regional::register(reg);
+    boundary::register(reg);
+    moment::register(reg);
 }
 
 pub(crate) fn is_empty_value(v: &Value) -> bool {
     uuid_bytes(v).is_some_and(|b| b == [0; 16])
         || binary_data_bytes(v).is_some_and(<[u8]>::is_empty)
 }
+
+pub(crate) use binary::binary_retained_layout;

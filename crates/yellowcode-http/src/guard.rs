@@ -17,7 +17,7 @@ pub fn text(status: u16, body: &str) -> Response {
     Response {
         status,
         content_type: "text/plain; charset=utf-8",
-        body: body.as_bytes().to_vec(),
+        body: body.as_bytes().to_vec().into(),
         ..Default::default()
     }
 }

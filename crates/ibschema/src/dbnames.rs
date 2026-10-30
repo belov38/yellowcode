@@ -51,12 +51,21 @@ impl Default for Lookup {
     }
 }
 fn entry_key(entries: &[DbName], i: usize) -> Option<(Uuid16, &str)> {
+    #[cfg(test)]
+    INDEX_PROBES.with(|count| count.set(count.get() + 1));
     entries
         .get(i)
         .map(|entry| (entry.uuid, entry.purpose.as_str()))
 }
 fn entry_number(entries: &[DbName], i: usize) -> Option<u32> {
+    #[cfg(test)]
+    INDEX_PROBES.with(|count| count.set(count.get() + 1));
     entries.get(i).map(|entry| entry.number)
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static INDEX_PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 fn perr(at: impl Into<String>, why: impl Into<String>) -> Error {
@@ -75,7 +84,55 @@ fn parse_root(text: &[u8]) -> Result<Node> {
     brace::parse_bytes(text).map_err(|e| perr("file", e.to_string()))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DbNamesIndexError {
+    Length,
+    Index,
+    KeyOrder,
+    NumberOrder,
+}
+impl std::fmt::Display for DbNamesIndexError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("invalid preallocated DBNames indexes")
+    }
+}
+impl std::error::Error for DbNamesIndexError {}
+
 impl DbNames {
+    pub fn from_indexed_entries(
+        entries: Vec<DbName>,
+        by_key: Vec<usize>,
+        by_num: Vec<usize>,
+    ) -> std::result::Result<Self, DbNamesIndexError> {
+        if entries.len() != by_key.len() || entries.len() != by_num.len() {
+            return Err(DbNamesIndexError::Length);
+        }
+        let mut previous_key = None;
+        for &index in &by_key {
+            let entry = entries.get(index).ok_or(DbNamesIndexError::Index)?;
+            let key = (entry.uuid, entry.purpose.as_str());
+            if previous_key.is_some_and(|previous| previous >= key) {
+                return Err(DbNamesIndexError::KeyOrder);
+            }
+            previous_key = Some(key);
+        }
+        let mut previous_number = None;
+        for &index in &by_num {
+            let entry = entries.get(index).ok_or(DbNamesIndexError::Index)?;
+            if previous_number.is_some_and(|previous| previous >= entry.number) {
+                return Err(DbNamesIndexError::NumberOrder);
+            }
+            previous_number = Some(entry.number);
+        }
+        let top = entries.iter().map(|entry| entry.number).max().unwrap_or(0);
+        Ok(Self {
+            counter: top,
+            top,
+            entries,
+            lookup: Lookup::Managed { by_key, by_num },
+        })
+    }
+
     pub fn parse(text: &[u8]) -> Result<DbNames> {
         let root = parse_root(text)?;
         let top = root
@@ -142,28 +199,22 @@ impl DbNames {
                 self.entries.push(e);
             }
             Lookup::Managed { by_key, by_num } => {
-                if by_key
-                    .binary_search_by(|&i| {
-                        entry_key(&self.entries, i).cmp(&Some((e.uuid, e.purpose.as_str())))
-                    })
-                    .is_ok()
-                {
-                    return Err(format!("duplicate key {} {:?}", e.uuid, e.purpose));
-                }
-                if by_num
+                let key_at = match by_key.binary_search_by(|&i| {
+                    entry_key(&self.entries, i).cmp(&Some((e.uuid, e.purpose.as_str())))
+                }) {
+                    Ok(_) => return Err(format!("duplicate key {} {:?}", e.uuid, e.purpose)),
+                    Err(at) => at,
+                };
+                let number_at = match by_num
                     .binary_search_by(|&i| entry_number(&self.entries, i).cmp(&Some(e.number)))
-                    .is_ok()
                 {
-                    return Err(format!("duplicate number {}", e.number));
-                }
+                    Ok(_) => return Err(format!("duplicate number {}", e.number)),
+                    Err(at) => at,
+                };
                 self.top = self.top.max(e.number);
                 self.entries.push(e);
-                by_key.push(idx);
-                by_num.push(idx);
-                by_key.sort_unstable_by(|&a, &b| {
-                    entry_key(&self.entries, a).cmp(&entry_key(&self.entries, b))
-                });
-                by_num.sort_unstable_by_key(|&i| entry_number(&self.entries, i));
+                by_key.insert(key_at, idx);
+                by_num.insert(number_at, idx);
             }
         }
         Ok(())

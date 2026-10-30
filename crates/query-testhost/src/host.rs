@@ -27,6 +27,7 @@ pub struct TestBase {
     pub(crate) schema: Arc<QuerySchema>,
     pub(crate) storage: StorageBinding,
     pub(crate) collation: Arc<dyn Collation>,
+    pub(crate) collation_locale: BaseLocale,
     pub(crate) by_number: HashMap<u32, RefAtom>,
     pub(crate) predefined_names: HashMap<(u32, RefId), String>,
     pub(crate) predefined_refs: HashMap<(QTableId, String), QValue>,
@@ -135,6 +136,9 @@ impl TestBase {
                 .reference_maps()
                 .saturating_add(crate::open_model::INDEX_SCAN),
         )?;
+        let collation_locale = db
+            .with_locale(BaseLocale::of)
+            .ok_or("the locale of the base cannot name a collation")?;
         let mut base = TestBase {
             db,
             store,
@@ -142,7 +146,8 @@ impl TestBase {
             schema_notes,
             schema,
             storage,
-            collation: query_testkit::ru_collation(),
+            collation: Arc::new(bsl_prim::IcuCollation::new(collation_locale.as_str())),
+            collation_locale,
             by_number: HashMap::new(),
             predefined_names: HashMap::new(),
             predefined_refs: HashMap::new(),
@@ -181,6 +186,7 @@ impl TestBase {
             schema: Arc::clone(&self.schema),
             storage: self.storage.clone(),
             collation: Arc::clone(&self.collation),
+            collation_locale: self.collation_locale,
             by_number: self.by_number.clone(),
             predefined_names: HashMap::new(),
             predefined_refs: HashMap::new(),
@@ -319,6 +325,20 @@ impl TestBase {
     pub fn ref_xml_name(&self, number: u32) -> Option<&str> {
         let atom = self.by_number.get(&number)?;
         Some(self.schema.ref_info(*atom).xml_name.as_str())
+    }
+
+    pub fn ref_kinds_borrowed(&self) -> impl Iterator<Item = (u32, &str)> {
+        self.by_number
+            .iter()
+            .map(|(number, atom)| (*number, self.schema.ref_info(*atom).xml_name.as_str()))
+    }
+
+    pub fn named_refs_borrowed(&self, number: u32) -> impl Iterator<Item = (RefId, &str)> {
+        self.predefined_names
+            .iter()
+            .chain(self.enum_names.iter())
+            .filter(move |((n, _), _)| *n == number)
+            .map(|((_, id), name)| (*id, name.as_str()))
     }
 
     pub fn ref_kinds(&self) -> Vec<(u32, &str)> {
@@ -650,5 +670,39 @@ impl std::fmt::Display for OpenFailure {
 impl std::error::Error for OpenFailure {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         Some(&self.source)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct BaseLocale {
+    bytes: [u8; Self::CAPACITY],
+    len: usize,
+}
+
+impl BaseLocale {
+    const CAPACITY: usize = 3 * 32 + 1;
+
+    fn of(locale: &str) -> Option<BaseLocale> {
+        let raw = locale.as_bytes();
+        if raw.len() >= Self::CAPACITY || raw.contains(&0) {
+            return None;
+        }
+        let mut bytes = [0; Self::CAPACITY];
+        bytes.get_mut(..raw.len())?.copy_from_slice(raw);
+        Some(BaseLocale {
+            bytes,
+            len: raw.len(),
+        })
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        self.bytes
+            .get(..self.len)
+            .and_then(|b| std::str::from_utf8(b).ok())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn as_cstr(&self) -> &std::ffi::CStr {
+        std::ffi::CStr::from_bytes_until_nul(&self.bytes).unwrap_or_default()
     }
 }

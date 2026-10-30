@@ -1,4 +1,4 @@
-use std::io::Write;
+use std::io::{Read, Write};
 
 use brace::binary::{Atom, BinNode, Writer};
 use ibschema::columns::{ColRole, Column};
@@ -218,6 +218,51 @@ pub(crate) fn write_row<W: Write>(
             write_value(w, c, v, chunk)?;
         }
     }
+    w.close()?;
+    Ok(())
+}
+
+pub(crate) fn write_folder_stream<W: Write>(
+    w: &mut Writer<W>,
+    cols: &[Column],
+    metadata: &[ColumnValue],
+    chunk: usize,
+    length: u64,
+    input: &mut impl Read,
+) -> Result<()> {
+    w.open()?;
+    for (c, v) in cols.iter().zip(metadata) {
+        if matches!(v, ColumnValue::Null) {
+            w.int(0)?;
+        } else {
+            w.int(1)?;
+            write_value(w, c, v, chunk)?;
+        }
+    }
+    w.int(1)?;
+    w.open()?;
+    w.int(0)?;
+    let mut remaining = length;
+    let mut buffer = [0_u8; crate::writer::FOLDER_CHUNK];
+    while remaining != 0 {
+        let take = usize::try_from(remaining.min(buffer.len() as u64))
+            .map_err(|_| Error::Unsupported("folder chunk size".into()))?;
+        let piece = buffer
+            .get_mut(..take)
+            .ok_or_else(|| Error::Unsupported("folder chunk size".into()))?;
+        input.read_exact(piece)?;
+        w.bytes(piece)?;
+        remaining -= take as u64;
+    }
+    let probe = buffer
+        .get_mut(..1)
+        .ok_or_else(|| Error::Unsupported("empty folder chunk buffer".into()))?;
+    if input.read(probe)? != 0 {
+        return Err(Error::Unsupported(
+            "folder input exceeds declared size".into(),
+        ));
+    }
+    w.close()?;
     w.close()?;
     Ok(())
 }

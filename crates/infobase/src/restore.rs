@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::fs::{self, File};
-use std::io::{self, BufReader, Read};
+use std::io::{self, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -56,6 +56,7 @@ const TABLES_MAX: usize = 65_536;
 const FILES_MAX: u64 = 1_000_000;
 const FOLDER_KEYS_MAX: usize = 64 * MIB as usize;
 const ROW_NODES: u64 = 1_000_000;
+const FOLDER_HEADER_SHARE: u64 = 64 * 1024;
 const SCHEMA_NODES_CAP: u64 = 16 << 20;
 const ROW_ATOM_CAP: u64 = 64 * MIB;
 const ROW_RETAINED_CAP: u64 = 128 * MIB;
@@ -153,6 +154,18 @@ fn io<T>(result: io::Result<T>) -> Result<T> {
     result.map_err(|e| Error::Inconsistent(format!("DT restore I/O: {e}")))
 }
 
+fn inflate_dbnames(
+    data: &[u8],
+    budget: &memory_budget::MemoryBudget,
+) -> Result<memory_budget::Charged<Vec<u8>>> {
+    zraw::inflate_budgeted(data, 16 * MIB, budget, memory_budget::Category::Metadata).map_err(
+        |error| match error {
+            zraw::ManagedInflateError::Memory(error) => Error::Memory(error),
+            other => bad(other),
+        },
+    )
+}
+
 struct Tap<R> {
     inner: R,
     read: std::sync::Arc<std::sync::atomic::AtomicU64>,
@@ -169,42 +182,6 @@ impl<R: Read> Read for Tap<R> {
         self.read
             .fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
         Ok(n)
-    }
-}
-
-fn folder_row(row: Vec<ColumnValue>) -> Result<FolderFile> {
-    let mut it = row.into_iter();
-    match (
-        it.next(),
-        it.next(),
-        it.next(),
-        it.next(),
-        it.next(),
-        it.next(),
-        it.next(),
-    ) {
-        (
-            Some(ColumnValue::Str(name)),
-            Some(ColumnValue::DateTime(creation)),
-            Some(ColumnValue::DateTime(modified)),
-            Some(ColumnValue::Number(attributes)),
-            Some(ColumnValue::Number(size)),
-            Some(ColumnValue::Bytes(data)),
-            None,
-        ) => {
-            if size != Numeric::from_i64(data.len() as i64) {
-                return Err(bad("folder DATASIZE differs from stored bytes"));
-            }
-            Ok(FolderFile {
-                name,
-                creation,
-                modified,
-                attributes,
-                data_size: size,
-                data,
-            })
-        }
-        _ => Err(bad("folder transfer columns")),
     }
 }
 
@@ -542,6 +519,73 @@ impl<'db> Batches<'db> {
     }
 }
 
+struct FolderSink<'a, 'db> {
+    batches: &'a mut Batches<'db>,
+    table: &'a str,
+    file: &'a FolderFile,
+    buf: Vec<u8>,
+    part_capacity: usize,
+    capacity_limit: usize,
+    part: u64,
+    error: Option<Error>,
+}
+
+impl FolderSink<'_, '_> {
+    fn flush_part(&mut self) -> Result<()> {
+        let bytes = std::mem::take(&mut self.buf);
+        let tx = self.batches.unit(
+            file_estimate(bytes.len()),
+            &format!("file {} part", self.file.name),
+        )?;
+        folder::insert_new_part(tx, self.table, self.file, self.part, bytes)?;
+        self.part = self
+            .part
+            .checked_add(1)
+            .ok_or_else(|| bad("folder part overflow"))?;
+        Ok(())
+    }
+
+    fn finish(&mut self) -> Result<()> {
+        if !self.buf.is_empty() || self.part == 0 {
+            self.flush_part()?;
+        }
+        Ok(())
+    }
+}
+
+impl Write for FolderSink<'_, '_> {
+    fn write(&mut self, mut input: &[u8]) -> io::Result<usize> {
+        let original = input.len();
+        while !input.is_empty() {
+            if self.buf.capacity() == 0 {
+                self.buf
+                    .try_reserve_exact(self.part_capacity)
+                    .map_err(|_| io::Error::other("folder part allocation failed"))?;
+                if self.buf.capacity() > self.capacity_limit {
+                    return Err(io::Error::other("folder part exceeds memory share"));
+                }
+            }
+            let take = (folder::PART_SIZE - self.buf.len()).min(input.len());
+            let (chunk, rest) = input
+                .split_at_checked(take)
+                .ok_or_else(|| io::Error::other("invalid folder part boundary"))?;
+            self.buf.extend_from_slice(chunk);
+            input = rest;
+            if self.buf.len() == folder::PART_SIZE
+                && let Err(error) = self.flush_part()
+            {
+                self.error = Some(error);
+                return Err(io::Error::other("cannot write folder part"));
+            }
+        }
+        Ok(original)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 thread_local! {
     static FAILURE: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
@@ -748,7 +792,7 @@ struct Expected {
     counts: Vec<u64>,
     files: u64,
     rows: u64,
-    dbnames: Vec<u8>,
+    dbnames: memory_budget::Charged<Vec<u8>>,
     users_dropped: u64,
     matching_keys: u64,
     users_descr: TableDescr,
@@ -816,6 +860,133 @@ fn restore(
     result
 }
 
+fn parse_locale(bytes: &[u8], parse_share: u64) -> Result<&'static str> {
+    let budget = memory_budget::MemoryBudget::new(memory_budget::Limits::new(parse_share));
+    let node = brace::parse_bytes_budgeted(bytes, &budget, memory_budget::Category::Metadata)
+        .map_err(|error| match error {
+            brace::ManagedParseError::Memory(_) => {
+                bad("locale.inf parse exceeds memory share; increase --memory-limit")
+            }
+            other => bad(other),
+        })?;
+    match node
+        .as_list()
+        .and_then(|v| v.first())
+        .and_then(brace::Node::as_str)
+    {
+        Some("ru_RU") => Ok("ru_RU"),
+        Some("en_US") => Ok("en_US"),
+        _ => Err(bad("unsupported locale.inf locale")),
+    }
+}
+
+fn probe_locale(
+    source: &Path,
+    limits: &RestoreLimits,
+    without_users: bool,
+    file_limit: u64,
+) -> Result<&'static str> {
+    let mut input = BufReader::with_capacity(1 << 20, io(File::open(source))?);
+    let header = read_header(&mut input)?;
+    if header.version != DtVersion::F3 || header.ev {
+        return Err(bad("only ordinary F3"));
+    }
+    let row_limits = ReadLimits {
+        atom_bytes: limits.atom_bytes,
+        retained_bytes: limits.row_bytes,
+        nodes: ROW_NODES,
+    };
+    let mut raw = RawReader::from_payload(inflate_reader(input)?, header);
+    raw.set_read_limits(row_limits);
+    let mut reader = DtReader::from_raw(raw);
+    match reader.next_event()? {
+        Some(Event::CompatibilityMode(mode)) if COMPAT.contains(&mode) => {}
+        _ => return Err(bad("compatibility mode outside 8.3.11-8.5.1")),
+    }
+    for name in ["IndexCompatibility", "UseMVCC"] {
+        expect(
+            reader.next_event()?,
+            Event::CustomFlag {
+                name: name.into(),
+                value: BinNode::Atom(brace::binary::Atom::int(1)),
+            },
+        )?;
+    }
+    let header_share = (limits.row_bytes / 4).min(FOLDER_HEADER_SHARE);
+    let mut files = 0u64;
+    for folder_name in FOLDERS.iter().take(3) {
+        let head = TableHead::system(&Source::Folder((*folder_name).into()))
+            .ok_or_else(|| bad("system head"))?;
+        expect(reader.next_event()?, Event::TableStart(head.clone()))?;
+        reader.set_read_limits(ReadLimits {
+            atom_bytes: row_limits.atom_bytes.min(header_share),
+            retained_bytes: header_share,
+            nodes: row_limits.nodes,
+        });
+        while let Some(metadata) = reader.folder_row_header()? {
+            if metadata.len() != 5 {
+                return Err(bad("folder transfer columns"));
+            }
+            for (column, value) in head.columns.iter().take(5).zip(&metadata) {
+                column.check(value).map_err(bad)?;
+            }
+            let [ColumnValue::Str(name), _, _, _, ColumnValue::Number(size)] = metadata.as_slice()
+            else {
+                return Err(bad("folder transfer columns"));
+            };
+            if !(without_users
+                && *folder_name == "Params"
+                && name.eq_ignore_ascii_case("users.usr"))
+            {
+                files = files
+                    .checked_add(1)
+                    .ok_or_else(|| bad("folder file limit"))?;
+                if files > file_limit {
+                    return Err(bad("folder file limit"));
+                }
+            }
+            let length: u64 = size
+                .to_string()
+                .parse()
+                .map_err(|_| bad("invalid folder DATASIZE"))?;
+            if *folder_name == "Params" && name.eq_ignore_ascii_case("locale.inf") {
+                if length.saturating_add(header_share) > limits.row_bytes {
+                    return Err(bad(
+                        "folder file exceeds the row share; increase --memory-limit",
+                    ));
+                }
+                let mut bytes = Vec::new();
+                bytes
+                    .try_reserve_exact(
+                        usize::try_from(length).map_err(|_| bad("folder file size overflow"))?,
+                    )
+                    .map_err(|_| bad("folder file allocation failed"))?;
+                if (bytes.capacity() as u64).saturating_add(header_share) > limits.row_bytes {
+                    return Err(bad(
+                        "folder file exceeds the row share; increase --memory-limit",
+                    ));
+                }
+                if reader.copy_folder_binary_with_work_limit(&mut bytes, length, ROW_NODES)?
+                    != length
+                {
+                    return Err(bad("folder DATASIZE differs from stored bytes"));
+                }
+                return parse_locale(
+                    &bytes,
+                    limits.row_bytes - header_share - bytes.capacity() as u64,
+                );
+            }
+            if reader.copy_folder_binary_with_work_limit(&mut io::sink(), length, ROW_NODES)?
+                != length
+            {
+                return Err(bad("folder DATASIZE differs from stored bytes"));
+            }
+        }
+        reader.set_read_limits(row_limits);
+    }
+    Err(bad("missing locale.inf"))
+}
+
 fn run(
     source: &Path,
     target: &Path,
@@ -824,6 +995,7 @@ fn run(
     notes: &mut Notes<'_, '_>,
     before_publish: impl FnOnce() -> Result<()>,
 ) -> Result<RestoreReport> {
+    let started = Instant::now();
     sweep_staging(parent, notes)?;
     let staging = io(tempfile::Builder::new()
         .prefix(STAGING_PREFIX)
@@ -835,6 +1007,11 @@ fn run(
 
     let before = io(fs::metadata(source))?;
     let stamp = |m: &fs::Metadata| (m.len(), m.modified().ok());
+    let locale = probe_locale(source, &opts.limits, opts.without_users, FILES_MAX)
+        .map_err(|e| row_limit(e, &opts.limits))?;
+    if stamp(&before) != stamp(&io(fs::metadata(source))?) {
+        return Err(bad("the source changed while it was read"));
+    }
     let read = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     let hash = std::sync::Arc::new(std::sync::Mutex::new(Sha256::new()));
     let mut input = Tap {
@@ -857,7 +1034,7 @@ fn run(
     let database = staging.path().join(DATABASE_NAME);
     let mut state = Run {
         opts,
-        started: Instant::now(),
+        started,
         source_len: before.len(),
         read,
         database: database.clone(),
@@ -866,7 +1043,7 @@ fn run(
         table: String::new(),
         last_progress: 0,
     };
-    let (expected, commits, peak) = stream(&mut reader, &mut state, notes, row_limits)
+    let (expected, commits, peak) = stream(&mut reader, &mut state, notes, row_limits, locale)
         .map_err(|e| row_limit(e, &opts.limits))?;
     drop(reader);
 
@@ -914,6 +1091,7 @@ fn stream<R: Read>(
     run: &mut Run<'_, '_>,
     notes: &mut Notes<'_, '_>,
     row_limits: ReadLimits,
+    locale: &str,
 ) -> Result<(Expected, u64, usize)> {
     let limits = run.opts.limits;
     let compat = match reader.next_event()? {
@@ -934,7 +1112,7 @@ fn stream<R: Read>(
         onecd::CreateOptions {
             format: onecd::Format::V838,
             page_size: PAGE as u32,
-            locale: "ru_RU".into(),
+            locale: locale.into(),
             open: database_options(&limits),
         },
     )?;
@@ -969,8 +1147,12 @@ fn stream<R: Read>(
     batches.commit()?;
 
     let mut counts = Vec::new();
-    let mut locale = false;
+    let mut locale_seen = false;
     let mut dbnames = None;
+    let dbnames_budget =
+        run.opts.memory_budget.clone().unwrap_or_else(|| {
+            memory_budget::MemoryBudget::new(memory_budget::Limits::new(34 * MIB))
+        });
     let mut users_dropped = 0u64;
     let mut key_bytes = 0usize;
     let collate = onecd::IcuCollate;
@@ -987,70 +1169,153 @@ fn stream<R: Read>(
             .ok_or_else(|| bad("folder FILENAME"))?;
         let mut keys = HashSet::new();
         let mut count = 0;
-        loop {
-            match reader.next_event()? {
-                Some(Event::TableEnd) => break,
-                Some(Event::Row(row)) => {
-                    check_row(&head, &row)?;
-                    if !matches!(
-                        head.phys_name.as_str(),
-                        "CONFIG" | "PARAMS" | "FILES" | "DEPOTFILES" | "CONFIGCAS"
-                    ) {
-                        return Err(bad("nonempty pending configuration folder"));
-                    }
-                    let f = folder_row(row)?;
-                    if head.phys_name == "PARAMS" && f.name.eq_ignore_ascii_case("locale.inf") {
-                        let node = brace::parse_bytes(&f.data).map_err(bad)?;
-                        if node
-                            .as_list()
-                            .and_then(|v| v.first())
-                            .and_then(brace::Node::as_str)
-                            != Some("ru_RU")
-                        {
-                            return Err(bad("locale.inf must describe ru_RU"));
-                        }
-                        if locale {
-                            return Err(bad("duplicate locale.inf"));
-                        }
-                        locale = true;
-                    }
-                    if head.phys_name == "PARAMS" && f.name.eq_ignore_ascii_case("DBNames") {
-                        if dbnames.is_some() {
-                            return Err(bad("duplicate DBNames"));
-                        }
-                        dbnames = Some(zraw::inflate(&f.data, 16 * MIB).map_err(bad)?);
-                    }
-                    let key =
-                        onecd::collate::field_string_key(&collate, "ru_RU", &filename, &f.name)?;
-                    key_bytes = key_bytes.saturating_add(key.len());
-                    if key_bytes > FOLDER_KEYS_MAX {
-                        return Err(bad("folder name key limit"));
-                    }
-                    if !keys.insert(key) {
-                        return Err(bad("duplicate collated folder identity"));
-                    }
-                    if run.opts.without_users
-                        && head.phys_name == "PARAMS"
-                        && f.name.eq_ignore_ascii_case("users.usr")
-                    {
-                        continue;
-                    }
-                    run.files += 1;
-                    if run.files > FILES_MAX {
-                        return Err(bad("folder file limit"));
-                    }
-                    let tx =
-                        batches.unit(file_estimate(f.data.len()), &format!("file {}", f.name))?;
-                    folder::insert_new(tx, &head.phys_name, &f)?;
-                    count += 1;
-                    run.tick(notes);
-                }
-                _ => return Err(bad("missing system table end")),
+        let header_share = (limits.row_bytes / 4).min(FOLDER_HEADER_SHARE);
+        reader.set_read_limits(ReadLimits {
+            atom_bytes: row_limits.atom_bytes.min(header_share),
+            retained_bytes: header_share,
+            nodes: row_limits.nodes,
+        });
+        while let Some(metadata) = reader.folder_row_header()? {
+            if metadata.len() != 5 {
+                return Err(bad("folder transfer columns"));
             }
+            for (column, value) in head.columns.iter().take(5).zip(&metadata) {
+                column.check(value).map_err(bad)?;
+            }
+            if !matches!(
+                head.phys_name.as_str(),
+                "CONFIG" | "PARAMS" | "FILES" | "DEPOTFILES" | "CONFIGCAS"
+            ) {
+                return Err(bad("nonempty pending configuration folder"));
+            }
+            let [
+                ColumnValue::Str(name),
+                ColumnValue::DateTime(creation),
+                ColumnValue::DateTime(modified),
+                ColumnValue::Number(attributes),
+                ColumnValue::Number(size),
+            ] = metadata.as_slice()
+            else {
+                return Err(bad("folder transfer columns"));
+            };
+            let length: u64 = size
+                .to_string()
+                .parse()
+                .map_err(|_| bad("invalid folder DATASIZE"))?;
+            let f = FolderFile {
+                name: name.clone(),
+                creation: *creation,
+                modified: *modified,
+                attributes: attributes.clone(),
+                data_size: size.clone(),
+                data: Vec::new(),
+            };
+            let key = onecd::collate::field_string_key(&collate, locale, &filename, &f.name)?;
+            key_bytes = key_bytes.saturating_add(key.len());
+            if key_bytes > FOLDER_KEYS_MAX {
+                return Err(bad("folder name key limit"));
+            }
+            if !keys.insert(key) {
+                return Err(bad("duplicate collated folder identity"));
+            }
+            let locale_file =
+                head.phys_name == "PARAMS" && f.name.eq_ignore_ascii_case("locale.inf");
+            let dbnames_file = head.phys_name == "PARAMS" && f.name.eq_ignore_ascii_case("DBNames");
+            let drop_user_file = run.opts.without_users
+                && head.phys_name == "PARAMS"
+                && f.name.eq_ignore_ascii_case("users.usr");
+            if drop_user_file {
+                if reader.copy_folder_binary_with_work_limit(&mut io::sink(), length, ROW_NODES)?
+                    != length
+                {
+                    return Err(bad("folder DATASIZE differs from stored bytes"));
+                }
+                continue;
+            }
+            run.files += 1;
+            if run.files > FILES_MAX {
+                return Err(bad("folder file limit"));
+            }
+            let special = locale_file || dbnames_file;
+            let part_size = length.min(folder::PART_SIZE as u64);
+            let needed = header_share.saturating_add(if special { length } else { part_size });
+            let part_limit = if special {
+                limits.row_bytes
+            } else {
+                limits.row_bytes - header_share
+            };
+            if needed > limits.row_bytes || part_size > part_limit {
+                return Err(bad(format!(
+                    "folder {} needs {needed} row bytes, limit {}; increase --memory-limit",
+                    f.name, limits.row_bytes
+                )));
+            }
+            let part_capacity =
+                usize::try_from(part_size).map_err(|_| bad("folder part size overflow"))?;
+            let capacity_limit = usize::try_from(part_limit).unwrap_or(usize::MAX);
+            let mut sink = FolderSink {
+                batches: &mut batches,
+                table: &head.phys_name,
+                file: &f,
+                buf: Vec::new(),
+                part_capacity,
+                capacity_limit,
+                part: 0,
+                error: None,
+            };
+            let copied = if special {
+                let mut bytes = Vec::new();
+                bytes
+                    .try_reserve_exact(
+                        usize::try_from(length).map_err(|_| bad("folder file size overflow"))?,
+                    )
+                    .map_err(|_| bad("folder file allocation failed"))?;
+                if (bytes.capacity() as u64).saturating_add(header_share) > limits.row_bytes {
+                    return Err(bad(
+                        "folder file exceeds the row share; increase --memory-limit",
+                    ));
+                }
+                let copied =
+                    reader.copy_folder_binary_with_work_limit(&mut bytes, length, ROW_NODES)?;
+                if locale_file {
+                    let parse_share = limits.row_bytes - header_share - bytes.capacity() as u64;
+                    if parse_locale(&bytes, parse_share)? != locale {
+                        return Err(bad("locale.inf changed between passes"));
+                    }
+                    if locale_seen {
+                        return Err(bad("duplicate locale.inf"));
+                    }
+                    locale_seen = true;
+                }
+                if dbnames_file {
+                    if dbnames.is_some() {
+                        return Err(bad("duplicate DBNames"));
+                    }
+                    dbnames = Some(inflate_dbnames(&bytes, &dbnames_budget)?);
+                }
+                if let Err(error) = sink.write_all(&bytes) {
+                    return Err(sink.error.take().unwrap_or_else(|| bad(error)));
+                }
+                copied
+            } else {
+                let result =
+                    reader.copy_folder_binary_with_work_limit(&mut sink, length, ROW_NODES);
+                if let Some(error) = sink.error.take() {
+                    return Err(error);
+                }
+                result?
+            };
+            if copied != length {
+                return Err(bad("folder DATASIZE differs from stored bytes"));
+            }
+            sink.finish()?;
+            count += 1;
+            run.tick(notes);
         }
+        reader.set_read_limits(row_limits);
         counts.push(count);
     }
-    if !locale {
+    if !locale_seen {
         return Err(bad("missing locale.inf"));
     }
     let users = match reader.next_event()? {
@@ -1337,7 +1602,7 @@ fn check_metadata(
 ) -> Result<(bool, Vec<OpenWarning>)> {
     let ib = open_check(path, opts)?;
     if ib.raw().dbschema_text()? != expected.schema.to_text()
-        || ib.raw().dbnames_text()? != expected.dbnames
+        || ib.raw().dbnames_text()?.as_slice() != expected.dbnames.as_slice()
     {
         return Err(bad("schema or DBNames"));
     }

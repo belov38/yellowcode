@@ -1,6 +1,6 @@
+use crate::{FactJson, FactMap};
 use serde::Deserialize;
 use serde::de::{Deserializer, MapAccess, Visitor};
-use std::collections::BTreeMap;
 use std::fmt;
 use std::marker::PhantomData;
 
@@ -77,7 +77,7 @@ pub struct PropSpec {
     #[serde(default)]
     pub codec: Codec,
     #[serde(default)]
-    pub map: BTreeMap<String, String>,
+    pub map: FactMap<String, String>,
     pub xml_type: Option<String>,
     pub path2: Option<Vec<usize>>,
     pub false_if: Option<(Vec<usize>, String)>,
@@ -179,39 +179,39 @@ pub struct BagProp {
     #[serde(default)]
     pub codec: Codec,
     #[serde(default)]
-    pub map: BTreeMap<String, String>,
+    pub map: FactMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Deserialize)]
 pub struct Ui {
     #[serde(default)]
-    pub command_groups: BTreeMap<String, String>,
+    pub command_groups: FactMap<String, String>,
     #[serde(default)]
-    pub std_pictures: BTreeMap<String, String>,
+    pub std_pictures: FactMap<String, String>,
     #[serde(default)]
-    pub web_colors: BTreeMap<String, String>,
+    pub web_colors: FactMap<String, String>,
     #[serde(default)]
-    pub win_colors: BTreeMap<String, String>,
+    pub win_colors: FactMap<String, String>,
     #[serde(default)]
-    pub style_colors: BTreeMap<String, String>,
+    pub style_colors: FactMap<String, String>,
     #[serde(default)]
-    pub keys: BTreeMap<String, String>,
+    pub keys: FactMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Deserialize)]
 pub struct UiTables {
     #[serde(default)]
-    pub style_fonts: BTreeMap<String, String>,
+    pub style_fonts: FactMap<String, String>,
     #[serde(default)]
-    pub windows_fonts: BTreeMap<String, String>,
+    pub windows_fonts: FactMap<String, String>,
     #[serde(default)]
-    pub style_colors: BTreeMap<String, String>,
+    pub style_colors: FactMap<String, String>,
     #[serde(default)]
-    pub win_colors: BTreeMap<String, String>,
+    pub win_colors: FactMap<String, String>,
     #[serde(default)]
-    pub style_borders: BTreeMap<String, String>,
+    pub style_borders: FactMap<String, String>,
     #[serde(default)]
-    pub border_styles: BTreeMap<String, String>,
+    pub border_styles: FactMap<String, String>,
     #[serde(default)]
     pub style_order: Vec<String>,
 }
@@ -227,7 +227,7 @@ pub struct ConfigPropSpec {
     pub name: String,
     pub path: Option<ConfigPath>,
     pub codec: String,
-    pub extra: serde_json::Value,
+    pub extra: FactJson,
 }
 
 impl PlatformType {

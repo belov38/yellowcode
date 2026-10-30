@@ -136,9 +136,27 @@ impl md_model::CodecState for Shared {
     }
 }
 impl Shared {
+    #[cfg(any(test, feature = "testing"))]
     pub(crate) fn new(
         v85: bool,
         tables: Arc<FormTables>,
+        std: &'static [KindStdAttrs],
+        names_order: Vec<Guid>,
+        child_patterns: HashMap<Guid, Node>,
+        names: &HashMap<Guid, String>,
+    ) -> Self {
+        Self::with_tables(
+            v85,
+            TableOwner::Native(tables),
+            std,
+            names_order,
+            child_patterns,
+            names,
+        )
+    }
+    fn with_tables(
+        v85: bool,
+        tables: TableOwner,
         std: &'static [KindStdAttrs],
         names_order: Vec<Guid>,
         child_patterns: HashMap<Guid, Node>,
@@ -433,9 +451,24 @@ pub fn form_compat(compatibility_mode: u32, v85: bool) -> FormCompat {
 pub fn build(cx: &LoadCtx, cfg: &Configuration) -> Result<Shared> {
     let v85 = V85_MODES.contains(&interface_mode(cx, cfg).as_str());
     let compat = form_compat(cfg.settings.compatibility_mode.0, v85);
-    let tables = cx
-        .resource()
-        .form_tables_mode(v85, compat, cx.opts.private_forms.as_deref())?;
+    let tables = if compat == FormCompat::Base
+        && cx.opts.private_forms.is_none()
+        && cx
+            .opts
+            .meter
+            .as_ref()
+            .and_then(|meter| meter.schema_budget())
+            .is_some()
+    {
+        cx.resource().require_embedded()?;
+        TableOwner::Embedded(v85, compat)
+    } else {
+        TableOwner::Native(cx.resource().form_tables_mode(
+            v85,
+            compat,
+            cx.opts.private_forms.as_deref(),
+        )?)
+    };
     let mut w = Walk::default();
     for &u in &cfg.index.order {
         let Some((kind, _)) = cfg.index.objs.get(&u) else {
@@ -458,7 +491,7 @@ pub fn build(cx: &LoadCtx, cfg: &Configuration) -> Result<Shared> {
         .into_iter()
         .filter(|u| names.contains_key(u))
         .collect();
-    let mut shared = Shared::new(
+    let mut shared = Shared::with_tables(
         v85,
         tables,
         cx.resource().std_attrs()?,
@@ -473,9 +506,9 @@ pub fn build(cx: &LoadCtx, cfg: &Configuration) -> Result<Shared> {
 }
 
 impl LegacyShared {
-    pub(crate) fn new(
+    fn new(
         v85: bool,
-        tables: Arc<FormTables>,
+        tables: TableOwner,
         std: &'static [KindStdAttrs],
         names_order: Vec<Guid>,
         child_patterns: HashMap<Guid, Node>,
@@ -484,7 +517,7 @@ impl LegacyShared {
         Self::with_tables(
             v85,
             FormCompat::Base,
-            TableOwner::Native(tables),
+            tables,
             std,
             names_order,
             child_patterns,

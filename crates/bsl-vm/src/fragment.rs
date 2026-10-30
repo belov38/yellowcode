@@ -66,7 +66,7 @@ pub(crate) fn start(ex: &mut Execution, sp_base: usize, expression: bool) -> Res
             f.module.clone(),
             f.inst.clone(),
             f.method,
-            f.flags,
+            f.mode_flags(),
             f.home.clone(),
         )
     };

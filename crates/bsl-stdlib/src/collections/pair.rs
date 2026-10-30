@@ -57,6 +57,34 @@ impl Drop for KeyValue {
 }
 
 impl HostObject for KeyValue {
+    fn session_edges(&self, visit: &mut dyn bsl_vm::SessionEdges) -> bool {
+        self.pair.borrow().iter().all(|value| visit.value(value))
+    }
+    fn session_clear(&self) {
+        drop(self.take());
+    }
+    fn session_transfer_supported(&self) -> bool {
+        true
+    }
+    fn session_transfer(
+        &self,
+        out: &mut dyn bsl_vm::SessionExport,
+    ) -> Result<Option<Box<dyn bsl_vm::SessionObject>>, bsl_vm::Exception> {
+        out.reserve(4)?;
+        for value in self.pair.borrow().iter() {
+            out.value(value)?;
+        }
+        Ok(Some(Box::new(SessionPair(self.hash))))
+    }
+    fn retained_memory(
+        &self,
+        visit: &mut dyn bsl_vm::RetainedMemory,
+    ) -> Result<bool, bsl_vm::Exception> {
+        for value in self.pair.borrow().iter() {
+            visit.value(value)?;
+        }
+        Ok(true)
+    }
     fn type_id(&self) -> TypeId {
         TypeId::of_catalog(types().pair)
     }
@@ -88,5 +116,47 @@ impl HostObject for KeyValue {
 
     fn boost_hash(&self) -> Option<i32> {
         Some(self.hash)
+    }
+}
+
+struct SessionPair(i32);
+impl bsl_vm::SessionObject for SessionPair {
+    fn retained_memory(&self, _: &mut dyn bsl_vm::RetainedMemory) -> Result<(), bsl_vm::Exception> {
+        Ok(())
+    }
+    fn create(
+        &self,
+        _: &mut Execution,
+        _: &mut bsl_vm::SessionImports,
+    ) -> Result<Value, bsl_vm::Exception> {
+        Ok(Value::Object(Rc::new(KeyValue {
+            pair: RefCell::new([Value::Undefined, Value::Undefined]),
+            hash: self.0,
+        })))
+    }
+    fn fill(
+        &self,
+        ex: &mut Execution,
+        shell: &Value,
+        children: Vec<Value>,
+    ) -> Result<(), bsl_vm::Exception> {
+        if let Some(object) = shell
+            .as_object()
+            .and_then(|o| o.as_any().downcast_ref::<KeyValue>())
+        {
+            *object.pair.borrow_mut() = children.try_into().map_err(|_| ex.out_of_memory())?;
+        }
+        Ok(())
+    }
+    fn clear(&self, shell: &Value) {
+        if let Some(object) = shell
+            .as_object()
+            .and_then(|o| o.as_any().downcast_ref::<KeyValue>())
+        {
+            drop(object.take());
+        }
+    }
+    fn restore_bytes(&self, _: usize) -> u64 {
+        (std::mem::size_of::<KeyValue>() + 16) as u64
     }
 }

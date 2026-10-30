@@ -411,7 +411,8 @@ CompactTrieDictionary::CompactTrieDictionary(UDataMemory *dataObj,
 {
     fData = (const CompactTrieHeader *) udata_getMemory(dataObj);
     fOwnData = FALSE;
-    if (fData->magic != COMPACT_TRIE_MAGIC_1) {
+    if (U_FAILURE(status)) { fData=NULL; return; }
+    if (fData==NULL || fData->magic != COMPACT_TRIE_MAGIC_1) {
         status = U_ILLEGAL_ARGUMENT_ERROR;
         fData = NULL;
     }
@@ -422,7 +423,8 @@ CompactTrieDictionary::CompactTrieDictionary( const void *data,
 {
     fData = (const CompactTrieHeader *) data;
     fOwnData = FALSE;
-    if (fData->magic != COMPACT_TRIE_MAGIC_1) {
+    if (U_FAILURE(status)) { fData=NULL; return; }
+    if (fData==NULL || fData->magic != COMPACT_TRIE_MAGIC_1) {
         status = U_ILLEGAL_ARGUMENT_ERROR;
         fData = NULL;
     }

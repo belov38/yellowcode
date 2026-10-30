@@ -410,14 +410,44 @@ pub fn names_dir(
     }
 }
 
+pub struct CheckAnswer {
+    value: serde_json::Value,
+    _memory: Option<memory_budget::Reservation>,
+}
+impl CheckAnswer {
+    pub fn new(value: serde_json::Value, memory: Option<memory_budget::Reservation>) -> Self {
+        Self {
+            value,
+            _memory: memory,
+        }
+    }
+}
+impl std::ops::Deref for CheckAnswer {
+    type Target = serde_json::Value;
+    fn deref(&self) -> &Self::Target {
+        &self.value
+    }
+}
+impl Serialize for CheckAnswer {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.value.serialize(serializer)
+    }
+}
+struct CacheMemory {
+    budget: memory_budget::MemoryBudget,
+    bytes: u64,
+    lease: Option<memory_budget::Reservation>,
+}
+
 #[derive(Default)]
 pub struct CheckCache {
     pub names: std::sync::Mutex<Option<(PathBuf, Vec<String>)>>,
-    pub answers: std::sync::Mutex<HashMap<String, std::sync::Arc<serde_json::Value>>>,
+    pub answers: std::sync::Mutex<HashMap<String, std::sync::Arc<CheckAnswer>>>,
     dir: Option<PathBuf>,
     key: std::sync::Mutex<Option<String>>,
     write: std::sync::Mutex<()>,
     writes: std::sync::atomic::AtomicUsize,
+    memory: std::sync::Mutex<Option<CacheMemory>>,
 }
 
 fn lock<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -425,6 +455,67 @@ fn lock<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 impl CheckCache {
+    pub(crate) fn bind_memory(&self, budget: memory_budget::MemoryBudget, bytes: u64) {
+        let mut memory = lock(&self.memory);
+        if let Some(memory) = memory.as_mut() {
+            memory.bytes = memory.bytes.max(bytes);
+        } else {
+            *memory = Some(CacheMemory {
+                budget,
+                bytes: bytes.max(8 << 20),
+                lease: None,
+            });
+        }
+    }
+    fn ensure_memory(&self) -> crate::Result<()> {
+        let mut memory = lock(&self.memory);
+        if let Some(memory) = memory.as_mut() {
+            if let Some(lease) = &memory.lease {
+                lease.try_grow(memory.bytes.saturating_sub(lease.bytes()))?;
+            } else {
+                memory.lease = Some(
+                    memory
+                        .budget
+                        .try_reserve(memory_budget::Category::Metadata, memory.bytes)?,
+                );
+            }
+        }
+        Ok(())
+    }
+    pub fn admit_answer(
+        &self,
+        source_bytes: u64,
+    ) -> crate::Result<Option<memory_budget::Reservation>> {
+        self.ensure_memory()?;
+        lock(&self.memory)
+            .as_ref()
+            .map(|memory| {
+                memory.budget.try_reserve(
+                    memory_budget::Category::Result,
+                    (64_u64 << 10).saturating_add(source_bytes.saturating_mul(128)),
+                )
+            })
+            .transpose()
+            .map_err(Into::into)
+    }
+
+    pub fn admit_compile(
+        &self,
+        source_bytes: u64,
+    ) -> crate::Result<Option<memory_budget::Reservation>> {
+        self.ensure_memory()?;
+        lock(&self.memory)
+            .as_ref()
+            .map(|memory| {
+                memory.budget.try_reserve(
+                    memory_budget::Category::Execution,
+                    (8_u64 << 20).saturating_add(source_bytes.saturating_mul(256)),
+                )
+            })
+            .transpose()
+            .map_err(Into::into)
+    }
+
     pub fn with_dir(dir: PathBuf) -> CheckCache {
         CheckCache {
             dir: Some(dir),
@@ -454,6 +545,7 @@ impl CheckCache {
         source: &Path,
         names: Option<&Path>,
     ) -> crate::Result<Option<(PathBuf, Vec<String>)>> {
+        self.ensure_memory()?;
         if let Some(n) = names {
             return Ok(Some((n.to_path_buf(), Vec::new())));
         }
@@ -489,8 +581,18 @@ impl CheckCache {
 }
 
 fn read_done(dir: &Path) -> Option<Vec<String>> {
-    let s = std::fs::read_to_string(dir.join(DONE)).ok()?;
-    Some(s.lines().map(String::from).collect())
+    use std::io::Read;
+    let file = std::fs::File::open(dir.join(DONE)).ok()?;
+    const LIMIT: u64 = 1 << 20;
+    if file.metadata().ok()?.len() > LIMIT {
+        return None;
+    }
+    let mut text = String::new();
+    file.take(LIMIT + 1).read_to_string(&mut text).ok()?;
+    if text.len() as u64 > LIMIT || text.lines().count() > 256 {
+        return None;
+    }
+    Some(text.lines().map(String::from).collect())
 }
 
 fn incomplete(dir: &Path) -> crate::Error {

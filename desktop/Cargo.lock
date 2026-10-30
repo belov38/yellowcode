@@ -111,6 +111,7 @@ dependencies = [
  "ibschema",
  "md-model",
  "mdschema",
+ "memory-budget",
  "platform-catalog",
  "query",
  "query-exec",
@@ -334,6 +335,7 @@ name = "bsl-prim"
 version = "0.1.0"
 dependencies = [
  "icu46-sys",
+ "memory-budget",
 ]
 
 [[package]]
@@ -345,6 +347,7 @@ dependencies = [
  "bsl-lib",
  "bsl-prim",
  "bsl-vm",
+ "icu46-sys",
  "platform-catalog",
  "rand 0.9.5",
  "zraw",
@@ -1782,6 +1785,7 @@ name = "icu46-sys"
 version = "0.1.0"
 dependencies = [
  "cc",
+ "memory-budget",
 ]
 
 [[package]]
@@ -2387,6 +2391,7 @@ dependencies = [
 name = "mdschema"
 version = "0.1.0"
 dependencies = [
+ "memory-budget",
  "regex",
  "serde",
  "serde_json",
@@ -2450,6 +2455,26 @@ dependencies = [
  "libc",
  "wasi",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "mssql-backup"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "brace",
+ "dtfile",
+ "getrandom 0.3.4",
+ "ibschema",
+ "mdconf",
+ "memory-budget",
+ "onecd",
+ "process-containment",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "v8cont",
 ]
 
 [[package]]
@@ -2763,10 +2788,11 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "onec-desktop"
-version = "0.1.0-alpha.13"
+version = "0.1.0-alpha.14"
 dependencies = [
  "cf-fixtures",
  "dunce",
+ "memory-budget",
  "reqwest",
  "serde",
  "serde_json",
@@ -2789,6 +2815,7 @@ name = "onecd"
 version = "0.1.0"
 dependencies = [
  "icu46-sys",
+ "libc",
  "memory-budget",
  "rustix",
  "thiserror 2.0.21",
@@ -3080,6 +3107,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "process-containment"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.3.4",
+ "libc",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5766,6 +5802,7 @@ dependencies = [
  "libc",
  "mdconf",
  "memory-budget",
+ "mssql-backup",
  "onecd",
  "platform-catalog",
  "query-console",

@@ -95,8 +95,8 @@ impl<'a> RunningBalance<'a> {
                 return Ok(false);
             };
             let equal = super::expr::keys_charged(a, b, cx, || {
-                crate::eval::cmp(a, b, cx.env.collation).is_eq()
-            })?;
+                crate::eval::try_cmp(a, b, cx.coll).map(std::cmp::Ordering::is_eq)
+            })??;
             if !equal {
                 return Ok(false);
             }

@@ -38,6 +38,7 @@
 #include "umutex.h"
 #include "cstring.h"
 #include "cmemory.h"
+#include "managed_memory.h"
 #include "ucln_cmn.h"
 #include "locmap.h"
 #include "uarrsort.h"
@@ -2142,7 +2143,7 @@ uloc_setDefault(const char*   newDefaultLocale,
     /* the error code isn't currently used for anything by this function*/
     
     /* propagate change to C++ */
-    locale_set_default(newDefaultLocale);
+    locale_set_default_checked_46(newDefaultLocale, err);
 }
 
 /**

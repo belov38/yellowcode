@@ -566,7 +566,13 @@ impl HostObject for SessionParams {
     }
 
     fn iter_get(&self, ex: &mut Execution, i: usize) -> CallResult<Value> {
-        self.read(ex, i)
+        self.read(ex, i).map_err(|error| match error {
+            CallError::Host(inner) => HostError::key("bsl:IDS_RTE_ENUMNEXTERROR")
+                .raw()
+                .caused_by(bsl_vm::Cause::Host(Box::new(inner)))
+                .into(),
+            error => error,
+        })
     }
 
     fn equals(&self, other: &dyn HostObject) -> Option<bool> {

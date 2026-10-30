@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 
 use super::super::http::{Request, Response};
 use super::super::state::State;
-use super::{Availability, NotBase, error, infobase_source, reply, slot};
+use super::{Availability, NotBase, error, infobase_source, reply, slot_for};
 
 pub fn handle(state: &State, req: &Request, route: &str) -> Response {
     if !matches!(
@@ -36,7 +36,7 @@ pub fn handle(state: &State, req: &Request, route: &str) -> Response {
     if let Err(kind) = infobase_source(state) {
         return error(409, &not_base(kind));
     }
-    let console = match slot(&state.source).get(&state.source) {
+    let console = match slot_for(state).get(&state.source) {
         Availability::Ready(c) => c,
         Availability::Failed(e) => return error(409, &format!("база не открыта: {e}")),
     };
@@ -124,7 +124,7 @@ fn value<T: serde::Serialize + ?Sized>(v: &T) -> Value {
 
 fn tables(console: &Console, req: &Request) -> Result<Response, Response> {
     params(req, [])?;
-    Ok(reply(200, &value(console.data_tables())))
+    Ok(reply(200, console.data_tables()))
 }
 
 fn indexes(console: &Console, req: &Request) -> Result<Response, Response> {
@@ -146,6 +146,24 @@ fn indexes(console: &Console, req: &Request) -> Result<Response, Response> {
             "filters": value(&listed.filters),
         }),
     ))
+}
+
+struct Cuts<'a>(&'a [(usize, usize, usize)]);
+impl serde::Serialize for Cuts<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        #[derive(serde::Serialize)]
+        struct Cut {
+            row: usize,
+            col: usize,
+            length: usize,
+        }
+        let mut seq = serializer.serialize_seq(Some(self.0.len()))?;
+        for &(row, col, length) in self.0 {
+            seq.serialize_element(&Cut { row, col, length })?;
+        }
+        seq.end()
+    }
 }
 
 fn page(console: &Console, req: &Request) -> Result<Response, Response> {
@@ -212,27 +230,36 @@ fn page(console: &Console, req: &Request) -> Result<Response, Response> {
         filter,
     };
     let page = console.data_page(kind, name, &request).map_err(failure)?;
-    let cut: Vec<Value> = page
-        .cut
-        .iter()
-        .map(|&(row, col, length)| json!({ "row": row, "col": col, "length": length }))
-        .collect();
-    let mut answer = json!({
-        "columns": value(&page.page.columns),
-        "rows": value(&page.page.rows),
-        "nextCursor": page.page.next_cursor,
-        "index": page.index,
-        "order": value(&page.order),
-        "limit": page.limit,
-        "cut": cut,
-    });
-    if let (Some(filter), Some(scanned), Some(fields)) =
-        (page.page.filter, page.page.scanned, answer.as_object_mut())
-    {
-        fields.insert("filter".into(), value(&filter));
-        fields.insert("scanned".into(), json!(scanned));
+    #[derive(serde::Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Answer<'a> {
+        columns: &'a [query_console::Column],
+        rows: &'a [Vec<Cell>],
+        next_cursor: Option<&'a str>,
+        index: Option<&'a str>,
+        order: &'a IndexOrder,
+        limit: usize,
+        cut: Cuts<'a>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        filter: Option<&'a RowFilter>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        scanned: Option<u64>,
     }
-    Ok(reply(200, &answer))
+    let filtered = page.page.filter.is_some() && page.page.scanned.is_some();
+    Ok(reply(
+        200,
+        &Answer {
+            columns: &page.page.columns,
+            rows: &page.page.rows,
+            next_cursor: page.page.next_cursor.as_deref(),
+            index: page.index.as_deref(),
+            order: &page.order,
+            limit: page.limit,
+            cut: Cuts(&page.cut),
+            filter: filtered.then_some(page.page.filter.as_ref()).flatten(),
+            scanned: filtered.then_some(page.page.scanned).flatten(),
+        },
+    ))
 }
 
 fn flag(name: &str, text: Option<&str>) -> Result<Option<bool>, Response> {
@@ -285,15 +312,7 @@ fn card(console: &Console, req: &Request) -> Result<Response, Response> {
 }
 
 fn body<T: serde::Serialize>(v: &T) -> Response {
-    match serde_json::to_vec(v) {
-        Ok(body) => Response {
-            status: 200,
-            content_type: "application/json; charset=utf-8",
-            body,
-            ..Default::default()
-        },
-        Err(e) => error(500, &format!("serialization: {e}")),
-    }
+    reply(200, v)
 }
 
 fn card_value(console: &Console, req: &Request) -> Result<Response, Response> {
@@ -366,12 +385,6 @@ fn movements_page(console: &Console, req: &Request) -> Result<Response, Response
         return Ok(reply(200, &json!({ "found": false })));
     };
     #[derive(serde::Serialize)]
-    struct Cut {
-        row: usize,
-        col: usize,
-        length: usize,
-    }
-    #[derive(serde::Serialize)]
     #[serde(rename_all = "camelCase")]
     struct Answer<'a> {
         found: bool,
@@ -381,7 +394,7 @@ fn movements_page(console: &Console, req: &Request) -> Result<Response, Response
         next_cursor: Option<&'a str>,
         index: Option<&'a str>,
         limit: usize,
-        cut: Vec<Cut>,
+        cut: Cuts<'a>,
     }
     Ok(body(&Answer {
         found: true,
@@ -391,10 +404,6 @@ fn movements_page(console: &Console, req: &Request) -> Result<Response, Response
         next_cursor: page.page.next_cursor.as_deref(),
         index: page.index.as_deref(),
         limit: page.limit,
-        cut: page
-            .cut
-            .iter()
-            .map(|&(row, col, length)| Cut { row, col, length })
-            .collect(),
+        cut: Cuts(&page.cut),
     }))
 }

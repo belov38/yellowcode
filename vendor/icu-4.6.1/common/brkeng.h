@@ -13,6 +13,8 @@
 #include "unicode/utext.h"
 #include "unicode/uscript.h"
 
+struct UDataMemory;
+
 U_NAMESPACE_BEGIN
 
 class UnicodeSet;
@@ -231,6 +233,7 @@ class ICULanguageBreakFactory : public LanguageBreakFactory {
      */
 
   UStack    *fEngines;
+  int32_t managedRole;
 
  public:
 
@@ -238,7 +241,7 @@ class ICULanguageBreakFactory : public LanguageBreakFactory {
    * <p>Standard constructor.</p>
    *
    */
-  ICULanguageBreakFactory(UErrorCode &status);
+  ICULanguageBreakFactory(UErrorCode &status, int32_t role=0);
 
   /**
    * <p>Virtual destructor.</p>
@@ -283,6 +286,12 @@ class ICULanguageBreakFactory : public LanguageBreakFactory {
   * @return A CompactTrieDictionary with the desired characteristics, or 0.
   */
   virtual const CompactTrieDictionary *loadDictionaryFor(UScriptCode script, int32_t breakType);
+
+  const CompactTrieDictionary *openDictionaryData(const char *path, const char *type,
+                                                  const char *name, UErrorCode &status);
+
+  // Adopt the opened descriptor, including constructor failure paths.
+  const CompactTrieDictionary *adoptDictionary(UDataMemory *file, UErrorCode &status);
 
 };
 

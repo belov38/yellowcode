@@ -1,4 +1,4 @@
-use onec_desktop::recent::{Origin, Recent};
+use onec_desktop::recent::{MemorySetting, Origin, Recent};
 use std::path::Path;
 
 fn source(dir: &Path, name: &str) -> std::path::PathBuf {
@@ -94,7 +94,17 @@ fn registry_process_worker() {
     }
     recent.remove(&root.join(format!("old-{id}.1cd")));
     let path = root.join(format!("new-{id}.1cd"));
-    recent.set(None, &path, &format!("Name {id}")).unwrap();
+    recent
+        .set_memory(
+            None,
+            &path,
+            &format!("Name {id}"),
+            MemorySetting::Limited {
+                mib: 256 + id.parse::<u64>().unwrap() * 64,
+            },
+            memory_budget::desktop::Facts::default(),
+        )
+        .unwrap();
     recent.touch(&path);
     std::fs::write(root.join(format!("saving-{id}")), b"").unwrap();
     recent.save(&file).unwrap();
@@ -139,7 +149,21 @@ fn simultaneous_processes_serialize_complete_transactions() {
     assert_eq!(saved.sources.len(), 6);
     assert_eq!(saved.items.len(), 6);
     for id in 0..6 {
-        assert!(saved.sources.iter().any(|s| s.name == format!("Name {id}")));
+        let source = saved
+            .sources
+            .iter()
+            .find(|s| s.name == format!("Name {id}"))
+            .unwrap();
+        assert_eq!(source.memory, MemorySetting::Limited { mib: 256 + id * 64 });
+        assert_eq!(
+            saved
+                .items
+                .iter()
+                .find(|item| item.path == source.path)
+                .unwrap()
+                .memory,
+            source.memory
+        );
         assert!(dir.path().join(format!("old-{id}.1cd")).exists());
     }
     assert!(!dir.path().join("recent.json.tmp").exists());
@@ -222,7 +246,7 @@ fn direct_canonical_open_reconciles_migrated_named_alias() {
     std::fs::write(
         &file,
         serde_json::json!({"items":[{
-            "path":original,"name":"My chosen йё name","kind":"infobase","origin":"yellowcode"
+            "path":original,"name":"My chosen йё name","kind":"infobase","origin":"yellowcode","memory":{"mode":"limited","mib":512}
         }]})
         .to_string(),
     )
@@ -240,6 +264,7 @@ fn direct_canonical_open_reconciles_migrated_named_alias() {
     assert_eq!(saved.items.len(), 1);
     assert_eq!(saved.sources[0].name, "My chosen йё name");
     assert_eq!(saved.sources[0].origin, Origin::Yellowcode);
+    assert_eq!(saved.sources[0].memory, MemorySetting::Limited { mib: 512 });
 }
 
 #[test]
@@ -261,7 +286,7 @@ fn offline_migrated_alias_rename_survives_save_restart_and_retry() {
         std::fs::write(
             &file,
             serde_json::json!({"items":[{
-                "path":original,"name":"Chosen name","kind":"infobase","origin":"yellowcode"
+                "path":original,"name":"Chosen name","kind":"infobase","origin":"yellowcode","memory":{"mode":"limited","mib":512}
             }]})
             .to_string(),
         )
@@ -289,5 +314,7 @@ fn offline_migrated_alias_rename_survives_save_restart_and_retry() {
         assert_eq!(saved.items[0].name, "Offline йё");
         assert_eq!(saved.items[0].origin, Origin::Yellowcode);
         assert_eq!(saved.items[0].kind, onec_desktop::recent::Kind::Infobase);
+        assert_eq!(saved.sources[0].memory, MemorySetting::Limited { mib: 512 });
+        assert_eq!(saved.items[0].memory, saved.sources[0].memory);
     }
 }

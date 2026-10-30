@@ -24,8 +24,9 @@ pub mod xml_in;
 pub mod entries {
     pub use mdconf_core::entries::{
         BudgetedEntries, CfFile, CfWriter, EntryBacking, EntryData, EntryList, EntryMeta,
-        EntrySink, EntrySource, Inflated, ManagedEntries, ManagedEntriesError, ManagedEntrySource,
-        MemEntries, StoredBytes, decode_inflated, decode_stored, decode_stored_budgeted,
+        EntrySink, EntrySource, Inflated, ManagedCfFile, ManagedEntries, ManagedEntriesError,
+        ManagedEntrySource, MemEntries, StoredBytes, decode_inflated, decode_stored,
+        decode_stored_budgeted,
     };
 }
 
@@ -35,8 +36,8 @@ pub mod xml {
 
 pub use entries::{
     BudgetedEntries, CfFile, CfWriter, EntryBacking, EntryData, EntryList, EntryMeta, EntrySink,
-    EntrySource, Inflated, ManagedEntries, ManagedEntriesError, ManagedEntrySource, MemEntries,
-    StoredBytes, decode_inflated, decode_stored, decode_stored_budgeted,
+    EntrySource, Inflated, ManagedCfFile, ManagedEntries, ManagedEntriesError, ManagedEntrySource,
+    MemEntries, StoredBytes, decode_inflated, decode_stored, decode_stored_budgeted,
 };
 pub use facade::{CfFileExt, ConfigurationExt};
 pub use md_model::*;
@@ -45,4 +46,4 @@ pub use mdconf_core::{
     LoadMeter, LoadOptions, LoadProfile, ManagedRootError, MeterRefusal, ObjectAutonumerationMode,
     Result, RootErrorKind, RootInfo, ScriptVariant,
 };
-pub use mdschema::{Codec, MdKind};
+pub use mdschema::{Codec, ManagedSchemaError, MdKind};

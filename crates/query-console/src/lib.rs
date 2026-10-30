@@ -18,6 +18,7 @@ mod cell;
 pub mod data;
 mod explain;
 mod job;
+mod lifecycle;
 pub mod managed;
 pub mod managed_batch;
 pub mod managed_results;
@@ -35,11 +36,14 @@ pub use data::{
 };
 pub use explain::{EXPLAIN_BUSY, EXPLAIN_TIMEOUT, Explain, ExplainFail, NOTE_IR_L, NOTE_LAST_ONLY};
 pub use job::{
-    Job, JobState, JobStatus, Jobs, MAX_RUNNING, Page, RETAIN_BUDGET, StateName, TOO_MANY_RUNNING,
+    Job, JobNested, JobRows, JobState, JobStatus, Jobs, MAX_RUNNING, Page, RETAIN_BUDGET,
+    StateName, TOO_MANY_RUNNING,
 };
 pub use md_model::LoadProfile;
 pub use open::{Console, Info};
-pub use params::{Choice, MAX_CHOICES, ParamInfoOut, ParamKind};
+pub use params::{
+    Choice, MAX_CHOICES, ParamInfoOut, ParamKind, Parameters, RefChoices, RetainedList,
+};
 pub use refs::{MAX_REFS_PER_KIND, NESTED_LATER, NestedOut, Presented, PresentedCell, Source};
 pub use run::{
     ErrorOut, Lang, MAX_BYTES, MAX_ROWS, Mode, ParamIn, Phase, Report, Rows, RunRefusal,

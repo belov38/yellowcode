@@ -370,6 +370,7 @@ pub(crate) struct Snapshot {
     pub catalog: Metadata<Catalog>,
     pub free_pages: u32,
     pager: Metadata<Pager>,
+    pub(crate) read_budget: Option<memory_budget::MemoryBudget>,
 }
 
 impl fmt::Debug for Snapshot {
@@ -520,6 +521,7 @@ impl Pager {
             catalog: st.catalog.clone(),
             free_pages: st.free_pages,
             pager: pager.clone(),
+            read_budget: None,
         }
     }
 
@@ -788,6 +790,45 @@ impl Pager {
         Ok(page)
     }
 
+    fn read_at_budgeted(
+        &self,
+        epoch: u64,
+        no: u32,
+        budget: &memory_budget::MemoryBudget,
+    ) -> Result<PageBuf> {
+        if self.budget.is_some() {
+            let mut cache = self
+                .clean_cache
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if let Some(page) = cache.cache.as_mut().and_then(|cache| cache.get(no)) {
+                return Ok(page);
+            }
+        }
+        let _gate = self.io_gate.read().unwrap_or_else(PoisonError::into_inner);
+        if self.budget.is_none()
+            && let Some(page) = self.state().cached(no, epoch)?
+        {
+            return Ok(page);
+        }
+        let mut page = PageBuf::try_zeroed(budget, self.page_size as usize)?;
+        let bytes = page.unique_mut().ok_or(Error::CorruptStatic {
+            location: Location::Page(no),
+            what: "new reader page is shared",
+        })?;
+        match self.storage.read_at(self.offset(no), bytes) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
+                return Err(Error::CorruptStatic {
+                    location: Location::Page(no),
+                    what: "page is cut off by the end of the file",
+                });
+            }
+            Err(e) => return Err(Error::Io(e)),
+        }
+        Ok(page)
+    }
+
     fn load(&self, no: u32) -> Result<PageBuf> {
         if let Some(budget) = &self.budget {
             let mut page = PageBuf::try_zeroed(budget, self.page_size as usize)?;
@@ -850,9 +891,12 @@ impl Drop for Snapshot {
 
 impl PageRead for Snapshot {
     fn memory_budget(&self) -> Option<&memory_budget::MemoryBudget> {
-        self.pager.budget.as_ref()
+        self.read_budget.as_ref().or(self.pager.budget.as_ref())
     }
     fn file_cache(&self) -> Option<(&super::files::FileCache, u64)> {
+        if self.read_budget.is_some() {
+            return None;
+        }
         self.pager.budget.as_ref()?;
         Some((&self.pager.clean_cache.1, self.epoch))
     }
@@ -866,7 +910,7 @@ impl PageRead for Snapshot {
 
     fn read_page(&self, no: u32) -> Result<PageBuf> {
         if no >= self.num_pages {
-            if self.pager.budget.is_some() {
+            if self.memory_budget().is_some() {
                 return Err(Error::CorruptStatic {
                     location: Location::Page(no),
                     what: "page is beyond the end of the database",
@@ -880,6 +924,9 @@ impl PageRead for Snapshot {
                 ),
             ));
         }
-        self.pager.read_at(self.epoch, no)
+        match &self.read_budget {
+            Some(budget) => self.pager.read_at_budgeted(self.epoch, no, budget),
+            None => self.pager.read_at(self.epoch, no),
+        }
     }
 }

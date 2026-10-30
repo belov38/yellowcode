@@ -55,6 +55,8 @@ const C_PARAM: u64 = 2048;
 pub struct BatchMemory {
     pub memory: RequestMemory,
     pub compile: Reservation,
+    pub params: Reservation,
+    pub outer: Reservation,
     pub exec: Arc<Reservation>,
     pub evictor: Arc<onecd::Database>,
     pub max_ref_fanout: u32,
@@ -100,6 +102,8 @@ impl BatchMemory {
         };
         let compile = reserve()?;
         let exec = reserve()?;
+        let params = reserve()?;
+        let outer = reserve()?;
         let row_limit = budget
             .snapshot()
             .categories
@@ -111,6 +115,8 @@ impl BatchMemory {
                 row_limit,
             },
             compile,
+            params,
+            outer,
             exec: Arc::new(exec),
             evictor,
             max_ref_fanout: bounds.max_ref_fanout,
@@ -121,7 +127,7 @@ impl BatchMemory {
     }
 
     pub fn params_stage(&self, bytes: u64, n: usize) -> Result<(), MemoryLimit> {
-        self.compile.try_grow_or_evict(
+        self.params.try_grow_or_evict(
             C_PARAM_BYTES
                 .saturating_mul(bytes)
                 .saturating_add(C_PARAM.saturating_mul(n as u64)),
@@ -145,6 +151,6 @@ impl BatchMemory {
     }
 
     pub fn held(&self) -> u64 {
-        self.compile.bytes() + self.exec.bytes()
+        self.compile.bytes() + self.exec.bytes() + self.params.bytes() + self.outer.bytes()
     }
 }

@@ -144,89 +144,65 @@ static const UChar gGC_LVTPattern[] = {
 RegexStaticSets *RegexStaticSets::gStaticSets = NULL;
 
 RegexStaticSets::RegexStaticSets(UErrorCode *status)
-:
-fUnescapeCharSet(UnicodeString(TRUE, gUnescapeCharPattern, -1), *status),
-fRuleDigitsAlias(NULL),
-fEmptyText(NULL)
+: fRuleDigitsAlias(NULL), fEmptyText(NULL)
 {
-    // First zero out everything
-    int i;
-    for (i=0; i<URX_LAST_SET; i++) {
-        fPropSets[i] = NULL;
+    int32_t i;
+    for (i=0; i<URX_LAST_SET; ++i) fPropSets[i] = NULL;
+    if (U_FAILURE(*status)) return;
+    for (i=0; i<10; ++i) {
+        if (fRuleSets[i].isBogus()) { *status=U_MEMORY_ALLOCATION_ERROR; return; }
     }
-    // Then init the sets to their correct values.
-    fPropSets[URX_ISWORD_SET]  = new UnicodeSet(UnicodeString(TRUE, gIsWordPattern, -1),     *status);
-    fPropSets[URX_ISSPACE_SET] = new UnicodeSet(UnicodeString(TRUE, gIsSpacePattern, -1),    *status);
-    fPropSets[URX_GC_EXTEND]   = new UnicodeSet(UnicodeString(TRUE, gGC_ExtendPattern, -1),  *status);
-    fPropSets[URX_GC_CONTROL]  = new UnicodeSet(UnicodeString(TRUE, gGC_ControlPattern, -1), *status);
-    fPropSets[URX_GC_L]        = new UnicodeSet(UnicodeString(TRUE, gGC_LPattern, -1),       *status);
-    fPropSets[URX_GC_V]        = new UnicodeSet(UnicodeString(TRUE, gGC_VPattern, -1),       *status);
-    fPropSets[URX_GC_T]        = new UnicodeSet(UnicodeString(TRUE, gGC_TPattern, -1),       *status);
-    fPropSets[URX_GC_LV]       = new UnicodeSet(UnicodeString(TRUE, gGC_LVPattern, -1),      *status);
-    fPropSets[URX_GC_LVT]      = new UnicodeSet(UnicodeString(TRUE, gGC_LVTPattern, -1),     *status);
-    
-    // Check for null pointers
-    if (fPropSets[URX_ISWORD_SET] == NULL || fPropSets[URX_ISSPACE_SET] == NULL || fPropSets[URX_GC_EXTEND] == NULL || 
-        fPropSets[URX_GC_CONTROL] == NULL || fPropSets[URX_GC_L] == NULL || fPropSets[URX_GC_V] == NULL || 
-        fPropSets[URX_GC_T] == NULL || fPropSets[URX_GC_LV] == NULL || fPropSets[URX_GC_LVT] == NULL) {
-        goto ExitConstrDeleteAll;
+    if (fUnescapeCharSet.isBogus()) { *status=U_MEMORY_ALLOCATION_ERROR; return; }
+    fUnescapeCharSet.applyPattern(UnicodeString(TRUE, gUnescapeCharPattern, -1), *status);
+    const UChar *patterns[] = {gIsWordPattern, gIsSpacePattern, gGC_ExtendPattern,
+        gGC_ControlPattern, gGC_LPattern, gGC_VPattern, gGC_TPattern,
+        gGC_LVPattern, gGC_LVTPattern};
+    const int32_t slots[] = {URX_ISWORD_SET, URX_ISSPACE_SET, URX_GC_EXTEND,
+        URX_GC_CONTROL, URX_GC_L, URX_GC_V, URX_GC_T, URX_GC_LV, URX_GC_LVT};
+    UManagedOwner46 owner = {9, 903};
+    for (i=0; i<9 && U_SUCCESS(*status); ++i) {
+        void *backing=managed_malloc_46(sizeof(UnicodeSet), 9, 902);
+        UnicodeSet *set=backing==NULL ? NULL : new (backing) UnicodeSet(owner);
+        fPropSets[slots[i]]=set;
+        if (set==NULL || set->isBogus()) { *status=U_MEMORY_ALLOCATION_ERROR; break; }
+        set->applyPattern(UnicodeString(TRUE, patterns[i], -1), *status);
+        if (set->isBogus() || managed_failed_46()) *status=U_MEMORY_ALLOCATION_ERROR;
     }
-    if (U_FAILURE(*status)) {
-        // Bail out if we were unable to create the above sets.
-        // The rest of the initialization needs them, so we cannot proceed.
-        return;
-    }
-
-
-    //
-    // The following sets  are dynamically constructed, because their
-    //   initialization strings would be unreasonable.
-    //
-
-
-    //
-    //  "Normal" is the set of characters that don't need special handling
-    //            when finding grapheme cluster boundaries.
-    //
-    fPropSets[URX_GC_NORMAL] = new UnicodeSet(0, UnicodeSet::MAX_VALUE);
-    // Null pointer check
-    if (fPropSets[URX_GC_NORMAL] == NULL) {
-    	goto ExitConstrDeleteAll;
-    }
-    fPropSets[URX_GC_NORMAL]->remove(0xac00, 0xd7a4);
-    fPropSets[URX_GC_NORMAL]->removeAll(*fPropSets[URX_GC_CONTROL]);
-    fPropSets[URX_GC_NORMAL]->removeAll(*fPropSets[URX_GC_L]);
-    fPropSets[URX_GC_NORMAL]->removeAll(*fPropSets[URX_GC_V]);
-    fPropSets[URX_GC_NORMAL]->removeAll(*fPropSets[URX_GC_T]);
-
-    // Initialize the 8-bit fast bit sets from the parallel full
-    //   UnicodeSets.
-    for (i=0; i<URX_LAST_SET; i++) {
+    if (U_FAILURE(*status)) return;
+    void *backing=managed_malloc_46(sizeof(UnicodeSet), 9, 902);
+    UnicodeSet *normal=backing==NULL ? NULL : new (backing) UnicodeSet(owner);
+    fPropSets[URX_GC_NORMAL]=normal;
+    if (normal==NULL || normal->isBogus()) { *status=U_MEMORY_ALLOCATION_ERROR; return; }
+    normal->add(0, UnicodeSet::MAX_VALUE);
+    normal->remove(0xac00, 0xd7a4);
+    normal->removeAll(*fPropSets[URX_GC_CONTROL]);
+    normal->removeAll(*fPropSets[URX_GC_L]);
+    normal->removeAll(*fPropSets[URX_GC_V]);
+    normal->removeAll(*fPropSets[URX_GC_T]);
+    for (i=0; i<URX_LAST_SET; ++i) {
         if (fPropSets[i]) {
             fPropSets[i]->compact();
+            if (fPropSets[i]->isBogus() || managed_failed_46()) {
+                *status=U_MEMORY_ALLOCATION_ERROR; return;
+            }
             fPropSets8[i].init(fPropSets[i]);
         }
     }
-
-    // Sets used while parsing rules, but not referenced from the parse state table
-    fRuleSets[kRuleSet_rule_char-128]   = UnicodeSet(UnicodeString(TRUE, gRuleSet_rule_char_pattern, -1),   *status);
-    fRuleSets[kRuleSet_digit_char-128]  = UnicodeSet(UnicodeString(TRUE, gRuleSet_digit_char_pattern, -1),  *status);
-    fRuleDigitsAlias = &fRuleSets[kRuleSet_digit_char-128];
-    for (i=0; i<(int32_t)(sizeof(fRuleSets)/sizeof(fRuleSets[0])); i++) {
+    fRuleSets[kRuleSet_rule_char-128].applyPattern(UnicodeString(TRUE, gRuleSet_rule_char_pattern, -1), *status);
+    fRuleSets[kRuleSet_digit_char-128].applyPattern(UnicodeString(TRUE, gRuleSet_digit_char_pattern, -1), *status);
+    fRuleDigitsAlias=&fRuleSets[kRuleSet_digit_char-128];
+    for (i=0; i<10; ++i) {
         fRuleSets[i].compact();
+        if (fRuleSets[i].isBogus()) *status=U_MEMORY_ALLOCATION_ERROR;
     }
-    
-    // Finally, initialize an empty string for utility purposes
-    fEmptyText = utext_openUChars(NULL, NULL, 0, status);
-    
-    return; // If we reached this point, everything is fine so just exit
-
-ExitConstrDeleteAll: // Remove fPropSets and fRuleSets and return error
-    for (i=0; i<URX_LAST_SET; i++) {
-        delete fPropSets[i];
-        fPropSets[i] = NULL;
-    }
-    *status = U_MEMORY_ALLOCATION_ERROR;
+    if (managed_failed_46()) *status=U_MEMORY_ALLOCATION_ERROR;
+    if (U_FAILURE(*status)) return;
+    // UText borrows this separately owned receiver; close does not free it.
+    fEmptyText=(UText *)managed_malloc_46(sizeof(UText), 9, 908);
+    if (fEmptyText==NULL) { *status=U_MEMORY_ALLOCATION_ERROR; return; }
+    UText initial=UTEXT_INITIALIZER;
+    *fEmptyText=initial;
+    utext_openUChars(fEmptyText, NULL, 0, status);
 }
 
 
@@ -240,6 +216,7 @@ RegexStaticSets::~RegexStaticSets() {
     fRuleDigitsAlias = NULL;
     
     utext_close(fEmptyText);
+    uprv_free(fEmptyText);
 }
 
 
@@ -264,14 +241,17 @@ regex_cleanup(void) {
 U_CDECL_END
 
 void RegexStaticSets::initGlobals(UErrorCode *status) {
+    if (U_FAILURE(*status)) return;
     RegexStaticSets *p;
     UMTX_CHECK(NULL, gStaticSets, p);
     if (p == NULL) {
-        p = new RegexStaticSets(status);
+        void *backing=managed_malloc_46(sizeof(RegexStaticSets), 9, 901);
+        p = backing==NULL ? NULL : new (backing) RegexStaticSets(status);
         if (p == NULL) {
         	*status = U_MEMORY_ALLOCATION_ERROR;
         	return;
         }
+        if (managed_failed_46()) *status=U_MEMORY_ALLOCATION_ERROR;
         if (U_FAILURE(*status)) {
             delete p;
             return;

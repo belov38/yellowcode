@@ -16,7 +16,7 @@ use std::ptr::{self, NonNull};
 use libz_sys as z;
 
 mod managed;
-pub use managed::{ManagedInflateError, inflate_budgeted};
+pub use managed::{ManagedInflateError, inflate_budgeted, inflate_budgeted_checked};
 
 pub const LEVEL_1C: u32 = 6;
 pub const DEFAULT_LIMIT: u64 = 1 << 30;

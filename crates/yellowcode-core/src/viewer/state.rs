@@ -17,6 +17,17 @@ pub struct FlatNode {
     pub children: Vec<usize>,
 }
 
+pub struct FlatTree {
+    nodes: Vec<FlatNode>,
+    memory: Option<Arc<super::memory::GuiLease>>,
+}
+impl std::ops::Deref for FlatTree {
+    type Target = [FlatNode];
+    fn deref(&self) -> &[FlatNode] {
+        &self.nodes
+    }
+}
+
 pub struct State {
     pub users_control: Arc<super::users_control::UsersControl>,
     pub skins: super::skin::Store,
@@ -24,7 +35,7 @@ pub struct State {
     pub source: PathBuf,
     pub names: Option<PathBuf>,
     pub lang: Lang,
-    pub nodes: Arc<Vec<FlatNode>>,
+    pub nodes: Arc<FlatTree>,
     pub stats: Value,
     pub check: Arc<CheckCache>,
     pub stages: Stages,
@@ -32,23 +43,43 @@ pub struct State {
     pub memory: Option<source::OpenMemory>,
     pub config_entries: Option<source::ConfigEntries>,
     pub code_analysis_active: Arc<std::sync::atomic::AtomicUsize>,
+    pub session: Option<Arc<super::memory::Session>>,
+    model_memory: Option<Arc<super::memory::GuiLease>>,
 }
 
-fn flatten(mut n: TreeNode, out: &mut Vec<FlatNode>) -> usize {
+fn flatten(
+    mut n: TreeNode,
+    out: &mut Vec<FlatNode>,
+    memory: Option<&super::memory::Session>,
+) -> Result<usize> {
+    if let Some(memory) = memory {
+        memory.check()?;
+    }
     let kids = std::mem::take(&mut n.children);
     let id = out.len();
     out.push(FlatNode {
         node: n,
         children: Vec::new(),
     });
-    let ids: Vec<usize> = kids.into_iter().map(|k| flatten(k, out)).collect();
+    let ids: Vec<usize> = kids
+        .into_iter()
+        .map(|k| flatten(k, out, memory))
+        .collect::<Result<_>>()?;
     if let Some(f) = out.get_mut(id) {
         f.children = ids;
     }
-    id
+    Ok(id)
 }
 
 impl State {
+    pub fn response_working_bytes(&self) -> u64 {
+        (2_u64 << 20).saturating_add(
+            self.model_memory
+                .as_ref()
+                .map_or(0, |lease| lease.bytes() / 2),
+        )
+    }
+
     pub fn load(source: &Path, names: Option<&Path>, lang: Lang) -> Result<State> {
         Self::load_with_progress(source, names, lang, &mut |_| Ok(()))
     }
@@ -95,7 +126,15 @@ impl State {
             }?;
             (cfg, None)
         };
-        let mut state = Self::build(source, names, lang, cfg, Stages::ALL, None, progress)?;
+        let mut state = Self::build(
+            source,
+            names,
+            lang,
+            cfg,
+            Stages::ALL,
+            (None, None),
+            progress,
+        )?;
         state.memory = memory.cloned();
         state.config_entries = entries;
         Ok(state)
@@ -150,10 +189,57 @@ impl State {
             .map_err(|e| crate::Error::from(e.to_string()))?;
             (cfg, fp, None)
         };
-        let mut state = Self::build(source, names, lang, cfg, extra, Some(fp), progress)?;
+        let mut state = Self::build(source, names, lang, cfg, extra, (Some(fp), None), progress)?;
         state.memory = memory.cloned();
         state.config_entries = entries;
         Ok(state)
+    }
+
+    pub fn load_stages_with_session(
+        source: &Path,
+        names: Option<&Path>,
+        lang: Lang,
+        extra: Stages,
+        memory: Arc<super::memory::Session>,
+        progress: &mut impl FnMut(&'static str) -> Result<()>,
+    ) -> Result<State> {
+        memory.check()?;
+        let lease = super::memory::GuiLease::new(&memory)?;
+        let result = (|| {
+            let source = source::resolve(source);
+            let mut checked_progress = |phase| {
+                memory.check()?;
+                progress(phase)
+            };
+            let loaded = source::open_snapshot_with_memory_lease(
+                &source,
+                &stage_options(extra),
+                None,
+                &memory,
+                lease.clone(),
+                &mut checked_progress,
+            )?;
+            let tree_lease = super::memory::GuiLease::tree(memory.budget(), loaded.lease.bytes())?;
+            let mut state = Self::build(
+                &source,
+                names,
+                lang,
+                loaded.cfg,
+                extra,
+                (Some(loaded.fingerprint), Some(&memory)),
+                &mut checked_progress,
+            )?;
+            state
+                .check
+                .bind_memory(memory.budget().clone(), loaded.lease.bytes());
+            state.session = Some(memory);
+            state.model_memory = Some(loaded.lease);
+            if let Some(tree) = Arc::get_mut(&mut state.nodes) {
+                tree.memory = Some(tree_lease);
+            }
+            Ok(state)
+        })();
+        result.map_err(|error| lease.retain_error(error))
     }
 
     fn build(
@@ -162,20 +248,31 @@ impl State {
         lang: Lang,
         cfg: Configuration,
         stages: Stages,
-        fingerprint: Option<Fingerprint>,
+        context: (Option<Fingerprint>, Option<&super::memory::Session>),
         progress: &mut impl FnMut(&'static str) -> Result<()>,
     ) -> Result<State> {
+        let (fingerprint, memory) = context;
         progress("tree")?;
         let mut nodes = Vec::new();
         {
             let _phase = memory_budget::profile::phase(memory_budget::profile::Phase::Tree);
-            flatten(tree::tree(&cfg, None, &[], lang), &mut nodes);
+            let tree = match memory {
+                Some(memory) => tree::tree_cancellable(&cfg, lang, memory.token())?,
+                None => tree::tree(&cfg, None, &[], lang),
+            };
+            flatten(tree, &mut nodes, memory)?;
         }
         progress("statistics")?;
         let stats = {
             let _phase = memory_budget::profile::phase(memory_budget::profile::Phase::Statistics);
-            serde_json::to_value(stats::stats(&cfg))?
+            serde_json::to_value(match memory {
+                Some(memory) => stats::stats_cancellable(&cfg, memory.token())?,
+                None => stats::stats(&cfg),
+            })?
         };
+        if let Some(memory) = memory {
+            memory.check()?;
+        }
         Ok(State {
             users_control: Arc::new(super::users_control::UsersControl::new(source)),
             skins: super::skin::Skins::store(),
@@ -183,7 +280,10 @@ impl State {
             source: source.to_path_buf(),
             names: names.map(Path::to_path_buf),
             lang,
-            nodes: Arc::new(nodes),
+            nodes: Arc::new(FlatTree {
+                nodes,
+                memory: None,
+            }),
             stats,
             check: Arc::new(CheckCache::default()),
             stages,
@@ -191,6 +291,8 @@ impl State {
             memory: None,
             config_entries: None,
             code_analysis_active: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            session: None,
+            model_memory: None,
         })
     }
 }
@@ -295,6 +397,8 @@ struct Inner {
     loader: Loader,
     alive: std::sync::atomic::AtomicUsize,
     most_alive: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    old_snapshot_wait_ms: std::sync::atomic::AtomicU64,
     #[cfg(test)]
     panic_in_write_names: std::sync::atomic::AtomicBool,
 }
@@ -401,6 +505,10 @@ impl Viewer {
                 loader,
                 alive: Default::default(),
                 most_alive: Default::default(),
+                #[cfg(test)]
+                old_snapshot_wait_ms: std::sync::atomic::AtomicU64::new(
+                    OLD_SNAPSHOT_WAIT.as_millis() as u64,
+                ),
                 #[cfg(test)]
                 panic_in_write_names: Default::default(),
             }),
@@ -516,6 +624,17 @@ impl Viewer {
         let mut g = lock(&inner.up);
         loop {
             let snap = inner.snapshot();
+            if snap
+                .session
+                .as_ref()
+                .is_some_and(|memory| memory.is_cancelled())
+            {
+                return Err(Unavailable::Failed {
+                    what: "opening".into(),
+                    error: "opening cancelled".into(),
+                    retry_in: None,
+                });
+            }
             let missing = match need {
                 Need::Stages(s) => {
                     if snap.stages.contains(s) {
@@ -652,6 +771,16 @@ impl Inner {
                 return;
             }
             let cur = self.snapshot();
+            if cur
+                .session
+                .as_ref()
+                .is_some_and(|memory| memory.is_cancelled())
+            {
+                let mut g = lock(&self.up);
+                g.pending = Stages::NONE;
+                g.split.clear();
+                g.names_pending = false;
+            }
             let (todo, names_job) = {
                 let mut g = lock(&self.up);
                 let names_job = std::mem::take(&mut g.names_pending);
@@ -716,10 +845,22 @@ impl Inner {
             let target = cur.stages.union(todo);
             lock(&self.up).loading = Some(target);
             let loaded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                (self.loader)(&cur.source, target, cur.fingerprint.as_ref())
+                if let Some(memory) = &cur.session {
+                    source::open_snapshot_with_session(
+                        &cur.source,
+                        &stage_options(target),
+                        cur.fingerprint.as_ref(),
+                        memory,
+                        &mut |_| Ok(()),
+                    )
+                    .map(|loaded| (loaded.cfg, loaded.fingerprint, Some(loaded.lease)))
+                } else {
+                    (self.loader)(&cur.source, target, cur.fingerprint.as_ref())
+                        .map(|(cfg, fp)| (cfg, fp, None))
+                }
             }));
             let result = match loaded {
-                Ok(Ok((cfg, fp))) => self.recheck(&cur).map(|()| (cfg, fp)),
+                Ok(Ok((cfg, fp, lease))) => self.recheck(&cur).map(|()| (cfg, fp, lease)),
                 Ok(Err(OpenError::Decode(e))) => self.recheck(&cur).and(Err(OpenError::Decode(e))),
                 Ok(Err(e)) => Err(e),
                 Err(p) => Err(OpenError::Decode(format!(
@@ -728,7 +869,7 @@ impl Inner {
                 ))),
             };
             match result {
-                Ok((cfg, fp)) => {
+                Ok((cfg, fp, lease)) => {
                     let next = Arc::new(State {
                         users_control: Arc::clone(&cur.users_control),
                         skins: cur.skins.clone(),
@@ -744,6 +885,8 @@ impl Inner {
                         memory: cur.memory.clone(),
                         config_entries: cur.config_entries.clone(),
                         code_analysis_active: Arc::clone(&cur.code_analysis_active),
+                        session: cur.session.clone(),
+                        model_memory: lease,
                     });
                     let old = std::mem::replace(
                         &mut *self.current.write().unwrap_or_else(|e| e.into_inner()),
@@ -765,8 +908,17 @@ impl Inner {
                     drop(cur);
                     drop(admission);
                     let t = Instant::now();
+                    #[cfg(not(test))]
+                    let old_wait = OLD_SNAPSHOT_WAIT;
                     while Arc::strong_count(&old) > 1 {
-                        if t.elapsed() >= OLD_SNAPSHOT_WAIT {
+                        if old
+                            .session
+                            .as_ref()
+                            .is_some_and(|memory| memory.is_cancelled())
+                        {
+                            break;
+                        }
+                        if t.elapsed() >= old_wait {
                             eprintln!(
                                 "v1b: old snapshot still held after {} s; starting the next load",
                                 OLD_SNAPSHOT_WAIT.as_secs()
@@ -785,7 +937,7 @@ impl Inner {
                     g.split.clear();
                     g.loading = None;
                 }
-                Err(OpenError::Transient(e)) => {
+                Err(OpenError::Transient(e) | OpenError::Pressure(e) | OpenError::Cancelled(e)) => {
                     let mut g = lock(&self.up);
                     let now = Instant::now();
                     for (s, _) in singles(todo) {
@@ -831,16 +983,23 @@ impl Inner {
         let Some(fp) = &cur.fingerprint else {
             return Ok(());
         };
-        match source::fingerprint(&cur.source) {
+        let checked = match &cur.session {
+            Some(memory) => source::fingerprint_with_memory(&cur.source, memory),
+            None => source::fingerprint(&cur.source),
+        };
+        match checked {
             Ok(now) if now == *fp => Ok(()),
-            Err(e @ OpenError::Transient(_)) => Err(e),
+            Err(
+                e @ (OpenError::Transient(_) | OpenError::Pressure(_) | OpenError::Cancelled(_)),
+            ) => Err(e),
             Ok(_) | Err(OpenError::Changed | OpenError::Decode(_)) => Err(OpenError::Changed),
         }
     }
 
     fn names_failed(&self, e: &(dyn std::error::Error + 'static)) {
         let mut g = lock(&self.up);
-        let retry_at = source::is_io(e).then(|| Instant::now() + g.next_delay(Stages::NONE));
+        let retry_at = (source::is_io(e) || source::is_resource(e))
+            .then(|| Instant::now() + g.next_delay(Stages::NONE));
         g.names_failure = Some(Failure {
             target: Stages::ALL,
             error: e.to_string(),
@@ -849,6 +1008,15 @@ impl Inner {
     }
 
     fn write_names(&self, st: &State) {
+        if let Some(memory) = &st.session {
+            if memory.is_cancelled() {
+                return;
+            }
+            st.check.bind_memory(
+                memory.budget().clone(),
+                st.response_working_bytes().saturating_mul(2),
+            );
+        }
         #[cfg(test)]
         if self
             .panic_in_write_names

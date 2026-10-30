@@ -12,6 +12,11 @@ autobenches = false
 
 [features]
 regex = []
+managed = ["dep:memory-budget"]
+testing = ["managed"]
+
+[dependencies]
+memory-budget = { path = "../memory-budget", optional = true }
 
 [build-dependencies]
 cc = { version = "1", features = ["parallel"] }

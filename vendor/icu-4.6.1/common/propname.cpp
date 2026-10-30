@@ -13,6 +13,7 @@
 #include "unicode/udata.h"
 #include "umutex.h"
 #include "cmemory.h"
+#include "udatamem.h"
 #include "cstring.h"
 #include "ucln_cmn.h"
 #include "uarrsort.h"
@@ -251,9 +252,10 @@ U_CDECL_END
  */
 static UBool _load() {
     UErrorCode ec = U_ZERO_ERROR;
+    UManagedOwner46 owner={10, 1021};
     UDataMemory* data =
-        udata_openChoice(0, PNAME_DATA_TYPE, PNAME_DATA_NAME,
-                         isPNameAcceptable, 0, &ec);
+        managed_udata_openChoice_46(0, PNAME_DATA_TYPE, PNAME_DATA_NAME,
+                         isPNameAcceptable, 0, owner, &ec);
     if (U_SUCCESS(ec)) {
         umtx_lock(NULL);
         if (UDATA == NULL) {

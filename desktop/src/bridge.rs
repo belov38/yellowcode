@@ -1,5 +1,5 @@
 use yellowcode_core::viewer::state::Viewer;
-use yellowcode_http::transport::{PAGE_CSP, Response};
+use yellowcode_http::transport::{Body, PAGE_CSP, Response};
 use yellowcode_http::viewer::dispatch as handle_viewer;
 use yellowcode_http::viewer::read_request;
 
@@ -11,7 +11,7 @@ pub struct Reply {
     pub content_type: String,
     pub csp: Option<&'static str>,
     pub cache_control: &'static str,
-    pub body: Vec<u8>,
+    pub body: Body,
 }
 
 impl Reply {
@@ -34,7 +34,7 @@ impl Reply {
             content_type: "text/plain; charset=utf-8".into(),
             csp: None,
             cache_control: "no-store",
-            body: body.as_bytes().to_vec(),
+            body: body.as_bytes().to_vec().into(),
         }
     }
 
@@ -44,7 +44,7 @@ impl Reply {
             content_type: "application/json; charset=utf-8".into(),
             csp: None,
             cache_control: "no-store",
-            body: serde_json::to_vec(body).unwrap_or_default(),
+            body: serde_json::to_vec(body).unwrap_or_default().into(),
         }
     }
 }
@@ -204,7 +204,7 @@ fn respond_internal(
                 content_type: content_type.into(),
                 csp: Some("default-src 'none'; style-src 'unsafe-inline'; sandbox"),
                 cache_control: "no-store",
-                body: bytes.to_vec(),
+                body: bytes.to_vec().into(),
             };
         }
         if req.path == "/skin/icon/pic/splash" {
@@ -217,7 +217,9 @@ fn respond_internal(
                     content_type: "image/svg+xml".into(),
                     csp: Some("default-src 'none'; style-src 'unsafe-inline'; sandbox"),
                     cache_control: "no-store",
-                    body: include_bytes!("startup_pictures/splash.svg").to_vec(),
+                    body: include_bytes!("startup_pictures/splash.svg")
+                        .to_vec()
+                        .into(),
                 };
             }
         }
@@ -247,7 +249,8 @@ fn respond_internal(
                 START_PAGE
             }
             .as_bytes()
-            .to_vec(),
+            .to_vec()
+            .into(),
         };
     }
     match state {
@@ -257,14 +260,14 @@ fn respond_internal(
             content_type: "text/html; charset=utf-8".into(),
             csp: Some(PAGE_CSP),
             cache_control: "no-store",
-            body: START_PAGE.as_bytes().to_vec(),
+            body: START_PAGE.as_bytes().to_vec().into(),
         },
         None if req.path == "/start.js" => Reply {
             status: 200,
             content_type: "text/javascript; charset=utf-8".into(),
             csp: None,
             cache_control: "no-store",
-            body: START_SCRIPT.as_bytes().to_vec(),
+            body: START_SCRIPT.as_bytes().to_vec().into(),
         },
         None if req.path.starts_with("/api/") => Reply::json(
             503,

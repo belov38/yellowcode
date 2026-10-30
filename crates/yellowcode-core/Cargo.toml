@@ -33,6 +33,7 @@ form-layout = { path = "../form-layout" }
 form-model = { path = "../form-model", features = ["mdconf"] }
 ibschema = { path = "../ibschema" }
 infobase = { path = "../infobase" }
+mssql-backup = { path = "../mssql-backup" }
 mdconf = { path = "../mdconf" }
 memory-budget = { path = "../memory-budget" }
 query-console = { path = "../query-console" }
@@ -48,10 +49,8 @@ clap = { version = "4", features = ["derive"], optional = true }
 [build-dependencies]
 serde_json = "1"
 
-[target."cfg(target_os = \"linux\")".dependencies]
-libc = "0.2"
-
 [target."cfg(unix)".dependencies]
+libc = "0.2"
 rustix = { version = "1", features = ["fs", "process"] }
 
 [target."cfg(windows)".dependencies]

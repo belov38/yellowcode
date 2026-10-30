@@ -18,6 +18,9 @@ pub struct Info {
 }
 
 pub struct Console {
+    #[cfg(test)]
+    pub(crate) query_probe: std::sync::Mutex<Option<Arc<QueryProbe>>>,
+    pub(crate) lifecycle: Arc<crate::lifecycle::Lifecycle>,
     pub(crate) cursor_generation: String,
     pub(crate) base: Arc<TestBase>,
     pub(crate) path: PathBuf,
@@ -106,6 +109,9 @@ impl Console {
             notes: base.schema_notes.clone(),
         };
         Ok(Console {
+            #[cfg(test)]
+            query_probe: std::sync::Mutex::new(None),
+            lifecycle: Arc::default(),
             cursor_generation: crate::table::generation(),
             base: Arc::new(base),
             path: file,

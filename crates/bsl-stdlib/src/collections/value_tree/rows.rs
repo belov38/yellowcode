@@ -224,6 +224,29 @@ impl TreeRows {
     }
 }
 impl HostObject for TreeRows {
+    fn session_edges(&self, visit: &mut dyn bsl_vm::SessionEdges) -> bool {
+        visit.backing(self.state.clone())
+            && self
+                .parent
+                .as_ref()
+                .is_none_or(|parent| visit.backing(parent.clone()))
+    }
+    fn session_clear(&self) {}
+    fn session_transfer_supported(&self) -> bool {
+        true
+    }
+    fn session_transfer(
+        &self,
+        out: &mut dyn bsl_vm::SessionExport,
+    ) -> Result<Option<Box<dyn bsl_vm::SessionObject>>, bsl_vm::Exception> {
+        super::session::capture(&self.state, self.parent.as_ref(), 2, out).map(Some)
+    }
+    fn retained_memory(
+        &self,
+        visit: &mut dyn bsl_vm::RetainedMemory,
+    ) -> Result<bool, bsl_vm::Exception> {
+        crate::collections::accounting::project(self, visit)
+    }
     fn type_id(&self) -> TypeId {
         TypeId::of_catalog(idx("ValueTreeRowCollection"))
     }
@@ -252,6 +275,7 @@ impl HostObject for TreeRows {
             Some("Find") => self.find(ex, args),
             Some("FindRows") => self.find_rows(ex, args),
             Some("Total") => self.total(ex, args),
+            Some("Sort") => self.sort(ex, args),
             Some("Add") => self.add(ex, args, false),
             Some("Insert") => self.add(ex, args, true),
             Some("Get") => {

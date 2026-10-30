@@ -48,6 +48,7 @@
 #include "unicode/ucol.h"
 #include "utrie.h"
 #include "cmemory.h"
+#include "managed_memory.h"
 
 /* This is the internal header file which contains important declarations for 
  * the collation framework. 
@@ -1028,6 +1029,7 @@ struct UCollator {
     int32_t* reorderCodes;
     int32_t reorderCodesLength;
     uint8_t* leadBytePermutationTable;
+    int32_t managedRole; // private receiver role, selected before construction
 };
 
 U_CDECL_END
@@ -1040,6 +1042,9 @@ UCollator* ucol_initUCA(UErrorCode *status);
 
 U_CFUNC
 UCollator* ucol_initCollator(const UCATableHeader *image, UCollator *fillIn, const UCollator *UCA, UErrorCode *status);
+
+U_CFUNC
+UCollator* managed_ucol_initCollator_46(const UCATableHeader *, UCollator *, const UCollator *, UErrorCode *, int32_t role);
 
 U_CFUNC
 void ucol_setOptionsFromHeader(UCollator* result, UColOptionSet * opts, UErrorCode *status);

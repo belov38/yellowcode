@@ -35,6 +35,7 @@
 #include "umutex.h"
 #include "uassert.h"
 #include "cmemory.h"
+#include "managed_memory.h"
 #include "cstring.h"
 #include "uhash.h"
 #include "ucln_cmn.h"
@@ -93,7 +94,8 @@ static UBool U_CALLCONV locale_cleanup(void)
     U_NAMESPACE_USE
 
     if (gLocaleCache) {
-        delete [] gLocaleCache;
+        for (int32_t i = 0; i < eMAX_LOCALES; ++i) gLocaleCache[i].~Locale();
+        uprv_free(gLocaleCache);
         gLocaleCache = NULL;
     }
 
@@ -115,9 +117,9 @@ U_NAMESPACE_BEGIN
 //
 //  locale_set_default_internal.
 //
-void locale_set_default_internal(const char *id)
+void locale_set_default_internal(const char *id, UErrorCode &status)
 {
-    UErrorCode   status = U_ZERO_ERROR;
+    if (U_FAILURE(status)) return;
     UBool canonicalize = FALSE;
 
     // If given a NULL string for the locale id, grab the default
@@ -147,18 +149,30 @@ void locale_set_default_internal(const char *id)
                                                  //   a long name filling the buffer.
                                                  //   (long names are truncated.)
 
+    if (U_FAILURE(status) || managed_failed_46()) {
+        if (U_SUCCESS(status)) status = U_MEMORY_ALLOCATION_ERROR;
+        return;
+    }
+
     // Lazy creation of the hash table itself, if needed.
     UBool isOnlyLocale;
     UMTX_CHECK(NULL, (gDefaultLocale == NULL), isOnlyLocale);
     if (isOnlyLocale) {
         // We haven't seen this locale id before.
         // Create a new Locale object for it.
-        Locale *newFirstDefault = new Locale(Locale::eBOGUS);
-        if (newFirstDefault == NULL) {
-            // No way to report errors from here.
+        void *backing = managed_malloc_46(sizeof(Locale), 1, 101);
+        if (backing == NULL) {
+            status = U_MEMORY_ALLOCATION_ERROR;
             return;
         }
+        Locale *newFirstDefault = new (backing) Locale(Locale::eBOGUS);
+        newFirstDefault->memoryRole46 = 1;
         newFirstDefault->init(localeNameBuf, FALSE);
+        if (newFirstDefault->isBogus() || managed_failed_46()) {
+            status = U_MEMORY_ALLOCATION_ERROR;
+            delete newFirstDefault;
+            return;
+        }
         umtx_lock(NULL);
         if (gDefaultLocale == NULL) {
             gDefaultLocale = newFirstDefault;  // Assignment to gDefaultLocale must happen inside mutex
@@ -172,6 +186,7 @@ void locale_set_default_internal(const char *id)
             // We were successful in setting the locale, and we were the first one to set it.
             return;
         }
+        delete newFirstDefault;
         // else start using the hash table.
     }
 
@@ -247,9 +262,29 @@ U_CFUNC void
 locale_set_default(const char *id)
 {
     U_NAMESPACE_USE
-    locale_set_default_internal(id);
+    UErrorCode status = U_ZERO_ERROR;
+    locale_set_default_internal(id, status);
 }
 /* end */
+
+U_CAPI void U_EXPORT2
+locale_set_default_checked_46(const char *id, UErrorCode *status) {
+    U_NAMESPACE_USE
+    locale_set_default_internal(id, *status);
+}
+
+U_CAPI const void * U_EXPORT2
+locale_english_checked_46(UErrorCode *status) {
+    U_NAMESPACE_USE
+    if (U_FAILURE(*status)) return NULL;
+    const Locale &locale = Locale::getEnglish();
+    if (locale.isBogus() || managed_failed_46()) {
+        *status = U_MEMORY_ALLOCATION_ERROR;
+        return NULL;
+    }
+    return &locale;
+}
+
 
 U_CFUNC const char *
 locale_get_default(void)
@@ -284,7 +319,7 @@ Locale::~Locale()
 }
 
 Locale::Locale()
-    : UObject(), fullName(fullNameBuffer), baseName(NULL)
+    : UObject(), fullName(fullNameBuffer), baseName(NULL), memoryRole46(0)
 {
     init(NULL, FALSE);
 }
@@ -295,7 +330,7 @@ Locale::Locale()
  *   the default locale.)
  */
 Locale::Locale(Locale::ELocaleType)
-    : UObject(), fullName(fullNameBuffer), baseName(NULL)
+    : UObject(), fullName(fullNameBuffer), baseName(NULL), memoryRole46(0)
 {
     setToBogus();
 }
@@ -305,7 +340,7 @@ Locale::Locale( const   char * newLanguage,
                 const   char * newCountry,
                 const   char * newVariant,
                 const   char * newKeywords)
-    : UObject(), fullName(fullNameBuffer), baseName(NULL)
+    : UObject(), fullName(fullNameBuffer), baseName(NULL), memoryRole46(0)
 {
     if( (newLanguage==NULL) && (newCountry == NULL) && (newVariant == NULL) )
     {
@@ -440,8 +475,9 @@ Locale::Locale( const   char * newLanguage,
 }
 
 Locale::Locale(const Locale &other)
-    : UObject(other), fullName(fullNameBuffer), baseName(NULL)
+    : UObject(other), fullName(fullNameBuffer), baseName(NULL), memoryRole46(0)
 {
+    setToBogus();
     *this = other;
 }
 
@@ -456,20 +492,13 @@ Locale &Locale::operator=(const Locale &other)
         return *this;
     }
 
-    /* Free our current storage */
-    if(fullName != fullNameBuffer) {
-        uprv_free(fullName);
-        fullName = fullNameBuffer;
+    char *replacement = fullNameBuffer;
+    if (other.fullName != other.fullNameBuffer) {
+        replacement = (char *)managed_malloc_46(uprv_strlen(other.fullName)+1, memoryRole46, 102);
+        if (replacement == NULL) return *this;
     }
-
-    /* Allocate the full name if necessary */
-    if(other.fullName != other.fullNameBuffer) {
-        fullName = (char *)uprv_malloc(sizeof(char)*(uprv_strlen(other.fullName)+1));
-        if (fullName == NULL) {
-            return *this;
-        }
-    }
-    /* Copy the full name */
+    if (fullName != fullNameBuffer) uprv_free(fullName);
+    fullName = replacement;
     uprv_strcpy(fullName, other.fullName);
 
     /* baseName is the cached result of getBaseName.  if 'other' has a
@@ -551,7 +580,7 @@ Locale& Locale::init(const char* localeID, UBool canonicalize)
 
         if(err == U_BUFFER_OVERFLOW_ERROR || length >= (int32_t)sizeof(fullNameBuffer)) {
             /*Go to heap for the fullName if necessary*/
-            fullName = (char *)uprv_malloc(sizeof(char)*(length + 1));
+            fullName = (char *)managed_malloc_46(sizeof(char)*(length + 1), memoryRole46, 103);
             if(fullName == 0) {
                 fullName = fullNameBuffer;
                 break; // error: out of memory
@@ -664,7 +693,8 @@ Locale::getDefault()
     const Locale *retLocale;
     UMTX_CHECK(NULL, gDefaultLocale, retLocale);
     if (retLocale == NULL) {
-        locale_set_default_internal(NULL);
+        UErrorCode status = U_ZERO_ERROR;
+        locale_set_default_internal(NULL, status);
         umtx_lock(NULL);
         // Need a mutex  in case some other thread set a new
         // default inbetween when we set and when we get the new default.  For
@@ -673,7 +703,7 @@ Locale::getDefault()
         retLocale = gDefaultLocale;
         umtx_unlock(NULL);
     }
-    return *retLocale;
+    return retLocale == NULL ? getBogus46() : *retLocale;
 }
 
 
@@ -690,7 +720,7 @@ Locale::setDefault( const   Locale&     newLocale,
      * This is a convenient way to access the default locale caching mechanisms.
      */
     const char *localeID = newLocale.getName();
-    locale_set_default_internal(localeID);
+    locale_set_default_internal(localeID, status);
 }
 
 Locale U_EXPORT2
@@ -889,16 +919,30 @@ Locale::getCanadaFrench(void)
 }
 
 const Locale &
+Locale::getBogus46() {
+    // POD storage avoids automatic C++ destructor/guard registration on refusal.
+    // This immutable, allocation-free sentinel lives until process exit.
+    static union {
+        UManagedAlignment46 alignment;
+        char bytes[sizeof(Locale)];
+    } storage;
+    static UBool initialized = FALSE;
+    umtx_lock(NULL);
+    if (!initialized) {
+        new (storage.bytes) Locale(eBOGUS);
+        initialized = TRUE;
+    }
+    umtx_unlock(NULL);
+    return *(const Locale *)storage.bytes;
+}
+
+const Locale &
 Locale::getLocale(int locid)
 {
     Locale *localeCache = getLocaleCache();
     U_ASSERT((locid < eMAX_LOCALES)&&(locid>=0));
-    if (localeCache == NULL) {
-        // Failure allocating the locale cache.
-        //   The best we can do is return a NULL reference.
-        locid = 0;
-    }
-    return localeCache[locid]; /*operating on NULL*/
+    if (localeCache == NULL) return getBogus46();
+    return localeCache[locid];
 }
 
 /*
@@ -913,29 +957,28 @@ Locale::getLocaleCache(void)
     umtx_unlock(NULL);
 
     if (needInit) {
-        Locale *tLocaleCache = new Locale[(int)eMAX_LOCALES];
-        if (tLocaleCache == NULL) {
+        Locale *tLocaleCache = (Locale *)managed_malloc_46(sizeof(Locale)*eMAX_LOCALES, 1, 104);
+        if (tLocaleCache == NULL) return NULL;
+        static const char *const names[eMAX_LOCALES] = {
+            "en", "fr", "de", "it", "ja", "ko", "zh", "fr_FR", "de_DE",
+            "it_IT", "ja_JP", "ko_KR", "zh_CN", "zh_TW", "en_GB", "en_US",
+            "en_CA", "fr_CA", ""
+        };
+        int32_t count = 0;
+        for (; count < eMAX_LOCALES; ++count) {
+            Locale *item = new (&tLocaleCache[count]) Locale(eBOGUS);
+            item->memoryRole46 = 1;
+            item->init(names[count], FALSE);
+            if (item->isBogus() || managed_failed_46()) {
+                ++count;
+                break;
+            }
+        }
+        if (count != eMAX_LOCALES || managed_failed_46() || tLocaleCache[eROOT].isBogus()) {
+            for (int32_t i = 0; i < count; ++i) tLocaleCache[i].~Locale();
+            uprv_free(tLocaleCache);
             return NULL;
         }
-	tLocaleCache[eROOT]          = Locale("");
-        tLocaleCache[eENGLISH]       = Locale("en");
-        tLocaleCache[eFRENCH]        = Locale("fr");
-        tLocaleCache[eGERMAN]        = Locale("de");
-        tLocaleCache[eITALIAN]       = Locale("it");
-        tLocaleCache[eJAPANESE]      = Locale("ja");
-        tLocaleCache[eKOREAN]        = Locale("ko");
-        tLocaleCache[eCHINESE]       = Locale("zh");
-        tLocaleCache[eFRANCE]        = Locale("fr", "FR");
-        tLocaleCache[eGERMANY]       = Locale("de", "DE");
-        tLocaleCache[eITALY]         = Locale("it", "IT");
-        tLocaleCache[eJAPAN]         = Locale("ja", "JP");
-        tLocaleCache[eKOREA]         = Locale("ko", "KR");
-        tLocaleCache[eCHINA]         = Locale("zh", "CN");
-        tLocaleCache[eTAIWAN]        = Locale("zh", "TW");
-        tLocaleCache[eUK]            = Locale("en", "GB");
-        tLocaleCache[eUS]            = Locale("en", "US");
-        tLocaleCache[eCANADA]        = Locale("en", "CA");
-        tLocaleCache[eCANADA_FRENCH] = Locale("fr", "CA");
 
         umtx_lock(NULL);
         if (gLocaleCache == NULL) {
@@ -945,7 +988,8 @@ Locale::getLocaleCache(void)
         }
         umtx_unlock(NULL);
         if (tLocaleCache) {
-            delete [] tLocaleCache;  // Fancy array delete will destruct each member.
+            for (int32_t i = 0; i < eMAX_LOCALES; ++i) tLocaleCache[i].~Locale();
+            uprv_free(tLocaleCache);
         }
     }
     return gLocaleCache;
@@ -1072,26 +1116,24 @@ Locale::setKeywordValue(const char* keywordName, const char* keywordValue, UErro
 const char *
 Locale::getBaseName() const
 {
-    // lazy init
     UErrorCode status = U_ZERO_ERROR;
-    // semantically const
-    if(baseName == 0) {
-        ((Locale *)this)->baseName = ((Locale *)this)->baseNameBuffer;
-        int32_t baseNameSize = uloc_getBaseName(fullName, baseName, ULOC_FULLNAME_CAPACITY, &status);
-        if(baseNameSize >= ULOC_FULLNAME_CAPACITY) {
-            ((Locale *)this)->baseName = (char *)uprv_malloc(sizeof(char) * baseNameSize + 1);
-            if (baseName == NULL) {
-                return baseName;
-            }
-            uloc_getBaseName(fullName, baseName, baseNameSize+1, &status);
+    if (baseName == NULL) {
+        char *result = ((Locale *)this)->baseNameBuffer;
+        int32_t length = uloc_getBaseName(fullName, result, ULOC_FULLNAME_CAPACITY, &status);
+        if (length >= ULOC_FULLNAME_CAPACITY) {
+            result = (char *)managed_malloc_46((size_t)length+1, memoryRole46, 105);
+            if (result == NULL) return NULL;
+            status = U_ZERO_ERROR;
+            uloc_getBaseName(fullName, result, length+1, &status);
         }
-        baseName[baseNameSize] = 0;
-
-        // the computation of variantBegin leaves it equal to the length
-        // of fullName if there is no variant.  It should instead be
-        // the length of the baseName.  Patch around this for now.
+        if (U_FAILURE(status) || length < 0 || managed_failed_46()) {
+            if (result != baseNameBuffer) uprv_free(result);
+            return NULL;
+        }
+        result[length] = 0;
+        ((Locale *)this)->baseName = result;
         if (variantBegin == (int32_t)uprv_strlen(fullName)) {
-          ((Locale*)this)->variantBegin = baseNameSize;
+            ((Locale *)this)->variantBegin = length;
         }
     }
     return baseName;

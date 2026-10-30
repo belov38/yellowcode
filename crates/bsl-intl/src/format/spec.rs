@@ -67,15 +67,18 @@ impl FormatSpec {
             "ДФ" | "DF" => self.df = Some(v),
             "ДЛФ" | "DLF" => self.dlf = Some(v),
             "ДП" | "DE" => self.de = Some(v),
-            "Л" | "L" => self.locale = Some(v),
             _ => {}
         }
     }
 }
 
 pub fn parse_spec(fmt: &[u16]) -> FormatSpec {
-    let mut spec = FormatSpec::default();
-    for (key, value) in pairs_with(fmt, true) {
+    let pairs = pairs_with(fmt, true);
+    let mut spec = FormatSpec {
+        locale: crate::locale_key::from_pairs(&pairs, crate::locale_key::KeyCase::Exact),
+        ..FormatSpec::default()
+    };
+    for (key, value) in pairs {
         spec.set(&key, value);
     }
     spec
@@ -85,7 +88,7 @@ pub(crate) fn pairs(fmt: &[u16]) -> Vec<(String, String)> {
     pairs_with(fmt, false)
 }
 
-fn pairs_with(fmt: &[u16], ends_at_space: bool) -> Vec<(String, String)> {
+pub(crate) fn pairs_with(fmt: &[u16], ends_at_space: bool) -> Vec<(String, String)> {
     let text: Vec<char> = char::decode_utf16(fmt.iter().copied())
         .map(|r| r.unwrap_or(char::REPLACEMENT_CHARACTER))
         .collect();

@@ -19,7 +19,11 @@ fn base3() -> Viewer {
 fn without_source() {
     let r = respond(None, "GET", "/");
     assert_eq!(r.status, 200);
-    assert!(String::from_utf8(r.body).unwrap().contains("id=\"open\""));
+    assert!(
+        String::from_utf8(r.body.to_vec())
+            .unwrap()
+            .contains("id=\"open\"")
+    );
     assert_eq!(respond(None, "GET", "/api/tree").status, 503);
     assert_eq!(respond(None, "GET", "/nope").status, 404);
 }
@@ -37,7 +41,7 @@ fn pages_allow_no_inline_script() {
             .unwrap_or("");
         assert_eq!(script_src.trim(), "script-src 'self'", "{csp}");
     }
-    let html = String::from_utf8(start.body).unwrap();
+    let html = String::from_utf8(start.body.to_vec()).unwrap();
     assert!(html.contains("<script src=\"/start.js\"></script>"));
     assert!(
         !html
@@ -47,7 +51,11 @@ fn pages_allow_no_inline_script() {
     let js = respond(None, "GET", "/start.js");
     assert_eq!(js.status, 200);
     assert!(js.content_type.starts_with("text/javascript"));
-    assert!(String::from_utf8(js.body).unwrap().contains("__TAURI__"));
+    assert!(
+        String::from_utf8(js.body.to_vec())
+            .unwrap()
+            .contains("__TAURI__")
+    );
 }
 
 #[test]
@@ -242,7 +250,11 @@ fn a_running_query_does_not_hold_info() {
     let t = std::time::Instant::now();
     assert_eq!(respond(Some(&st), "GET", "/api/x/query/info").status, 200);
     let job = respond(Some(&st), "GET", &format!("/api/x/query/job?id={id}"));
-    assert!(String::from_utf8(job.body).unwrap().contains("running"));
+    assert!(
+        String::from_utf8(job.body.to_vec())
+            .unwrap()
+            .contains("running")
+    );
     assert!(t.elapsed() < std::time::Duration::from_secs(30));
     let c = onec_desktop::bridge::respond_with_body(
         Some(&st),

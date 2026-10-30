@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 
 use super::super::http::{Request, Response};
 use super::super::state::State;
-use super::{Availability, ConsoleSlot, NotBase, error, infobase_source, param, reply, slot};
+use super::{Availability, ConsoleSlot, NotBase, error, infobase_source, param, reply, slot_for};
 
 const DEFAULT_ROWS: usize = 200;
 const MAX_PAGE: usize = 1000;
@@ -38,10 +38,13 @@ pub fn handle(state: &State, req: &Request, route: &str) -> Response {
     if route == "info" {
         return info(state);
     }
+    if route == "cancel" {
+        return cancel(&slot_for(state), req);
+    }
     if let Err(reason) = source_state(state) {
         return error(409, &reason);
     }
-    let slot = slot(&state.source);
+    let slot = slot_for(state);
     if route == "reopen" {
         return match slot.reopen(&state.source) {
             Availability::Ready(c) => reply(200, &info_json(&c)),
@@ -103,14 +106,14 @@ fn info(state: &State) -> Response {
             }),
         );
     }
-    match slot(&state.source).get(&state.source) {
+    match slot_for(state).get(&state.source) {
         Availability::Ready(c) => reply(200, &info_json(&c)),
         Availability::Failed(e) => reply(200, &failed_json(state, &e)),
     }
 }
 
 fn query_error(e: &ErrorOut) -> Response {
-    reply(200, &serde_json::to_value(e).unwrap_or(Value::Null))
+    reply(200, e)
 }
 
 fn body<T: for<'de> Deserialize<'de>>(req: &Request) -> Result<T, Response> {
@@ -138,8 +141,10 @@ fn parameters(console: &Console, req: &Request) -> Response {
         Ok(b) => b,
         Err(r) => return r,
     };
-    match console.parameters(&b.text) {
-        Ok(p) => reply(200, &serde_json::to_value(p).unwrap_or(Value::Null)),
+    match super::super::memory::with_cancel(|cancel| {
+        console.parameters_with_cancel(&b.text, cancel)
+    }) {
+        Ok(p) => reply(200, &p),
         Err(e) => query_error(&e),
     }
 }
@@ -161,7 +166,7 @@ fn job(slot: &ConsoleSlot, req: &Request) -> Response {
         Err(r) => return r,
     };
     match slot.jobs.status(id) {
-        Some(s) => reply(200, &serde_json::to_value(s).unwrap_or(Value::Null)),
+        Some(s) => reply(200, &s),
         None => error(404, "no such job"),
     }
 }
@@ -190,8 +195,11 @@ fn rows(slot: &ConsoleSlot, console: &Console, req: &Request) -> Response {
     if limit > MAX_PAGE {
         return error(400, &format!("limit: at most {MAX_PAGE}"));
     }
-    match slot.jobs.page(console, id, stmt, from, limit) {
-        Ok(p) => reply(200, &serde_json::to_value(p).unwrap_or(Value::Null)),
+    match super::super::memory::with_cancel(|cancel| {
+        slot.jobs
+            .page_with_cancel(console, id, stmt, from, limit, cancel)
+    }) {
+        Ok(p) => reply(200, &p),
         Err(e) => job_failure(&e),
     }
 }
@@ -210,7 +218,7 @@ fn nested(slot: &ConsoleSlot, console: &Console, req: &Request) -> Response {
         (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => return e,
     };
     match slot.jobs.nested(console, id, stmt, row, col) {
-        Ok(n) => reply(200, &serde_json::to_value(n).unwrap_or(Value::Null)),
+        Ok(n) => reply(200, &n),
         Err(e) => query_error(&e),
     }
 }
@@ -220,8 +228,10 @@ fn explain(console: &Console, req: &Request) -> Response {
         Ok(r) => r,
         Err(r) => return r,
     };
-    match console.explain_guarded(&r) {
-        Ok(x) => reply(200, &serde_json::to_value(x).unwrap_or(Value::Null)),
+    match super::super::memory::with_cancel(|cancel| {
+        console.explain_guarded_with_cancel(&r, cancel)
+    }) {
+        Ok(x) => reply(200, &x),
         Err(ExplainFail::Busy) => error(429, EXPLAIN_BUSY),
         Err(ExplainFail::Query(e)) => query_error(&e),
     }
@@ -243,8 +253,10 @@ fn choices(console: &Console, req: &Request) -> Response {
         Ok(l) => l.min(MAX_CHOICES),
         Err(e) => return e,
     };
-    reply(
-        200,
-        &serde_json::to_value(console.ref_choices(kind, limit)).unwrap_or(Value::Null),
-    )
+    match super::super::memory::with_cancel(|cancel| {
+        console.ref_choices_with_cancel(kind, limit, cancel)
+    }) {
+        Ok(values) => reply(200, &values),
+        Err(error) => query_error(&error),
+    }
 }

@@ -1,5 +1,5 @@
-use std::collections::HashMap;
-use std::sync::OnceLock;
+use super::resources::{self, Graph, GuiResourceError};
+use memory_budget::{BudgetError, Category, MemoryBudget};
 
 use bsl_prim::fold_name;
 use mdconf::{ChildTag, MdKind, SubKind};
@@ -209,19 +209,140 @@ pub fn fold_path_name(s: &str) -> String {
     fold_name(s.trim()).replace('ё', "е")
 }
 
-pub fn kind_from_name(s: &str) -> Option<MdKind> {
-    static MAP: OnceLock<HashMap<String, MdKind>> = OnceLock::new();
-    let map = MAP.get_or_init(|| {
-        let mut m = HashMap::new();
-        for &k in MdKind::all() {
-            m.entry(fold_path_name(k.as_str())).or_insert(k);
-            if let Some(ru) = kind_ru(k) {
-                m.entry(fold_path_name(&ru)).or_insert(k);
-            }
+#[cfg(feature = "testing")]
+static DIAGNOSTIC_KIND_MAP: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(feature = "testing")]
+#[doc(hidden)]
+pub fn diagnostic_kind_map_identity() -> usize {
+    let _ = kind_from_name("Catalog");
+    DIAGNOSTIC_KIND_MAP.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[derive(Clone, Copy)]
+struct KindEntry {
+    raw: &'static str,
+    kind: MdKind,
+    ordinal: usize,
+}
+static KINDS: Graph<Vec<KindEntry>> = Graph::new();
+
+fn folded(s: &str) -> impl Iterator<Item = char> + '_ {
+    s.trim().chars().map(|c| {
+        let mut lower = c.to_lowercase();
+        let first = lower.next().unwrap_or(c);
+        let c = if lower.next().is_none() { first } else { c };
+        if c == 'ё' { 'е' } else { c }
+    })
+}
+fn kind_rows(
+    cat: &'static platform_catalog::Catalog,
+    root: Option<&MemoryBudget>,
+    mut row: impl FnMut(&'static str, MdKind) -> Result<(), BudgetError>,
+) -> Result<(), BudgetError> {
+    let q = MdKind::all()
+        .iter()
+        .map(|k| PREFIX_EN.len() + k.as_str().len())
+        .max()
+        .unwrap_or(0);
+    let _scratch = root
+        .map(|r| r.try_reserve(Category::Metadata, q as u64))
+        .transpose()?;
+    let mut query = resources::text("")?;
+    query
+        .try_reserve_exact(q)
+        .map_err(|_| BudgetError::AllocationFailed)?;
+    for &kind in MdKind::all() {
+        row(kind.as_str(), kind)?;
+        query.clear();
+        query.push_str(PREFIX_EN);
+        query.push_str(kind.as_str());
+        let ru = cat
+            .find_type(&query)
+            .map(|i| {
+                let ru = cat.type_info(i).name_ru.as_str();
+                ru.strip_prefix(PREFIX_RU).unwrap_or(ru)
+            })
+            .or_else(|| {
+                KIND_RU_FALLBACK
+                    .iter()
+                    .find(|(en, _)| *en == kind.as_str())
+                    .map(|(_, ru)| *ru)
+            });
+        if let Some(ru) = ru {
+            row(ru, kind)?;
         }
-        m
-    });
-    map.get(&fold_path_name(s)).copied()
+    }
+    Ok(())
+}
+fn kind_map(
+    cat: &'static platform_catalog::Catalog,
+    root: Option<&MemoryBudget>,
+) -> Result<&'static Vec<KindEntry>, BudgetError> {
+    KINDS.prepare(
+        root,
+        || {
+            let mut count = 0usize;
+            kind_rows(cat, root, |_, _| {
+                count = count.checked_add(1).ok_or(BudgetError::Overflow)?;
+                Ok(())
+            })?;
+            let mut bytes = 0;
+            resources::rows::<KindEntry>(&mut bytes, count)?;
+            Ok(bytes)
+        },
+        |rows| {
+            let mut bytes = 0;
+            resources::rows::<KindEntry>(&mut bytes, rows.capacity())?;
+            Ok(bytes)
+        },
+        || {
+            let mut count = 0usize;
+            kind_rows(cat, root, |_, _| {
+                count = count.checked_add(1).ok_or(BudgetError::Overflow)?;
+                Ok(())
+            })?;
+            let mut rows = resources::vec(count)?;
+            kind_rows(cat, root, |raw, kind| {
+                rows.push(KindEntry {
+                    raw,
+                    kind,
+                    ordinal: rows.len(),
+                });
+                Ok(())
+            })?;
+            rows.sort_unstable_by(|a, b| {
+                folded(a.raw)
+                    .cmp(folded(b.raw))
+                    .then(a.ordinal.cmp(&b.ordinal))
+            });
+            Ok(rows)
+        },
+    )
+}
+pub fn prepare_with_memory(budget: &MemoryBudget) -> Result<(), GuiResourceError> {
+    let (cat, root) = platform_catalog::catalog_with_memory(budget)?;
+    kind_map(cat, Some(&root))?;
+    Ok(())
+}
+#[allow(
+    clippy::panic,
+    reason = "legacy infallible accessor; managed readiness is fallible"
+)]
+pub fn kind_from_name(s: &str) -> Option<MdKind> {
+    let map = match kind_map(catalog(), None) {
+        Ok(v) => v,
+        Err(e) => panic!("kind aliases: {e}"),
+    };
+    #[cfg(feature = "testing")]
+    DIAGNOSTIC_KIND_MAP.store(
+        std::ptr::from_ref(map) as usize,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    let i = map.partition_point(|entry| folded(entry.raw).cmp(folded(s)).is_lt());
+    map.get(i)
+        .filter(|entry| folded(entry.raw).eq(folded(s)))
+        .map(|entry| entry.kind)
 }
 
 pub fn child_tag_from_name(s: &str) -> Option<ChildTag> {

@@ -1,6 +1,7 @@
 use crate::Application;
 use crate::model::{FieldDef, ObjDef, ObjId, StdAttr, Usage};
 use crate::predefined::AreaKey;
+use crate::read_budget as budget;
 use crate::session::call_ctx;
 use crate::values::field::{default_of, from_field};
 use crate::values::refs::{RefValue, ref_value};
@@ -21,18 +22,44 @@ pub(crate) struct ReadRow {
 }
 
 impl ReadRow {
-    pub fn value(&self, app: &Application, obj: ObjId, i: usize) -> Result<Value, HostError> {
+    pub(crate) fn bytes(&self) -> u64 {
+        let base = budget::rc_size::<Self>()
+            .saturating_add(budget::slots::<Value>(self.fields.capacity()))
+            .saturating_add(budget::slots::<FieldValue>(self.raw.capacity()))
+            .saturating_add(budget::slots::<bool>(self.faulty.capacity()))
+            .saturating_add(self.version.capacity() as u64);
+        let fields = self
+            .fields
+            .iter()
+            .fold(base, |n, v| n.saturating_add(budget::value_heap(v)));
+        self.raw
+            .iter()
+            .fold(fields, |n, v| n.saturating_add(budget::field_heap(v)))
+    }
+    pub fn value(
+        &self,
+        ex: &mut Execution,
+        app: &Application,
+        obj: ObjId,
+        i: usize,
+    ) -> CallResult<Value> {
         if self.faulty.get(i).copied().unwrap_or(false)
             && let (Some(f), Some(raw)) = (app.model().obj(obj).fields.get(i), self.raw.get(i))
         {
-            return convert(app, f, raw);
+            budget::reserve(
+                ex,
+                self.bytes().saturating_add(budget::conversion_peak(raw)),
+            )?;
+            return Ok(convert(app, f, raw)?);
         }
-        self.fields.get(i).cloned().ok_or_else(|| {
+        let value = self.fields.get(i).ok_or_else(|| {
             HostError::text(
                 "internal: the field is not in the row",
                 "internal: the field is not in the row",
             )
-        })
+        })?;
+        budget::reserve(ex, self.bytes().saturating_add(budget::value_heap(value)))?;
+        Ok(value.clone())
     }
 }
 
@@ -49,8 +76,31 @@ fn internal(text: &str) -> HostError {
     HostError::text(&format!("internal: {text}"), &format!("internal: {text}"))
 }
 
-pub(crate) fn read_fresh(app: &Application, r: RefValue) -> Result<ReadRow, HostError> {
-    load_row(app, r)
+pub(crate) fn read_fresh(
+    ex: &mut Execution,
+    app: &Application,
+    r: RefValue,
+) -> CallResult<ReadRow> {
+    admit_read(ex, r)?;
+    load_row(ex, app, r, 0)
+}
+
+fn admit_read(ex: &mut Execution, r: RefValue) -> Result<(), HostError> {
+    if r.is_empty() {
+        return Ok(());
+    }
+    admit_data_read(ex)
+}
+
+pub(crate) fn admit_data_read(ex: &mut Execution) -> Result<(), HostError> {
+    if call_ctx(ex).is_some_and(|c| c.sess.user().no_users) {
+        Ok(())
+    } else {
+        Err(HostError::not_implemented(
+            "P6",
+            "application read security provider",
+        ))
+    }
 }
 
 pub(crate) fn read_object_row(
@@ -58,13 +108,29 @@ pub(crate) fn read_object_row(
     app: &Application,
     r: RefValue,
 ) -> CallResult<Rc<ReadRow>> {
+    admit_read(ex, r)?;
     let epoch = app.write_epoch();
     if let Some((e, row)) = call_ctx(ex).and_then(|c| c.read_cache.get(&r))
         && *e == epoch
     {
         return Ok(row.clone());
     }
-    let row = Rc::new(load_row(app, r)?);
+    let retained = call_ctx(ex).map_or(0, |c| {
+        if c.read_cache.len() >= crate::session::READ_CACHE_CAP {
+            c.read_cache.clear();
+        }
+        let capacity = c.read_cache.capacity();
+        let map = bsl_vm::retained_hash_bytes::<(RefValue, (u64, Rc<ReadRow>))>(capacity)
+            .unwrap_or(u64::MAX)
+            .saturating_add(budget::hash_growth::<(RefValue, (u64, Rc<ReadRow>))>(
+                capacity,
+                c.read_cache.len(),
+            ));
+        c.read_cache
+            .values()
+            .fold(map, |n, (_, row)| n.saturating_add(row.bytes()))
+    });
+    let row = Rc::new(load_row(ex, app, r, retained)?);
     if let Some(c) = call_ctx(ex) {
         if c.read_cache.len() >= crate::session::READ_CACHE_CAP {
             c.read_cache.clear();
@@ -75,11 +141,13 @@ pub(crate) fn read_object_row(
 }
 
 pub(crate) fn read_tabular(
-    _ex: &mut Execution,
+    ex: &mut Execution,
     app: &Application,
     r: RefValue,
     tab: usize,
+    live: u64,
 ) -> CallResult<Vec<Vec<Value>>> {
+    admit_read(ex, r)?;
     let def = app.model().obj(r.obj);
     let (Some(st), Some(td)) = (app.model().storage_of(r.obj), def.tabular.get(tab)) else {
         return Ok(Vec::new());
@@ -91,19 +159,64 @@ pub(crate) fn read_tabular(
         return Ok(Vec::new());
     }
     app.predefined().ensure(app, r.obj, &AreaKey::default())?;
-    let rows = fetch(app, *table, number, r, usize::MAX)?;
-    let mut out = Vec::with_capacity(rows.len());
-    for row in &rows {
-        let mut line = Vec::with_capacity(td.fields.len());
-        for (i, f) in td.fields.iter().enumerate() {
-            let fid = ids.get(i).copied().flatten();
-            line.push(match fid {
-                Some(fid) => convert(app, f, cell(row, fid)?)?,
-                None => default_of(app, f)?,
-            });
-        }
-        out.push(line);
-    }
+    let mut out = Vec::new();
+    let mut payload = 0u64;
+    visit(
+        ex,
+        app,
+        *table,
+        number,
+        r,
+        usize::MAX,
+        live,
+        |ex, memory, row| {
+            ex.charge(1)?;
+            let capacity = if out.len() == out.capacity() {
+                out.capacity().saturating_mul(2).max(4)
+            } else {
+                out.capacity()
+            };
+            let line_peak = row
+                .iter()
+                .fold(budget::slots::<Value>(td.fields.len()), |n, v| {
+                    n.saturating_add(budget::conversion_peak(v))
+                });
+            let peak = live
+                .saturating_add(payload)
+                .saturating_add(budget::slots::<Vec<Value>>(capacity))
+                .saturating_add(budget::stored_row(row))
+                .saturating_add(line_peak);
+            budget::admit(
+                ex,
+                memory,
+                peak.saturating_add(budget::slots::<Vec<Value>>(out.capacity())),
+            )?;
+            if out.len() == out.capacity() {
+                out.try_reserve_exact(capacity - out.len())
+                    .map_err(|_| ex.out_of_memory())?;
+            }
+            let mut line = Vec::with_capacity(td.fields.len());
+            for (i, f) in td.fields.iter().enumerate() {
+                let fid = ids.get(i).copied().flatten();
+                line.push(match fid {
+                    Some(fid) => convert(app, f, cell(row, fid)?)?,
+                    None => default_of(app, f)?,
+                });
+            }
+            payload = line.iter().fold(
+                payload.saturating_add(budget::slots::<Value>(line.capacity())),
+                |n, v| n.saturating_add(budget::value_heap(v)),
+            );
+            out.push(line);
+            budget::remaining(
+                ex,
+                memory,
+                live.saturating_add(payload)
+                    .saturating_add(budget::slots::<Vec<Value>>(out.capacity())),
+            );
+            Ok(())
+        },
+    )?;
     Ok(out)
 }
 
@@ -112,26 +225,66 @@ fn cell(row: &[FieldValue], fid: FieldId) -> Result<&FieldValue, HostError> {
         .ok_or_else(|| internal("the row is shorter than its table"))
 }
 
-fn fetch(
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one admitted reference range and its conversion"
+)]
+fn visit(
+    ex: &mut Execution,
     app: &Application,
     table: TableId,
     number: u32,
     r: RefValue,
     limit: usize,
-) -> Result<Vec<Vec<FieldValue>>, HostError> {
+    live: u64,
+    mut visit: impl FnMut(&mut Execution, &memory_budget::MemoryBudget, &[FieldValue]) -> CallResult<()>,
+) -> CallResult<()> {
     let ti = app
         .store()
         .storage()
         .try_table(table)
         .ok_or_else(|| internal("no table"))?;
-    if ti.key_index.as_ref().is_some_and(|k| k.prefix != 0) {
-        return Err(HostError::not_implemented("Ссылка", "Разделение данных"));
-    }
-    let key = [FieldValue::Ref {
+    let mut key = if ti.key_index.as_ref().is_some_and(|k| k.prefix != 0) {
+        let scope = app
+            .options()
+            .read_only_scope
+            .as_ref()
+            .ok_or_else(|| HostError::not_implemented("Ссылка", "Разделение данных"))?;
+        let values = scope
+            .area(ti)
+            .map_err(|_| internal("invalid bound read area"))?;
+        let index = ti
+            .key_index
+            .as_ref()
+            .ok_or_else(|| internal("no key index"))?;
+        if index.prefix != values.len()
+            || !index
+                .fields
+                .iter()
+                .take(index.prefix)
+                .zip(&ti.separators)
+                .all(|(field, separator)| *field == separator.field)
+        {
+            return Err(internal("separator prefix does not match the key index").into());
+        }
+        values
+    } else {
+        Vec::new()
+    };
+    key.push(FieldValue::Ref {
         table: number,
         id: r.id,
-    }];
-    let txn = app.store().read().map_err(|e| store_error(&e))?;
+    });
+    let mut txn = app.store().read().map_err(|e| store_call_error(ex, e))?;
+    let remaining = ex
+        .options()
+        .memory_limit
+        .unwrap_or(u64::MAX)
+        .saturating_sub(live)
+        .saturating_sub(ex.retained_workspace_bytes());
+    let memory = txn
+        .read_memory(remaining)
+        .map_err(|e| store_call_error(ex, e))?;
     let it = txn
         .range(
             table,
@@ -140,12 +293,18 @@ fn fetch(
             Bound::Included(&key),
             Direction::Forward,
         )
-        .map_err(|e| store_error(&e))?;
-    let mut rows = Vec::new();
+        .map_err(|e| store_call_error(ex, e))?;
     for item in it.take(limit) {
-        rows.push(item.map_err(|e| store_error(&e))?.1);
+        visit(ex, &memory, &item.map_err(|e| store_call_error(ex, e))?.1)?;
     }
-    Ok(rows)
+    Ok(())
+}
+
+pub(crate) fn store_call_error(ex: &Execution, error: StoreError) -> bsl_vm::CallError {
+    match error {
+        StoreError::Memory(_) => ex.out_of_memory().into(),
+        _ => store_error(&error).into(),
+    }
 }
 
 pub(crate) fn field_index(def: &ObjDef, name: &str) -> Option<usize> {
@@ -194,7 +353,7 @@ fn convert(app: &Application, f: &FieldDef, v: &FieldValue) -> Result<Value, Hos
     })
 }
 
-fn load_row(app: &Application, r: RefValue) -> Result<ReadRow, HostError> {
+fn load_row(ex: &mut Execution, app: &Application, r: RefValue, live: u64) -> CallResult<ReadRow> {
     let model = app.model();
     let def = model.obj(r.obj);
     if !r.is_empty() {
@@ -202,16 +361,37 @@ fn load_row(app: &Application, r: RefValue) -> Result<ReadRow, HostError> {
     }
     let found = match (model.storage_of(r.obj), r.is_empty()) {
         (Some(st), false) => match st.ref_number {
-            Some(number) => fetch(app, st.main, number, r, 1)?
-                .into_iter()
-                .next()
-                .map(|row| (st, row)),
+            Some(number) => {
+                let mut found = None;
+                visit(ex, app, st.main, number, r, 1, live, |ex, memory, row| {
+                    let conversions = row
+                        .iter()
+                        .fold(0u64, |n, v| n.saturating_add(budget::conversion_peak(v)));
+                    budget::admit(
+                        ex,
+                        memory,
+                        live.saturating_add(budget::stored_row(row).saturating_mul(2))
+                            .saturating_add(conversions)
+                            .saturating_add(budget::slots::<Value>(def.fields.len()))
+                            .saturating_add(budget::slots::<FieldValue>(def.fields.len()))
+                            .saturating_add(def.fields.len() as u64)
+                            .saturating_add(budget::rc_size::<ReadRow>()),
+                    )?;
+                    found = Some((st, row.to_vec()));
+                    Ok(())
+                })?;
+                found
+            }
             None => None,
         },
         _ => None,
     };
     let Some((st, row)) = found else {
-        return defaults(app, def, r);
+        budget::reserve(
+            ex,
+            live.saturating_add((def.fields.len() as u64).saturating_mul(512)),
+        )?;
+        return Ok(defaults(app, def, r)?);
     };
     let mut fields = Vec::with_capacity(def.fields.len());
     let mut faulty = Vec::with_capacity(def.fields.len());

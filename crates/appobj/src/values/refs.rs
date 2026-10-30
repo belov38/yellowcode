@@ -69,7 +69,7 @@ impl RefObject {
 
     fn attr(&self, ex: &mut Execution, i: usize) -> CallResult<Value> {
         let row = read_object_row(ex, &self.app, self.r)?;
-        Ok(row.value(&self.app, self.r.obj, i)?)
+        row.value(ex, &self.app, self.r.obj, i)
     }
 
     fn no_field(name: &str) -> HostError {
@@ -154,6 +154,18 @@ impl SharedObject for SharedRef {
 }
 
 impl HostObject for RefObject {
+    fn point_in_time_key(&self, ex: &Execution) -> Option<([u8; 16], [u8; 16])> {
+        let ty = ex.runtime().types().app_type(self.ty)?;
+        Some((ty.guid, *self.r.id.to_uuid().as_bytes()))
+    }
+
+    fn retained_memory(
+        &self,
+        visit: &mut dyn bsl_vm::RetainedMemory,
+    ) -> Result<bool, bsl_vm::Exception> {
+        visit.work(1)?;
+        Ok(true)
+    }
     fn type_id(&self) -> TypeId {
         self.ty
     }

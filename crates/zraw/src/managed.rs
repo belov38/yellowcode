@@ -157,12 +157,29 @@ pub fn inflate_budgeted(
     budget: &MemoryBudget,
     category: Category,
 ) -> Result<Charged<Vec<u8>>, ManagedInflateError> {
+    inflate_budgeted_checked(data, limit, budget, category, || true)?
+        .ok_or(ManagedInflateError::Zlib(z::Z_STREAM_ERROR))
+}
+
+pub fn inflate_budgeted_checked(
+    data: &[u8],
+    limit: u64,
+    budget: &MemoryBudget,
+    category: Category,
+    mut keep_running: impl FnMut() -> bool,
+) -> Result<Option<Charged<Vec<u8>>>, ManagedInflateError> {
+    if !keep_running() {
+        return Ok(None);
+    }
     let mut stream = ManagedStream::new(budget, category)?;
     let mut output = BudgetedVec::new(budget, category)?;
     let mut scratch = [0u8; BUF_SIZE];
     let mut position = 0usize;
     let mut total = 0u64;
     loop {
+        if !keep_running() {
+            return Ok(None);
+        }
         let rest = data.get(position..).unwrap_or_default();
         let (used, n, ret) = stream.stream.step(rest, &mut scratch, z::Z_NO_FLUSH);
         if stream.context.error.is_some() || ret == z::Z_MEM_ERROR {
@@ -179,7 +196,7 @@ pub fn inflate_budgeted(
         match ret {
             z::Z_OK => {}
             z::Z_STREAM_END if position < data.len() => return Err(ManagedInflateError::Trailing),
-            z::Z_STREAM_END => return Ok(output.into_charged_vec()),
+            z::Z_STREAM_END => return Ok(Some(output.into_charged_vec())),
             z::Z_BUF_ERROR => return Err(ManagedInflateError::Truncated),
             _ => return Err(stream.error(ret)),
         }

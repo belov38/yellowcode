@@ -390,6 +390,53 @@ impl BinBuf {
 }
 
 impl HostObject for BinBuf {
+    fn session_edges(&self, _: &mut dyn bsl_vm::SessionEdges) -> bool {
+        true
+    }
+    fn session_transfer_supported(&self) -> bool {
+        true
+    }
+    fn session_transfer(
+        &self,
+        out: &mut dyn bsl_vm::SessionExport,
+    ) -> Result<Option<Box<dyn bsl_vm::SessionObject>>, bsl_vm::Exception> {
+        out.reserve(std::mem::size_of::<SessionBuffer>() as u64)?;
+        let bytes = self.store.borrow();
+        let backing = out.backing(
+            std::any::TypeId::of::<SessionBuffer>(),
+            Rc::as_ptr(&self.store) as usize,
+            &mut |out| {
+                out.reserve(bytes.len() as u64 + bsl_vm::session_shared_bytes::<Vec<u8>>())?;
+                Ok(std::sync::Arc::new(
+                    crate::session::copy(&bytes).map_err(|_| out.memory_error())?,
+                ))
+            },
+        )?;
+        let Ok(bytes) = backing.downcast::<Vec<u8>>() else {
+            return Ok(None);
+        };
+        Ok(Some(Box::new(SessionBuffer {
+            bytes,
+            off: self.off,
+            len: self.len,
+            big: self.big.get(),
+            ro: self.ro.get(),
+        })))
+    }
+    fn retained_memory(
+        &self,
+        visit: &mut dyn bsl_vm::RetainedMemory,
+    ) -> Result<bool, bsl_vm::Exception> {
+        visit.mutable();
+        let bytes = self.store.borrow();
+        visit.allocation(
+            Rc::as_ptr(&self.store) as usize,
+            (bytes.capacity() as u64).saturating_add(
+                (std::mem::size_of::<RefCell<Vec<u8>>>() + 2 * std::mem::size_of::<usize>()) as u64,
+            ),
+        )?;
+        Ok(true)
+    }
     fn type_id(&self) -> TypeId {
         TypeId::of_catalog(types().binary_buffer)
     }
@@ -442,52 +489,54 @@ impl HostObject for BinBuf {
     }
 
     fn call(&self, ex: &mut Execution, m: MemberId, args: &mut [Arg]) -> CallResult<Value> {
-        let t = types().binary_buffer;
-        let args: &[Arg] = args;
-        match method_name(t, m) {
-            Some("Get") => {
-                let i = strict_i64(ex, args.first(), 1, false)?;
-                Ok(self.byte(i)?)
+        ex.with_reuse_check(|ex| {
+            let t = types().binary_buffer;
+            let args: &[Arg] = args;
+            match method_name(t, m) {
+                Some("Get") => {
+                    let i = strict_i64(ex, args.first(), 1, false)?;
+                    Ok(self.byte(i)?)
+                }
+                Some("Set") => {
+                    let i = strict_i64(ex, args.first(), 1, false)?;
+                    let v = arg_value(ex, args.get(1))?;
+                    self.set_byte(i, &v, 2)?;
+                    Ok(Value::Undefined)
+                }
+                Some("Read") => self.read(ex, args),
+                Some("Write") => self.write_op(ex, args, Op::Copy),
+                Some("WriteBitwiseAnd") => self.write_op(ex, args, Op::And),
+                Some("WriteBitwiseOr") => self.write_op(ex, args, Op::Or),
+                Some("WriteBitwiseXor") => self.write_op(ex, args, Op::Xor),
+                Some("WriteBitwiseAndNot") => self.write_op(ex, args, Op::AndNot),
+                Some("Invert") => self.invert(ex, args),
+                Some("ReadInt16") => self.read_int(ex, args, 2),
+                Some("ReadInt32") => self.read_int(ex, args, 4),
+                Some("ReadInt64") => self.read_int(ex, args, 8),
+                Some("WriteInt16") => self.write_int(ex, args, 2),
+                Some("WriteInt32") => self.write_int(ex, args, 4),
+                Some("WriteInt64") => self.write_int(ex, args, 8),
+                Some("GetSlice") => self.slice(ex, args),
+                Some("Copy") => {
+                    guard_bytes(ex, self.len as u64)?;
+                    let bytes = self.bytes();
+                    Ok(Value::Object(Rc::new(self.derive(bytes))))
+                }
+                Some("Reverse") => {
+                    guard_bytes(ex, self.len as u64)?;
+                    let mut bytes = self.bytes();
+                    bytes.reverse();
+                    Ok(Value::Object(Rc::new(self.derive(bytes))))
+                }
+                Some("Split") if !args.is_empty() => self.split(ex, args),
+                Some("Concat") => self.concat(ex, args),
+                Some("SetReadOnly") => {
+                    self.ro.set(true);
+                    Ok(Value::Undefined)
+                }
+                _ => Err(not_implemented(t, m).into()),
             }
-            Some("Set") => {
-                let i = strict_i64(ex, args.first(), 1, false)?;
-                let v = arg_value(ex, args.get(1))?;
-                self.set_byte(i, &v, 2)?;
-                Ok(Value::Undefined)
-            }
-            Some("Read") => self.read(ex, args),
-            Some("Write") => self.write_op(ex, args, Op::Copy),
-            Some("WriteBitwiseAnd") => self.write_op(ex, args, Op::And),
-            Some("WriteBitwiseOr") => self.write_op(ex, args, Op::Or),
-            Some("WriteBitwiseXor") => self.write_op(ex, args, Op::Xor),
-            Some("WriteBitwiseAndNot") => self.write_op(ex, args, Op::AndNot),
-            Some("Invert") => self.invert(ex, args),
-            Some("ReadInt16") => self.read_int(ex, args, 2),
-            Some("ReadInt32") => self.read_int(ex, args, 4),
-            Some("ReadInt64") => self.read_int(ex, args, 8),
-            Some("WriteInt16") => self.write_int(ex, args, 2),
-            Some("WriteInt32") => self.write_int(ex, args, 4),
-            Some("WriteInt64") => self.write_int(ex, args, 8),
-            Some("GetSlice") => self.slice(ex, args),
-            Some("Copy") => {
-                guard_bytes(ex, self.len as u64)?;
-                let bytes = self.bytes();
-                Ok(Value::Object(Rc::new(self.derive(bytes))))
-            }
-            Some("Reverse") => {
-                guard_bytes(ex, self.len as u64)?;
-                let mut bytes = self.bytes();
-                bytes.reverse();
-                Ok(Value::Object(Rc::new(self.derive(bytes))))
-            }
-            Some("Split") if !args.is_empty() => self.split(ex, args),
-            Some("Concat") => self.concat(ex, args),
-            Some("SetReadOnly") => {
-                self.ro.set(true);
-                Ok(Value::Undefined)
-            }
-            _ => Err(not_implemented(t, m).into()),
-        }
+        })
     }
 
     fn index_get(&self, ex: &mut Execution, key: &Value) -> CallResult<Value> {
@@ -499,10 +548,12 @@ impl HostObject for BinBuf {
     }
 
     fn index_set(&self, ex: &mut Execution, key: &Value, v: Value) -> CallResult<()> {
-        let Value::Number(n) = key else {
-            return Err(no_field(ex, key)?.into());
-        };
-        self.set_byte(n.trunc_to_i64_saturating(), &v, 0)
+        ex.with_reuse_check(|ex| {
+            let Value::Number(n) = key else {
+                return Err(no_field(ex, key)?.into());
+            };
+            self.set_byte(n.trunc_to_i64_saturating(), &v, 0)
+        })
     }
 
     fn iter_len(&self, _ex: &mut Execution) -> Option<usize> {
@@ -511,5 +562,66 @@ impl HostObject for BinBuf {
 
     fn iter_get(&self, _ex: &mut Execution, i: usize) -> CallResult<Value> {
         Ok(self.byte(i64::try_from(i).unwrap_or(i64::MAX))?)
+    }
+}
+
+struct SessionBuffer {
+    bytes: std::sync::Arc<Vec<u8>>,
+    off: usize,
+    len: usize,
+    big: bool,
+    ro: bool,
+}
+impl bsl_vm::SessionObject for SessionBuffer {
+    fn retained_memory(
+        &self,
+        visit: &mut dyn bsl_vm::RetainedMemory,
+    ) -> Result<(), bsl_vm::Exception> {
+        visit
+            .allocation(
+                std::sync::Arc::as_ptr(&self.bytes) as usize,
+                self.bytes.capacity() as u64 + bsl_vm::session_shared_bytes::<Vec<u8>>(),
+            )
+            .map(|_| ())
+    }
+    fn create(
+        &self,
+        ex: &mut Execution,
+        imports: &mut bsl_vm::SessionImports,
+    ) -> Result<Value, bsl_vm::Exception> {
+        let store = imports.backing(ex, std::sync::Arc::as_ptr(&self.bytes) as usize, |ex| {
+            Ok(Rc::new(RefCell::new(
+                crate::session::copy(&self.bytes).map_err(|_| ex.out_of_memory())?,
+            )))
+        })?;
+        Ok(Value::Object(Rc::new(BinBuf {
+            store,
+            off: self.off,
+            len: self.len,
+            big: Cell::new(self.big),
+            ro: Cell::new(self.ro),
+        })))
+    }
+    fn fill(&self, _: &mut Execution, _: &Value, _: Vec<Value>) -> Result<(), bsl_vm::Exception> {
+        Ok(())
+    }
+    fn clear(&self, _: &Value) {}
+    fn restore_bytes(&self, _: usize) -> u64 {
+        self.bytes.len() as u64 + 128
+    }
+    fn restore_memory(
+        &self,
+        _: usize,
+        visit: &mut dyn bsl_vm::RetainedMemory,
+    ) -> Result<(), bsl_vm::Exception> {
+        visit.bytes((std::mem::size_of::<BinBuf>() + 2 * std::mem::size_of::<usize>()) as u64)?;
+        visit
+            .allocation(
+                std::sync::Arc::as_ptr(&self.bytes) as usize,
+                (self.bytes.len()
+                    + std::mem::size_of::<RefCell<Vec<u8>>>()
+                    + 2 * std::mem::size_of::<usize>()) as u64,
+            )
+            .map(|_| ())
     }
 }

@@ -7,8 +7,7 @@ use appobj::{
 use bsl_compiler::{CompileOptions, CompiledModule, ExecContext, FragmentScope, ModuleKind};
 use bsl_syntax::{ParseMode, SourceText};
 use bsl_vm::{
-    CompatMode, Exception, ExecOptions, Execution, FatalKind, ModuleContext, Registry, Runtime,
-    SessionEnv,
+    Exception, ExecOptions, Execution, FatalKind, ModuleContext, Registry, Runtime, SessionEnv,
 };
 use serde::Serialize;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -169,15 +168,16 @@ impl CodeConsole {
             module_name: HOST_MODULE,
             kind: ModuleKind::Object,
             context: ExecContext::Server,
-            compat: CompatMode::DontUse,
+            compat: app.modules().compat(),
             catalog,
             app: runtime.app().names(),
             extension: None,
         };
         let host = bsl_compiler::compile(&SourceText::from_str(HOST_MODULE, ""), &o)
             .map_err(|e| e.cause_text(HOST_MODULE, bsl_vm::Lang::Ru))?;
-        let env =
-            bsl_testhost::StandEnv::bench_default().with_config_language(&app.model().lang_code);
+        let env = bsl_testhost::StandEnv::bench_default()
+            .with_compat(app.modules().compat())
+            .with_config_language(&app.model().lang_code);
         Ok(CodeConsole {
             host,
             runtime,

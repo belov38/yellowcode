@@ -14,6 +14,7 @@ use std::{
     io::{Read, Write},
 };
 
+mod bak;
 mod convert;
 mod metadata;
 mod query;
@@ -69,7 +70,7 @@ pub fn is_cli(args: &[OsString]) -> bool {
             gui_has_cli_flag(args.get(1..).unwrap_or(&[]))
         }
         "open" => gui_has_cli_flag(args.get(2..).unwrap_or(&[])),
-        "help" | "metadata" | "convert" | "query" | "serve" | "table" | "users" => true,
+        "help" | "metadata" | "convert" | "bak" | "query" | "serve" | "table" | "users" => true,
         flag if flag.starts_with('-') => true,
         _ => {
             let path = std::path::Path::new(arg);
@@ -123,6 +124,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    #[command(subcommand, about = "Исследовать резервную копию MS SQL Server")]
+    Bak(bak::Command),
     #[command(
         about = "Преобразовать конфигурацию или выгрузить информационную базу; исходный файл не меняется"
     )]
@@ -228,6 +231,7 @@ pub fn run(
         closed: false,
     };
     let result = match cli.command {
+        Some(Command::Bak(command)) => bak::run(command, &mut output, err).map(|()| 0),
         Some(Command::Users(command)) => users::run(command, &mut output, tty).map(|()| 0),
         Some(Command::Metadata(command)) => metadata::run(command, &mut output).map(|()| 0),
         Some(Command::Convert(args)) => convert::run(args, &mut output, err),

@@ -350,7 +350,7 @@ private:
 struct Norm2AllModes : public UMemory {
     static Norm2AllModes *createInstance(const char *packageName,
                                          const char *name,
-                                         UErrorCode &errorCode);
+                                         UErrorCode &errorCode, int32_t role = 0);
     Norm2AllModes() : comp(impl, FALSE), decomp(impl), fcd(impl), fcc(impl, TRUE) {}
 
     Normalizer2Impl impl;
@@ -363,16 +363,21 @@ struct Norm2AllModes : public UMemory {
 Norm2AllModes *
 Norm2AllModes::createInstance(const char *packageName,
                               const char *name,
-                              UErrorCode &errorCode) {
+                              UErrorCode &errorCode, int32_t role) {
     if(U_FAILURE(errorCode)) {
         return NULL;
     }
-    LocalPointer<Norm2AllModes> allModes(new Norm2AllModes);
+    void *backing = managed_malloc_46(sizeof(Norm2AllModes), role, role == 0 ? 0 : 501);
+    if (backing == NULL) {
+        errorCode = U_MEMORY_ALLOCATION_ERROR;
+        return NULL;
+    }
+    LocalPointer<Norm2AllModes> allModes(new (backing) Norm2AllModes);
     if(allModes.isNull()) {
         errorCode=U_MEMORY_ALLOCATION_ERROR;
         return NULL;
     }
-    allModes->impl.load(packageName, name, errorCode);
+    allModes->impl.load(packageName, name, errorCode, role);
     return U_SUCCESS(errorCode) ? allModes.orphan() : NULL;
 }
 
@@ -390,7 +395,7 @@ public:
 private:
     static void *createInstance(const void *context, UErrorCode &errorCode) {
         ucln_common_registerCleanup(UCLN_COMMON_NORMALIZER2, uprv_normalizer2_cleanup);
-        return Norm2AllModes::createInstance(NULL, (const char *)context, errorCode);
+        return Norm2AllModes::createInstance(NULL, (const char *)context, errorCode, 5);
     }
 
     const char *name;
@@ -452,8 +457,8 @@ const Normalizer2 *Normalizer2Factory::getNFDInstance(UErrorCode &errorCode) {
 const Normalizer2 *Normalizer2Factory::getFCDInstance(UErrorCode &errorCode) {
     Norm2AllModes *allModes=Norm2AllModesSingleton(nfcSingleton, "nfc").getInstance(errorCode);
     if(allModes!=NULL) {
-        allModes->impl.getFCDTrie(errorCode);
-        return &allModes->fcd;
+        const UTrie2 *trie = allModes->impl.getFCDTrie(errorCode);
+        return trie != NULL && U_SUCCESS(errorCode) ? &allModes->fcd : NULL;
     } else {
         return NULL;
     }

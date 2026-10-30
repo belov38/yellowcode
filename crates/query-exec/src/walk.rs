@@ -1,11 +1,12 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use bsl_prim::{BslDate, Collation, fold_name};
+use bsl_prim::{BslDate, fold_name};
 use query_ir::{ExecError, QValue};
 use query_syntax::Kw;
 
-use crate::key::{Key, key_of_totals};
+use crate::coll::ExecCollation;
+use crate::key::{Key, try_key_of_totals};
 use crate::result::QueryResult;
 use crate::source::Row;
 use crate::totals::{
@@ -91,13 +92,14 @@ pub enum Unloaded {
     Tree(Vec<TreeRow>),
 }
 
-pub fn select(
+pub fn select<'c>(
     result: &Arc<QueryResult>,
     walk: Walk,
     groupings: &str,
     fill: &str,
-    coll: &dyn Collation,
+    coll: impl Into<ExecCollation<'c>>,
 ) -> Result<Selection, WalkError> {
+    let coll = coll.into();
     if let Some(t) = &result.totals {
         check(t)?;
     }
@@ -253,13 +255,14 @@ impl Selection {
         Ok(false)
     }
 
-    pub fn select(
+    pub fn select<'c>(
         &self,
         walk: Walk,
         groupings: &str,
         fill: &str,
-        coll: &dyn Collation,
+        coll: impl Into<ExecCollation<'c>>,
     ) -> Result<Selection, WalkError> {
+        let coll = coll.into();
         let item = self.current_or_err()?.clone();
         let mut parents = self.parents.clone();
         if let Some(p) = point_of(&self.result, &item) {
@@ -482,7 +485,7 @@ fn items_for(
     walk: Walk,
     names: &str,
     fill: &str,
-    coll: &dyn Collation,
+    coll: ExecCollation<'_>,
 ) -> Result<Vec<Item>, WalkError> {
     let names: Vec<&str> = names
         .split(',')
@@ -642,7 +645,7 @@ fn jump_tree(
     details: &[u32],
     ctx: &[(usize, QValue)],
     level: u32,
-    coll: &dyn Collation,
+    coll: ExecCollation<'_>,
 ) -> Result<TotalsTree, WalkError> {
     let n = tree.spec.points.len();
     let after: Vec<usize> = (t + 1..n).collect();
@@ -694,7 +697,7 @@ fn flat_jump(
     details: &[u32],
     ctx: &[(usize, QValue)],
     level: u32,
-    coll: &dyn Collation,
+    coll: ExecCollation<'_>,
 ) -> Result<Vec<Item>, WalkError> {
     let Some(point) = tree.spec.points.get(t) else {
         return Ok(Vec::new());
@@ -734,7 +737,7 @@ fn flat_jump(
     let mut groups: Vec<(QValue, Vec<u32>)> = Vec::new();
     for &r in details {
         let v = cell(r, col).cloned().unwrap_or(QValue::Null);
-        let k = key_of_totals(&v, coll);
+        let k = try_key_of_totals(&v, coll)?;
         match index.get(&k) {
             Some(&g) => {
                 if let Some(g) = groups.get_mut(g) {
@@ -755,7 +758,13 @@ fn flat_jump(
         return Err(WalkError::DivisionByZero);
     }
     if !tree.spec.order.is_empty() {
-        made.sort_by(|a, b| compare_keys(&a.1, &b.1, &tree.spec.order, coll));
+        let keys: Vec<Vec<Key>> = made
+            .iter()
+            .map(|(_, k)| k.iter().map(|v| try_key_of_totals(v, coll)).collect())
+            .collect::<Result<_, ExecError>>()?;
+        let mut keyed: Vec<_> = keys.into_iter().zip(made).collect();
+        keyed.sort_by(|a, b| compare_keys(&a.0, &b.0, &tree.spec.order));
+        made = keyed.into_iter().map(|(_, m)| m).collect();
     }
     Ok(made.into_iter().map(|(item, _)| item).collect())
 }
@@ -793,7 +802,7 @@ fn fill_periods(
     items: &[Item],
     ctx: &[(usize, QValue)],
     level: u32,
-    coll: &dyn Collation,
+    coll: ExecCollation<'_>,
 ) -> Result<Vec<Item>, WalkError> {
     let Some(point) = tree.spec.points.get(t) else {
         return Ok(Vec::new());

@@ -31,7 +31,8 @@ UVector::UVector(UErrorCode &status) :
     capacity(0),
     elements(0),
     deleter(0),
-    comparer(0)
+    comparer(0),
+    managedOwner()
 {
     _init(DEFAULT_CAPACITY, status);
 }
@@ -41,7 +42,8 @@ UVector::UVector(int32_t initialCapacity, UErrorCode &status) :
     capacity(0),
     elements(0),
     deleter(0),
-    comparer(0)
+    comparer(0),
+    managedOwner()
 {
     _init(initialCapacity, status);
 }
@@ -51,7 +53,8 @@ UVector::UVector(UObjectDeleter *d, UKeyComparator *c, UErrorCode &status) :
     capacity(0),
     elements(0),
     deleter(d),
-    comparer(c)
+    comparer(c),
+    managedOwner()
 {
     _init(DEFAULT_CAPACITY, status);
 }
@@ -61,7 +64,15 @@ UVector::UVector(UObjectDeleter *d, UKeyComparator *c, int32_t initialCapacity, 
     capacity(0),
     elements(0),
     deleter(d),
-    comparer(c)
+    comparer(c),
+    managedOwner()
+{
+    _init(initialCapacity, status);
+}
+
+UVector::UVector(UObjectDeleter *d, UKeyComparator *c, int32_t initialCapacity,
+                 UErrorCode &status, UManagedOwner46 owner) :
+    count(0), capacity(0), elements(0), deleter(d), comparer(c), managedOwner(owner)
 {
     _init(initialCapacity, status);
 }
@@ -74,7 +85,7 @@ void UVector::_init(int32_t initialCapacity, UErrorCode &status) {
     if ((initialCapacity < 1) || (initialCapacity > (int32_t)(INT32_MAX / sizeof(UHashTok)))) {
         initialCapacity = DEFAULT_CAPACITY;
     }
-    elements = (UHashTok *)uprv_malloc(sizeof(UHashTok)*initialCapacity);
+    elements = (UHashTok *)managed_malloc_46(sizeof(UHashTok)*initialCapacity, managedOwner.role, managedOwner.site);
     if (elements == 0) {
         status = U_MEMORY_ALLOCATION_ERROR;
     } else {

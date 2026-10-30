@@ -9,11 +9,17 @@
     )
 )]
 
+mod fact_json;
+mod fact_map;
+pub use fact_json::{FactArray, FactJson, FactObject, FactValue};
+pub use fact_map::FactMap;
+
 pub mod build;
 pub mod fmt220;
 pub mod forms;
 pub mod forms_upgrade;
 pub mod kind;
+pub mod learned_kinds;
 pub mod rights;
 pub mod spec;
 pub mod tables;
@@ -33,6 +39,11 @@ pub use static_view::{
     static_form_tables, static_form_tables_mode, static_rights_tables, static_schema,
     static_template_tables,
 };
+
+mod managed;
+#[cfg(feature = "testing")]
+pub use managed::testing;
+pub use managed::{ManagedSchemaError, SchemaDataError, SchemaGroup};
 
 mod resource;
 pub use resource::{ConfigFormat, ResourceError, SchemaResource, embedded_resource, for_format};

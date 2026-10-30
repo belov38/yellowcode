@@ -28,6 +28,10 @@ impl Str {
         self.0.capacity()
     }
 
+    pub fn backing_identity(&self) -> usize {
+        Rc::as_ptr(&self.0) as usize
+    }
+
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }

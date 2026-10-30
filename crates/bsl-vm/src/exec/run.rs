@@ -21,23 +21,41 @@ const BUDGET_TEXT: &str = "<instruction budget exhausted>";
 const CANCEL_POLL_UNITS: u64 = 1024;
 
 impl Execution {
+    pub fn remaining_budget(&self) -> Option<u64> {
+        self.opts
+            .budget
+            .map(|budget| budget.saturating_sub(self.exec.steps))
+    }
+
+    pub fn cancellation_error(&self) -> Exception {
+        fatal(
+            FatalKind::Cancelled,
+            match self.lang() {
+                Lang::Ru => "Выполнение прервано",
+                Lang::En => "Execution interrupted",
+            }
+            .into(),
+        )
+    }
+
     pub fn charge(&mut self, units: u64) -> Result<(), Exception> {
+        self.check_charge(units)?;
+        self.exec.steps = self.exec.steps.saturating_add(units);
+        Ok(())
+    }
+
+    pub(crate) fn check_charge(&self, units: u64) -> Result<(), Exception> {
         let total = self.exec.steps.saturating_add(units);
         if let Some(flag) = &self.opts.cancel
             && (self.exec.steps == 0
                 || self.exec.steps / CANCEL_POLL_UNITS != total / CANCEL_POLL_UNITS)
             && flag.load(Ordering::Relaxed)
         {
-            let text = match self.lang() {
-                Lang::Ru => "Выполнение прервано",
-                Lang::En => "Execution interrupted",
-            };
-            return Err(fatal(FatalKind::Cancelled, text.into()));
+            return Err(self.cancellation_error());
         }
         if self.opts.budget.is_some_and(|b| total > b) {
             return Err(fatal(FatalKind::Budget, BUDGET_TEXT.into()));
         }
-        self.exec.steps = total;
         Ok(())
     }
 }
@@ -134,6 +152,11 @@ pub(crate) fn push_frame(
     argc: usize,
     flags: ExecFlags,
 ) -> Result<(), Exception> {
+    let flags = ExecFlags {
+        privileged: flags.privileged
+            || matches!(module.kind, bsl_compiler::ModuleKind::Common(f) if f.privileged),
+        ..flags
+    };
     let weight = ex.opts.weights.call;
     push_frame_weighted(ex, module, inst, method, argc, flags, weight)
 }
@@ -184,6 +207,7 @@ fn push_frame_weighted(
         }
     }
     ex.exec.frames.push(Frame {
+        reuse: None,
         method,
         home: module.clone(),
         module,
@@ -194,6 +218,8 @@ fn push_frame_weighted(
         handler_exc: None,
         handlers: Vec::new(),
         flags,
+        safe_depth: 0,
+        privileged_depth: 0,
         outer: None,
         used,
     });
@@ -252,7 +278,11 @@ fn run_loop(
     snapshot: bool,
 ) -> Result<(Value, Vec<Value>), Exception> {
     loop {
-        match run_ops(ex, floor, snapshot) {
+        let result = run_ops(ex, floor, snapshot);
+        if result.is_err() {
+            crate::reuse::reconcile(ex)?;
+        }
+        match result {
             Err(Exception::Catchable(info)) => {
                 if !handler::catch(ex, floor, &info) {
                     return Err(Exception::Catchable(info));
@@ -273,7 +303,7 @@ fn run_ops(
             return Err(internal("no frame to run"));
         }
         let fi = ex.exec.frames.len() - 1;
-        let (module, inst, method, base, sp_base, mut pc, flags) = {
+        let (module, inst, method, base, sp_base, mut pc) = {
             let f = &ex.exec.frames[fi];
             (
                 f.module.clone(),
@@ -282,11 +312,11 @@ fn run_ops(
                 f.base,
                 f.sp_base,
                 f.pc,
-                f.flags,
             )
         };
         let code = code_of(&module, method).ok_or_else(|| internal("no such method"))?;
         loop {
+            crate::reuse::reconcile(ex)?;
             let Some(&op) = code.code.get(pc as usize) else {
                 return Err(internal("jump or flow out of the code"));
             };
@@ -469,6 +499,7 @@ fn run_ops(
                         return Err(internal("operand stack underflow"));
                     }
                     let target = ex.exec.frames[fi].home.clone();
+                    let flags = ex.frame_flags();
                     push_frame(
                         ex,
                         target,
@@ -491,7 +522,12 @@ fn run_ops(
                         Vec::new()
                     };
                     ex.exec.stack.truncate(base);
-                    ex.exec.frames.pop();
+                    if let Some(frame) = ex.exec.frames.pop()
+                        && let Some(pending) = frame.reuse
+                    {
+                        crate::reuse::publish(ex, pending, &v)?;
+                    }
+                    crate::reuse::reconcile(ex)?;
                     if fi == floor {
                         return Ok((v, slots));
                     }
@@ -508,8 +544,10 @@ fn run_ops(
                     continue 'frame;
                 }
                 Op::CallApp { method, argc, .. } => {
-                    call::call_app(ex, &module, sp_base, method, argc, flags)?;
-                    continue 'frame;
+                    let flags = ex.frame_flags();
+                    if call::call_app(ex, &module, sp_base, method, argc, flags)? {
+                        continue 'frame;
+                    }
                 }
                 Op::CallPlatform { method, argc, .. } => {
                     member::call_platform(ex, sp_base, method, argc)?;
@@ -518,6 +556,7 @@ fn run_ops(
                     member::call_context(ex, &module, inst.as_ref(), sp_base, name, argc, want)?;
                 }
                 Op::CallMember { name, argc, want } => {
+                    let flags = ex.frame_flags();
                     if member::call_member(ex, &module, sp_base, name, argc, want, flags)? {
                         continue 'frame;
                     }

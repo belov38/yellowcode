@@ -48,7 +48,7 @@ pub(super) fn omitted() -> Value {
     Value::Object(Rc::new(OmittedArg))
 }
 
-pub(super) fn is_omitted(v: &Value) -> bool {
+pub(crate) fn is_omitted(v: &Value) -> bool {
     matches!(v, Value::Object(o) if o.as_any().is::<OmittedArg>())
 }
 
@@ -140,7 +140,7 @@ pub(super) fn call_app(
     method: u32,
     argc: u32,
     flags: crate::host::ExecFlags,
-) -> Result<(), Exception> {
+) -> Result<bool, Exception> {
     let argc = argc as usize;
     if ex.exec.stack.len() < sp_base + argc {
         return Err(internal("operand stack underflow"));
@@ -158,14 +158,60 @@ pub(super) fn call_app(
         .module()
         .method(&sig.name)
         .ok_or_else(|| internal(format!("no method {} in {}", sig.name, sig.module)))?;
-    super::run::push_frame(
+    let value = push_external_frame(
         ex,
         inst.module().clone(),
         Some(inst),
         super::frame::MethodRef::Method(idx),
         argc,
         flags,
-    )
+    )?;
+    if let Some(value) = value {
+        ex.exec.stack.push(value);
+        Ok(false)
+    } else {
+        Ok(true)
+    }
+}
+
+pub(crate) fn arg_initial(value: &Value) -> &Value {
+    arg_ref(value).map_or(value, |arg| &arg.init)
+}
+
+fn push_external_frame(
+    ex: &mut Execution,
+    module: std::sync::Arc<bsl_compiler::CompiledModule>,
+    inst: Option<ModuleInstanceRef>,
+    method: super::frame::MethodRef,
+    argc: usize,
+    flags: ExecFlags,
+) -> Result<Option<Value>, Exception> {
+    let lookup = match method {
+        super::frame::MethodRef::Method(index) => crate::reuse::lookup(ex, &module, index, argc),
+        _ => Ok(crate::reuse::Lookup::Bypass),
+    };
+    let pending = match lookup {
+        Ok(crate::reuse::Lookup::Hit(value)) => {
+            ex.exec
+                .stack
+                .truncate(ex.exec.stack.len().saturating_sub(argc));
+            ex.exec.entry_weight = 0;
+            ex.exec.frame_weight = None;
+            return Ok(Some(value));
+        }
+        Ok(crate::reuse::Lookup::Miss(pending)) => Some(pending),
+        Ok(crate::reuse::Lookup::Bypass) => None,
+        Err(error) => {
+            ex.exec.entry_weight = 0;
+            ex.exec.frame_weight = None;
+            return Err(error);
+        }
+    };
+    super::run::push_frame(ex, module, inst, method, argc, flags)?;
+    if let Some(frame) = ex.exec.frames.last_mut() {
+        frame.reuse = pending;
+    }
+    Ok(None)
 }
 
 pub(crate) fn push_args(ex: &mut Execution, args: &[Arg]) -> Result<(), Exception> {
@@ -239,7 +285,7 @@ pub(crate) fn call_index(
         Reentry::OnTopOfFrame(w) => ex.enter_weight(w),
         Reentry::FullLevel(w) => ex.enter_full_weight(w),
     }
-    if let Err(e) = super::run::push_frame(
+    match push_external_frame(
         ex,
         module,
         Some(inst.clone()),
@@ -247,8 +293,12 @@ pub(crate) fn call_index(
         args.len(),
         flags,
     ) {
-        ex.exec.stack.truncate(start);
-        return Err(e);
+        Ok(Some(value)) => return Ok(value),
+        Ok(None) => (),
+        Err(error) => {
+            ex.exec.stack.truncate(start);
+            return Err(error);
+        }
     }
     super::run::run_until_return(ex, floor)
 }
@@ -260,7 +310,7 @@ pub(super) fn enter_module_value(
     argc: usize,
     want: bool,
     flags: ExecFlags,
-) -> Result<bool, Exception> {
+) -> Result<Option<bool>, Exception> {
     let Some(pos) = ex
         .exec
         .stack
@@ -268,14 +318,14 @@ pub(super) fn enter_module_value(
         .checked_sub(argc + 1)
         .filter(|&p| p >= sp_base)
     else {
-        return Ok(false);
+        return Ok(None);
     };
     let inst = match ex.exec.stack.get(pos) {
         Some(Value::Object(o)) => match o.as_any().downcast_ref::<crate::module::ModuleValue>() {
             Some(mv) => mv.instance().clone(),
-            None => return Ok(false),
+            None => return Ok(None),
         },
-        _ => return Ok(false),
+        _ => return Ok(None),
     };
     let module = inst.module().clone();
     let Some((idx, code)) = crate::module::exported(&module, name) else {
@@ -283,7 +333,7 @@ pub(super) fn enter_module_value(
     };
     check_call(ex, code, name, argc, want)?;
     ex.exec.stack.remove(pos);
-    super::run::push_frame(
+    let value = push_external_frame(
         ex,
         module,
         Some(inst),
@@ -291,5 +341,10 @@ pub(super) fn enter_module_value(
         argc,
         flags,
     )?;
-    Ok(true)
+    if let Some(value) = value {
+        ex.exec.stack.push(value);
+        Ok(Some(false))
+    } else {
+        Ok(Some(true))
+    }
 }

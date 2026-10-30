@@ -20,6 +20,7 @@ use std::{
 pub enum StringEvalError {
     Memory(BudgetError),
     Icu(icu46_sys::IcuStatus),
+    Runtime(icu46_sys::managed::runtime::RuntimeError),
     Argument(&'static str),
 }
 impl From<BudgetError> for StringEvalError {
@@ -32,6 +33,7 @@ impl From<CollationError> for StringEvalError {
         match error {
             CollationError::Budget(e) => Self::Memory(e),
             CollationError::Icu(e) => Self::Icu(e),
+            CollationError::Runtime(e) => Self::Runtime(e),
         }
     }
 }
@@ -48,6 +50,7 @@ impl fmt::Display for StringEvalError {
         match self {
             Self::Memory(e) => e.fmt(f),
             Self::Icu(e) => e.fmt(f),
+            Self::Runtime(e) => write!(f, "{e:?}"),
             Self::Argument(e) => f.write_str(e),
         }
     }

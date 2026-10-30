@@ -1,7 +1,7 @@
 use onecd::{DateTime, Numeric};
 
 use crate::columns::{ColRole, ColType, Column, Part};
-use crate::error::{Error, Result};
+use crate::error::{Error, NAME_BYTES, Result, diagnostic_name};
 use crate::logical::TypeCode;
 use crate::storage::{FieldId, FieldInfo, TableInfo};
 use crate::values::{ColumnValue, RefId, Uuid16, type_code, utf16_len};
@@ -89,19 +89,37 @@ fn shape<'a>(
     Ok((sh, cols))
 }
 
+pub const ERROR_BYTES: usize = 4 * NAME_BYTES + 1024;
+
 fn no_fit(t: &TableInfo, f: &FieldInfo, why: impl Into<String>) -> Error {
     Error::ValueDoesNotFit {
-        table: t.logical.clone(),
-        column: f.name.clone(),
+        table: diagnostic_name(&t.logical),
+        column: diagnostic_name(&f.name),
         why: why.into(),
     }
 }
 
 fn bad_value(t: &TableInfo, f: &FieldInfo, why: impl Into<String>) -> Error {
     Error::BadValue {
-        table: t.logical.clone(),
-        field: f.name.clone(),
+        table: diagnostic_name(&t.logical),
+        field: diagnostic_name(&f.name),
         why: why.into(),
+    }
+}
+
+fn kind_name(v: &FieldValue) -> &'static str {
+    match v {
+        FieldValue::Null => "NULL",
+        FieldValue::Undefined => "Undefined",
+        FieldValue::Bool(_) => "a boolean",
+        FieldValue::Number(_) => "a number",
+        FieldValue::Date(_) => "a date",
+        FieldValue::String(_) => "a string",
+        FieldValue::Uuid(_) => "a UUID",
+        FieldValue::Ref { .. } => "a reference",
+        FieldValue::Storage(_) => "a value storage",
+        FieldValue::Binary(_) => "binary data",
+        FieldValue::RowVersion(_) => "a row version",
     }
 }
 
@@ -162,14 +180,15 @@ fn be4(v: &ColumnValue) -> Option<u32> {
 
 pub fn encode(t: &TableInfo, f: FieldId, v: &FieldValue) -> Result<Vec<ColumnValue>> {
     let fi = t.field(f).ok_or_else(|| Error::ValueDoesNotFit {
-        table: t.logical.clone(),
+        table: diagnostic_name(&t.logical),
         column: format!("#{}", f.0),
         why: "no such field".into(),
     })?;
     if is_version(fi) {
         return Err(Error::Unsupported(format!(
             "{}.{}: the row version is not written",
-            t.logical, fi.name
+            diagnostic_name(&t.logical),
+            diagnostic_name(&fi.name)
         )));
     }
     let (sh, cols) = shape(t, fi).map_err(|w| no_fit(t, fi, w))?;
@@ -180,7 +199,7 @@ pub fn encode(t: &TableInfo, f: FieldId, v: &FieldValue) -> Result<Vec<ColumnVal
     };
     for (c, x) in cols.iter().zip(&out) {
         c.check(x)
-            .map_err(|w| no_fit(t, fi, format!("{}: {w}", c.name)))?;
+            .map_err(|w| no_fit(t, fi, format!("{}: {w}", diagnostic_name(&c.name))))?;
     }
     Ok(out)
 }
@@ -198,18 +217,50 @@ pub fn encode_bound(t: &TableInfo, f: FieldId, v: &FieldValue) -> Result<Vec<Col
             })
         && utf16_len(s) > slot
     {
-        let mut cut = String::new();
         let mut used = 0;
-        for ch in s.chars() {
-            used += ch.len_utf16();
-            if used > slot {
-                break;
-            }
-            cut.push(ch);
-        }
+        let end = s
+            .char_indices()
+            .find_map(|(at, ch)| {
+                used += ch.len_utf16();
+                (used > slot).then_some(at)
+            })
+            .unwrap_or(s.len());
+        let cut = s.get(..end).unwrap_or(s).to_string();
         return encode(t, f, &FieldValue::String(cut));
     }
     encode(t, f, v)
+}
+
+pub fn encode_bound_bytes(t: &TableInfo, f: FieldId, v: &FieldValue) -> usize {
+    let Some(cols) = t.field(f).and_then(|fi| t.columns.get(fi.columns.clone())) else {
+        return 0;
+    };
+    let text = match v {
+        FieldValue::String(s) => s.len(),
+        _ => 0,
+    };
+    let bytes = match v {
+        FieldValue::Binary(b) | FieldValue::Storage(b) => b.len(),
+        _ => 0,
+    };
+    let digits = match v {
+        FieldValue::Number(n) => n.digits().len(),
+        _ => 0,
+    };
+    let column = |c: &Column| -> usize {
+        match c.ty {
+            ColType::NC(n) | ColType::NVC(n) => text + 2 * n as usize,
+            ColType::NT => text,
+            ColType::B(n) | ColType::VB(n) => bytes + n as usize + 16,
+            ColType::I => bytes + 16,
+            ColType::N(p, s) => digits + 4 * (p as usize + s as usize + 2),
+            ColType::L | ColType::DT | ColType::RV => 0,
+        }
+    };
+    let values = cols.len() * std::mem::size_of::<ColumnValue>();
+    cols.iter()
+        .map(column)
+        .fold(values + text + ERROR_BYTES, usize::saturating_add)
 }
 
 fn null_cols(t: &TableInfo, fi: &FieldInfo, cols: &[Column]) -> Result<Vec<ColumnValue>> {
@@ -221,15 +272,20 @@ fn null_cols(t: &TableInfo, fi: &FieldInfo, cols: &[Column]) -> Result<Vec<Colum
 }
 
 fn kind_error(t: &TableInfo, fi: &FieldInfo, v: &FieldValue, want: &str) -> Error {
-    no_fit(t, fi, format!("{v:?} given, the column holds {want}"))
+    no_fit(
+        t,
+        fi,
+        format!("{} given, the column holds {want}", kind_name(v)),
+    )
 }
 
 fn pad_nc(c: &Column, s: &str) -> String {
     match c.ty {
         ColType::NC(n) => {
-            let have = utf16_len(s);
-            let mut out = s.to_string();
-            out.extend(std::iter::repeat_n(' ', (n as usize).saturating_sub(have)));
+            let pad = (n as usize).saturating_sub(utf16_len(s));
+            let mut out = String::with_capacity(s.len() + pad);
+            out.push_str(s);
+            out.extend(std::iter::repeat_n(' ', pad));
             out
         }
         _ => s.to_string(),
@@ -321,7 +377,13 @@ fn encode_composite(
         return null_cols(t, fi, cols);
     }
     let mut out: Vec<ColumnValue> = cols.iter().map(empty_value).collect();
-    let missing = || no_fit(t, fi, format!("the field has no column for {v:?}"));
+    let missing = || {
+        no_fit(
+            t,
+            fi,
+            format!("the field has no column for {}", kind_name(v)),
+        )
+    };
     let mut set = |part: Part, x: ColumnValue| -> Result<()> {
         let i = cols
             .iter()

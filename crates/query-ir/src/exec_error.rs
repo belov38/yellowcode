@@ -60,6 +60,37 @@ impl std::fmt::Display for RuntimeError {
 
 impl std::error::Error for RuntimeError {}
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeError {
+    RestartRequired {
+        memory: Option<memory_budget::MemoryLimit>,
+    },
+    Status(i32),
+}
+
+impl NativeError {
+    pub const fn public_text(self) -> &'static str {
+        match self {
+            NativeError::RestartRequired { memory: Some(_) } => {
+                "MEMORY_LIMIT: native: restart the application"
+            }
+            NativeError::RestartRequired { memory: None } => {
+                "native ICU allocation failed: restart the application"
+            }
+            NativeError::Status(_) => "native ICU error",
+        }
+    }
+}
+
+impl std::fmt::Display for NativeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NativeError::Status(code) => write!(f, "{} {code}", self.public_text()),
+            _ => f.write_str(self.public_text()),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum ExecError {
     Runtime(RuntimeError),
@@ -72,6 +103,7 @@ pub enum ExecError {
     },
     Memory(memory_budget::MemoryLimit),
     Structure(memory_budget::StructureLimit),
+    Native(NativeError),
 }
 
 impl ExecError {
@@ -92,6 +124,7 @@ impl std::fmt::Display for ExecError {
             ExecError::Fatal(s) => f.write_str(s),
             ExecError::Later { what, stage } => write!(f, "{what}: {stage}"),
             ExecError::Memory(m) => f.write_str(m.public_text()),
+            ExecError::Native(n) => n.fmt(f),
             ExecError::Structure(l) => {
                 write!(
                     f,

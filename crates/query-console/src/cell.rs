@@ -176,6 +176,17 @@ impl RowSizes {
         base: &TestBase,
         lang: Lang,
     ) -> Result<u64, BudgetError> {
+        self.measure_checked(values, base, lang, || Ok::<(), BudgetError>(()))
+    }
+
+    pub(crate) fn measure_checked<E: From<BudgetError>>(
+        &mut self,
+        values: &[QValue],
+        base: &TestBase,
+        lang: Lang,
+        mut check: impl FnMut() -> Result<(), E>,
+    ) -> Result<u64, E> {
+        check()?;
         let sizes = match &mut self.sizes {
             Some(sizes) => sizes,
             empty => empty.insert(BudgetedVec::try_with_capacity(
@@ -188,6 +199,7 @@ impl RowSizes {
         sizes.try_reserve(values.len())?;
         let mut total = 0u64;
         for v in values {
+            check()?;
             let n = cell_measure(v, base, lang, &self.budget)?;
             sizes.try_push(n)?;
             total = total.saturating_add(cell_charge(v, base, n));

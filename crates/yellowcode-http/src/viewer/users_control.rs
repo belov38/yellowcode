@@ -19,7 +19,7 @@ fn reply(status: u16, value: &impl Serialize) -> Response {
         Ok(body) => Response {
             status,
             content_type: "application/json; charset=utf-8",
-            body,
+            body: body.into(),
             ..Default::default()
         },
         Err(_) => error(500, "response_unavailable", "response unavailable"),
@@ -31,7 +31,8 @@ fn error(status: u16, code: &str, message: &str) -> Response {
         content_type: "application/json; charset=utf-8",
         body: json!({"error":message, "code":code, "phase":"before_commit", "committed":false})
             .to_string()
-            .into_bytes(),
+            .into_bytes()
+            .into(),
         ..Default::default()
     }
 }
@@ -208,9 +209,7 @@ fn handle_inner(viewer: &Viewer, req: &Request, phase: &std::cell::Cell<Phase>) 
     if !viewer.idle() {
         return busy();
     }
-    if !yellowcode_core::viewer::consoles::slot(&state.source).release_idle()
-        || !yellowcode_core::viewer::code_consoles::code_slot(&state.source).release_idle()
-    {
+    if !yellowcode_core::viewer::consoles::release_idle_readers(&state) {
         return busy();
     }
     if let Err(e) = control.consume_revision(&request.revision) {
@@ -228,7 +227,7 @@ fn handle_inner(viewer: &Viewer, req: &Request, phase: &std::cell::Cell<Phase>) 
                 Ok(body) => Response {
                     status: 200,
                     content_type: "application/json; charset=utf-8",
-                    body,
+                    body: body.into(),
                     ..Default::default()
                 },
                 Err(_) => map_error(UserWriteError::CommittedUnverified),
@@ -256,6 +255,7 @@ fn map_error(e: UserWriteError) -> Response {
         UnsupportedLayout(_) => (422, "unsupported_layout"),
         UnsupportedPolicy => (422, "unsupported_policy"),
         UnsupportedPlatform => (422, "unsupported_platform"),
+        SourceBusy => (409, "source_busy"),
         StaleRevision => (409, "stale_revision"),
         NotFound => (404, "not_found"),
         Ambiguous => (409, "ambiguous_identity"),

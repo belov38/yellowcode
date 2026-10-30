@@ -830,6 +830,11 @@ inline uint8_t i_getCombiningClass(UChar32 c, const UCollator *coll) {
 }
 
 UCollator* ucol_initCollator(const UCATableHeader *image, UCollator *fillIn, const UCollator *UCA, UErrorCode *status) {
+    return managed_ucol_initCollator_46(image, fillIn, UCA, status, 0);
+}
+
+UCollator* managed_ucol_initCollator_46(const UCATableHeader *image, UCollator *fillIn,
+                                      const UCollator *UCA, UErrorCode *status, int32_t role) {
     UChar c;
     UCollator *result = fillIn;
     if(U_FAILURE(*status) || image == NULL) {
@@ -837,7 +842,7 @@ UCollator* ucol_initCollator(const UCATableHeader *image, UCollator *fillIn, con
     }
 
     if(result == NULL) {
-        result = (UCollator *)uprv_malloc(sizeof(UCollator));
+        result = (UCollator *)managed_malloc_46(sizeof(UCollator), role, role == 0 ? 0 : 702);
         if(result == NULL) {
             *status = U_MEMORY_ALLOCATION_ERROR;
             return result;
@@ -847,6 +852,7 @@ UCollator* ucol_initCollator(const UCATableHeader *image, UCollator *fillIn, con
         result->freeOnClose = FALSE;
     }
 
+    result->managedRole = role;
     result->image = image;
     result->mapping.getFoldingOffset = _getFoldingOffset;
     const uint8_t *mapping = (uint8_t*)result->image+result->image->mappingPosition;
@@ -915,6 +921,9 @@ UCollator* ucol_initCollator(const UCATableHeader *image, UCollator *fillIn, con
     result->hasRealData = FALSE; // real data lives in .dat file...
     result->freeImageOnClose = FALSE;
 
+    /* Initialize close ownership before fallible Latin1/normalizer work. */
+    result->options = NULL;
+    result->freeOptionsOnClose = FALSE;
     /* set attributes */
     ucol_setOptionsFromHeader(
         result,
@@ -2392,7 +2401,16 @@ inline void setDiscontiguosAttribute(collIterate *source, const UnicodeString &b
         source->writableBuffer = buffer;
     }
 
-    source->pos = source->writableBuffer.getTerminatedBuffer();
+    const UChar *chars = source->writableBuffer.getTerminatedBuffer();
+    if (chars == NULL) {
+        /* A refused copy leaves no side buffer: resume the source string. The
+         * key is wrong; the managed call reports the refusal and publishes no
+         * key. */
+        source->pos   = source->fcdPosition;
+        source->flags = source->origFlags;
+        return;
+    }
+    source->pos = chars;
 }
 
 /**
@@ -6658,7 +6676,7 @@ ucol_addLatinOneEntry(UCollator *coll, UChar ch, uint32_t CE,
 
 static inline UBool
 ucol_resizeLatinOneTable(UCollator *coll, int32_t size, UErrorCode *status) {
-    uint32_t *newTable = (uint32_t *)uprv_malloc(size*sizeof(uint32_t)*3);
+    uint32_t *newTable = (uint32_t *)managed_malloc_46(size*sizeof(uint32_t)*3, coll->managedRole, coll->managedRole == 0 ? 0 : 703);
     if(newTable == NULL) {
       *status = U_MEMORY_ALLOCATION_ERROR;
       coll->latinOneFailed = TRUE;
@@ -6679,7 +6697,7 @@ static UBool
 ucol_setUpLatinOne(UCollator *coll, UErrorCode *status) {
     UBool result = TRUE;
     if(coll->latinOneCEs == NULL) {
-        coll->latinOneCEs = (uint32_t *)uprv_malloc(sizeof(uint32_t)*UCOL_LATINONETABLELEN*3);
+        coll->latinOneCEs = (uint32_t *)managed_malloc_46(sizeof(uint32_t)*UCOL_LATINONETABLELEN*3, coll->managedRole, coll->managedRole == 0 ? 0 : 703);
         if(coll->latinOneCEs == NULL) {
             *status = U_MEMORY_ALLOCATION_ERROR;
             return FALSE;
@@ -7186,7 +7204,7 @@ ucol_setReorderCodes(UCollator *coll,
         coll->leadBytePermutationTable = NULL;
         return;
     }
-    coll->reorderCodes = (int32_t*) uprv_malloc(reorderCodesLength * sizeof(int32_t));
+    coll->reorderCodes = (int32_t*) managed_malloc_46(reorderCodesLength * sizeof(int32_t), coll->managedRole, coll->managedRole == 0 ? 0 : 704);
     if (coll->reorderCodes == NULL) {
         *pErrorCode = U_MEMORY_ALLOCATION_ERROR;
         return;

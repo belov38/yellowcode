@@ -275,7 +275,32 @@ impl OpenOptions {
             None => default_collator(),
         }
     }
+
+    fn txn_collator<'s>(&'s self, keys: &'s TxnKeys) -> Option<&'s dyn Collate> {
+        #[cfg(feature = "icu")]
+        if let Some(request) = keys {
+            return Some(request);
+        }
+        #[cfg(not(feature = "icu"))]
+        let () = keys;
+        self.collator()
+    }
+
+    #[cfg(feature = "icu")]
+    fn txn_keys(&self) -> TxnKeys {
+        match self.collate {
+            None => crate::collate::KeyRequest::when_bound(self.memory_budget.as_ref()),
+            Some(_) => None,
+        }
+    }
+    #[cfg(not(feature = "icu"))]
+    fn txn_keys(&self) -> TxnKeys {}
 }
+
+#[cfg(feature = "icu")]
+type TxnKeys = Option<crate::collate::KeyRequest>;
+#[cfg(not(feature = "icu"))]
+type TxnKeys = ();
 
 impl Database {
     pub fn file_close_observer(&self) -> Option<crate::FileCloseObserver> {
@@ -380,6 +405,11 @@ impl Database {
         self.inner.pager.evict_clean_cache();
     }
 
+    pub fn with_locale<R>(&self, f: impl FnOnce(&str) -> R) -> R {
+        let s = self.inner.pager.snapshot();
+        f(&s.catalog.locale)
+    }
+
     pub fn info(&self) -> DbInfo {
         let s = self.inner.pager.snapshot();
         DbInfo {
@@ -445,6 +475,7 @@ impl Database {
             tables: HashMap::new(),
             rv_next: 0,
             last_table: None,
+            keys: self.inner.opts.txn_keys(),
         })
     }
 
@@ -462,6 +493,7 @@ pub struct WriteTxn<'db> {
     tables: HashMap<String, TableFiles>,
     rv_next: u32,
     last_table: Option<usize>,
+    keys: TxnKeys,
 }
 
 impl fmt::Debug for WriteTxn<'_> {
@@ -491,16 +523,14 @@ impl WriteTxn<'_> {
             .filter(|&i| self.catalog.at_named(i, name).is_some())
         {
             Some(i) => i,
-            None => self
-                .catalog
-                .position(name)
-                .ok_or_else(|| Error::NotFound(NotFound::Table(name.to_string())))?,
+            None => self.catalog.position(name).ok_or_else(|| {
+                Error::NotFound(NotFound::Table(crate::error::brief(name).to_owned()))
+            })?,
         };
         self.last_table = Some(index);
-        let entry = self
-            .catalog
-            .at_named(index, name)
-            .ok_or_else(|| Error::NotFound(NotFound::Table(name.to_string())))?;
+        let entry = self.catalog.at_named(index, name).ok_or_else(|| {
+            Error::NotFound(NotFound::Table(crate::error::brief(name).to_owned()))
+        })?;
         check_writable(&entry.descr)?;
         let files = match self.tables.entry(entry.descr.name.to_uppercase()) {
             Entry::Occupied(e) => e.into_mut(),
@@ -508,7 +538,7 @@ impl WriteTxn<'_> {
         };
         files.settle(&mut self.pages)?;
         let keys = KeyCtx {
-            collate: db.inner.opts.collator(),
+            collate: db.inner.opts.txn_collator(&self.keys),
             locale: &self.catalog.locale,
         };
         Ok(TableWrite::new(
@@ -522,12 +552,11 @@ impl WriteTxn<'_> {
     }
 
     pub fn read_table(&self, name: &str) -> Result<TableRead<'_>> {
-        let entry = self
-            .catalog
-            .find(name)
-            .ok_or_else(|| Error::NotFound(NotFound::Table(name.to_string())))?;
+        let entry = self.catalog.find(name).ok_or_else(|| {
+            Error::NotFound(NotFound::Table(crate::error::brief(name).to_owned()))
+        })?;
         let keys = KeyCtx {
-            collate: self.db.inner.opts.collator(),
+            collate: self.db.inner.opts.txn_collator(&self.keys),
             locale: &self.catalog.locale,
         };
         TableRead::open(&self.pages, self.db.inner.fi, entry, keys)
@@ -597,7 +626,7 @@ impl WriteTxn<'_> {
         let fi = db.inner.fi;
         let old = self.find_table(name)?;
         let (mut d, layout, key_lens) = self.check_new_table(new, Some(&old))?;
-        let collate = db.inner.opts.collator();
+        let collate = db.inner.opts.txn_collator(&self.keys);
         if has_string_keys(&d) && collate.is_none() {
             return Err(Error::Unsupported(Unsupported::NoCollator));
         }
@@ -720,7 +749,7 @@ impl WriteTxn<'_> {
 
     fn find_table(&self, name: &str) -> Result<CatalogEntry> {
         (self.catalog.find(name).cloned())
-            .ok_or_else(|| Error::NotFound(NotFound::Table(name.to_string())))
+            .ok_or_else(|| Error::NotFound(NotFound::Table(crate::error::brief(name).to_owned())))
     }
 
     fn files_to_free(&self, entry: &CatalogEntry) -> Result<Vec<IFile>> {
@@ -900,19 +929,21 @@ impl fmt::Debug for ReadTxn {
 }
 
 impl ReadTxn {
+    pub fn set_read_budget(&mut self, budget: memory_budget::MemoryBudget) {
+        self.snap.read_budget = Some(budget);
+    }
+
     pub fn memory_budget(&self) -> Option<&memory_budget::MemoryBudget> {
-        self.inner.pager.memory_budget()
+        self.snap.memory_budget()
     }
     pub fn table_names(&self) -> Vec<String> {
         self.snap.catalog.table_names()
     }
 
     pub fn table(&self, name: &str) -> Result<TableRead<'_>> {
-        let entry = self
-            .snap
-            .catalog
-            .find(name)
-            .ok_or_else(|| Error::NotFound(NotFound::Table(name.to_string())))?;
+        let entry = self.snap.catalog.find(name).ok_or_else(|| {
+            Error::NotFound(NotFound::Table(crate::error::brief(name).to_owned()))
+        })?;
         TableRead::open(&self.snap, self.inner.fi, entry, self.keys())
     }
 
@@ -926,12 +957,20 @@ impl ReadTxn {
 
     pub fn verify(&self) -> Result<VerifyReport> {
         let s = &self.snap;
+        #[cfg_attr(
+            not(feature = "icu"),
+            allow(clippy::let_unit_value, reason = "no key request without ICU")
+        )]
+        let request = self.inner.opts.txn_keys();
         verify::run(
             s,
             self.inner.fi,
             s.header.freelist_page,
             &s.catalog,
-            self.keys(),
+            KeyCtx {
+                collate: self.inner.opts.txn_collator(&request),
+                locale: &s.catalog.locale,
+            },
             s.trailing_pages,
         )
     }

@@ -7,6 +7,7 @@ use crate::format::spec::pairs;
 use crate::format::{FALLBACK_LANGUAGE, words};
 use crate::grammar::{Capital, Grammar, Part, SubjectShape, TreeLayout};
 use crate::locale::Locale;
+use crate::locale_key::{KeyCase, language_of_key, locale_key};
 use crate::plural::{Category, NumberKind, Operands, category};
 use bsl_prim::Number;
 
@@ -41,7 +42,10 @@ fn bool_value(v: &str) -> Option<bool> {
 }
 
 fn parse_words_spec(fmt: &[u16]) -> Result<WordsSpec, LibError> {
-    let mut s = WordsSpec::default();
+    let mut s = WordsSpec {
+        locale: locale_key(fmt, KeyCase::AnyCase),
+        ..WordsSpec::default()
+    };
     for (key, v) in pairs(fmt) {
         let set = |slot: &mut bool| {
             if let Some(b) = bool_value(&v) {
@@ -49,7 +53,6 @@ fn parse_words_spec(fmt: &[u16]) -> Result<WordsSpec, LibError> {
             }
         };
         match key.to_lowercase().as_str() {
-            "л" | "l" => s.locale = Some(v).filter(|v| !v.is_empty()),
             "нп" | "sn" => set(&mut s.subject_name),
             "нд" | "fn" => set(&mut s.fraction_name),
             "дп" | "fs" => set(&mut s.fraction_in_words),
@@ -432,25 +435,6 @@ fn compose(
     }
 }
 
-pub(crate) fn locale_key(fmt: &[u16]) -> Option<String> {
-    pairs(fmt)
-        .into_iter()
-        .filter(|(k, _)| matches!(k.to_lowercase().as_str(), "л" | "l"))
-        .map(|(_, v)| v)
-        .next_back()
-        .filter(|v| !v.is_empty())
-}
-
-pub(crate) fn language_of(key: Option<&str>, session: &Locale) -> String {
-    match key {
-        Some(name) => {
-            let end = name.find(['_', '-']).unwrap_or(name.len());
-            name[..end].to_ascii_lowercase()
-        }
-        None => session.language().to_string(),
-    }
-}
-
 pub fn number_in_words(
     n: &Number,
     fmt: Option<&[u16]>,
@@ -465,7 +449,7 @@ pub fn number_in_words(
         Some(f) => parse_words_spec(f)?,
         None => WordsSpec::default(),
     };
-    let language = language_of(spec.locale.as_deref(), session);
+    let language = language_of_key(spec.locale.as_deref(), session);
     let language = language.as_str();
     let all = &words().spell;
     if !all.contains_key(language)

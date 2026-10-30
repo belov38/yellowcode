@@ -255,18 +255,62 @@ impl<R: Read> Reader<R> {
     }
 
     pub fn copy_binary(&mut self, sink: &mut impl Write, limit: u64) -> Result<u64, Error> {
+        self.copy_binary_with_chunk_limit(sink, limit, u64::MAX)
+    }
+
+    pub fn copy_binary_with_chunk_limit(
+        &mut self,
+        sink: &mut impl Write,
+        limit: u64,
+        max_chunks: u64,
+    ) -> Result<u64, Error> {
+        self.copy_binary_bounded(sink, limit, max_chunks, false)
+    }
+
+    pub fn copy_binary_with_work_limit(
+        &mut self,
+        sink: &mut impl Write,
+        limit: u64,
+        base_chunks: u64,
+    ) -> Result<u64, Error> {
+        self.copy_binary_bounded(sink, limit, base_chunks, true)
+    }
+
+    fn copy_binary_bounded(
+        &mut self,
+        sink: &mut impl Write,
+        limit: u64,
+        base_chunks: u64,
+        adaptive: bool,
+    ) -> Result<u64, Error> {
         self.guard(|r| {
-            if r.pull(false)? != Some(Event::Open)
-                || !matches!(r.pull(false)?, Some(Event::Atom(a)) if a.as_int() == Some(0))
+            let mut tags = 0u64;
+            let initial_tag_limit = base_chunks.saturating_mul(4).saturating_add(16);
+            if r.pull_tag_bounded(&mut tags, initial_tag_limit)? != Some(Event::Open)
+                || !matches!(r.pull_tag_bounded(&mut tags, initial_tag_limit)?, Some(Event::Atom(a)) if a.as_int() == Some(0))
             {
                 return Err(r.fail(ErrorKind::InvalidBinary));
             }
             let mut copied = 0u64;
+            let mut chunks = 0u64;
             loop {
+                let max_chunks = if adaptive {
+                    base_chunks.saturating_add(copied.div_ceil(250).saturating_mul(2))
+                } else {
+                    base_chunks
+                };
+                let tag_limit = max_chunks.saturating_mul(4).saturating_add(16);
                 let mut n = 0;
-                match r.lex_to(false, Some((sink, limit - copied, &mut n)))? {
+                match r.lex_to(
+                    false,
+                    Some((sink, limit - copied, &mut n, chunks < max_chunks)),
+                    Some((&mut tags, tag_limit)),
+                )? {
                     Some(Event::Close) => return Ok(copied),
-                    Some(Event::Atom(_)) => copied += n,
+                    Some(Event::Atom(_)) => {
+                        chunks += 1;
+                        copied += n;
+                    }
                     None => return Err(r.eof()),
                     _ => return Err(r.fail(ErrorKind::InvalidBinary)),
                 }
@@ -334,6 +378,13 @@ impl<R: Read> Reader<R> {
         }
     }
 
+    fn pull_tag_bounded(&mut self, tags: &mut u64, limit: u64) -> Result<Option<Event>, Error> {
+        match self.peeked.take() {
+            Some(e) => Ok(e),
+            None => self.lex_to(false, None, Some((tags, limit))),
+        }
+    }
+
     fn start_value(&mut self, skip: bool) -> Result<Option<Event>, Error> {
         match self.pull(skip)? {
             end @ (None | Some(Event::Close)) => {
@@ -359,16 +410,23 @@ impl<R: Read> Reader<R> {
     }
 
     fn lex(&mut self, skip: bool) -> Result<Option<Event>, Error> {
-        self.lex_to(skip, None)
+        self.lex_to(skip, None, None)
     }
 
     fn lex_to(
         &mut self,
         skip: bool,
-        sink: Option<(&mut dyn Write, u64, &mut u64)>,
+        sink: Option<(&mut dyn Write, u64, &mut u64, bool)>,
+        mut tag_budget: Option<(&mut u64, u64)>,
     ) -> Result<Option<Event>, Error> {
         loop {
             if self.pend == 0 {
+                if let Some((tags, limit)) = tag_budget.as_mut() {
+                    if **tags >= *limit {
+                        return Err(self.fail(ErrorKind::Limit("binary tags")));
+                    }
+                    **tags += 1;
+                }
                 let at = self.src.offset;
                 let b = self.src.byte().map_err(|e| Error {
                     offset: at,
@@ -415,7 +473,10 @@ impl<R: Read> Reader<R> {
                 continue;
             }
             let at = self.tag_off;
-            let atom = if let Some((sink, limit, copied)) = sink {
+            let atom = if let Some((sink, limit, copied, admit)) = sink {
+                if !admit {
+                    return Err(self.fail(ErrorKind::Limit("binary chunks")));
+                }
                 *copied = Atom::copy_bytes(&mut self.src, t, sink, limit)
                     .map_err(|kind| Error { offset: at, kind })?;
                 Atom::int(0)

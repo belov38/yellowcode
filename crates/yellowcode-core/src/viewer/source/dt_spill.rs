@@ -51,7 +51,11 @@ fn clean_pending(dir: &Path) -> io::Result<()> {
 fn unlink_pending(named: tempfile::NamedTempFile) -> io::Result<File> {
     named.as_file().lock()?;
     let (file, path) = named.into_parts();
-    path.close()?;
+    match path.close() {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
     Ok(file)
 }
 

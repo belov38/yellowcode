@@ -1,10 +1,9 @@
 use std::sync::Arc;
 
-use bsl_prim::Collation;
-use query_exec::QueryResult;
 use query_exec::totals::{RecordType, RowRef};
 use query_exec::walk::{self, Selection, TreeRow, Unloaded, Walk, WalkError};
-use query_ir::QValue;
+use query_exec::{ExecCollation, QueryResult};
+use query_ir::{ExecError, QValue};
 use query_syntax::Lang;
 use serde_json::{Value, json};
 
@@ -58,6 +57,7 @@ pub fn walk_error(e: &WalkError, method: &str, lang: Lang) -> Vec<String> {
             "entext:IDS_SELECT_ERROR_DIFFERENTCOUNTINDIMENSIONSOURCES",
             lang,
         ),
+        WalkError::Exec(ExecError::Native(native)) => native.to_string(),
         other => format!("{other:?}"),
     };
     vec![cause]
@@ -90,7 +90,7 @@ fn tree(
     w: Walk,
     base: &TestBase,
     lang: Lang,
-    coll: &dyn Collation,
+    coll: ExecCollation<'_>,
 ) -> Result<Vec<Value>, WalkError> {
     let mut out = Vec::new();
     while s.next() {
@@ -115,7 +115,7 @@ pub(crate) fn rows_json(
     walk_kind: &str,
     base: &TestBase,
     lang: Lang,
-    coll: &dyn Collation,
+    coll: ExecCollation<'_>,
 ) -> Result<Vec<Value>, WalkError> {
     match walk_kind {
         "linear" => {
@@ -422,7 +422,7 @@ pub(crate) fn untie_text(text: &str, cols: &[usize]) -> String {
 
 pub(crate) fn detail_mask(
     res: &Arc<QueryResult>,
-    coll: &dyn Collation,
+    coll: ExecCollation<'_>,
 ) -> Result<Vec<bool>, WalkError> {
     let mut s = walk::select(res, Walk::Direct, "", "", coll)?;
     let mut out = Vec::new();

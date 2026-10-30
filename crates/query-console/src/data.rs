@@ -7,7 +7,7 @@ pub use card::{
 };
 pub use movements::{DocumentRegister, DocumentRegisters, MovementsKnob, MovementsPage, NO_INDEX};
 
-use crate::table::{AvailableIndex, PageOptions, available_indexes};
+use crate::table::{AvailableIndex, PageOptions, available_indexes, brief, store_error};
 use crate::{Cell, CellKind, Console, IndexOrder, IndexRange, TableIndexRequest, TablePage};
 use crate::{TableReadError, TableReadError::Invalid};
 use query_ir::QTableId;
@@ -153,7 +153,7 @@ impl Console {
         let table = self.main_table(kind, name)?;
         self.base
             .stored_table(table)
-            .map_err(TableReadError::Storage)?
+            .map_err(store_error)?
             .ok_or_else(|| {
                 TableReadError::Unsupported(
                     "only mapped, stored main object tables are supported".into(),
@@ -209,7 +209,7 @@ impl Console {
                 Ok(None) => {}
                 Err(e) => list.dropped.push(DroppedTable {
                     path: t.name_en.clone(),
-                    reason: e,
+                    reason: e.to_string(),
                 }),
             }
         }
@@ -222,14 +222,14 @@ impl Console {
         name: &str,
     ) -> Result<Vec<AvailableIndex>, TableReadError> {
         let stored = self.data_stored(kind, name)?;
-        let indexes = stored.indexes().map_err(TableReadError::Storage)?;
-        Ok(available_indexes(&stored, &indexes))
+        let indexes = stored.indexes().map_err(store_error)?;
+        available_indexes(&stored, &indexes, self.base.memory_budget())
     }
 
     pub fn data_indexes(&self, kind: &str, name: &str) -> Result<DataIndexes, TableReadError> {
         let stored = self.data_stored(kind, name)?;
-        let indexes = stored.indexes().map_err(TableReadError::Storage)?;
-        let indexes = available_indexes(&stored, &indexes);
+        let indexes = stored.indexes().map_err(store_error)?;
+        let indexes = available_indexes(&stored, &indexes, self.base.memory_budget())?;
         let has = |role| {
             matches!(
                 stored.record_filter_field(role),
@@ -257,8 +257,8 @@ impl Console {
         name: &str,
     ) -> Result<Result<PeriodAccess, String>, TableReadError> {
         let stored = self.data_stored(kind, name)?;
-        let indexes = stored.indexes().map_err(TableReadError::Storage)?;
-        let available = available_indexes(&stored, &indexes);
+        let indexes = stored.indexes().map_err(store_error)?;
+        let available = available_indexes(&stored, &indexes, self.base.memory_budget())?;
         let Some((ix, listed)) = PERIOD_INDEXES.iter().find_map(|want| {
             indexes
                 .iter()
@@ -275,21 +275,22 @@ impl Console {
             .iter()
             .position(|(f, _)| stored.condition_kind(*f) == Some(ConditionKind::Date))
         else {
-            return Ok(Err(format!("index {} has no date field", ix.name)));
+            return Ok(Err(format!("index {} has no date field", brief(&ix.name))));
         };
         let fields = listed.fields.get(..=at).unwrap_or_default();
         if let Some(f) = fields.iter().find(|f| !f.conditions) {
             let reason = f.reason.as_deref().unwrap_or("no conditions");
-            return Ok(Err(format!("{}: {reason}", f.name)));
+            return Ok(Err(format!("{}: {reason}", brief(&f.name))));
         }
-        let keyed = card::key_indexes(&stored, std::slice::from_ref(ix));
-        if let Some(keyed) = keyed.first()
+        let keyed =
+            card::key_indexes(&stored, std::slice::from_ref(ix), self.base.memory_budget())?;
+        if let Some(keyed) = keyed.indexes.first()
             && let Err(reason) = period_leading(keyed, at)
         {
             return Ok(Err(reason));
         }
         let Some((date, leading)) = fields.split_last() else {
-            return Ok(Err(format!("index {} has no date field", ix.name)));
+            return Ok(Err(format!("index {} has no date field", brief(&ix.name))));
         };
         drop(stored);
         let first = |order| {
@@ -318,7 +319,7 @@ impl Console {
                 None => {
                     return Ok(Err(format!(
                         "{}: the first entry has no condition value",
-                        f.name
+                        brief(&f.name)
                     )));
                 }
             }
@@ -354,8 +355,12 @@ impl Console {
             let index = match &req.index {
                 Some(index) => Some(index.clone()),
                 None => {
-                    let indexes = stored.indexes().map_err(TableReadError::Storage)?;
-                    pick_default(&available_indexes(&stored, &indexes))
+                    let indexes = stored.indexes().map_err(store_error)?;
+                    pick_default(&available_indexes(
+                        &stored,
+                        &indexes,
+                        self.base.memory_budget(),
+                    )?)
                 }
             };
             (stored.fields.len(), index)
@@ -425,7 +430,8 @@ fn period_leading(index: &card::KeyIndex, at: usize) -> Result<(), String> {
         .find(|f| !(f.area && f.conditions))
         .map_or(date, |f| f.name.as_str());
     Err(format!(
-        "{field}: not a data area in front of the date of index {}",
-        index.name
+        "{}: not a data area in front of the date of index {}",
+        brief(field),
+        brief(&index.name)
     ))
 }

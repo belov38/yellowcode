@@ -485,6 +485,63 @@ body > #tabbar .tab:not(.cur):hover { background: linear-gradient(#e0eeff, #cce3
 .service-dialog[data-dialog=users] th button { width: 100%; border: 0; background: transparent; text-align: left; padding: 0; font: inherit; }
 .users-status { max-width: 356px; white-space: pre-wrap; overflow-wrap: anywhere; padding: 5px; }
 .users-status:empty { display: none; }
+.service-dialog[data-dialog=users] { width: 312px; }
+.service-dialog[data-dialog=users] > .dialog-body { --users-notice-height: 0px; max-width: 100%; }
+.service-dialog[data-dialog=users] > .dialog-body:has(> .users-status:not(:empty)) { --users-notice-height: 52px; }
+.service-dialog[data-dialog=users] [data-control=UserList] { height: calc(170px - var(--users-notice-height)) !important; }
+.service-dialog[data-dialog=users] :is([data-control="1"], [data-control=SelectionSt]) { top: calc(203px - var(--users-notice-height)) !important; }
+.service-dialog[data-dialog=users] :is([data-control=TotalUsersSt], [data-control=TotalUsersCntSt]) { top: calc(223px - var(--users-notice-height)) !important; }
+.service-dialog[data-dialog=users] .users-status { position: absolute; left: 6px; right: 6px; bottom: 6px; max-height: 46px; padding: 0; overflow: auto; }
+.service-dialog[data-dialog=user] { width: 356px; }
+.service-dialog[data-dialog=user] > .dialog-body {
+  box-sizing: border-box; max-width: 100%; max-height: calc(100dvh - 38px);
+  display: flex; flex-direction: column; padding: 6px 4px 8px 6px; gap: 6px;
+}
+.service-dialog[data-dialog=user] [data-control=TabControl] {
+  position: relative; left: auto !important; top: auto !important; width: auto !important; height: auto !important;
+  flex: 1; min-height: 0;
+}
+.service-dialog[data-dialog=user] .dialog-tabs { flex-wrap: nowrap; gap: 0; flex-shrink: 0; }
+.service-dialog[data-dialog=user] .dialog-tabs button { padding: 1px 4px; }
+.service-dialog[data-dialog=user] [data-control=TabControl] > .dialog-page:nth-child(2) {
+  display: grid; grid-template-columns: 143px minmax(0, 1fr); gap: 3px 2px;
+  align-content: start; padding: 6px 5px 6px 6px;
+}
+.service-dialog[data-dialog=user] [data-control=TabControl] > .dialog-page:nth-child(2) > * {
+  position: static; width: auto !important; max-width: 100%; grid-column: 1 / -1;
+}
+.service-dialog[data-dialog=user] [data-control=TabControl] > .dialog-page:nth-child(2) > .dialog-label { grid-column: 1; }
+.service-dialog[data-dialog=user] [data-control=TabControl] > .dialog-page:nth-child(2) > .dialog-input { grid-column: 2; }
+.service-dialog[data-dialog=user] :is([data-control=Control1], [data-control=EditName]) { grid-row: 1; }
+.service-dialog[data-dialog=user] :is([data-control=Control11], [data-control=EditFullName]) { grid-row: 2; }
+.service-dialog[data-dialog=user] :is([data-control=EmailText], [data-control=EditEmail]) { grid-row: 3; }
+.service-dialog[data-dialog=user] [data-control="3"] { grid-row: 4; }
+.service-dialog[data-dialog=user] [data-control=EntAuth] { grid-row: 5; }
+.service-dialog[data-dialog=user] :is([data-control=Control111], [data-control=EditPassword1]) { grid-row: 6; }
+.service-dialog[data-dialog=user] .users-clear { grid-row: 7; justify-self: start; }
+.service-dialog[data-dialog=user] [data-control=CannotChangePassword] { grid-row: 8; }
+.service-dialog[data-dialog=user] [data-control=InList] { grid-row: 9; }
+.service-dialog[data-dialog=user] [data-control="4"] { grid-row: 10; }
+.service-dialog[data-dialog=user] [data-control=WinAuth] { grid-row: 11; }
+.service-dialog[data-dialog=user] :is([data-control=WinUserT1], [data-control=WinUser]) { grid-row: 12; }
+.service-dialog[data-dialog=user] [data-control="6"] { grid-row: 13; }
+.service-dialog[data-dialog=user] [data-control=OpenIDAutentication] { grid-row: 14; }
+.service-dialog[data-dialog=user] [data-control=OpenIDConnectAutentication] { grid-row: 15; }
+.service-dialog[data-dialog=user] [data-control=AccessTokenAutentication] { grid-row: 16; }
+.service-dialog[data-dialog=user] [data-control=QRCodeAutentication] { grid-row: 17; }
+.service-dialog[data-dialog=user] [data-control=EmailAuthentication] { grid-row: 18; }
+.service-dialog[data-dialog=user] [data-control="7"] { grid-row: 19; }
+.service-dialog[data-dialog=user] [data-control=InteractiveSecurity] { grid-row: 20; }
+.service-dialog[data-dialog=user] [data-control=CannotRecoveryPassword] { grid-row: 21; }
+.service-dialog[data-dialog=user] [data-control=EditPassword1] { display: flex; align-items: center; }
+.service-dialog[data-dialog=user] .dialog-checkbox { height: 16px !important; }
+.users-card-messages { flex-shrink: 0; min-width: 0; }
+.users-write-notice summary { cursor: pointer; }
+.users-write-notice p { margin: 4px 0; max-height: 66px; overflow: auto; overflow-wrap: anywhere; }
+.users-card-messages .users-status { padding: 4px 0; max-height: 44px; overflow: auto; }
+.users-card-messages > button { display: block; max-width: 100%; white-space: normal; text-align: left; }
+.users-card-buttons { display: flex; justify-content: flex-end; gap: 4px; flex-shrink: 0; }
+.users-card-buttons > .dialog-control { position: static; width: 80px !important; height: 20px !important; }
 .users-clear { position: absolute; left: 6px; top: 130px; max-width: 333px; }
 .users-public-info { position: absolute; top: 322px; left: 6px; right: 6px; margin: 0; font-size: 10px; }
 .users-public-info dt { font-weight: bold; }

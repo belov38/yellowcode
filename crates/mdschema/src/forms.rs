@@ -364,18 +364,25 @@ pub fn std_attrs() -> Result<&'static [KindStdAttrs], SchemaError> {
 }
 impl crate::SchemaResource {
     pub fn std_attrs(&'static self) -> Result<&'static [KindStdAttrs], SchemaError> {
+        if self.require_embedded().is_ok() {
+            return self
+                .embedded_stdattrs()
+                .map_err(|e| SchemaError(e.to_string()));
+        }
         self.stdattrs
-            .get_or_init(|| {
-                let v: Value = serde_json::from_str(self.json("stdattrs.json").map_err(|e| e.0)?)
-                    .map_err(|e| format!("stdattrs.json: {e}"))?;
-                let top = v.as_object().ok_or("stdattrs.json: object expected")?;
+            .legacy_plain(|| {
+                let v: Value = serde_json::from_str(self.json("stdattrs.json")?)
+                    .map_err(|e| SchemaError(format!("stdattrs.json: {e}")))?;
+                let top = v
+                    .as_object()
+                    .ok_or_else(|| SchemaError("stdattrs.json: object expected".into()))?;
                 let mut out = Vec::new();
                 for (kind, m) in top {
                     let Some(m) = m.as_object() else { continue };
                     let mut ids = Vec::with_capacity(m.len());
                     for (id, nm) in m {
                         let nm = nm.as_str().ok_or_else(|| {
-                            format!("stdattrs.json: {kind}.{id}: string expected")
+                            SchemaError(format!("stdattrs.json: {kind}.{id}: string expected"))
                         })?;
                         ids.push((id.clone(), nm.to_string()));
                     }
@@ -383,9 +390,7 @@ impl crate::SchemaResource {
                 }
                 Ok(out)
             })
-            .as_ref()
             .map(Vec::as_slice)
-            .map_err(|e| SchemaError(e.clone()))
     }
 }
 

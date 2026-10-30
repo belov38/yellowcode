@@ -1,7 +1,9 @@
 use crate::kinds::display_name;
 use crate::runner::stand_object;
 use crate::scan::{ConfigScan, ScanError};
+use crate::scan_io::ScanInput;
 use crate::wrapper::STAND_GLOBAL;
+use crate::xml::Ev;
 use bsl_compiler::{
     AppGlobal, AppMethodSig, AppNames, CompileError, CompileOptions, CompiledModule, ContextValue,
     ExecContext, ModuleKind, compile,
@@ -75,13 +77,44 @@ pub struct StandHost {
     by_name: HashMap<String, ModuleRef>,
     compiled: Mutex<HashMap<u32, Compiled>>,
     files: MemFs,
+    regional: Mutex<Option<Arc<bsl_vm::IbRegionalSettings>>>,
     script_variant: Lang,
     config_language: String,
+    compat: CompatMode,
 }
 
-fn config_settings(cfg_dir: &Path) -> (Lang, String) {
-    let props = crate::xml::properties(&cfg_dir.join("Configuration.xml")).unwrap_or_default();
+fn config_settings(cfg_dir: &Path) -> Result<(Lang, String, CompatMode), ScanError> {
+    let path = cfg_dir.join("Configuration.xml");
+    let mut props: Vec<(String, String)> = Vec::new();
+    let read = crate::xml::scan_file(&path, &ScanInput::default(), |stack, ev| {
+        if stack.len() == 4
+            && stack[0] == "MetaDataObject"
+            && stack[1] == "Configuration"
+            && stack[2] == "Properties"
+            && matches!(
+                stack[3].as_str(),
+                "ScriptVariant" | "DefaultLanguage" | "CompatibilityMode"
+            )
+        {
+            match ev {
+                Ev::Start(_) => props.push((stack[3].clone(), String::new())),
+                Ev::Text(text) => {
+                    if let Some((_, value)) = props.last_mut() {
+                        value.push_str(text);
+                    }
+                }
+            }
+        }
+    });
+    if read.is_err() {
+        props.clear();
+    }
     let get = |k: &str| props.iter().find(|(n, _)| n == k).map(|(_, v)| v.trim());
+    let compat = get("CompatibilityMode")
+        .map(CompatMode::from_xml_name)
+        .transpose()
+        .map_err(|e| ScanError::new(&path, format!("unsupported compatibility mode: {}", e.0)))?
+        .unwrap_or(CompatMode::DontUse);
     let variant = match get("ScriptVariant") {
         Some("English") => Lang::En,
         _ => Lang::Ru,
@@ -99,13 +132,13 @@ fn config_settings(cfg_dir: &Path) -> (Lang, String) {
         })
         .filter(|c| !c.is_empty())
         .unwrap_or_else(|| "ru".to_owned());
-    (variant, code)
+    Ok((variant, code, compat))
 }
 
 impl StandHost {
     pub fn load(cfg_dir: &Path) -> Result<StandHost, ScanError> {
         let scan = ConfigScan::load(cfg_dir)?;
-        let (script_variant, config_language) = config_settings(cfg_dir);
+        let (script_variant, config_language, compat) = config_settings(cfg_dir)?;
         let mut commons = Vec::new();
         let mut by_name = HashMap::new();
         for (i, m) in scan.modules().iter().enumerate() {
@@ -122,6 +155,7 @@ impl StandHost {
         Ok(StandHost {
             script_variant,
             config_language,
+            compat,
             names: StandNames {
                 scan,
                 script_variant,
@@ -130,11 +164,16 @@ impl StandHost {
             by_name,
             compiled: Mutex::new(HashMap::new()),
             files: MemFs::stand(),
+            regional: Mutex::new(None),
         })
     }
 
     pub fn config_language(&self) -> &str {
         &self.config_language
+    }
+
+    pub fn compat(&self) -> CompatMode {
+        self.compat
     }
 
     pub fn scan(&self) -> &ConfigScan {
@@ -159,7 +198,7 @@ impl StandHost {
                     module_name: &name,
                     kind: file.kind,
                     context: ExecContext::Server,
-                    compat: CompatMode::DontUse,
+                    compat: self.compat,
                     catalog: platform_catalog::catalog(),
                     app: &self.names,
                     extension: None,
@@ -174,6 +213,24 @@ impl StandHost {
 }
 
 impl AppHost for StandHost {
+    fn ib_regional_settings(&self) -> Option<Arc<bsl_vm::IbRegionalSettings>> {
+        self.regional
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn set_ib_regional_settings(
+        &self,
+        settings: Arc<bsl_vm::IbRegionalSettings>,
+    ) -> Result<(), HostError> {
+        *self
+            .regional
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(settings);
+        Ok(())
+    }
+
     fn names(&self) -> &dyn AppNames {
         &self.names
     }

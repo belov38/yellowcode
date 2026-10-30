@@ -46,6 +46,19 @@ fn execute_temps_impl(
     opts: PlanOptions,
     observation: Option<&crate::observe::ObservationSession>,
 ) -> Result<QueryResult, ExecError> {
+    ibschema::store::with_key_cancel(env.cancel, || {
+        execute_on_source(stmt, src, env, temps, opts, observation)
+    })
+}
+
+fn execute_on_source(
+    stmt: &StmtL,
+    src: &dyn DataSource,
+    env: &ExecEnv<'_>,
+    temps: Option<&TempTables>,
+    opts: PlanOptions,
+    observation: Option<&crate::observe::ObservationSession>,
+) -> Result<QueryResult, ExecError> {
     let Some(obs) = observation else {
         return with_source(stmt.max_depth, src, move |s| {
             run(stmt, s, env, temps, opts, None)
@@ -207,8 +220,10 @@ fn run(
             }
         }
     }
+    let managed = crate::coll::open(env)?;
     let mut op = build(&plan);
     let mut cx = Cx::new(env, src);
+    cx.coll = crate::coll::route(env, managed.as_ref());
     cx.temps = temps;
     cx.observation = observation.cloned();
     cx.week_start = stmt.week_start;
@@ -252,6 +267,7 @@ fn run(
             &rows,
             src,
             env,
+            cx.coll,
             &cx.mem,
         )?),
         None => None,

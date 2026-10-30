@@ -66,30 +66,13 @@ pub fn picture(key: &str) -> Option<(&'static [u8], Option<&'static [u8]>)> {
         .map(|(_, png, png2)| (*png, *png2))
 }
 
+include!("icons_version.rs");
+
 pub fn version() -> &'static str {
-    static V: std::sync::OnceLock<[u8; 10]> = std::sync::OnceLock::new();
-    let bytes = V.get_or_init(|| {
-        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-        let mut eat = |b: &[u8]| {
-            for x in b {
-                h = (h ^ u64::from(*x)).wrapping_mul(0x0100_0000_01b3);
-            }
-        };
-        for (kind, png, png2) in ICONS {
-            eat(kind.as_bytes());
-            eat(png);
-            eat(png2.unwrap_or_default());
-        }
-        let mut bytes = [b'0'; 10];
-        for (at, byte) in bytes.iter_mut().enumerate() {
-            let nibble = ((h >> (60 - 4 * at)) & 15) as u8;
-            *byte = if nibble < 10 {
-                b'0' + nibble
-            } else {
-                b'a' + nibble - 10
-            };
-        }
-        bytes
-    });
-    std::str::from_utf8(bytes).unwrap_or_default()
+    ICON_VERSION
+}
+pub fn prepare_with_memory(
+    _: &memory_budget::MemoryBudget,
+) -> Result<(), super::resources::GuiResourceError> {
+    Ok(())
 }

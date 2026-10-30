@@ -9,11 +9,11 @@ autoexamples = false
 autobenches = false
 
 [features]
-collate = ["dep:icu46-sys"]
+collate = []
 
 [dependencies]
 rand = "0.9"
-icu46-sys = { path = "../icu46-sys", optional = true }
+icu46-sys = { path = "../icu46-sys", features = ["regex", "managed"] }
 bsl-vm = { path = "../bsl-vm" }
 bsl-prim = { path = "../bsl-prim", default-features = false }
 platform-catalog = { path = "../platform-catalog" }

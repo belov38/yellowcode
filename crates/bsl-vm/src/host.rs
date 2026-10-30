@@ -1,28 +1,42 @@
 use crate::error::{Exception, HostError};
 use crate::fs::FileSystem;
 use crate::place::Place;
+pub use crate::reuse::ReuseStore;
 use crate::runtime::Execution;
-use crate::shared::SharedValue;
 use crate::types::TypeId;
 use crate::value::{ObjRef, Value};
 use bsl_compiler::{AppGlobal, AppNames, CompiledModule};
 use bsl_prim::{BslDate, Collation, CompatMode, fold_name};
 use platform_catalog::{XdtoName, messages::Lang};
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
 pub trait SessionEnv: Send + Sync {
+    fn reuse_clock(&self) -> std::time::Duration {
+        static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+        START.get_or_init(std::time::Instant::now).elapsed()
+    }
     fn locale(&self) -> &str;
     fn ib_locale(&self) -> &str;
     fn collation(&self) -> &dyn Collation;
     fn interface_language(&self) -> Lang;
+    fn presentation_language(&self) -> Lang {
+        self.interface_language()
+    }
     fn config_language(&self) -> &str;
+    fn ib_regional_settings(&self) -> Option<Arc<IbRegionalSettings>> {
+        None
+    }
     fn time_zone(&self) -> &str;
     fn now_utc(&self) -> BslDate;
     fn compat(&self) -> CompatMode;
     fn code_pages(&self) -> [&str; 3];
+}
+
+#[derive(Default)]
+pub struct IbRegionalSettings {
+    pub values: std::collections::BTreeMap<String, crate::SharedValue>,
 }
 
 pub trait AppHost: Send + Sync {
@@ -32,6 +46,18 @@ pub trait AppHost: Send + Sync {
     fn module_ref(&self, name: &str) -> Option<ModuleRef>;
     fn serializer(&self) -> Option<&dyn AppSerializer> {
         None
+    }
+    fn ib_regional_settings(&self) -> Option<Arc<IbRegionalSettings>> {
+        None
+    }
+    fn set_ib_regional_settings(
+        &self,
+        _settings: Arc<IbRegionalSettings>,
+    ) -> Result<(), HostError> {
+        Err(HostError::not_implemented(
+            "Глобальный контекст",
+            "УстановитьРегиональныеНастройкиИнформационнойБазы",
+        ))
     }
     fn file_system(&self) -> Option<&dyn FileSystem> {
         None
@@ -161,24 +187,5 @@ impl ModuleInstanceRef {
             .iter()
             .position(|v| v.export && *v.name.folded == *folded)?;
         Some(Place::mod_var(self.0.clone(), i))
-    }
-}
-
-#[derive(Default)]
-pub struct ReuseStore {
-    entries: HashMap<String, SharedValue>,
-}
-
-impl ReuseStore {
-    pub fn clear(&mut self) {
-        self.entries.clear();
-    }
-
-    pub fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
     }
 }

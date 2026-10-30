@@ -1,6 +1,6 @@
 use super::{CUT_LEN, condition_text, default_limit, portion};
 use crate::cell::row_bytes;
-use crate::table::{PageOptions, available_indexes};
+use crate::table::{PageOptions, available_indexes, store_error};
 use crate::{
     Cell, CellKind, Column, Console, ErrorOut, IndexOrder, IndexRange, MAX_BYTES, MAX_ROWS,
     TableIndexRequest, TablePage, TableReadError,
@@ -200,13 +200,21 @@ pub(super) struct KeyIndex {
     pub(super) fields: Vec<KeyField>,
 }
 
+pub(super) struct KeyIndexes {
+    pub(super) indexes: Vec<KeyIndex>,
+    _paid: Option<memory_budget::Reservation>,
+}
+
 pub(super) fn key_indexes(
     stored: &query_testhost::StoredTable<'_>,
     indexes: &[ibschema::store::IndexAccess],
-) -> Vec<KeyIndex> {
-    indexes
+    budget: Option<&memory_budget::MemoryBudget>,
+) -> Result<KeyIndexes, TableReadError> {
+    let mut listed = available_indexes(stored, indexes, budget)?;
+    let paid = listed.first_mut().and_then(|first| first.paid.take());
+    let keyed = indexes
         .iter()
-        .zip(available_indexes(stored, indexes))
+        .zip(listed)
         .map(|(ix, listed)| KeyIndex {
             name: listed.name,
             fields: ix
@@ -221,7 +229,11 @@ pub(super) fn key_indexes(
                 })
                 .collect(),
         })
-        .collect()
+        .collect();
+    Ok(KeyIndexes {
+        indexes: keyed,
+        _paid: paid,
+    })
 }
 
 pub(super) fn area_prefix(index: &KeyIndex, key: &str) -> Option<(usize, Vec<String>)> {
@@ -301,7 +313,8 @@ pub(super) fn values_of(
                 .and_then(condition_text)
                 .ok_or_else(|| {
                     TableReadError::Unsupported(format!(
-                        "{name}: the object has no condition value of this field"
+                        "{}: the object has no condition value of this field",
+                        crate::table::brief(name)
                     ))
                 })
         })
@@ -405,15 +418,15 @@ impl Console {
         let stored = self
             .base
             .stored_table(table)
-            .map_err(TableReadError::Storage)?
+            .map_err(store_error)?
             .ok_or_else(|| {
                 TableReadError::Unsupported(format!(
                     "{}: not a stored table",
                     schema.table(table).name_en
                 ))
             })?;
-        let indexes = stored.indexes().map_err(TableReadError::Storage)?;
-        choose_ref_index(&key_indexes(&stored, &indexes))
+        let indexes = stored.indexes().map_err(store_error)?;
+        choose_ref_index(&key_indexes(&stored, &indexes, self.base.memory_budget())?.indexes)
             .map(|(index, leading)| RefIndex {
                 table,
                 index,

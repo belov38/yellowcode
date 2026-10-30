@@ -22,9 +22,14 @@ pub struct StoredTable<'a> {
     positions: Vec<usize>,
     reads: Vec<ibschema::storage::FieldId>,
     pub fields: Vec<&'a QField>,
+    _paid: Option<memory_budget::Reservation>,
 }
 impl TestBase {
-    pub fn stored_table(&self, table: QTableId) -> Result<Option<StoredTable<'_>>, String> {
+    pub fn stored_table(
+        &self,
+        table: QTableId,
+    ) -> Result<Option<StoredTable<'_>>, ibschema::store::StoreError> {
+        use ibschema::store::StoreError;
         let schema = self.schema.table(table);
         if !matches!(schema.kind, TableKind::Object(_) | TableKind::Tabular) {
             return Ok(None);
@@ -35,9 +40,25 @@ impl TestBase {
         let info = self
             .map
             .try_table(id)
-            .ok_or("table has no storage information")?;
-        let mut fields = Vec::new();
-        let mut positions = Vec::new();
+            .ok_or_else(|| StoreError::NotFound("table has no storage information".into()))?;
+        let width = schema.fields.len();
+        let bytes = width.saturating_add(1).saturating_mul(
+            std::mem::size_of::<&QField>()
+                + std::mem::size_of::<usize>()
+                + std::mem::size_of::<ibschema::storage::FieldId>(),
+        );
+        let paid = self
+            .memory_budget()
+            .map(|b| {
+                b.try_reserve(
+                    memory_budget::Category::Execution,
+                    u64::try_from(bytes).unwrap_or(u64::MAX),
+                )
+                .map_err(StoreError::Memory)
+            })
+            .transpose()?;
+        let mut fields = Vec::with_capacity(width);
+        let mut positions = Vec::with_capacity(width);
         for (index, field) in schema.fields.iter().enumerate() {
             if matches!(
                 field.role,
@@ -47,17 +68,20 @@ impl TestBase {
             ) {
                 continue;
             }
-            let index = u16::try_from(index).map_err(|_| "too many fields")?;
+            let index = u16::try_from(index)
+                .map_err(|_| StoreError::Unsupported("too many fields".into()))?;
             if let Some(stored) = self.storage.field(table, QFieldId(index)) {
                 fields.push(field);
                 positions.push(usize::from(stored.0));
             }
         }
-        let read = self.store.read().map_err(|e| e.to_string())?;
-        let mut reads: Vec<ibschema::storage::FieldId> = positions
-            .iter()
-            .filter_map(|&p| u16::try_from(p).ok().map(ibschema::storage::FieldId))
-            .collect();
+        let read = self.store.read()?;
+        let mut reads = Vec::with_capacity(positions.len() + 1);
+        reads.extend(
+            positions
+                .iter()
+                .filter_map(|&p| u16::try_from(p).ok().map(ibschema::storage::FieldId)),
+        );
         reads.extend(info.field_by_std(StdField::Folder));
         Ok(Some(StoredTable {
             read,
@@ -66,6 +90,7 @@ impl TestBase {
             positions,
             reads,
             fields,
+            _paid: paid,
         }))
     }
 }
@@ -200,22 +225,40 @@ pub enum ConditionKind {
     String,
     Ref { table: u32 },
 }
+const ONLY_REASON: &str =
+    "field is applicable only to folders or items; logical NULLs require filtering";
+
 impl StoredTable<'_> {
-    pub fn indexes(&self) -> Result<Vec<IndexAccess>, String> {
-        let mut indexes = self.read.indexes(self.id).map_err(|e| e.to_string())?;
+    pub fn indexes(&self) -> Result<Vec<IndexAccess>, ibschema::store::StoreError> {
+        let mut indexes = self.read.indexes(self.id)?;
         for ix in &mut indexes {
-            for (id, reason) in &mut ix.fields {
-                if let Some(p) = self.positions.iter().position(|p| *p == usize::from(id.0))
-                    && self
-                        .fields
-                        .get(p)
-                        .is_some_and(|f| matches!(f.only, Only::Folders | Only::Items))
-                {
-                    *reason = Some("field is applicable only to folders or items; logical NULLs require filtering".into());
-                }
-            }
+            self.mark_only(ix);
         }
         Ok(indexes)
+    }
+
+    pub fn index_named(
+        &self,
+        name: &str,
+    ) -> Result<Option<IndexAccess>, ibschema::store::StoreError> {
+        let mut ix = self.read.index_named(self.id, name)?;
+        if let Some(ix) = &mut ix {
+            self.mark_only(ix);
+        }
+        Ok(ix)
+    }
+
+    fn mark_only(&self, ix: &mut IndexAccess) {
+        for (id, reason) in &mut ix.fields {
+            if let Some(p) = self.positions.iter().position(|p| *p == usize::from(id.0))
+                && self
+                    .fields
+                    .get(p)
+                    .is_some_and(|f| matches!(f.only, Only::Folders | Only::Items))
+            {
+                *reason = Some(ONLY_REASON.into());
+            }
+        }
     }
     pub fn index_field_name(&self, id: ibschema::storage::FieldId) -> Option<&str> {
         let mapped = self

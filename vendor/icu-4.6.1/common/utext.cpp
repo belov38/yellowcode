@@ -862,8 +862,19 @@ utext_copy(UText *ut,
 
 U_CAPI UText * U_EXPORT2
 utext_clone(UText *dest, const UText *src, UBool deep, UBool readOnly, UErrorCode *status) {
+    /* As in later ICU: a failed clone (incoming status or refused setup) returns no text to freeze. */
+    if (U_FAILURE(*status)) {
+        return dest;
+    }
     UText *result;
     result = src->pFuncs->clone(dest, src, deep, status);
+    if (U_FAILURE(*status)) {
+        return result;
+    }
+    if (result == NULL) {
+        *status = U_MEMORY_ALLOCATION_ERROR;
+        return result;
+    }
     if (readOnly) {
         utext_freeze(result);
     }

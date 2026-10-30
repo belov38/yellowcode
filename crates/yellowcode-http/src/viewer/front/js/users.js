@@ -20,9 +20,12 @@ async function read(path, signal) {
 }
 
 function message(error, tr) {
+  if (error?.code === "unsupported_layout" && error?.error === "unsupported user storage layout: служебный счётчик ролей не согласован с наборами ролей — требуется проверка в 1С") {
+    return tr("Служебный счётчик ролей не согласован с наборами ролей — требуется проверка в 1С. Изменения не записаны.", "The service role counter is inconsistent with the surviving role sets. A check in 1C is required. No changes were written.");
+  }
   const texts = {
     unsupported_source: ["Пользователи доступны для существующей файловой базы .1cd. Этот источник изменить нельзя.", "Users require an existing .1cd infobase. This source cannot be changed."],
-    unsupported_platform: ["Изменение пользователей на этой платформе ещё не подтверждено. Доступно только чтение.", "User writes are not qualified on this platform. Read-only access is available."],
+    unsupported_platform: ["Это действие с пользователем на этой платформе пока недоступно. Обновите список доступных действий.", "This user operation is unavailable on this platform. Refresh the available actions."],
     unsupported_layout: ["Этот формат пользователей или разделение данных пока не поддерживает изменение.", "This user format or data separation does not support changes yet."],
     unsupported_policy: ["Пустой пароль или восстановление входа при этих требованиях не подтверждены. Политики и способы входа не изменены. Требования меняются в 1С.", "Empty passwords or login recovery under these requirements are not qualified. Policies and authentication are unchanged. Change requirements in 1C."],
     data_area_read_only: ["Пользователь области данных доступен только для чтения.", "Data-area users are read-only."],
@@ -44,7 +47,7 @@ function message(error, tr) {
 function snapshotReason(snapshot, tr) {
   if (snapshot.writable) return "";
   const reason = snapshot.reason || "";
-  if (/platform/i.test(reason)) return message({ code: "unsupported_platform" }, tr);
+  if (/platform/i.test(reason)) return tr("Изменение пользователей на этой платформе ещё не подтверждено. Доступно только чтение.", "User writes are not yet qualified on this platform. Read-only access is available.");
   if (/separat|layout|format/i.test(reason)) return message({ code: "unsupported_layout" }, tr);
   return message({ code: "unsupported_source" }, tr);
 }
@@ -54,7 +57,7 @@ export function mountUsers(ctx, { tr, icon, openCard }) {
   const body = list.querySelector("tbody");
   const count = ctx.nodes.get("users/TotalUsersCntSt");
   const status = el("div", { class: "users-status", "data-users-status": "", role: "status" });
-  ctx.dialog.append(status);
+  ctx.body.append(status);
   list.removeAttribute("aria-disabled"); list.removeAttribute("title");
   list.setAttribute("aria-label", tr("Пользователи", "Users"));
   const toolbar = el("div", { class: "dialog-users-toolbar" });
@@ -68,8 +71,11 @@ export function mountUsers(ctx, { tr, icon, openCard }) {
   let reader = null, cancelConfirmation = null;
   const current = () => snapshot?.users.find((u) => u.id === selected);
   const area = (card) => Boolean(card?.data_separation?.length);
+  const supports = (action) => !snapshot?.supported_actions || snapshot.supported_actions.includes(action);
+  const clearOnlyReason = () => supports("clear_password") && !supports("update")
+    ? tr("Доступно только действие «Установить пустой пароль».", "Only Set empty password is available.") : "";
   const loadingReason = tr("Загружается другой источник. Новая запись приостановлена; результат уже отправленного запроса будет показан.", "Another source is loading. New writes are paused; an admitted request's outcome will still be shown.");
-  const writable = (card) => alive && snapshot?.writable && permission && performance.now() < deadline
+  const writable = (card, action = "clear_password") => alive && snapshot?.writable && supports(action) && permission && performance.now() < deadline
     && !sourceLoading && !blocked && !permissionBlocked && !needsRefresh && !area(card);
   const readonly = (card) => blocked || permissionBlocked || (sourceLoading ? loadingReason : area(card) ? message({ code: "data_area_read_only" }, tr)
     : needsRefresh ? message({ code: "stale_revision" }, tr) : snapshot ? snapshotReason(snapshot, tr) : "");
@@ -79,8 +85,8 @@ export function mountUsers(ctx, { tr, icon, openCard }) {
     status.textContent = statusText(notice);
     for (const { node, action } of buttons) {
       const yes = !busy && (action === "refresh" ? alive && !sourceInvalid && !sourceLoading : action === "edit" ? Boolean(current())
-        : action === "add" ? writable() : writable(current()) && Boolean(current()));
-      enable(node, yes, busy ? tr("Операция выполняется", "Operation in progress") : readonly(current()));
+        : action === "add" ? writable(null, "create") : writable(current(), action === "delete" ? "delete" : "clear_password") && Boolean(current()));
+      enable(node, yes, busy ? tr("Операция выполняется", "Operation in progress") : readonly(current()) || clearOnlyReason());
     }
     list.setAttribute("aria-busy", String(busy));
     for (const form of forms) form.update();
@@ -222,7 +228,7 @@ export function mountUsers(ctx, { tr, icon, openCard }) {
 
   async function apply(action, form = null) {
     const card = form?.card || current();
-    if (busy || !writable(action.action === "create" ? null : card)) return;
+    if (busy || !writable(action.action === "create" ? null : card, action.action)) return;
     busy = true; menu.hidden = true;
     const revision = snapshot.revision;
     const version = generation;
@@ -236,7 +242,7 @@ export function mountUsers(ctx, { tr, icon, openCard }) {
           allowLast = true;
         }
       }
-      if (!alive || version !== generation || !writable(action.action === "create" ? null : card)) return;
+      if (!alive || version !== generation || !writable(action.action === "create" ? null : card, action.action)) return;
       needsRefresh = true;
       controls();
       let response, outcome;
@@ -287,7 +293,7 @@ export function mountUsers(ctx, { tr, icon, openCard }) {
   }
 
   function showCard(create) {
-    if (busy || !alive || (create ? !writable() : !current())) return;
+    if (busy || !alive || (create ? !writable(null, "create") : !current())) return;
     menu.hidden = true;
     openCard({ mount: (cardCtx) => mountCard(cardCtx, create ? null : current()) });
   }
@@ -346,7 +352,12 @@ export function mountUsers(ctx, { tr, icon, openCard }) {
     const note = el("div", { class: "users-status", "data-user-status": "", role: "status" });
     const reload = el("button", { type: "button", "data-user-action": "refresh", onclick: () => refresh(form) },
       tr("Обновить карточку (сбросить изменения)", "Refresh card (discard changes)"));
-    cardCtx.dialog.append(el("p", null, tr(...WRITE_NOTICE)), note, reload);
+    const warning = el("details", { class: "users-write-notice", open: "" },
+      el("summary", null, tr("Перед записью в базу", "Before writing to the infobase")),
+      el("p", null, tr(...WRITE_NOTICE)));
+    const messages = el("div", { class: "users-card-messages" }, warning, note, reload);
+    const footer = el("div", { class: "users-card-buttons" }, get("BtnOK"), get("BtnCancel"), get("BtnHelp"));
+    cardCtx.body.append(messages, footer);
     const form = { ctx: cardCtx, alive: true, card: initial, message: "", update, populate,
       report: (text) => { form.message = text; update(); } };
     forms.add(form);
@@ -365,7 +376,7 @@ export function mountUsers(ctx, { tr, icon, openCard }) {
     const publicInfo = el("dl", { class: "users-public-info" });
     get("RunModeEdit").parentElement.append(publicInfo);
     get("BtnOK").addEventListener("click", () => {
-      if (busy || !writable(form.card)) return;
+      if (busy || !writable(form.card, form.card ? "update" : "create")) return;
       if (!name.value.trim()) { form.report(tr("Укажите имя пользователя.", "Enter a user name.")); name.focus(); return; }
       const ids = [...roles.selectedOptions].map((o) => o.value);
       for (const role of form.card?.roles || []) {
@@ -419,10 +430,10 @@ export function mountUsers(ctx, { tr, icon, openCard }) {
       form.report(card ? "" : tr("Новый пользователь создаётся с пустым паролем. Возможность записи проверяет сервис.", "A new user has an empty password. The service checks whether this is permitted."));
     }
     function update() {
-      const can = !busy && !form.missing && writable(form.card);
-      const why = readonly(form.card);
+      const can = !busy && !form.missing && writable(form.card, form.card ? "update" : "create");
+      const why = readonly(form.card) || clearOnlyReason();
       for (const node of [name, full, roles, show, get("BtnOK")]) enable(node, can, why);
-      enable(clear, can && Boolean(form.card), why);
+      enable(clear, !busy && !form.missing && writable(form.card) && Boolean(form.card), why);
       clear.hidden = !form.card;
       enable(reload, !busy && alive && !sourceInvalid && !sourceLoading, why);
       note.textContent = statusText(form.message, form.card);

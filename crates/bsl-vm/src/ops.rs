@@ -140,6 +140,12 @@ fn charge_strings(ex: &mut Execution, x: &Str, y: &Str) -> Result<(), Exception>
 pub fn charge_equal(ex: &mut Execution, a: &Value, b: &Value) -> Result<(), Exception> {
     match (a, b) {
         (Value::String(x), Value::String(y)) => charge_strings(ex, x, y),
+        (Value::Object(x), Value::Object(y)) if !std::rc::Rc::ptr_eq(x, y) => {
+            if !x.charge_equals(ex, y.as_ref())? {
+                y.charge_equals(ex, x.as_ref())?;
+            }
+            Ok(())
+        }
         _ => Ok(()),
     }
 }
@@ -175,11 +181,14 @@ pub fn compare(ex: &mut Execution, op: CmpOp, a: &Value, b: &Value) -> Result<bo
         (Value::Date(x), Value::Date(y)) => x.cmp(y),
         (Value::String(x), Value::String(y)) => {
             charge_strings(ex, x, y)?;
-            let c = ex.env().collation();
             let (xu, yu) = (x.units(), y.units());
-            if c.less(xu, yu) {
+            let less = |ex: &mut Execution, a: &[u16], b: &[u16]| {
+                let result = ex.env().collation().try_less(a, b);
+                result.map_err(|error| ex.collation_error(error))
+            };
+            if less(ex, xu, yu)? {
                 Ordering::Less
-            } else if c.less(yu, xu) {
+            } else if less(ex, yu, xu)? {
                 Ordering::Greater
             } else {
                 Ordering::Equal
@@ -198,7 +207,7 @@ pub fn compare(ex: &mut Execution, op: CmpOp, a: &Value, b: &Value) -> Result<bo
     })
 }
 
-fn string_to_bool(units: &[u16]) -> Option<bool> {
+pub fn string_to_bool(units: &[u16]) -> Option<bool> {
     let is_space = |u: &u16| matches!(*u, 0x20 | 0x09 | 0x0A | 0x0D | 0xA0);
     let start = units.iter().position(|u| !is_space(u))?;
     let end = units.iter().rposition(|u| !is_space(u))? + 1;

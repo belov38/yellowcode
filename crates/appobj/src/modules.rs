@@ -6,7 +6,7 @@ use bsl_syntax::{ExecContext, SourceText};
 use bsl_vm::{Exception, Execution, ModuleContext, ModuleInstanceRef, ModuleRef};
 use platform_catalog::messages::Lang;
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -298,6 +298,19 @@ impl Modules {
         Ok(())
     }
 
+    pub(crate) fn initialize_globals(&self, lang: Lang) -> Result<(), Exception> {
+        let mut exports = HashSet::new();
+        for module in self.global_modules(ExecContext::Server) {
+            let compiled = self.compiled_or_fatal(module, lang)?;
+            for method in compiled.methods.iter().filter(|method| method.export) {
+                if !exports.insert(method.name.clone()) {
+                    return Err(duplicate_global_export(&method.name.name, lang));
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn global_modules(&self, ctx: ExecContext) -> Vec<ModuleRef> {
         self.entries
             .iter()
@@ -328,6 +341,26 @@ impl Modules {
             .position(|e| e.owner == Some(obj) && e.kind == want)
             .map(|i| ModuleRef(i as u32))
     }
+}
+
+fn duplicate_global_export(name: &str, lang: Lang) -> Exception {
+    use bsl_vm::{Category, CategorySet, ErrorInfo, FatalError, FatalKind};
+    use platform_catalog::messages;
+
+    const LIBRARY_INIT: &str = "backbas:IDS_ERR_BSL_LIBRARY_INIT";
+    const DUPLICATE: &str = "IDS_STX_PROC_DEFINED";
+    let text = messages::text_key(LIBRARY_INIT, lang).unwrap_or(LIBRARY_INIT);
+    let description = messages::render(DUPLICATE, Some(name), lang)
+        .unwrap_or_else(|| format!("{DUPLICATE} ({name})"));
+    let cause = ErrorInfo::new(
+        description.into(),
+        CategorySet::default().with(Category::AllErrors),
+    );
+    Exception::Fatal(std::rc::Rc::new(FatalError {
+        kind: FatalKind::ModuleInit,
+        text: text.to_owned(),
+        cause: Some(std::rc::Rc::new(cause)),
+    }))
 }
 
 fn invalid_ref(m: ModuleRef) -> Exception {

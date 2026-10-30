@@ -11,6 +11,8 @@
 #ifndef UNICODESET_H
 #define UNICODESET_H
 
+#include "managed_memory.h"
+
 #include "unicode/unifilt.h"
 #include "unicode/unistr.h"
 #include "unicode/uset.h"
@@ -297,6 +299,7 @@ private:
         kIsBogus = 1       // This set is bogus (i.e. not valid)
     };
     uint8_t fFlags;         // Bit flag (see constants above)
+    UManagedOwner46 managedOwner; // list/buffer owner; string vector uses next two sites
 public:
     /**
      * Determine if this object contains a valid set.
@@ -354,6 +357,9 @@ public:
      * @stable ICU 2.0
      */
     UnicodeSet();
+
+    // Private retained receiver constructor; ordinary constructors stay Operation.
+    explicit UnicodeSet(UManagedOwner46 owner);
 
     /**
      * Constructs a set containing the given range. If <code>end >

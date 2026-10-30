@@ -49,6 +49,8 @@ fn builtins() {
             .chain(crate::ui::codecs())
             .chain(super::errinfo::codecs())
             .chain(super::storage::codecs())
+            .chain(super::s4_codecs::codecs())
+            .chain(super::typedesc::codecs())
         {
             t.entry(idx.0).or_insert(c);
         }

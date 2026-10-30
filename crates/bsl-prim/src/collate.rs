@@ -6,6 +6,26 @@ pub enum Strength {
     Tertiary,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CollationError {
+    Memory,
+    Restart { memory: bool },
+}
+
+impl std::fmt::Display for CollationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Memory => "MEMORY_LIMIT: not enough memory to compare strings",
+            Self::Restart { memory: true } => "MEMORY_LIMIT: native: restart the application",
+            Self::Restart { memory: false } => {
+                "native ICU allocation failed: restart the application"
+            }
+        })
+    }
+}
+
+impl std::error::Error for CollationError {}
+
 pub trait Collation: Send + Sync {
     fn sort_key(&self, strength: Strength, text: &[u16]) -> Vec<u8>;
 
@@ -27,6 +47,25 @@ pub trait Collation: Send + Sync {
         let end = text.iter().rposition(|&u| u != 0x20).map_or(0, |p| p + 1);
         self.sort_key(Strength::Secondary, &text[..end])
     }
+
+    fn try_sort_key(&self, strength: Strength, text: &[u16]) -> Result<Vec<u8>, CollationError> {
+        Ok(self.sort_key(strength, text))
+    }
+
+    fn try_less(&self, a: &[u16], b: &[u16]) -> Result<bool, CollationError> {
+        Ok(self.try_sort_key(Strength::Tertiary, a)? < self.try_sort_key(Strength::Tertiary, b)?)
+    }
+
+    fn try_compare_secondary(&self, a: &[u16], b: &[u16]) -> Result<Ordering, CollationError> {
+        Ok(self
+            .try_sort_key(Strength::Secondary, a)?
+            .cmp(&self.try_sort_key(Strength::Secondary, b)?))
+    }
+
+    fn try_sort_key_for_sorting(&self, text: &[u16]) -> Result<Vec<u8>, CollationError> {
+        let end = text.iter().rposition(|&u| u != 0x20).map_or(0, |p| p + 1);
+        self.try_sort_key(Strength::Secondary, &text[..end])
+    }
 }
 
 #[cfg(feature = "icu")]
@@ -44,8 +83,9 @@ pub use icu_impl::IcuCollation;
 
 #[cfg(feature = "icu")]
 mod icu_impl {
-    use super::{Collation, Strength, fallback_key};
+    use super::{Collation, CollationError, Strength, fallback_key};
     use std::cell::RefCell;
+    use std::cmp::Ordering;
     use std::collections::HashMap;
 
     thread_local! {
@@ -81,7 +121,16 @@ mod icu_impl {
     }
 
     impl Collation for IcuCollation {
+        #[allow(
+            clippy::panic,
+            reason = "documented: bound processes use the try_ methods"
+        )]
         fn sort_key(&self, strength: Strength, text: &[u16]) -> Vec<u8> {
+            if super::managed::bound() {
+                return super::managed::key(&self.locale, strength, text)
+                    .map(|key| key.as_slice().to_vec())
+                    .unwrap_or_else(|error| panic!("{error}"));
+            }
             if i32::try_from(text.len()).is_err() {
                 return fallback_key(text);
             }
@@ -103,7 +152,40 @@ mod icu_impl {
             }
         }
 
+        fn try_sort_key(
+            &self,
+            strength: Strength,
+            text: &[u16],
+        ) -> Result<Vec<u8>, CollationError> {
+            if super::managed::bound() {
+                return super::managed::key(&self.locale, strength, text)
+                    .map(|key| key.as_slice().to_vec());
+            }
+            Ok(self.sort_key(strength, text))
+        }
+
+        fn try_less(&self, a: &[u16], b: &[u16]) -> Result<bool, CollationError> {
+            if super::managed::bound() {
+                let a = super::managed::key(&self.locale, Strength::Tertiary, a)?;
+                let b = super::managed::key(&self.locale, Strength::Tertiary, b)?;
+                return Ok(a.as_slice() < b.as_slice());
+            }
+            Ok(self.less(a, b))
+        }
+
+        fn try_compare_secondary(&self, a: &[u16], b: &[u16]) -> Result<Ordering, CollationError> {
+            if super::managed::bound() {
+                let a = super::managed::key(&self.locale, Strength::Secondary, a)?;
+                let b = super::managed::key(&self.locale, Strength::Secondary, b)?;
+                return Ok(a.as_slice().cmp(b.as_slice()));
+            }
+            Ok(self.compare_secondary(a, b))
+        }
+
         fn sort_key_len(&self, strength: Strength, text: &[u16]) -> Option<usize> {
+            if super::managed::bound() {
+                return None;
+            }
             if i32::try_from(text.len()).is_err() {
                 return Some(2 * text.len() + 1);
             }
@@ -121,6 +203,136 @@ mod icu_impl {
                     .as_ref()
                     .and_then(|coll| coll.sort_key_len(text))
             })
+        }
+    }
+}
+
+#[cfg(feature = "icu")]
+mod managed {
+    use super::{CollationError, Strength};
+    use icu46_sys::managed::FailureCause;
+    use icu46_sys::managed::runtime::{
+        Mode, NativeCause, NativeFailure, RuntimeError, mode, process_root, quarantined,
+    };
+    use icu46_sys::{Collator, SORT_KEY_SLACK, SortKeyWrite};
+    use memory_budget::{BudgetError, BudgetedVec, Category, MemoryBudget};
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::sync::atomic::AtomicBool;
+
+    thread_local! {
+        static OPENED: RefCell<HashMap<String, [Option<Collator>; 2]>> = RefCell::new(HashMap::new());
+    }
+
+    static NEVER: AtomicBool = AtomicBool::new(false);
+
+    pub(super) fn bound() -> bool {
+        matches!(mode(), Mode::Managed | Mode::Quarantined(_))
+    }
+
+    fn restart(first: NativeFailure) -> CollationError {
+        CollationError::Restart {
+            memory: matches!(
+                first.cause,
+                NativeCause::Allocation(FailureCause::MemoryLimit(_))
+            ),
+        }
+    }
+
+    fn prepared<T>(result: Result<T, BudgetError>) -> Result<T, CollationError> {
+        result.map_err(|_| quarantined().map_or(CollationError::Memory, restart))
+    }
+
+    fn runtime_error(error: RuntimeError) -> CollationError {
+        match error {
+            RuntimeError::RestartRequired(first) => restart(first),
+            _ => quarantined().map_or(CollationError::Restart { memory: false }, restart),
+        }
+    }
+
+    pub(super) fn key(
+        locale: &str,
+        strength: Strength,
+        text: &[u16],
+    ) -> Result<BudgetedVec<u8>, CollationError> {
+        if let Some(first) = quarantined() {
+            return Err(restart(first));
+        }
+        let Some(root) = process_root() else {
+            return Err(CollationError::Restart { memory: false });
+        };
+        prepared(i32::try_from(text.len()).map_err(|_| BudgetError::Overflow))?;
+        let padded = prepared(text.len().checked_add(1).ok_or(BudgetError::Overflow))?;
+        let mut source = prepared(BudgetedVec::try_with_capacity(
+            &root,
+            Category::Execution,
+            padded,
+        ))?;
+        prepared(source.try_extend_from_slice(text))?;
+        prepared(source.try_push(0))?;
+        OPENED.with(|opened| {
+            let mut opened = opened
+                .try_borrow_mut()
+                .map_err(|_| CollationError::Memory)?;
+            if !opened.contains_key(locale) {
+                prepared(
+                    opened
+                        .try_reserve(1)
+                        .map_err(|_| BudgetError::AllocationFailed),
+                )?;
+                opened.insert(locale.to_owned(), [None, None]);
+            }
+            let Some(slots) = opened.get_mut(locale) else {
+                return Err(CollationError::Memory);
+            };
+            let (slot, native) = match strength {
+                Strength::Secondary => (&mut slots[0], icu46_sys::Strength::Secondary),
+                Strength::Tertiary => (&mut slots[1], icu46_sys::Strength::Tertiary),
+            };
+            let collator = match slot {
+                Some(collator) => collator,
+                None => {
+                    let name = std::ffi::CString::new(locale)
+                        .map_err(|_| CollationError::Restart { memory: false })?;
+                    let collator = Collator::open_managed_cancellable(&name, native, &root, &NEVER)
+                        .map_err(runtime_error)?;
+                    slot.insert(collator)
+                }
+            };
+            write(collator, &source, &root)
+        })
+    }
+
+    fn write(
+        collator: &Collator,
+        source: &[u16],
+        root: &MemoryBudget,
+    ) -> Result<BudgetedVec<u8>, CollationError> {
+        let mut probe = [0; SORT_KEY_SLACK + 1];
+        let needed = match collator
+            .sort_key_managed_cancellable(source, &mut probe, root, &NEVER)
+            .map_err(runtime_error)?
+        {
+            SortKeyWrite::Complete(n) | SortKeyWrite::Required(n) => n,
+        };
+        let capacity = prepared(
+            needed
+                .checked_add(SORT_KEY_SLACK)
+                .ok_or(BudgetError::Overflow),
+        )?;
+        let mut output = prepared(
+            BudgetedVec::try_with_capacity(root, Category::Execution, capacity)
+                .and_then(|mut output| output.try_resize(capacity, 0).map(|()| output)),
+        )?;
+        match collator
+            .sort_key_managed_cancellable(source, &mut output, root, &NEVER)
+            .map_err(runtime_error)?
+        {
+            SortKeyWrite::Complete(n) if n > 0 => {
+                output.truncate(n);
+                Ok(output)
+            }
+            _ => Err(quarantined().map_or(CollationError::Restart { memory: false }, restart)),
         }
     }
 }

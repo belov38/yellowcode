@@ -21,6 +21,7 @@
 #include "ustr_imp.h"
 #include "umutex.h"
 #include "cmemory.h"
+#include "udatamem.h"
 #include "cstring.h"
 #include "ucln_cmn.h"
 #include "udataswp.h"
@@ -203,8 +204,9 @@ isDataLoaded(UErrorCode *pErrorCode) {
             return FALSE;
         }
 
+        UManagedOwner46 owner={10, 1022};
         /* open the data outside the mutex block */
-        data=udata_openChoice(NULL, DATA_TYPE, DATA_NAME, isAcceptable, NULL, pErrorCode);
+        data=managed_udata_openChoice_46(NULL, DATA_TYPE, DATA_NAME, isAcceptable, NULL, owner, pErrorCode);
         if(U_FAILURE(*pErrorCode)) {
             gLoadErrorCode=*pErrorCode;
             return FALSE;

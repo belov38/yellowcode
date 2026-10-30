@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
+use crate::coll::{ExecCollation, Keys, infallible};
 use bsl_prim::{Collation, Strength};
 use query_ir::{ExecError, QValue};
 
@@ -44,10 +45,10 @@ pub struct LikePattern {
     cache: Mutex<HashMap<u32, Arc<[u64]>>>,
 }
 
-fn key_of_cp(cp: u32, c: &dyn Collation) -> Vec<u8> {
+fn key_of_cp<C: Keys>(cp: u32, c: C) -> Result<Vec<u8>, C::Error> {
     let mut u = Vec::with_capacity(2);
     push_units(cp, &mut u);
-    c.sort_key(Strength::Secondary, &u)
+    c.key(Strength::Secondary, &u)
 }
 
 fn is_special(ch: u32) -> bool {
@@ -108,14 +109,30 @@ fn parse_set(p: &[u32], sink: &mut impl Sink) -> usize {
     j
 }
 
-struct Build<'c> {
-    c: &'c dyn Collation,
+struct Build<C: Keys> {
+    c: C,
     items: Vec<Item>,
     stars: Vec<usize>,
     set: Option<CharSet>,
+    error: Option<C::Error>,
 }
 
-impl Sink for Build<'_> {
+impl<C: Keys> Build<C> {
+    fn key(&mut self, cp: u32) -> Option<Vec<u8>> {
+        if self.error.is_some() {
+            return None;
+        }
+        match key_of_cp(cp, self.c) {
+            Ok(key) => Some(key),
+            Err(error) => {
+                self.error = Some(error);
+                None
+            }
+        }
+    }
+}
+
+impl<C: Keys> Sink for Build<C> {
     fn star(&mut self) {
         self.stars.push(self.items.len());
     }
@@ -125,7 +142,9 @@ impl Sink for Build<'_> {
     }
 
     fn lit(&mut self, cp: u32) {
-        let key = key_of_cp(cp, self.c);
+        let Some(key) = self.key(cp) else {
+            return;
+        };
         if cp == SHARP_S {
             self.items.push(Item::Lit(key.clone()));
         }
@@ -141,14 +160,19 @@ impl Sink for Build<'_> {
     }
 
     fn single(&mut self, cp: u32) {
-        if let Some(set) = &mut self.set {
-            set.singles.insert(key_of_cp(cp, self.c));
+        if self.set.is_some()
+            && let Some(key) = self.key(cp)
+            && let Some(set) = &mut self.set
+        {
+            set.singles.insert(key);
         }
     }
 
     fn range(&mut self, a: u32, b: u32) {
-        if let Some(set) = &mut self.set {
-            let (a, b) = (key_of_cp(a, self.c), key_of_cp(b, self.c));
+        if self.set.is_some()
+            && let (Some(a), Some(b)) = (self.key(a), self.key(b))
+            && let Some(set) = &mut self.set
+        {
             set.ranges.push(if a <= b { (a, b) } else { (b, a) });
         }
     }
@@ -214,6 +238,22 @@ impl Sink for Shape {
 
 impl LikePattern {
     pub fn compile(pat: &[u16], esc: Option<char>, c: &dyn Collation) -> LikePattern {
+        infallible(Self::compile_with(pat, esc, c))
+    }
+
+    pub fn try_compile(
+        pat: &[u16],
+        esc: Option<char>,
+        c: ExecCollation<'_>,
+    ) -> Result<LikePattern, ExecError> {
+        Self::compile_with(pat, esc, c)
+    }
+
+    fn compile_with<C: Keys>(
+        pat: &[u16],
+        esc: Option<char>,
+        c: C,
+    ) -> Result<LikePattern, C::Error> {
         let mut p: Vec<u32> = Vec::with_capacity(pat.len());
         p.extend(code_points(pat));
         let mut build = Build {
@@ -221,9 +261,18 @@ impl LikePattern {
             items: Vec::new(),
             stars: Vec::new(),
             set: None,
+            error: None,
         };
         parse(&p, esc.map(u32::from), &mut build);
-        let Build { items, stars, .. } = build;
+        let Build {
+            items,
+            stars,
+            error,
+            ..
+        } = build;
+        if let Some(error) = error {
+            return Err(error);
+        }
         let k = items.len();
         let words = (k + 1).div_ceil(64);
         let mut star = vec![0u64; words];
@@ -241,7 +290,7 @@ impl LikePattern {
                 Item::Set(_) => sets.push(j),
             }
         }
-        LikePattern {
+        Ok(LikePattern {
             items,
             lits,
             any,
@@ -249,16 +298,16 @@ impl LikePattern {
             star,
             words,
             cache: Mutex::new(HashMap::new()),
-        }
+        })
     }
 
-    fn mask(&self, cp: u32, c: &dyn Collation) -> Arc<[u64]> {
+    fn mask<C: Keys>(&self, cp: u32, c: C) -> Result<Arc<[u64]>, C::Error> {
         if let Ok(cache) = self.cache.lock()
             && let Some(m) = cache.get(&cp)
         {
-            return m.clone();
+            return Ok(m.clone());
         }
-        let key = key_of_cp(cp, c);
+        let key = key_of_cp(cp, c)?;
         let mut m = vec![0u64; self.words];
         let mut set_bit = |j: usize| {
             if let Some(w) = m.get_mut(j / 64) {
@@ -286,10 +335,18 @@ impl LikePattern {
         {
             cache.insert(cp, m.clone());
         }
-        m
+        Ok(m)
     }
 
     pub fn matches(&self, text: &[u16], c: &dyn Collation) -> bool {
+        infallible(self.matches_with(text, c))
+    }
+
+    pub fn try_matches(&self, text: &[u16], c: ExecCollation<'_>) -> Result<bool, ExecError> {
+        self.matches_with(text, c)
+    }
+
+    fn matches_with<C: Keys>(&self, text: &[u16], c: C) -> Result<bool, C::Error> {
         let k = self.items.len();
         let mut cur = vec![0u64; self.words];
         let mut next = vec![0u64; self.words];
@@ -302,7 +359,7 @@ impl LikePattern {
             let m = match local.get(&cp) {
                 Some(m) => m.clone(),
                 None => {
-                    let m = self.mask(cp, c);
+                    let m = self.mask(cp, c)?;
                     local.insert(cp, m.clone());
                     m
                 }
@@ -319,12 +376,12 @@ impl LikePattern {
                     live |= *n;
                 }
                 if live == 0 {
-                    return false;
+                    return Ok(false);
                 }
                 std::mem::swap(&mut cur, &mut next);
             }
         }
-        cur.get(k / 64).is_some_and(|w| w >> (k % 64) & 1 == 1)
+        Ok(cur.get(k / 64).is_some_and(|w| w >> (k % 64) & 1 == 1))
     }
 }
 
@@ -403,10 +460,28 @@ pub fn like_cost(
 }
 
 pub fn like(s: &QValue, pat: &QValue, esc: Option<char>, c: &dyn Collation) -> Option<bool> {
+    infallible(like_with(s, pat, esc, c))
+}
+
+pub fn try_like(
+    s: &QValue,
+    pat: &QValue,
+    esc: Option<char>,
+    c: ExecCollation<'_>,
+) -> Result<Option<bool>, ExecError> {
+    like_with(s, pat, esc, c)
+}
+
+fn like_with<C: Keys>(
+    s: &QValue,
+    pat: &QValue,
+    esc: Option<char>,
+    c: C,
+) -> Result<Option<bool>, C::Error> {
     match (s, pat) {
-        (QValue::String(s), QValue::String(p)) => {
-            Some(LikePattern::compile(&p.0, esc, c).matches(&s.0, c))
-        }
-        _ => None,
+        (QValue::String(s), QValue::String(p)) => Ok(Some(
+            LikePattern::compile_with(&p.0, esc, c)?.matches_with(&s.0, c)?,
+        )),
+        _ => Ok(None),
     }
 }

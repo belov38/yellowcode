@@ -137,6 +137,7 @@ pub trait DataSource {
 
 pub struct ExecEnv<'a> {
     pub collation: &'a dyn bsl_prim::Collation,
+    pub native: Option<crate::coll::NativeCollation<'a>>,
     pub cancel: &'a AtomicBool,
     pub stop: Option<&'a AtomicBool>,
     pub mem_limit: u64,

@@ -49,7 +49,8 @@ fn text_key(ex: &mut Execution, text: &[u16], cache_bytes: &mut u64) -> Result<V
             .saturating_add(work_bytes)
             .saturating_add(bytes),
     )?;
-    let key = ex.env().collation().sort_key_for_sorting(text);
+    let key = ex.env().collation().try_sort_key_for_sorting(text);
+    let key = key.map_err(|error| ex.collation_error(error))?;
     *cache_bytes = cache_bytes.saturating_add(key.len() as u64);
     ex.reserve(*cache_bytes)?;
     Ok(key)

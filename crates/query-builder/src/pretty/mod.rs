@@ -23,6 +23,7 @@ pub(crate) fn pretty_with_blocks(
         let mut l = L {
             script,
             same_block,
+            ordinary_query: b.mode == query_syntax::ParseMode::Query,
             ..L::default()
         };
         for s in &b.stmts {
@@ -49,10 +50,12 @@ pub(crate) struct L {
     pub(crate) out: String,
     pub(crate) script: ScriptVariant,
     pub(crate) ei: usize,
+    pub(crate) expression_base: Option<usize>,
     pub(crate) glue: bool,
     pub(crate) pending: bool,
     pub(crate) tight: bool,
     pub(crate) embedded: usize,
+    pub(crate) ordinary_query: bool,
     pub(crate) same_block: HashSet<usize>,
 }
 
@@ -157,6 +160,12 @@ impl L {
         if q.parts.first().is_none_or(|p| p.items.is_empty()) {
             return;
         }
+        let expression_base = self.expression_base.take();
+        let union_blank = if self.ordinary_query && r > b {
+            expression_base.unwrap_or(b)
+        } else {
+            b
+        };
         let last = q.parts.len().saturating_sub(1);
         let placement_index = q.parts.first().is_some_and(|p| p.into.is_some())
             && q.parts
@@ -172,19 +181,21 @@ impl L {
             || (q.order_by.is_some() && q.autoorder.is_none() && q.totals.is_none());
         for (i, part) in q.parts.iter().enumerate() {
             if let Some(j) = i.checked_sub(1) {
-                self.blank(b);
+                self.blank(union_blank);
                 self.nl(r);
                 self.kw(Kw::Union);
                 if q.unions.get(j).is_some_and(|u| u.all) {
                     self.kw(Kw::All);
                 }
-                self.blank(b);
+                self.blank(union_blank);
                 self.nl(r);
             }
             self.select(part, r, b, i == last && index_late);
         }
         if let Some(o) = &q.order_by {
-            self.blank(b);
+            if !self.ordinary_query || r == b {
+                self.blank(b);
+            }
             self.nl(r);
             self.kws(&[Kw::Order, Kw::By]);
             self.lines(&o.items, r + 1, |t, it| {
@@ -211,6 +222,7 @@ impl L {
             self.nl(r);
             self.dcs_block(blk, r);
         }
+        self.expression_base = expression_base;
     }
 
     fn select(&mut self, s: &Select, r: usize, b: usize, index_late: bool) {
@@ -254,7 +266,9 @@ impl L {
         }
         blocks.print(self, r, DcsSlot::Where);
         if let Some(g) = &s.group_by {
-            self.blank(b);
+            if !self.ordinary_query || r == b {
+                self.blank(b);
+            }
             self.nl(r);
             self.kws(&[Kw::Group, Kw::By]);
             match &g.kind {
@@ -263,7 +277,9 @@ impl L {
             }
         }
         if let Some(h) = &s.having {
-            self.blank(b);
+            if !self.ordinary_query || r == b {
+                self.blank(b);
+            }
             self.nl(r);
             self.kw(Kw::Having);
             self.elements(&h.expr, r + 1, true);

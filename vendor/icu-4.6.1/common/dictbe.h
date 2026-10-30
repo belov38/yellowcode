@@ -58,7 +58,7 @@ class DictionaryBreakEngine : public LanguageBreakEngine {
    *
    * @param breakTypes A bitmap of types handled by the engine.
    */
-  DictionaryBreakEngine( uint32_t breakTypes );
+  DictionaryBreakEngine(uint32_t breakTypes, UErrorCode &status, int32_t role=0);
 
   /**
    * <p>Virtual destructor.</p>
@@ -104,7 +104,7 @@ class DictionaryBreakEngine : public LanguageBreakEngine {
   *
   * @param set A UnicodeSet of the set of characters handled by the engine
   */
-  virtual void setCharacters( const UnicodeSet &set );
+  virtual void setCharacters(const UnicodeSet &set, UErrorCode &status);
 
  /**
   * <p>Set the break types handled by this engine.</p>
@@ -162,7 +162,7 @@ class ThaiBreakEngine : public DictionaryBreakEngine {
    * @param adoptDictionary A TrieWordDictionary to adopt. Deleted when the
    * engine is deleted.
    */
-  ThaiBreakEngine(const TrieWordDictionary *adoptDictionary, UErrorCode &status);
+  ThaiBreakEngine(const TrieWordDictionary *adoptDictionary, UErrorCode &status, int32_t role=0);
 
   /**
    * <p>Virtual destructor.</p>

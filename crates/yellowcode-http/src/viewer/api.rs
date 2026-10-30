@@ -8,17 +8,12 @@ use super::state::State;
 use yellowcode_core::viewer::check::{self, Ctx, Run};
 use yellowcode_core::viewer::names::{child_tag_en, kind_name, module_name, sub_kind_en};
 use yellowcode_core::viewer::path::{self, Target};
-use yellowcode_core::viewer::{Lang, find, identity, module, tree};
+use yellowcode_core::viewer::{Lang, find, identity, module};
 
 const MAX_HITS: usize = 500;
 
-fn reply(status: u16, body: &Value) -> Response {
-    Response {
-        status,
-        content_type: "application/json; charset=utf-8",
-        body: serde_json::to_vec(body).unwrap_or_else(|_| b"null".to_vec()),
-        ..Default::default()
-    }
+fn reply<T: serde::Serialize + ?Sized>(status: u16, body: &T) -> Response {
+    super::memory::json(status, body)
 }
 
 fn error(status: u16, msg: &str) -> Response {
@@ -61,7 +56,7 @@ pub fn handle(state: &State, req: &Request) -> Option<Response> {
     Some(r)
 }
 
-fn synonym_of_config(state: &State) -> Option<String> {
+fn synonym_of_config(state: &State) -> Option<&str> {
     let code = if state.lang == Lang::Ru { "ru" } else { "en" };
     state
         .cfg
@@ -73,29 +68,56 @@ fn synonym_of_config(state: &State) -> Option<String> {
                 l.0.iter()
                     .find(|(c, _)| c == code)
                     .or_else(|| l.0.first())
-                    .map(|(_, t)| t.clone())
+                    .map(|(_, t)| t.as_str())
                     .filter(|t| !t.is_empty())
             }
             _ => None,
         })
 }
 
+struct SourcePath<'a>(&'a std::path::Path);
+impl serde::Serialize for SourcePath<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(&self.0.display())
+    }
+}
+
+#[derive(serde::Serialize)]
+struct Info<'a> {
+    name: &'a str,
+    synonym: Option<&'a str>,
+    yellowcode_version: &'static str,
+    configuration_version: Option<&'a str>,
+    source: SourcePath<'a>,
+    lang: &'static str,
+    stats: &'a Value,
+    icons_v: &'static str,
+}
+
 fn info(state: &State) -> Response {
-    reply(
-        200,
-        &json!({
-            "name": tree::config_name(&state.cfg),
-            "synonym": synonym_of_config(state),
-            "yellowcode_version": yellowcode_core::VERSION,
-            "configuration_version": state.cfg.props.iter().find(|p| p.name == "Version").and_then(|p| match &p.value {
+    let text = |name| {
+        state
+            .cfg
+            .props
+            .iter()
+            .find(|p| p.name == name)
+            .and_then(|p| match &p.value {
                 MdValue::Text(value) => Some(value.as_str()),
                 _ => None,
-            }),
-            "source": state.source.display().to_string(),
-            "lang": if state.lang == Lang::Ru { "ru" } else { "en" },
-            "stats": state.stats,
-            "icons_v": yellowcode_core::viewer::icons::version(),
-        }),
+            })
+    };
+    reply(
+        200,
+        &Info {
+            name: text("Name").unwrap_or_default(),
+            synonym: synonym_of_config(state),
+            yellowcode_version: yellowcode_core::VERSION,
+            configuration_version: text("Version"),
+            source: SourcePath(&state.source),
+            lang: if state.lang == Lang::Ru { "ru" } else { "en" },
+            stats: &state.stats,
+            icons_v: yellowcode_core::viewer::icons::version(),
+        },
     )
 }
 
@@ -110,24 +132,49 @@ fn tree_children(state: &State, req: &Request) -> Response {
     let Some(parent) = state.nodes.get(id) else {
         return error(404, "no such node");
     };
-    let kids: Vec<Value> = parent
-        .children
-        .iter()
-        .filter_map(|&c| Some((c, state.nodes.get(c)?)))
-        .map(|(c, f)| {
-            json!({
-                "id": c,
-                "label": f.node.label,
-                "path": f.node.path,
-                "module": f.node.module,
-                "synonym": f.node.synonym,
-                "type_text": f.node.type_text,
-                "icon": f.node.icon,
-                "children": f.children.len(),
-            })
-        })
-        .collect();
-    reply(200, &Value::Array(kids))
+    struct Children<'a> {
+        state: &'a State,
+        ids: &'a [usize],
+    }
+    impl serde::Serialize for Children<'_> {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            use serde::ser::SerializeSeq;
+            #[derive(serde::Serialize)]
+            struct Child<'a> {
+                id: usize,
+                label: &'a str,
+                path: Option<&'a str>,
+                module: Option<&'a str>,
+                synonym: Option<&'a str>,
+                type_text: Option<&'a str>,
+                icon: Option<&'a str>,
+                children: usize,
+            }
+            let mut seq = serializer.serialize_seq(None)?;
+            for &id in self.ids {
+                if let Some(child) = self.state.nodes.get(id) {
+                    seq.serialize_element(&Child {
+                        id,
+                        label: &child.node.label,
+                        path: child.node.path.as_deref(),
+                        module: child.node.module.as_deref(),
+                        synonym: child.node.synonym.as_deref(),
+                        type_text: child.node.type_text.as_deref(),
+                        icon: child.node.icon.as_deref(),
+                        children: child.children.len(),
+                    })?;
+                }
+            }
+            seq.end()
+        }
+    }
+    reply(
+        200,
+        &Children {
+            state,
+            ids: &parent.children,
+        },
+    )
 }
 
 fn not_found(e: &path::PathError) -> Response {
@@ -248,8 +295,16 @@ fn check_module(state: &State, req: &Request) -> Response {
     };
     let key = item.name.clone();
     if let Some(a) = lock(&state.check.answers).get(&key) {
-        return reply(200, a);
+        return reply(200, a.as_ref());
     }
+    let answer_memory = match state.check.admit_answer(m.source.len() as u64) {
+        Ok(memory) => memory,
+        Err(_) => return super::memory::refusal(),
+    };
+    let _compile_memory = match state.check.admit_compile(m.source.len() as u64) {
+        Ok(memory) => memory,
+        Err(_) => return super::memory::refusal(),
+    };
     let answer = (|| -> yellowcode_core::Result<Value> {
         let (dir, mut warnings) = names_dir(state)?;
         let compat = check::compat_of(state.cfg.settings().compatibility_mode.0);
@@ -264,9 +319,14 @@ fn check_module(state: &State, req: &Request) -> Response {
     })();
     match answer {
         Ok(v) => {
-            let v = Arc::new(v);
-            lock(&state.check.answers).insert(key, v.clone());
-            reply(200, &v)
+            let v = Arc::new(check::CheckAnswer::new(v, answer_memory));
+            let mut answers = lock(&state.check.answers);
+            if answers.len() >= 64 {
+                answers.clear();
+            }
+            answers.insert(key, v.clone());
+            drop(answers);
+            reply(200, v.as_ref())
         }
         Err(e) => error(500, &e.to_string()),
     }

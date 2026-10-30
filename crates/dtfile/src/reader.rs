@@ -82,6 +82,90 @@ pub struct DtReader<R: Read> {
 }
 
 impl<R: Read> DtReader<R> {
+    pub fn folder_row_header(&mut self) -> Result<Option<Vec<ColumnValue>>> {
+        if let Some(error) = &self.failed {
+            return Err(error.again());
+        }
+        let result = (|| {
+            let head = self
+                .cur
+                .as_ref()
+                .filter(|h| matches!(h.source, Source::Folder(_)))
+                .ok_or_else(|| Error::Unsupported("streamed row outside a folder".into()))?;
+            let at = self.raw.offset();
+            let Some(values) = self.raw.folder_header()? else {
+                self.cur = None;
+                return Ok(None);
+            };
+            let columns = head
+                .columns
+                .get(..5)
+                .ok_or_else(|| Error::Unsupported("invalid folder columns".into()))?;
+            rows::decode_in(&head.phys_name, columns, &values, at).map(Some)
+        })();
+        if let Err(error) = &result {
+            self.failed = Some(error.again());
+        }
+        result
+    }
+
+    pub fn copy_folder_binary(
+        &mut self,
+        sink: &mut impl std::io::Write,
+        limit: u64,
+    ) -> Result<u64> {
+        self.copy_folder_binary_with_chunk_limit(sink, limit, u64::MAX)
+    }
+
+    pub fn copy_folder_binary_with_chunk_limit(
+        &mut self,
+        sink: &mut impl std::io::Write,
+        limit: u64,
+        max_chunks: u64,
+    ) -> Result<u64> {
+        self.copy_folder_binary_bounded(sink, limit, max_chunks, false)
+    }
+
+    pub fn copy_folder_binary_with_work_limit(
+        &mut self,
+        sink: &mut impl std::io::Write,
+        limit: u64,
+        base_chunks: u64,
+    ) -> Result<u64> {
+        self.copy_folder_binary_bounded(sink, limit, base_chunks, true)
+    }
+
+    fn copy_folder_binary_bounded(
+        &mut self,
+        sink: &mut impl std::io::Write,
+        limit: u64,
+        chunks: u64,
+        adaptive: bool,
+    ) -> Result<u64> {
+        if let Some(error) = &self.failed {
+            return Err(error.again());
+        }
+        let result = if self
+            .cur
+            .as_ref()
+            .is_some_and(|h| matches!(h.source, Source::Folder(_)))
+        {
+            if adaptive {
+                self.raw
+                    .copy_folder_binary_with_work_limit(sink, limit, chunks)
+            } else {
+                self.raw
+                    .copy_folder_binary_with_chunk_limit(sink, limit, chunks)
+            }
+        } else {
+            Err(Error::Unsupported("streamed data outside a folder".into()))
+        };
+        if let Err(error) = &result {
+            self.failed = Some(error.again());
+        }
+        result
+    }
+
     pub fn open(r: R) -> Result<DtReader<R>> {
         Ok(Self::from_raw(RawReader::open(r)?))
     }

@@ -46,6 +46,7 @@
 #include "cmemory.h"
 #include "uenumimp.h"
 #include "ulist.h"
+#include "udatamem.h"
 
 U_NAMESPACE_USE
 
@@ -113,10 +114,11 @@ ucol_initUCA(UErrorCode *status) {
     UMTX_CHECK(NULL, (_staticUCA == NULL), needsInit);
 
     if(needsInit) {
-        UDataMemory *result = udata_openChoice(U_ICUDATA_COLL, UCA_DATA_TYPE, UCA_DATA_NAME, isAcceptableUCA, NULL, status);
+        UManagedOwner46 owner = { 7, 701 };
+        UDataMemory *result = managed_udata_openChoice_46(U_ICUDATA_COLL, UCA_DATA_TYPE, UCA_DATA_NAME, isAcceptableUCA, NULL, owner, status);
 
         if(U_SUCCESS(*status)){
-            UCollator *newUCA = ucol_initCollator((const UCATableHeader *)udata_getMemory(result), NULL, NULL, status);
+            UCollator *newUCA = managed_ucol_initCollator_46((const UCATableHeader *)udata_getMemory(result), NULL, NULL, status, 7);
             if(U_SUCCESS(*status)){
                 // Initalize variables for implicit generation
                 uprv_uca_initImplicitConstants(status);
@@ -453,7 +455,7 @@ ucol_openRulesForImport( const UChar        *rules,
             goto cleanup;
         }
         // And set only the options
-        UColOptionSet *opts = (UColOptionSet *)uprv_malloc(sizeof(UColOptionSet));
+        UColOptionSet *opts = (UColOptionSet *)managed_malloc_46(sizeof(UColOptionSet), result->managedRole, result->managedRole == 0 ? 0 : 706);
         /* test for NULL */
         if (opts == NULL) {
             *status = U_MEMORY_ALLOCATION_ERROR;
@@ -1042,7 +1044,7 @@ static void ucol_setReorderCodesFromParser(UCollator *coll, UColTokenParser *par
     }
     
     coll->reorderCodesLength = parser->reorderCodesLength;
-    coll->reorderCodes = (int32_t*) uprv_malloc(coll->reorderCodesLength * sizeof(int32_t));
+    coll->reorderCodes = (int32_t*) managed_malloc_46(coll->reorderCodesLength * sizeof(int32_t), coll->managedRole, coll->managedRole == 0 ? 0 : 704);
     uprv_memcpy(coll->reorderCodes, parser->reorderCodes, coll->reorderCodesLength * sizeof(int32_t));
 }
 
@@ -1131,7 +1133,7 @@ void ucol_buildPermutationTable(UCollator *coll, UErrorCode *status) {
     }
 
     if (coll->leadBytePermutationTable == NULL) {
-        coll->leadBytePermutationTable = (uint8_t*)uprv_malloc(256*sizeof(uint8_t));
+        coll->leadBytePermutationTable = (uint8_t*)managed_malloc_46(256*sizeof(uint8_t), coll->managedRole, coll->managedRole == 0 ? 0 : 705);
         if (coll->leadBytePermutationTable == NULL) {
             *status = U_MEMORY_ALLOCATION_ERROR;
             return;

@@ -37,6 +37,7 @@
 #include "regexcmp.h"
 #include "regexst.h"
 #include "regextxt.h"
+#include "managed_memory.h"
 
 
 
@@ -138,6 +139,10 @@ void    RegexCompile::compile(
 
     // Prepare the RegexPattern object to receive the compiled pattern.
     fRXPat->fPattern        = utext_clone(fRXPat->fPattern, pat, FALSE, TRUE, fStatus);
+    if (U_FAILURE(*fStatus)) {
+        // A refused clone leaves no pattern text to scan.
+        return;
+    }
     fRXPat->fStaticSets     = RegexStaticSets::gStaticSets->fPropSets;
     fRXPat->fStaticSets8    = RegexStaticSets::gStaticSets->fPropSets8;
 
@@ -161,6 +166,8 @@ void    RegexCompile::compile(
     for (;;) {
         //  Bail out if anything has gone wrong.
         //  Regex pattern parsing stops on the first error encountered.
+        //  A refused allocation may have been reported only to the allocator.
+        checkAllocation();
         if (U_FAILURE(*fStatus)) {
             break;
         }
@@ -262,6 +269,7 @@ void    RegexCompile::compile(
 
     }
 
+    checkAllocation();
     if (U_FAILURE(*fStatus)) {
         // Bail out if the pattern had errors.
         //   Set stack cleanup:  a successful compile would have left it empty,
@@ -300,6 +308,10 @@ void    RegexCompile::compile(
     // Optimization pass 1: NOPs, back-references, and case-folding
     //
     stripNOPs();
+    checkAllocation();
+    if (U_FAILURE(*fStatus)) {
+        return;
+    }
 
     //
     // Get bounds for the minimum and maximum length of a string that this
@@ -312,6 +324,10 @@ void    RegexCompile::compile(
     // Optimization pass 2: match start type
     //
     matchStartType();
+    checkAllocation();
+    if (U_FAILURE(*fStatus)) {
+        return;
+    }
 
     //
     // Set up fast latin-1 range sets
@@ -328,7 +344,37 @@ void    RegexCompile::compile(
         UnicodeSet *s = (UnicodeSet *)fRXPat->fSets->elementAt(i);
         fRXPat->fSets8[i].init(s);
     }
+    checkAllocation();
+}
 
+//
+//  checkAllocation   A memory refusal can be absorbed by a set or vector
+//                    (bogus, or an element silently not added). Report it.
+//
+void RegexCompile::checkAllocation() {
+    if (U_SUCCESS(*fStatus) && managed_failed_46()) {
+        *fStatus = U_MEMORY_ALLOCATION_ERROR;
+    }
+}
+
+//
+//  pushNewSet        Push a new empty set operand. A refused set or stack
+//                    slot fails the compile instead of pushing NULL or bogus.
+//
+void RegexCompile::pushNewSet() {
+    if (U_FAILURE(*fStatus)) {
+        return;
+    }
+    UnicodeSet *set = new UnicodeSet();
+    if (set == NULL || set->isBogus()) {
+        delete set;
+        *fStatus = U_MEMORY_ALLOCATION_ERROR;
+        return;
+    }
+    fSetStack.push(set, *fStatus);
+    if (U_FAILURE(*fStatus)) {
+        delete set;
+    }
 }
 
 
@@ -1533,7 +1579,7 @@ UBool RegexCompile::doParseActions(int32_t action)
         }
 
     case doSetBegin:
-        fSetStack.push(new UnicodeSet(), *fStatus);
+        pushNewSet();
         fSetOpStack.push(setStart, *fStatus);
         if ((fModeFlags & UREGEX_CASE_INSENSITIVE) != 0) {
             fSetOpStack.push(setCaseClose, *fStatus);
@@ -2248,6 +2294,11 @@ void        RegexCompile::compileSet(UnicodeSet *theSet)
     if (theSet == NULL) {
         return;
     }
+    if (theSet->isBogus()) {
+        delete theSet;
+        *fStatus = U_MEMORY_ALLOCATION_ERROR;
+        return;
+    }
     //  Remove any strings from the set.
     //  There shoudn't be any, but just in case.
     //     (Case Closure can add them; if we had a simple case closure avaialble that
@@ -2280,6 +2331,11 @@ void        RegexCompile::compileSet(UnicodeSet *theSet)
             //  Put it into the compiled pattern as a set.
             int32_t setNumber = fRXPat->fSets->size();
             fRXPat->fSets->addElement(theSet, *fStatus);
+            if (U_FAILURE(*fStatus)) {
+                // The pattern does not own a set it could not register.
+                delete theSet;
+                return;
+            }
             int32_t setOp = URX_BUILD(URX_SETREF, setNumber);
             fRXPat->fCompiledPat->addElement(setOp, *fStatus);
         }
@@ -4055,6 +4111,21 @@ static inline void addIdentifierIgnorable(UnicodeSet *set, UErrorCode& ec) {
 //
 static const UChar posSetPrefix[] = {0x5b, 0x5c, 0x70, 0x7b, 0}; // "[\p{"
 static const UChar negSetPrefix[] = {0x5b, 0x5c, 0x50, 0x7b, 0}; // "[\P{"
+//
+//  propertySetUsable   FALSE (and the set deleted) when its construction ran
+//                      out of memory; other errors keep the existing fallbacks.
+//
+UBool RegexCompile::propertySetUsable(UnicodeSet *&set) {
+    if (set == NULL || *fStatus == U_MEMORY_ALLOCATION_ERROR || set->isBogus() ||
+        managed_failed_46()) {
+        delete set;
+        set = NULL;
+        *fStatus = U_MEMORY_ALLOCATION_ERROR;
+        return FALSE;
+    }
+    return TRUE;
+}
+
 UnicodeSet *RegexCompile::createSetForProperty(const UnicodeString &propName, UBool negated) {
     UnicodeString   setExpr;
     UnicodeSet      *set;
@@ -4079,6 +4150,9 @@ UnicodeSet *RegexCompile::createSetForProperty(const UnicodeString &propName, UB
         usetFlags |= USET_CASE_INSENSITIVE;
     }
     set = new UnicodeSet(setExpr, usetFlags, NULL, *fStatus);
+    if (!propertySetUsable(set)) {
+        return NULL;
+    }
     if (U_SUCCESS(*fStatus)) {
        return set;
     }
@@ -4094,9 +4168,8 @@ UnicodeSet *RegexCompile::createSetForProperty(const UnicodeString &propName, UB
     if (propName.caseCompare(UNICODE_STRING_SIMPLE("word"), 0) == 0) {
         *fStatus = U_ZERO_ERROR;
         set = new UnicodeSet(*(fRXPat->fStaticSets[URX_ISWORD_SET]));
-        if (set == NULL) {
-            *fStatus = U_MEMORY_ALLOCATION_ERROR;
-            return set;
+        if (!propertySetUsable(set)) {
+            return NULL;
         }
         if (negated) {
             set->complement();
@@ -4143,6 +4216,9 @@ UnicodeSet *RegexCompile::createSetForProperty(const UnicodeString &propName, UB
         setExpr.append(chRBracket);
         *fStatus = U_ZERO_ERROR;
         set = new UnicodeSet(setExpr, usetFlags, NULL, *fStatus);
+        if (!propertySetUsable(set)) {
+            return NULL;
+        }
         if (U_SUCCESS(*fStatus)) {
             return set;
         }
@@ -4156,6 +4232,9 @@ UnicodeSet *RegexCompile::createSetForProperty(const UnicodeString &propName, UB
         UErrorCode localStatus = U_ZERO_ERROR;
         //setExpr.remove();
         set = new UnicodeSet();
+        if (!propertySetUsable(set)) {
+            return NULL;
+        }
         //
         //  Try the various Java specific properties.
         //   These all begin with "java"
@@ -4239,6 +4318,12 @@ UnicodeSet *RegexCompile::createSetForProperty(const UnicodeString &propName, UB
             set->add(0, UnicodeSet::MAX_VALUE);
         }
 
+        if (localStatus == U_MEMORY_ALLOCATION_ERROR) {
+            *fStatus = U_MEMORY_ALLOCATION_ERROR;
+        }
+        if (!propertySetUsable(set)) {
+            return NULL;
+        }
         if (U_SUCCESS(localStatus) && !set->isEmpty()) {
             *fStatus = U_ZERO_ERROR;
             if (usetFlags & USET_CASE_INSENSITIVE) {
@@ -4268,6 +4353,10 @@ void RegexCompile::setEval(int32_t nextOp) {
     UnicodeSet *rightOperand = NULL;
     UnicodeSet *leftOperand  = NULL;
     for (;;) {
+        if (U_FAILURE(*fStatus)) {
+            // Operands may be missing after a refused push.
+            return;
+        }
         U_ASSERT(fSetOpStack.empty()==FALSE);
         int32_t pendingSetOperation = fSetOpStack.peeki();
         if ((pendingSetOperation&0xffff0000) < (nextOp&0xffff0000)) {
@@ -4315,7 +4404,7 @@ void RegexCompile::setEval(int32_t nextOp) {
 void RegexCompile::setPushOp(int32_t op) {
     setEval(op);
     fSetOpStack.push(op, *fStatus);
-    fSetStack.push(new UnicodeSet(), *fStatus);
+    pushNewSet();
 }
 
 U_NAMESPACE_END

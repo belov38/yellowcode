@@ -9,12 +9,7 @@ use yellowcode_core::{
 };
 
 fn reply(status: u16, body: serde_json::Value) -> Response {
-    Response {
-        status,
-        content_type: "application/json; charset=utf-8",
-        body: serde_json::to_vec(&body).unwrap_or_default(),
-        ..Default::default()
-    }
+    super::memory::json(status, &body)
 }
 fn error(status: u16, msg: &str) -> Response {
     reply(status, json!({"error":msg}))

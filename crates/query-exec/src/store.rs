@@ -42,6 +42,10 @@ pub(crate) fn store_error(e: StoreError) -> ExecError {
             chain: vec![QueryError::new(MsgId::SELECT_ERROR_RUNTIMEERROR, None)],
         }),
         StoreError::Memory(m) => ExecError::Memory(m),
+        StoreError::NativeRestart { memory } => {
+            ExecError::Native(query_ir::NativeError::RestartRequired { memory })
+        }
+        StoreError::Cancelled => ExecError::Fatal("выполнение прервано".to_string()),
         other => ExecError::Fatal(format!("store: {other}")),
     }
 }

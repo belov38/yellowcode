@@ -26,6 +26,7 @@
 #include "cmemory.h"
 #include "umutex.h"
 #include "ustr_cnv.h"
+#include "ucnv_bld.h"
 
 /* mutexed access to a shared default converter ----------------------------- */
 
@@ -35,7 +36,10 @@ U_CAPI UConverter* U_EXPORT2
 u_getDefaultConverter(UErrorCode *status)
 {
     UConverter *converter = NULL;
-    
+
+    if (status==NULL || U_FAILURE(*status)) return NULL;
+    if (managed_failed_46()) { *status=U_MEMORY_ALLOCATION_ERROR; return NULL; }
+
     if (gDefaultConverter != NULL) {
         umtx_lock(NULL);
         
@@ -49,7 +53,8 @@ u_getDefaultConverter(UErrorCode *status)
 
     /* if the cache was empty, create a converter */
     if(converter == NULL) {
-        converter = ucnv_open(NULL, status);
+        UManagedOwner46 owner={12,1205};
+        converter = managed_ucnv_createConverter_46(NULL, NULL, status, owner);
         if(U_FAILURE(*status)) {
             ucnv_close(converter);
             converter = NULL;
@@ -62,6 +67,7 @@ u_getDefaultConverter(UErrorCode *status)
 U_CAPI void U_EXPORT2
 u_releaseDefaultConverter(UConverter *converter)
 {
+    if (managed_failed_46()) { ucnv_close(converter); return; }
     if(gDefaultConverter == NULL) {
         if (converter != NULL) {
             ucnv_reset(converter);

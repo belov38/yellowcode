@@ -188,9 +188,58 @@ impl<'a> TableRead<'a> {
     }
 
     pub fn string_key(&self, field: &str, text: &str) -> Result<Vec<u8>> {
+        let field = self.string_field(field)?;
+        let collate = self
+            .keys
+            .collate
+            .ok_or(Error::Unsupported(Unsupported::NoCollator))?;
+        crate::collate::field_string_key(collate, self.keys.locale, field, text)
+    }
+
+    #[cfg(feature = "icu")]
+    pub fn string_key_budgeted(
+        &self,
+        field: &str,
+        text: &str,
+        keys: &crate::collate::KeyRequest,
+    ) -> Result<memory_budget::BudgetedVec<u8>> {
+        use crate::collate::prepared;
+        let field = self.string_field(field)?;
+        let trimmed = text.trim_end_matches(' ');
+        let mut units = prepared(memory_budget::BudgetedVec::try_with_capacity(
+            keys.budget(),
+            memory_budget::Category::Execution,
+            trimmed.encode_utf16().count(),
+        ))?;
+        for unit in trimmed.encode_utf16() {
+            prepared(units.try_push(unit))?;
+        }
+        let strength = if field.case_sensitive {
+            crate::collate::Strength::Tertiary
+        } else {
+            crate::collate::Strength::Secondary
+        };
+        keys.sort_key(self.keys.locale, strength, units.as_slice())
+    }
+
+    #[cfg(feature = "icu")]
+    pub fn strings_equal_budgeted(
+        &self,
+        field: &str,
+        left: &str,
+        right: &str,
+        keys: &crate::collate::KeyRequest,
+    ) -> Result<bool> {
+        let left = self.string_key_budgeted(field, left, keys)?;
+        let right = self.string_key_budgeted(field, right, keys)?;
+        Ok(left.as_slice() == right.as_slice())
+    }
+
+    fn string_field(&self, field: &str) -> Result<&FieldDescr> {
         let (_, field) = self.descr().field(field).ok_or_else(|| {
             Error::Constraint(Constraint::BadDescr(format!(
-                "unknown string field {field}"
+                "unknown string field {}",
+                crate::error::brief(field)
             )))
         })?;
         if !matches!(field.ty, FieldType::NC | FieldType::NVC) {
@@ -199,11 +248,7 @@ impl<'a> TableRead<'a> {
                 field.name
             ))));
         }
-        let collate = self
-            .keys
-            .collate
-            .ok_or(Error::Unsupported(Unsupported::NoCollator))?;
-        crate::collate::field_string_key(collate, self.keys.locale, field, text)
+        Ok(field)
     }
 
     pub fn layout(&self) -> &RecordLayout {
@@ -592,10 +637,9 @@ impl<'a> TableRead<'a> {
     }
 
     pub fn blob(&self, row: RowId, field: &str) -> Result<BlobReader<'_>> {
-        let (i, f) = self
-            .descr()
-            .field(field)
-            .ok_or_else(|| Error::NotFound(NotFound::Field(field.to_string())))?;
+        let (i, f) = self.descr().field(field).ok_or_else(|| {
+            Error::NotFound(NotFound::Field(crate::error::brief(field).to_owned()))
+        })?;
         if !f.ty.is_blob() {
             return Err(Error::Constraint(Constraint::TypeMismatch {
                 table: self.name().to_string(),
@@ -1810,8 +1854,9 @@ impl<'t> TableWrite<'t> {
     pub fn blob_writer(&mut self, row: RowId, field: &str) -> Result<BlobWriter<'_>> {
         let _unwind = self.tx.abort_on_panic();
         self.settle()?;
-        let (i, f) = (self.t.descr().field(field))
-            .ok_or_else(|| Error::NotFound(NotFound::Field(field.to_string())))?;
+        let (i, f) = (self.t.descr().field(field)).ok_or_else(|| {
+            Error::NotFound(NotFound::Field(crate::error::brief(field).to_owned()))
+        })?;
         if !f.ty.is_blob() {
             return Err(Error::Constraint(Constraint::TypeMismatch {
                 table: self.t.name().to_string(),

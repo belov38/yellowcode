@@ -112,9 +112,9 @@ impl Console {
     ) -> Result<Option<RecorderIndex>, TableReadError> {
         let values = row.page.rows.first().map(Vec::as_slice).unwrap_or_default();
         let stored = self.stored_of(table)?;
-        let indexes = stored.indexes().map_err(TableReadError::Storage)?;
+        let indexes = stored.indexes().map_err(crate::table::store_error)?;
         Ok(choose_recorder_index(
-            &key_indexes(&stored, &indexes),
+            &key_indexes(&stored, &indexes, self.base.memory_budget())?.indexes,
             recorder,
             |name| values_of(&[name.to_owned()], &row.page.columns, values).is_ok(),
         ))

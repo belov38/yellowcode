@@ -14,6 +14,7 @@
     )
 )]
 
+pub mod coll;
 pub mod eval;
 pub mod key;
 pub mod managed;
@@ -45,6 +46,7 @@ pub use batch::{
     StmtRun, count_column, explain_last, find_parameters, run_batch, run_batch_budgeted,
     run_batch_detailed,
 };
+pub use coll::{ExecCollation, NativeCollation};
 pub use eval::text_of as value_text;
 pub use exec::{execute, execute_temps, execute_temps_observed, execute_with, result_model};
 pub use host::ExecHost;
@@ -56,7 +58,7 @@ pub use query_ir::{ExecError, RuntimeError};
 pub use result::QueryResult;
 pub use source::{DataSource, ExecEnv, IndexPrefixes, Row, RowIter, SKIP_MAX_AREAS};
 pub use store::{StoreSource, execute_store};
-pub use stream::{ExecEnvOwned, RowStream, stream};
+pub use stream::{ExecEnvOwned, NativeOwned, RowStream, stream};
 pub use temp::{TempIndex, TempTable, TempTableId, TempTables};
 
 #[doc(hidden)]

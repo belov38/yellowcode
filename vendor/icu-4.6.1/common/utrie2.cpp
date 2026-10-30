@@ -124,6 +124,15 @@ U_CAPI UTrie2 * U_EXPORT2
 utrie2_openFromSerialized(UTrie2ValueBits valueBits,
                           const void *data, int32_t length, int32_t *pActualLength,
                           UErrorCode *pErrorCode) {
+    UManagedOwner46 owner = { 0, 0 };
+    return managed_utrie2_openFromSerialized_46(valueBits, data, length,
+                                               pActualLength, owner, pErrorCode);
+}
+
+U_CAPI UTrie2 * U_EXPORT2
+managed_utrie2_openFromSerialized_46(UTrie2ValueBits valueBits,
+    const void *data, int32_t length, int32_t *pActualLength,
+    UManagedOwner46 owner, UErrorCode *pErrorCode) {
     const UTrie2Header *header;
     const uint16_t *p16;
     int32_t actualLength;
@@ -187,7 +196,7 @@ utrie2_openFromSerialized(UTrie2ValueBits valueBits,
     }
 
     /* allocate the trie */
-    trie=(UTrie2 *)uprv_malloc(sizeof(UTrie2));
+    trie=(UTrie2 *)managed_malloc_46(sizeof(UTrie2), owner.role, owner.site);
     if(trie==NULL) {
         *pErrorCode=U_MEMORY_ALLOCATION_ERROR;
         return 0;

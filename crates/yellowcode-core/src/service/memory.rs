@@ -189,6 +189,15 @@ impl Settings {
     }
 }
 
+pub fn process_root() -> Result<&'static MemoryBudget, BudgetError> {
+    static ROOT: std::sync::OnceLock<MemoryBudget> = std::sync::OnceLock::new();
+    if let Some(root) = ROOT.get() {
+        return Ok(root);
+    }
+    let candidate = MemoryBudget::try_new(memory_budget::Limits::new(u64::MAX))?;
+    Ok(ROOT.get_or_init(|| candidate))
+}
+
 impl Context {
     pub fn new(raw: &Raw, observation: &Observation) -> crate::Result<Self> {
         let startup = numeric::resolve(
@@ -201,7 +210,7 @@ impl Context {
         )
         .map_err(config_error)?;
         let policy = startup.policy();
-        let budget = MemoryBudget::try_new(policy.target().limits)?;
+        let budget = process_root()?.try_child(policy.target().limits)?;
         let sources = policy.sources;
         let explicit = [
             sources.memory,
@@ -446,9 +455,8 @@ pub fn reason(text: &str) -> &'static str {
 
 pub fn report_reason(report: &query_console::Report, timed_out: bool) -> &'static str {
     let first = report
-        .error
-        .as_ref()
-        .map(|e| e.chain.first().map_or("", String::as_str));
+        .error()
+        .map(|e| e.chain().first().map_or("", String::as_str));
     outcome_reason(first, report.cancelled, timed_out)
 }
 fn outcome_reason(error: Option<&str>, cancelled: bool, timed_out: bool) -> &'static str {

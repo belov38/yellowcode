@@ -1,0 +1,33 @@
+[package]
+name = "mssql-backup"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99.1"
+license = "MIT OR Apache-2.0"
+publish = false
+autotests = false
+autoexamples = false
+autobenches = false
+
+[dependencies]
+base64 = "0.22"
+getrandom = "0.3"
+serde_json = "1"
+tempfile = "3"
+thiserror = "2"
+process-containment = { path = "../process-containment" }
+brace = { path = "../brace" }
+dtfile = { path = "../dtfile" }
+ibschema = { path = "../ibschema" }
+mdconf = { path = "../mdconf" }
+memory-budget = { path = "../memory-budget" }
+onecd = { path = "../onecd" }
+serde = { version = "1", features = ["derive"] }
+v8cont = { path = "../v8cont" }
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+undocumented_unsafe_blocks = "warn"
+unused_result_ok = "warn"

@@ -145,6 +145,7 @@ impl CallQueryHost<'_> {
             .tables()
             .iter()
             .any(|t| !t.separators.is_empty())
+            && self.provider.app.options().read_only_scope.is_none()
         {
             return Err(later("Q7e-SessionSeparators", "P6 + Q7c"));
         }
@@ -264,6 +265,7 @@ impl QueryHost for CallQueryHost<'_> {
     fn env(&self) -> ExecEnv<'_> {
         ExecEnv {
             collation: &*self.provider.ctx.collation,
+            native: None,
             cancel: &self.cancel,
             stop: None,
             mem_limit: self.mem_limit,

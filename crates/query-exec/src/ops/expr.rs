@@ -4,8 +4,8 @@ use query_syntax::ast::{BinOp, CmpOp};
 
 use super::{Cx, fatal};
 use crate::eval::{
-    and3, case_truth, cast, compare, eq3, func, like, like_cost, load_cast_with_budget, not3, rank,
-    to_value, truth, type_of_value, unit_arg,
+    and3, case_truth, cast, func_with, like_cost, load_cast_with_budget, not3, rank, to_value,
+    truth, try_compare, try_eq3, try_like, type_of_value, unit_arg,
 };
 use crate::model::{key_sizes_charged, walk_bytes};
 use crate::num::{
@@ -16,7 +16,7 @@ type R<T> = Result<T, ExecError>;
 
 pub fn eval<'a>(e: &PExpr, row: &[QValue], cx: &Cx<'a>) -> R<QValue> {
     let env = cx.env;
-    let coll = env.collation;
+    let coll = cx.coll;
     Ok(match e {
         PExpr::Col(i) => row
             .get(usize::from(*i))
@@ -77,7 +77,9 @@ pub fn eval<'a>(e: &PExpr, row: &[QValue], cx: &Cx<'a>) -> R<QValue> {
         }
         PExpr::Compare(op, a, b) => {
             let (a, b) = (eval(a, row, cx)?, eval(b, row, cx)?);
-            to_value(keys_charged(&a, &b, cx, || compare(*op, &a, &b, coll))?)
+            to_value(keys_charged(&a, &b, cx, || {
+                try_compare(*op, &a, &b, coll)
+            })??)
         }
         PExpr::InQuery {
             l,
@@ -110,8 +112,8 @@ pub fn eval<'a>(e: &PExpr, row: &[QValue], cx: &Cx<'a>) -> R<QValue> {
         PExpr::Between { l, not, lo, hi } => {
             let (l, lo, hi) = (eval(l, row, cx)?, eval(lo, row, cx)?, eval(hi, row, cx)?);
             let r = and3([
-                keys_charged(&l, &lo, cx, || compare(CmpOp::Ge, &l, &lo, coll))?,
-                keys_charged(&l, &hi, cx, || compare(CmpOp::Le, &l, &hi, coll))?,
+                keys_charged(&l, &lo, cx, || try_compare(CmpOp::Ge, &l, &lo, coll))??,
+                keys_charged(&l, &hi, cx, || try_compare(CmpOp::Le, &l, &hi, coll))??,
             ]);
             to_value(if *not { not3(r) } else { r })
         }
@@ -127,8 +129,9 @@ pub fn eval<'a>(e: &PExpr, row: &[QValue], cx: &Cx<'a>) -> R<QValue> {
         PExpr::Like { l, not, pat, esc } => {
             let (l, p) = (eval(l, row, cx)?, eval(pat, row, cx)?);
             let n = like_cost(&l, &p, *esc, &mut |m| cx.mem.grow_scratch(m))?;
-            let r = like(&l, &p, *esc, coll);
+            let r = try_like(&l, &p, *esc, coll);
             cx.mem.shrink_scratch(n);
+            let r = r?;
             to_value(if *not { not3(r) } else { r })
         }
         PExpr::Case {
@@ -143,7 +146,7 @@ pub fn eval<'a>(e: &PExpr, row: &[QValue], cx: &Cx<'a>) -> R<QValue> {
             for (w, t) in whens {
                 let wv = eval(w, row, cx)?;
                 let hit = match &op {
-                    Some(o) => keys_charged(o, &wv, cx, || eq3(o, &wv, coll))?,
+                    Some(o) => keys_charged(o, &wv, cx, || try_eq3(o, &wv, coll))??,
                     None => Some(case_truth(&wv)),
                 };
                 if hit == Some(true) {
@@ -231,7 +234,7 @@ pub(super) fn keys_charged<T>(a: &QValue, b: &QValue, cx: &Cx<'_>, f: impl FnOnc
     if r != rank(b) || r <= 4 {
         return Ok(f());
     }
-    let coll = cx.env.collation;
+    let coll = cx.coll;
     let walks = walk_bytes(a) + walk_bytes(b);
     let (kept_a, peak_a) = key_sizes_charged(a, coll, &mut |m| cx.mem.grow_scratch(m))?;
     let (_, peak_b) = key_sizes_charged(b, coll, &mut |m| cx.mem.grow_scratch(m))?;
@@ -243,12 +246,12 @@ pub(super) fn keys_charged<T>(a: &QValue, b: &QValue, cx: &Cx<'_>, f: impl FnOnc
 }
 
 fn in_list(l: &[QValue], rhs: &[PExpr], row: &[QValue], cx: &Cx<'_>) -> R<Option<bool>> {
-    let coll = cx.env.collation;
+    let coll = cx.coll;
     let k = l.len().max(1);
     let tuple_eq = |t: &[QValue]| -> R<Option<bool>> {
         let mut parts = Vec::with_capacity(l.len());
         for (a, b) in l.iter().zip(t) {
-            parts.push(keys_charged(a, b, cx, || eq3(a, b, coll))?);
+            parts.push(keys_charged(a, b, cx, || try_eq3(a, b, coll))??);
         }
         Ok(and3(parts))
     };
@@ -402,13 +405,13 @@ fn call(
         Func::BeginOfPeriod | Func::EndOfPeriod | Func::Week => match cx.week_start {
             Some(ws) => match crate::eval::week_call(f, &a, ws) {
                 Some(v) => v,
-                None => func(f, &a, ty, env, &cx.mem),
+                None => func_with(f, &a, ty, cx.coll, &cx.mem),
             },
             None if crate::eval::week_call(f, &a, 1).is_some() => Err(fatal(
                 "a week is computed without the first day of a week of the base (BindHost::week_start)",
             )),
-            None => func(f, &a, ty, env, &cx.mem),
+            None => func_with(f, &a, ty, cx.coll, &cx.mem),
         },
-        other => func(other, &a, ty, env, &cx.mem),
+        other => func_with(other, &a, ty, cx.coll, &cx.mem),
     }
 }

@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ibschema::columns::{ColRole, ColType, Part};
+use ibschema::error::diagnostic_name;
 use ibschema::fields::{self, FieldValue};
 use ibschema::storage::{FieldId, FieldInfo, IndexId, IndexInfo, StorageMap, TableId, TableInfo};
 use ibschema::store::{
@@ -61,7 +62,7 @@ struct PositionedIter<'a> {
     p: &'a PhysTable,
     fields: Projection,
     prefix: Option<Prefix<'a>>,
-    checks: Vec<Check>,
+    checks: Checks,
 }
 impl Iterator for PositionedIter<'_> {
     type Item = StoreResult<Scanned<IndexPosition>>;
@@ -69,7 +70,7 @@ impl Iterator for PositionedIter<'_> {
         let fields = self.fields.as_deref();
         self.cell.with_dependent_mut(|ic, rows| {
             Some(match rows.next()? {
-                Ok((entry, row)) => match passes(self.t, &self.checks, &row) {
+                Ok((entry, row)) => match passes(self.t, &self.checks.list, &row) {
                     Ok(true) => decode_cells(
                         self.map,
                         self.t,
@@ -80,19 +81,11 @@ impl Iterator for PositionedIter<'_> {
                         self.prefix,
                     )
                     .map_err(|e| at_row(e, u64::from(entry.row)))
-                    .map(|row| {
-                        Scanned::Row(
-                            IndexPosition {
-                                key: entry.key,
-                                row: handle(entry.row),
-                            },
-                            row,
-                        )
-                    }),
-                    Ok(false) => Ok(Scanned::Skipped(IndexPosition {
-                        key: entry.key,
-                        row: handle(entry.row),
-                    })),
+                    .map(|row| Scanned::Row(IndexPosition::new(entry.key, handle(entry.row)), row)),
+                    Ok(false) => Ok(Scanned::Skipped(IndexPosition::new(
+                        entry.key,
+                        handle(entry.row),
+                    ))),
                     Err(e) => Err(at_row(e, u64::from(entry.row))),
                 },
                 Err(e) => Err(engine_err(e)),
@@ -118,32 +111,45 @@ struct Check {
     want: bool,
 }
 
+struct Checks {
+    list: Vec<Check>,
+    _paid: Option<memory_budget::Reservation>,
+}
+
+impl Checks {
+    fn none() -> Checks {
+        Checks {
+            list: Vec::new(),
+            _paid: None,
+        }
+    }
+}
+
 fn checks(t: &TableInfo, p: &PhysTable, filter: RecordFilter<'_>) -> StoreResult<Vec<Check>> {
-    filter
-        .iter()
-        .map(|&(f, want)| {
-            let field = usize::from(f.0);
-            let fi = t
-                .fields
-                .get(field)
-                .ok_or_else(|| StoreError::NotFound(format!("field #{} of {}", f.0, t.logical)))?;
-            let col = match t.columns.get(fi.columns.clone()) {
-                Some([c]) if c.ty == ColType::L && !c.nullable => p.cols.get(fi.columns.start),
-                _ => None,
-            }
-            .ok_or_else(|| {
-                StoreError::Unsupported(format!(
-                    "{}.{}: a record filter takes a stored not null boolean field",
-                    t.logical, fi.name
-                ))
-            })?;
-            Ok(Check {
-                field,
-                col: *col,
-                want,
-            })
-        })
-        .collect()
+    let mut list = Vec::with_capacity(filter.len());
+    for &(f, want) in filter {
+        let field = usize::from(f.0);
+        let fi = t.fields.get(field).ok_or_else(|| {
+            StoreError::NotFound(format!("field #{} of {}", f.0, diagnostic_name(&t.logical)))
+        })?;
+        let col = match t.columns.get(fi.columns.clone()) {
+            Some([c]) if c.ty == ColType::L && !c.nullable => p.cols.get(fi.columns.start),
+            _ => None,
+        }
+        .ok_or_else(|| {
+            StoreError::Unsupported(format!(
+                "{}.{}: a record filter takes a stored not null boolean field",
+                diagnostic_name(&t.logical),
+                diagnostic_name(&fi.name)
+            ))
+        })?;
+        list.push(Check {
+            field,
+            col: *col,
+            want,
+        });
+    }
+    Ok(list)
 }
 
 fn passes(t: &TableInfo, checks: &[Check], row: &onecd::Row) -> StoreResult<bool> {
@@ -157,7 +163,11 @@ fn passes(t: &TableInfo, checks: &[Check], row: &onecd::Row) -> StoreResult<bool
             _ => {
                 return Err(match t.fields.get(c.field) {
                     Some(f) => bad_value(t, f, "the record filter value is not a boolean"),
-                    None => StoreError::NotFound(format!("field #{} of {}", c.field, t.logical)),
+                    None => StoreError::NotFound(format!(
+                        "field #{} of {}",
+                        c.field,
+                        diagnostic_name(&t.logical)
+                    )),
                 });
             }
         }
@@ -170,15 +180,15 @@ fn condition_reason(
     f: FieldId,
     tr: &onecd::TableRead<'_>,
     ir: &IndexRead<'_>,
-) -> Option<String> {
+) -> Option<&'static str> {
     let Some(fi) = t.field(f) else {
-        return Some("index field is absent".into());
+        return Some("index field is absent");
     };
     if fi.nullable {
-        return Some("nullable fields require NULL-aware conditions; unsupported in v1".into());
+        return Some("nullable fields require NULL-aware conditions; unsupported in v1");
     }
     let Some([c]) = t.columns.get(fi.columns.clone()) else {
-        return Some("composite fields are not supported for exact conditions".into());
+        return Some("composite fields are not supported for exact conditions");
     };
     let reason = match (c.ty, c.role) {
         (ColType::N(_, _), _) => "numeric field is not stored fully in this index",
@@ -191,7 +201,7 @@ fn condition_reason(
         }
         _ => {
             return Some(
-                "only numeric, date, string and reference fields support exact conditions".into(),
+                "only numeric, date, string and reference fields support exact conditions",
             );
         }
     };
@@ -211,10 +221,10 @@ fn condition_reason(
             && c.nullable == d.nullable
             && indexed.is_some_and(|i| whole(d, i))
     }) else {
-        return Some(reason.into());
+        return Some(reason);
     };
     if d.ty.is_string() && d.case_sensitive {
-        return Some("case-sensitive string fields are not supported for exact conditions".into());
+        return Some("case-sensitive string fields are not supported for exact conditions");
     }
     None
 }
@@ -272,7 +282,12 @@ struct PhysMap {
 }
 
 fn same_name(a: &str, b: &str) -> bool {
-    a.to_lowercase() == b.to_lowercase()
+    if a.is_ascii() && b.is_ascii() {
+        return a.eq_ignore_ascii_case(b);
+    }
+    a.chars()
+        .flat_map(char::to_lowercase)
+        .eq(b.chars().flat_map(char::to_lowercase))
 }
 
 fn find_index(
@@ -482,6 +497,7 @@ impl Store1cd {
     fn transaction<T>(&self, txn: T, ticket: Option<WriterTicket>) -> Read1cd<T> {
         Read1cd {
             txn,
+            db: Arc::clone(&self.db),
             map: Arc::clone(&self.map),
             phys: Arc::clone(&self.phys),
             memory: self.db.memory_budget().map(|budget| RowMemory {
@@ -511,6 +527,8 @@ impl Store for Store1cd {
 fn engine_err(e: onecd::Error) -> StoreError {
     match e {
         onecd::Error::Memory(memory_budget::BudgetError::Limit(m)) => StoreError::Memory(m),
+        onecd::Error::NativeRestart { memory } => StoreError::NativeRestart { memory },
+        onecd::Error::Cancelled => StoreError::Cancelled,
         onecd::Error::SnapshotTooOld => StoreError::SnapshotTooOld,
         onecd::Error::TxnTooLarge => StoreError::TxnTooLarge,
         onecd::Error::NotFound(n) => StoreError::NotFound(n.to_string()),
@@ -520,8 +538,8 @@ fn engine_err(e: onecd::Error) -> StoreError {
 
 fn bad_value(t: &TableInfo, f: &FieldInfo, why: impl Into<String>) -> StoreError {
     StoreError::BadValue {
-        table: t.logical.clone(),
-        field: f.name.clone(),
+        table: diagnostic_name(&t.logical),
+        field: diagnostic_name(&f.name),
         row: 0,
         why: why.into(),
     }
@@ -561,17 +579,19 @@ fn cell_err(e: Error, t: &TableInfo, f: &FieldInfo) -> StoreError {
     }
 }
 
-type Projection = Option<Vec<bool>>;
-
-fn projection(t: &TableInfo, fields: &[FieldId]) -> Projection {
-    let mut mask = vec![false; t.fields.len()];
-    for f in fields {
-        if let Some(m) = mask.get_mut(usize::from(f.0)) {
-            *m = true;
-        }
-    }
-    Some(mask)
+struct Mask {
+    fields: Vec<bool>,
+    _paid: Option<memory_budget::Reservation>,
 }
+
+impl std::ops::Deref for Mask {
+    type Target = [bool];
+    fn deref(&self) -> &[bool] {
+        &self.fields
+    }
+}
+
+type Projection = Option<Mask>;
 
 fn selected(fields: &Projection, k: usize) -> bool {
     fields
@@ -711,16 +731,22 @@ fn decode_cells_cut(
 
 trait TableSource {
     fn table(&self, name: &str) -> StoreResult<onecd::TableRead<'_>>;
+    fn set_read_budget(&mut self, budget: memory_budget::MemoryBudget) -> StoreResult<()>;
 }
 
 impl TableSource for onecd::ReadTxn {
     fn table(&self, name: &str) -> StoreResult<onecd::TableRead<'_>> {
         self.table(name).map_err(engine_err)
     }
+    fn set_read_budget(&mut self, budget: memory_budget::MemoryBudget) -> StoreResult<()> {
+        self.set_read_budget(budget);
+        Ok(())
+    }
 }
 
 struct Read1cd<T = onecd::ReadTxn> {
     txn: T,
+    db: Arc<onecd::Database>,
     map: Arc<StorageMap>,
     phys: Arc<PhysMap>,
     memory: Option<RowMemory>,
@@ -968,7 +994,7 @@ struct ManagedScanIter<'a> {
     prefix: Option<Prefix<'a>>,
     current: Option<memory_budget::Reservation>,
     scratch: Option<onecd::RowScratch>,
-    checks: Vec<Check>,
+    checks: Checks,
     stopped: bool,
 }
 
@@ -989,7 +1015,7 @@ impl Iterator for ManagedScanIter<'_> {
                 id,
                 &self.fields,
                 self.prefix,
-                &self.checks,
+                &self.checks.list,
             ) {
                 Ok(Slot::Row(row)) => {
                     return Some(Ok(Scanned::Row(handle(id), row)));
@@ -1027,11 +1053,13 @@ struct ManagedRangeIter<'a> {
     current: Option<memory_budget::Reservation>,
     scratch: Option<onecd::RowScratch>,
     key: Option<memory_budget::Scratch<Vec<u8>>>,
-    checks: Vec<Check>,
+    checks: Checks,
+    positions: bool,
 }
 
 impl ManagedRangeIter<'_> {
     fn next_entry(&mut self) -> Option<StoreResult<Scanned<IndexPosition>>> {
+        let positions = self.positions;
         let (memory, ctx, map, t, p, fields, prefix, scratch, current, checks) = (
             &self.memory,
             &self.ctx,
@@ -1042,7 +1070,7 @@ impl ManagedRangeIter<'_> {
             self.prefix,
             &mut self.scratch,
             &mut self.current,
-            &self.checks,
+            &self.checks.list,
         );
         let key = match &mut self.key {
             Some(key) => key,
@@ -1059,9 +1087,25 @@ impl ManagedRangeIter<'_> {
                 Err(e) => return Some(Err(engine_err(e))),
             };
             let tr = ic.borrow_owner();
-            let position = || IndexPosition {
-                key: key.get().cloned().unwrap_or_default(),
-                row: handle(row_id),
+            let paid = if positions {
+                let bytes = key.get().map_or(0, Vec::len);
+                match ctx.budget.try_reserve(
+                    memory_budget::Category::Execution,
+                    u64::try_from(bytes).unwrap_or(u64::MAX),
+                ) {
+                    Ok(paid) => Some(paid),
+                    Err(e) => return Some(Err(StoreError::Memory(e))),
+                }
+            } else {
+                None
+            };
+            let position = move || match paid {
+                Some(paid) => IndexPosition::paid(
+                    key.get().cloned().unwrap_or_default(),
+                    handle(row_id),
+                    paid,
+                ),
+                None => IndexPosition::new(Vec::new(), handle(row_id)),
             };
             Some(
                 match memory.read_into(
@@ -1069,9 +1113,13 @@ impl ManagedRangeIter<'_> {
                 ) {
                     Ok(Slot::Row(row)) => Ok(Scanned::Row(position(), row)),
                     Ok(Slot::Skipped) => Ok(Scanned::Skipped(position())),
-                    Ok(Slot::Free) => Err(StoreError::Backend(Box::new(Error::Inconsistent(
-                        format!("{}: index entry for free slot {}", t.logical, row_id),
-                    )))),
+                    Ok(Slot::Free) => {
+                        Err(StoreError::Backend(Box::new(Error::Inconsistent(format!(
+                            "{}: index entry for free slot {}",
+                            diagnostic_name(&t.logical),
+                            row_id
+                        )))))
+                    }
                     Err(e) => Err(e),
                 },
             )
@@ -1112,7 +1160,7 @@ struct ScanIter<'a> {
     p: &'a PhysTable,
     fields: Projection,
     prefix: Option<Prefix<'a>>,
-    checks: Vec<Check>,
+    checks: Checks,
 }
 
 impl Iterator for ScanIter<'_> {
@@ -1124,7 +1172,7 @@ impl Iterator for ScanIter<'_> {
             self.p,
             self.fields.as_deref(),
             self.prefix,
-            &self.checks,
+            &self.checks.list,
         );
         self.cell.with_dependent_mut(|tr, rows| {
             Some(match rows.next()? {
@@ -1223,6 +1271,52 @@ impl<T: TableSource> Read1cd<T> {
     fn reader(&self, p: &PhysTable) -> StoreResult<onecd::TableRead<'_>> {
         self.txn.table(&p.name)
     }
+
+    fn key_request(&self) -> Option<onecd::KeyRequest> {
+        onecd::KeyRequest::when_bound(self.memory.as_ref().map(|m| &m.budget))
+    }
+
+    fn prepare(&self, bytes: u64) -> StoreResult<Option<memory_budget::Reservation>> {
+        self.memory
+            .as_ref()
+            .map(|m| {
+                m.budget
+                    .try_reserve(memory_budget::Category::Execution, bytes)
+                    .map_err(StoreError::Memory)
+            })
+            .transpose()
+    }
+
+    fn projection(&self, t: &TableInfo, fields: &[FieldId]) -> StoreResult<Projection> {
+        let paid = self.prepare(u64::try_from(t.fields.len()).unwrap_or(u64::MAX))?;
+        let mut mask = vec![false; t.fields.len()];
+        for f in fields {
+            if let Some(m) = mask.get_mut(usize::from(f.0)) {
+                *m = true;
+            }
+        }
+        Ok(Some(Mask {
+            fields: mask,
+            _paid: paid,
+        }))
+    }
+
+    fn checks(
+        &self,
+        t: &TableInfo,
+        p: &PhysTable,
+        filter: RecordFilter<'_>,
+    ) -> StoreResult<Checks> {
+        let bytes = filter.len().saturating_mul(std::mem::size_of::<Check>());
+        let paid = match bytes {
+            0 => None,
+            _ => self.prepare(u64::try_from(bytes).unwrap_or(u64::MAX))?,
+        };
+        Ok(Checks {
+            list: checks(t, p, filter)?,
+            _paid: paid,
+        })
+    }
 }
 
 fn engine_direction(dir: Direction) -> onecd::Direction {
@@ -1232,13 +1326,73 @@ fn engine_direction(dir: Direction) -> onecd::Direction {
     }
 }
 
+enum BoundKey {
+    Legacy(Vec<u8>),
+    Paid(memory_budget::BudgetedVec<u8>),
+}
+
+impl BoundKey {
+    fn bytes(&self) -> &[u8] {
+        match self {
+            BoundKey::Legacy(key) => key,
+            BoundKey::Paid(key) => key.as_slice(),
+        }
+    }
+}
+
+fn index_key(
+    ir: &IndexRead<'_>,
+    vals: &[onecd::Value],
+    keys: Option<&onecd::KeyRequest>,
+) -> StoreResult<BoundKey> {
+    match keys {
+        Some(keys) => ir.key_budgeted(vals, keys).map(BoundKey::Paid),
+        None => ir.key(vals).map(BoundKey::Legacy),
+    }
+    .map_err(engine_err)
+}
+
+fn admit_conversion(
+    keys: Option<&onecd::KeyRequest>,
+    ledger: Option<&memory_budget::MemoryBudget>,
+    bytes: impl FnOnce() -> u64,
+) -> StoreResult<Option<memory_budget::Reservation>> {
+    Ok(match (keys, ledger) {
+        (Some(keys), _) => Some(keys.try_reserve(bytes()).map_err(engine_err)?),
+        (None, Some(ledger)) => Some(
+            ledger
+                .try_reserve(memory_budget::Category::Execution, bytes())
+                .map_err(StoreError::Memory)?,
+        ),
+        (None, None) => None,
+    })
+}
+
+fn conversion_bytes(ti: &TableInfo, ix: &IndexInfo, vals: &[FieldValue], columns: usize) -> u64 {
+    let mut bytes = columns.saturating_mul(std::mem::size_of::<onecd::Value>());
+    for (f, v) in ix.fields.iter().zip(vals) {
+        bytes = bytes.saturating_add(fields::encode_bound_bytes(ti, *f, v));
+        if let FieldValue::String(s) = v
+            && ti
+                .field(*f)
+                .and_then(|fi| ti.columns.get(fi.columns.clone()))
+                .is_some_and(|cols| cols.iter().any(|c| c.ty == ColType::NT))
+        {
+            bytes = bytes.saturating_add(s.len().saturating_mul(colval::NT_COPY_FACTOR));
+        }
+    }
+    u64::try_from(bytes).unwrap_or(u64::MAX)
+}
+
 fn bound_key(
     ti: &TableInfo,
     ix: &IndexInfo,
     ir: &IndexRead<'_>,
     b: Bound<&[FieldValue]>,
     exact: bool,
-) -> StoreResult<Bound<Vec<u8>>> {
+    keys: Option<&onecd::KeyRequest>,
+    ledger: Option<&memory_budget::MemoryBudget>,
+) -> StoreResult<Bound<BoundKey>> {
     let (vals, incl) = match b {
         Bound::Unbounded => return Ok(Bound::Unbounded),
         Bound::Included(v) => (v, true),
@@ -1247,29 +1401,42 @@ fn bound_key(
     if vals.len() > ix.fields.len() {
         return Err(StoreError::Unsupported(format!(
             "{}: bound of {} values over index {} of {} fields",
-            ti.logical,
+            diagnostic_name(&ti.logical),
             vals.len(),
-            ix.name,
+            diagnostic_name(&ix.name),
             ix.fields.len()
         )));
     }
-    let mut ev = Vec::new();
+    let columns: usize = ix
+        .fields
+        .iter()
+        .zip(vals)
+        .filter_map(|(f, _)| ti.field(*f))
+        .map(|fi| fi.columns.len())
+        .sum();
+    let _admitted = admit_conversion(keys, ledger, || conversion_bytes(ti, ix, vals, columns))?;
+    let mut ev = Vec::with_capacity(columns);
     let mut part_start = 0;
     for (f, v) in ix.fields.iter().zip(vals) {
         let cols = fields::encode_bound(ti, *f, v).map_err(StoreError::from_schema)?;
-        let fi = ti
-            .field(*f)
-            .ok_or_else(|| StoreError::NotFound(format!("field #{} of {}", f.0, ti.logical)))?;
+        let fi = ti.field(*f).ok_or_else(|| {
+            StoreError::NotFound(format!(
+                "field #{} of {}",
+                f.0,
+                diagnostic_name(&ti.logical)
+            ))
+        })?;
         for (i, c) in fi.columns.clone().zip(cols) {
             let ty = ti
                 .columns
                 .get(i)
                 .map(|c| c.ty)
                 .ok_or_else(|| bad_value(ti, fi, "no column"))?;
-            ev.push(colval::to_onecd(&c, ty).map_err(lib_err)?);
+            ev.push(colval::into_onecd(c, ty).map_err(lib_err)?);
         }
         if exact {
-            let key = ir.key(&ev).map_err(engine_err)?;
+            let key = index_key(ir, &ev, keys)?;
+            let key = key.bytes();
             if matches!(v, FieldValue::String(_))
                 && key.get(part_start..).and_then(<[u8]>::last) != Some(&0)
             {
@@ -1280,7 +1447,7 @@ fn bound_key(
             part_start = key.len();
         }
     }
-    let key = ir.key(&ev).map_err(engine_err)?;
+    let key = index_key(ir, &ev, keys)?;
     Ok(if incl {
         Bound::Included(key)
     } else {
@@ -1298,7 +1465,7 @@ impl<T: TableSource> Read1cd<T> {
         end: Option<RowHandle>,
     ) -> StoreResult<ScannedRows<'_>> {
         let (ti, p) = self.table(t)?;
-        let checks = checks(ti, p, filter)?;
+        let checks = self.checks(ti, p, filter)?;
         let start = u32::try_from(after.0).ok().and_then(|n| n.checked_add(1));
         let bound = |slots: u32| {
             end.map_or(slots, |end| {
@@ -1361,31 +1528,50 @@ impl<T: TableSource> Read1cd<T> {
             if i == IndexId::Id {
                 return Err(StoreError::Unsupported(format!(
                     "{}: no key index",
-                    ti.logical
+                    diagnostic_name(&ti.logical)
                 )));
             }
             return Err(StoreError::NotFound(format!(
                 "index {i:?} of {}",
-                ti.logical
+                diagnostic_name(&ti.logical)
             )));
         };
         let Some(name) = name else {
             return Err(StoreError::Unsupported(format!(
                 "{}: no 1CD index serves {}",
-                ti.logical, ix.name
+                diagnostic_name(&ti.logical),
+                diagnostic_name(&ix.name)
             )));
         };
         let ic = IndexCell::try_new(self.reader(p)?, |tr| tr.index(name)).map_err(engine_err)?;
-        let lo = bound_key(ti, ix, ic.borrow_dependent(), lo, false)?;
-        let hi = bound_key(ti, ix, ic.borrow_dependent(), hi, false)?;
+        let keys = self.key_request();
+        let ledger = self.memory.as_ref().map(|m| &m.budget);
+        let lo = bound_key(
+            ti,
+            ix,
+            ic.borrow_dependent(),
+            lo,
+            false,
+            keys.as_ref(),
+            ledger,
+        )?;
+        let hi = bound_key(
+            ti,
+            ix,
+            ic.borrow_dependent(),
+            hi,
+            false,
+            keys.as_ref(),
+            ledger,
+        )?;
         let d = engine_direction(dir);
         if let Some(memory) = &self.memory {
             let ctx = memory.context();
             let cell = ManagedRangeCell::try_new(ic, |ic| {
                 ic.borrow_dependent()
                     .entries_budgeted(
-                        lo.as_ref().map(Vec::as_slice),
-                        hi.as_ref().map(Vec::as_slice),
+                        lo.as_ref().map(BoundKey::bytes),
+                        hi.as_ref().map(BoundKey::bytes),
                         d,
                         &ctx,
                     )
@@ -1404,14 +1590,15 @@ impl<T: TableSource> Read1cd<T> {
                 current: None,
                 scratch: None,
                 key: None,
-                checks: Vec::new(),
+                checks: Checks::none(),
+                positions: false,
             })));
         }
         let cell = RangeCell::try_new(ic, |ic| {
             ic.borrow_dependent()
                 .range(
-                    lo.as_ref().map(Vec::as_slice),
-                    hi.as_ref().map(Vec::as_slice),
+                    lo.as_ref().map(BoundKey::bytes),
+                    hi.as_ref().map(BoundKey::bytes),
                     d,
                 )
                 .map(|it| Box::new(it) as Rows)
@@ -1429,7 +1616,8 @@ impl<T: TableSource> Read1cd<T> {
 
     fn get_projected(&self, t: TableId, h: RowHandle, fields: Projection) -> StoreResult<Row> {
         let (ti, p) = self.table(t)?;
-        let missing = || StoreError::NotFound(format!("{} row {}", ti.logical, h.0));
+        let missing =
+            || StoreError::NotFound(format!("{} row {}", diagnostic_name(&ti.logical), h.0));
         let id = u32::try_from(h.0).map_err(|_| missing())?;
         let tr = self.reader(p)?;
         if let Some(memory) = &self.memory {
@@ -1505,9 +1693,14 @@ struct Positioned<'a> {
     ti: &'a TableInfo,
     p: &'a PhysTable,
     ic: IndexCell<'a>,
-    lo: Bound<Vec<u8>>,
-    hi: Bound<Vec<u8>>,
-    after: Option<onecd::index::IndexEntry>,
+    lo: Bound<BoundKey>,
+    hi: Bound<BoundKey>,
+    after: Option<PaidEntry>,
+}
+
+struct PaidEntry {
+    entry: onecd::index::IndexEntry,
+    _paid: Option<memory_budget::Reservation>,
 }
 
 impl<T: TableSource> Read1cd<T> {
@@ -1520,11 +1713,6 @@ impl<T: TableSource> Read1cd<T> {
         after: Option<&IndexPosition>,
     ) -> StoreResult<Positioned<'_>> {
         let (ti, p) = self.table(t)?;
-        let access = self
-            .indexes(t)?
-            .into_iter()
-            .find(|a| a.id == i)
-            .ok_or_else(|| StoreError::Unsupported("index has no physical mapping".into()))?;
         let (ix, name) = match i {
             IndexId::Id => (ti.key_index.as_ref(), p.key_index.as_ref()),
             IndexId::Named(n) => (
@@ -1533,41 +1721,74 @@ impl<T: TableSource> Read1cd<T> {
             ),
         };
         let (Some(ix), Some(name)) = (ix, name) else {
-            return Err(StoreError::Unsupported("index unavailable".into()));
+            return Err(StoreError::Unsupported(
+                "index has no physical mapping".into(),
+            ));
+        };
+        let ic = IndexCell::try_new(self.reader(p)?, |tr| tr.index(name)).map_err(engine_err)?;
+        let keys = self.key_request();
+        let ledger = self.memory.as_ref().map(|m| &m.budget);
+        let checked = |f: FieldId, v: &FieldValue| -> StoreResult<()> {
+            let _admitted = admit_conversion(keys.as_ref(), ledger, || {
+                u64::try_from(fields::encode_bound_bytes(ti, f, v)).unwrap_or(u64::MAX)
+            })?;
+            fields::encode(ti, f, v).map_err(StoreError::from_schema)?;
+            Ok(())
         };
         for b in [lo, hi] {
             let vals = match b {
                 Bound::Unbounded => continue,
                 Bound::Included(v) | Bound::Excluded(v) => v,
             };
-            if vals.len() > access.fields.len() {
+            if vals.len() > ix.fields.len() {
                 return Err(StoreError::Unsupported("too many bound fields".into()));
             }
-            for ((f, reason), v) in access.fields.iter().zip(vals) {
-                if access.ref_pairs.contains(f) && matches!(v, FieldValue::Ref { .. }) {
-                    fields::encode(ti, *f, v).map_err(StoreError::from_schema)?;
+            for (f, v) in ix.fields.iter().zip(vals) {
+                let (tr, ir) = (ic.borrow_owner(), ic.borrow_dependent());
+                if matches!(v, FieldValue::Ref { .. }) && exact_ref_pair(ti, *f, tr, ir) {
+                    checked(*f, v)?;
                     continue;
                 }
-                if let Some(reason) = reason {
-                    return Err(StoreError::Unsupported(reason.clone()));
+                if let Some(reason) = condition_reason(ti, *f, tr, ir) {
+                    return Err(StoreError::Unsupported(reason.into()));
                 }
                 bound_value_kind(ti, *f, v)?;
-                fields::encode(ti, *f, v).map_err(StoreError::from_schema)?;
+                checked(*f, v)?;
             }
         }
-        let ic = IndexCell::try_new(self.reader(p)?, |tr| tr.index(name)).map_err(engine_err)?;
-        let lo = bound_key(ti, ix, ic.borrow_dependent(), lo, true)?;
-        let hi = bound_key(ti, ix, ic.borrow_dependent(), hi, true)?;
-        let after = after
-            .map(|a| {
-                u32::try_from(a.row.0)
-                    .map(|row| onecd::index::IndexEntry {
-                        key: a.key.clone(),
-                        row,
-                    })
-                    .map_err(|_| StoreError::Unsupported("invalid index row position".into()))
-            })
-            .transpose()?;
+        let lo = bound_key(
+            ti,
+            ix,
+            ic.borrow_dependent(),
+            lo,
+            true,
+            keys.as_ref(),
+            ledger,
+        )?;
+        let hi = bound_key(
+            ti,
+            ix,
+            ic.borrow_dependent(),
+            hi,
+            true,
+            keys.as_ref(),
+            ledger,
+        )?;
+        let after = match after {
+            None => None,
+            Some(a) => {
+                let row = u32::try_from(a.row.0)
+                    .map_err(|_| StoreError::Unsupported("invalid index row position".into()))?;
+                let paid = admit_conversion(keys.as_ref(), ledger, || {
+                    u64::try_from(a.key.len()).unwrap_or(u64::MAX)
+                })?;
+                let entry = onecd::index::IndexEntry {
+                    key: a.key.clone(),
+                    row,
+                };
+                Some(PaidEntry { entry, _paid: paid })
+            }
+        };
         Ok(Positioned {
             ti,
             p,
@@ -1602,16 +1823,17 @@ impl<T: TableSource> Read1cd<T> {
             hi,
             after,
         } = self.positioned(t, i, lo, hi, after)?;
-        let checks = checks(ti, p, filter)?;
+        let after_entry = after.as_ref().map(|a| &a.entry);
+        let checks = self.checks(ti, p, filter)?;
         if let Some(memory) = &self.memory {
             let ctx = memory.context();
             let cell = ManagedRangeCell::try_new(ic, |ic| {
                 ic.borrow_dependent()
                     .entries_after_budgeted(
-                        lo.as_ref().map(Vec::as_slice),
-                        hi.as_ref().map(Vec::as_slice),
+                        lo.as_ref().map(BoundKey::bytes),
+                        hi.as_ref().map(BoundKey::bytes),
                         d,
-                        after.as_ref(),
+                        after_entry,
                         &ctx,
                     )
                     .map(|it| Box::new(it) as Entries)
@@ -1630,15 +1852,16 @@ impl<T: TableSource> Read1cd<T> {
                 scratch: None,
                 key: None,
                 checks,
+                positions: true,
             })));
         }
         let cell = PositionedCell::try_new(ic, |ic| {
             ic.borrow_dependent()
                 .range_after(
-                    lo.as_ref().map(Vec::as_slice),
-                    hi.as_ref().map(Vec::as_slice),
+                    lo.as_ref().map(BoundKey::bytes),
+                    hi.as_ref().map(BoundKey::bytes),
                     d,
-                    after.as_ref(),
+                    after_entry,
                 )
                 .map(|it| Box::new(it) as PositionedEngineRows)
         })
@@ -1655,7 +1878,84 @@ impl<T: TableSource> Read1cd<T> {
     }
 }
 
+fn mapped_indexes<'a>(
+    ti: &'a TableInfo,
+    p: &'a PhysTable,
+) -> impl Iterator<Item = (IndexId, &'a IndexInfo, &'a String)> + 'a {
+    ti.key_index
+        .iter()
+        .zip(p.key_index.iter())
+        .map(|(ix, name)| (IndexId::Id, ix, name))
+        .chain(ti.indexes.iter().enumerate().filter_map(|(n, ix)| {
+            p.indexes
+                .get(n)
+                .and_then(Option::as_ref)
+                .map(|name| (IndexId::Named(n as u16), ix, name))
+        }))
+}
+
+const REASON_BYTES: usize = 128;
+
+fn access_bytes(ix: &IndexInfo) -> u64 {
+    let per_field = std::mem::size_of::<(FieldId, Option<String>)>()
+        + REASON_BYTES
+        + std::mem::size_of::<FieldId>();
+    u64::try_from(
+        ix.name
+            .len()
+            .saturating_add(ix.fields.len().saturating_mul(per_field)),
+    )
+    .unwrap_or(u64::MAX)
+}
+
+fn access_of(
+    ti: &TableInfo,
+    tr: &onecd::TableRead<'_>,
+    id: IndexId,
+    ix: &IndexInfo,
+    name: &str,
+    paid: Option<memory_budget::Reservation>,
+) -> StoreResult<IndexAccess> {
+    let ir = tr.index(name).map_err(engine_err)?;
+    let mut fields = Vec::with_capacity(ix.fields.len());
+    for f in &ix.fields {
+        let reason = condition_reason(ti, *f, tr, &ir);
+        debug_assert!(reason.is_none_or(|r| r.len() <= REASON_BYTES));
+        fields.push((*f, reason.map(str::to_owned)));
+    }
+    let mut ref_pairs = Vec::with_capacity(ix.fields.len());
+    ref_pairs.extend(
+        ix.fields
+            .iter()
+            .copied()
+            .filter(|f| exact_ref_pair(ti, *f, tr, &ir)),
+    );
+    Ok(IndexAccess {
+        id,
+        name: ix.name.clone(),
+        key_len: ir.key_len() as usize,
+        fields,
+        ref_pairs,
+        paid,
+    })
+}
+
 impl<T: TableSource> ReadTxn for Read1cd<T> {
+    fn read_memory(&mut self, limit: u64) -> StoreResult<memory_budget::MemoryBudget> {
+        let budget = match &self.memory {
+            Some(memory) => memory
+                .budget
+                .try_scope(memory_budget::Category::Execution, limit),
+            None => memory_budget::MemoryBudget::try_new(memory_budget::Limits::new(limit)),
+        }
+        .map_err(StoreError::from_budget)?;
+        self.txn.set_read_budget(budget.clone())?;
+        self.memory = Some(RowMemory {
+            budget: budget.clone(),
+            evictor: self.db.clone(),
+        });
+        Ok(budget)
+    }
     fn set_blob_prefix(&self, max_bytes: Option<usize>) {
         self.prefix
             .store(max_bytes.unwrap_or(0), std::sync::atomic::Ordering::Relaxed);
@@ -1689,7 +1989,7 @@ impl<T: TableSource> ReadTxn for Read1cd<T> {
         Ok(Box::new(rows_only(self.scan_projected(
             t,
             after.unwrap_or(RowHandle(0)),
-            projection(ti, fields),
+            self.projection(ti, fields)?,
             &[],
             None,
         )?)))
@@ -1708,7 +2008,7 @@ impl<T: TableSource> ReadTxn for Read1cd<T> {
         end: RowHandle,
     ) -> StoreResult<ScannedRows<'_>> {
         let ti = self.table(t)?.0;
-        self.scan_projected(t, after, projection(ti, fields), filter, Some(end))
+        self.scan_projected(t, after, self.projection(ti, fields)?, filter, Some(end))
     }
 
     #[allow(
@@ -1727,7 +2027,16 @@ impl<T: TableSource> ReadTxn for Read1cd<T> {
         filter: RecordFilter<'_>,
     ) -> StoreResult<ScannedPositioned<'_>> {
         let ti = self.table(t)?.0;
-        self.range_after_projected(t, i, lo, hi, dir, after, projection(ti, fields), filter)
+        self.range_after_projected(
+            t,
+            i,
+            lo,
+            hi,
+            dir,
+            after,
+            self.projection(ti, fields)?,
+            filter,
+        )
     }
 
     fn scan_end(&self, t: TableId) -> StoreResult<RowHandle> {
@@ -1756,12 +2065,12 @@ impl<T: TableSource> ReadTxn for Read1cd<T> {
         fields: &[FieldId],
     ) -> StoreResult<RowIter<'_>> {
         let ti = self.table(t)?.0;
-        self.range_projected(t, i, lo, hi, dir, projection(ti, fields))
+        self.range_projected(t, i, lo, hi, dir, self.projection(ti, fields)?)
     }
 
     fn get_fields(&self, t: TableId, h: RowHandle, fields: &[FieldId]) -> StoreResult<Row> {
         let ti = self.table(t)?.0;
-        self.get_projected(t, h, projection(ti, fields))
+        self.get_projected(t, h, self.projection(ti, fields)?)
     }
 
     fn next_used_after(&self, t: TableId, after: RowHandle) -> StoreResult<Option<RowHandle>> {
@@ -1787,43 +2096,35 @@ impl<T: TableSource> ReadTxn for Read1cd<T> {
 
     fn indexes(&self, t: TableId) -> StoreResult<Vec<IndexAccess>> {
         let (ti, p) = self.table(t)?;
+        let count = mapped_indexes(ti, p).count();
+        let list = u64::try_from(count.saturating_mul(std::mem::size_of::<IndexAccess>()))
+            .unwrap_or(u64::MAX);
+        let bytes = mapped_indexes(ti, p)
+            .fold(list, |sum, (_, ix, _)| sum.saturating_add(access_bytes(ix)));
+        let mut paid = self.prepare(bytes)?;
         let tr = self.reader(p)?;
-        let mut out = Vec::new();
-        let all = ti
-            .key_index
-            .iter()
-            .zip(p.key_index.iter())
-            .map(|(ix, name)| (IndexId::Id, ix, Some(name)))
-            .chain(ti.indexes.iter().enumerate().map(|(n, ix)| {
-                (
-                    IndexId::Named(n as u16),
-                    ix,
-                    p.indexes.get(n).and_then(Option::as_ref),
-                )
-            }));
-        for (id, ix, name) in all {
-            let Some(name) = name else {
-                continue;
+        let mut out = Vec::with_capacity(count);
+        for (k, (id, ix, name)) in mapped_indexes(ti, p).enumerate() {
+            let own = access_bytes(ix).saturating_add(if k == 0 { list } else { 0 });
+            let share = match &mut paid {
+                Some(paid) => Some(paid.split(own).map_err(StoreError::Memory)?),
+                None => None,
             };
-            let ir = tr.index(name).map_err(engine_err)?;
-            out.push(IndexAccess {
-                id,
-                name: ix.name.clone(),
-                key_len: ir.key_len() as usize,
-                fields: ix
-                    .fields
-                    .iter()
-                    .map(|f| (*f, condition_reason(ti, *f, &tr, &ir)))
-                    .collect(),
-                ref_pairs: ix
-                    .fields
-                    .iter()
-                    .copied()
-                    .filter(|f| exact_ref_pair(ti, *f, &tr, &ir))
-                    .collect(),
-            });
+            out.push(access_of(ti, &tr, id, ix, name, share)?);
         }
         Ok(out)
+    }
+
+    fn index_named(&self, t: TableId, name: &str) -> StoreResult<Option<IndexAccess>> {
+        let (ti, p) = self.table(t)?;
+        let Some((id, ix, phys)) =
+            mapped_indexes(ti, p).find(|(_, ix, _)| ix.name.eq_ignore_ascii_case(name))
+        else {
+            return Ok(None);
+        };
+        let paid = self.prepare(access_bytes(ix))?;
+        let tr = self.reader(p)?;
+        access_of(ti, &tr, id, ix, phys, paid).map(Some)
     }
 
     fn range_after(
@@ -1865,7 +2166,7 @@ impl<T: TableSource> ReadTxn for Read1cd<T> {
             hi,
             dir,
             after,
-            projection(ti, fields),
+            self.projection(ti, fields)?,
             &[],
         )?)))
     }
@@ -1883,31 +2184,43 @@ impl<T: TableSource> ReadTxn for Read1cd<T> {
         let range = self.positioned(t, i, lo, hi, after)?;
         let ir = range.ic.borrow_dependent();
         let (lo, hi) = (
-            range.lo.as_ref().map(Vec::as_slice),
-            range.hi.as_ref().map(Vec::as_slice),
+            range.lo.as_ref().map(BoundKey::bytes),
+            range.hi.as_ref().map(BoundKey::bytes),
         );
-        let entry = match &self.memory {
+        let after = range.after.as_ref().map(|a| &a.entry);
+        match &self.memory {
             Some(memory) => {
                 let ctx = memory.context();
-                ir.entries_after_budgeted(lo, hi, d, range.after.as_ref(), &ctx)
+                let Some(e) = ir
+                    .entries_after_budgeted(lo, hi, d, after, &ctx)
                     .map_err(engine_err)?
                     .next()
                     .transpose()
                     .map_err(engine_err)?
-                    .map(|e| (e.key.clone(), e.row))
+                else {
+                    return Ok(None);
+                };
+                let paid = ctx
+                    .budget
+                    .try_reserve(
+                        memory_budget::Category::Execution,
+                        u64::try_from(e.key.len()).unwrap_or(u64::MAX),
+                    )
+                    .map_err(StoreError::Memory)?;
+                Ok(Some(IndexPosition::paid(
+                    e.key.clone(),
+                    handle(e.row),
+                    paid,
+                )))
             }
-            None => ir
-                .entries_after(lo, hi, d, range.after.as_ref())
+            None => Ok(ir
+                .entries_after(lo, hi, d, after)
                 .map_err(engine_err)?
                 .next()
                 .transpose()
                 .map_err(engine_err)?
-                .map(|e| (e.key, e.row)),
-        };
-        Ok(entry.map(|(key, row)| IndexPosition {
-            key,
-            row: handle(row),
-        }))
+                .map(|e| IndexPosition::new(e.key, handle(e.row)))),
+        }
     }
 
     fn get(&self, t: TableId, h: RowHandle) -> StoreResult<Row> {
@@ -1921,21 +2234,59 @@ impl<T: TableSource> ReadTxn for Read1cd<T> {
         f: FieldId,
     ) -> StoreResult<Box<dyn ReadSeek + '_>> {
         let (ti, p) = self.table(t)?;
-        let fi = ti
-            .field(f)
-            .ok_or_else(|| StoreError::NotFound(format!("field #{} of {}", f.0, ti.logical)))?;
+        let fi = ti.field(f).ok_or_else(|| {
+            StoreError::NotFound(format!(
+                "field #{} of {}",
+                f.0,
+                diagnostic_name(&ti.logical)
+            ))
+        })?;
         let col = match ti.columns.get(fi.columns.clone()) {
             Some([c]) if matches!(c.ty, ColType::NT | ColType::I) => fi.columns.start,
             _ => {
                 return Err(StoreError::Unsupported(format!(
                     "{}.{}: not a blob",
-                    ti.logical, fi.name
+                    diagnostic_name(&ti.logical),
+                    diagnostic_name(&fi.name)
                 )));
             }
         };
-        let missing = || StoreError::NotFound(format!("{} row {}", ti.logical, h.0));
+        let missing =
+            || StoreError::NotFound(format!("{} row {}", diagnostic_name(&ti.logical), h.0));
         let id = u32::try_from(h.0).map_err(|_| missing())?;
         let tr = self.reader(p)?;
+        if let Some(memory) = &self.memory {
+            let context = memory.context();
+            let raw = tr
+                .get_budgeted(id, &context)
+                .map_err(engine_err)?
+                .ok_or_else(missing)?;
+            let value = p.cols.get(col).and_then(|&c| raw.get(c));
+            let blob = match value {
+                Some(
+                    onecd::Value::NText(onecd::BlobVal::Ref(r))
+                    | onecd::Value::Image(onecd::BlobVal::Ref(r)),
+                ) => *r,
+                Some(onecd::Value::Null) => onecd::BlobRef { start: 0, len: 0 },
+                _ => {
+                    return Err(bad_value(
+                        ti,
+                        fi,
+                        "the column does not hold a BLOB reference",
+                    ));
+                }
+            };
+            drop(raw);
+            let bytes = tr
+                .blob_bytes_managed(
+                    blob,
+                    &memory.budget,
+                    memory_budget::Category::Execution,
+                    u64::MAX,
+                )
+                .map_err(engine_err)?;
+            return ibschema::store::charged_blob(bytes);
+        }
         let name = p
             .cols
             .get(col)

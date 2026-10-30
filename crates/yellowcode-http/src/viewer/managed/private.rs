@@ -95,6 +95,22 @@ pub(super) fn handle(
             &format_args!("unknown parameter: {key}"),
         ));
     }
+    if kind == "query" && route == "cancel" {
+        return Some(
+            match req
+                .query
+                .iter()
+                .find(|(key, _)| key == "id")
+                .map(|(_, id)| id)
+            {
+                None => message(budget, limit, 400, &"id is required"),
+                Some(id) if id.parse::<u64>().is_err() => {
+                    message(budget, limit, 400, &"id: not a number")
+                }
+                Some(_) => Ok(error(200, b"{\"ok\":false}")),
+            },
+        );
+    }
     Some(
         if (kind == "data" && route == "source") || (kind == "code" && route == "info") {
             json(

@@ -117,6 +117,31 @@ impl HostObject for Deflation {
 }
 
 impl HostObject for ValueStorage {
+    fn session_edges(&self, _: &mut dyn bsl_vm::SessionEdges) -> bool {
+        true
+    }
+    fn session_transfer_supported(&self) -> bool {
+        true
+    }
+    fn session_transfer(
+        &self,
+        out: &mut dyn bsl_vm::SessionExport,
+    ) -> Result<Option<Box<dyn bsl_vm::SessionObject>>, Exception> {
+        out.reserve(16)?;
+        Ok(Some(Box::new(SessionStorage(self.bytes.clone()))))
+    }
+    fn retained_memory(
+        &self,
+        visit: &mut dyn bsl_vm::RetainedMemory,
+    ) -> Result<bool, bsl_vm::Exception> {
+        visit.allocation(
+            Arc::as_ptr(&self.bytes).cast::<()>() as usize,
+            (self.bytes.len() as u64).saturating_add(
+                (2 * std::mem::size_of::<usize>() + std::mem::align_of::<usize>() - 1) as u64,
+            ),
+        )?;
+        Ok(true)
+    }
     fn type_id(&self) -> TypeId {
         TypeId::of_catalog(types().storage)
     }
@@ -151,6 +176,34 @@ impl HostObject for ValueStorage {
 
     fn presentation(&self, _ex: &mut Execution) -> CallResult<Option<Str>> {
         Ok(Some(Str::from("ХранилищеЗначения")))
+    }
+}
+
+struct SessionStorage(Arc<[u8]>);
+impl bsl_vm::SessionObject for SessionStorage {
+    fn retained_memory(&self, visit: &mut dyn bsl_vm::RetainedMemory) -> Result<(), Exception> {
+        visit
+            .allocation(
+                Arc::as_ptr(&self.0).cast::<()>() as usize,
+                crate::session::shared_bytes(&*self.0),
+            )
+            .map(|_| ())
+    }
+    fn create(
+        &self,
+        _: &mut Execution,
+        _: &mut bsl_vm::SessionImports,
+    ) -> Result<Value, Exception> {
+        Ok(Value::Object(Rc::new(ValueStorage {
+            bytes: self.0.clone(),
+        })))
+    }
+    fn fill(&self, _: &mut Execution, _: &Value, _: Vec<Value>) -> Result<(), Exception> {
+        Ok(())
+    }
+    fn clear(&self, _: &Value) {}
+    fn restore_bytes(&self, _: usize) -> u64 {
+        32
     }
 }
 

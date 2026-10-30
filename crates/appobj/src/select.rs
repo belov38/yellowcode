@@ -4,7 +4,8 @@ use crate::errors::{self, keys};
 use crate::meta::{arg_value, member_name, type_mismatch};
 use crate::model::{CodeType, NumberPeriodicity, ObjId, ObjKind, TypeAtom};
 use crate::queryhost::{CallBindHost, exec_error, to_value};
-use crate::read::{field_index, store_error, tabular_index};
+use crate::read::{field_index, store_call_error, tabular_index};
+use crate::read_budget as budget;
 use crate::readtab::tabular_value;
 use crate::session::call_ctx;
 use crate::types::Category;
@@ -15,8 +16,9 @@ use bsl_vm::{
     Arg, CallResult, Execution, HostError, HostObject, MemberId, MemberKind, TypeId, Value,
 };
 use ibschema::values::RefId;
+use memory_budget::{Category as MemoryCategory, MemoryBudget, RequestMemory, Reservation};
 use platform_catalog::messages::Lang;
-use query_exec::{ExecEnv, ExecEnvOwned, RowStream, execute_store, stream};
+use query_exec::{ExecEnv, ExecEnvOwned, RowStream, execute_store};
 use query_ir::build::{BuildValue, Selection};
 use query_ir::{BindCtx, FieldRole, ParamValue, ParamValues, QFieldId, QStr, QValue, StdRole};
 use std::any::Any;
@@ -368,7 +370,20 @@ fn prepare(app: &Application, obj: ObjId, spec: &SelectSpec) -> Result<Prepared,
 struct InterimSelectionSecurity;
 
 impl InterimSelectionSecurity {
-    fn for_call(ex: &mut Execution) -> Result<Self, HostError> {
+    fn for_call(ex: &mut Execution, app: &Application) -> Result<Self, HostError> {
+        if app.options().read_only_scope.is_none()
+            && app
+                .store()
+                .storage()
+                .tables()
+                .iter()
+                .any(|t| !t.separators.is_empty())
+        {
+            return Err(HostError::not_implemented(
+                "P1ro",
+                "explicit read area required",
+            ));
+        }
         if call_ctx(ex).is_some_and(|c| c.sess.user().no_users) {
             Ok(Self)
         } else {
@@ -501,6 +516,27 @@ struct State {
     sub: Option<Subtree>,
     level: i64,
     levels: Option<std::collections::HashMap<[u8; 16], i64>>,
+    buffer_bytes: u64,
+    memory: Option<MemoryBudget>,
+    buffer_paid: Option<Reservation>,
+    state_paid: Option<Reservation>,
+    current_paid: Option<Reservation>,
+}
+
+impl Drop for State {
+    fn drop(&mut self) {
+        self.current = None;
+        self.current_paid = None;
+        self.src = Src::Done;
+        self.buffer_paid = None;
+    }
+}
+
+fn execution_error(ex: &Execution, error: query_ir::ExecError) -> bsl_vm::CallError {
+    match error {
+        query_ir::ExecError::Memory(_) => ex.out_of_memory().into(),
+        _ => exec_error(&error).into(),
+    }
 }
 
 pub struct SelectionObject {
@@ -515,50 +551,158 @@ pub struct SelectionObject {
 }
 
 impl SelectionObject {
+    fn overhead(&self, st: &State) -> u64 {
+        budget::rc_size::<Self>()
+            .saturating_add(budget::slots::<Option<usize>>(self.cols.capacity()))
+            .saturating_add(st.sub.as_ref().map_or(0, |s| {
+                bsl_vm::retained_hash_bytes::<[u8; 16]>(s.ids.capacity()).unwrap_or(u64::MAX)
+            }))
+            .saturating_add(st.levels.as_ref().map_or(0, |m| {
+                bsl_vm::retained_hash_bytes::<([u8; 16], i64)>(m.capacity()).unwrap_or(u64::MAX)
+            }))
+    }
+    fn bytes(&self, st: &State) -> u64 {
+        budget::rc_size::<Self>()
+            .saturating_add(budget::slots::<Option<usize>>(self.cols.capacity()))
+            .saturating_add(st.buffer_bytes)
+            .saturating_add(st.current.as_ref().map_or(0, |r| {
+                budget::query_row(r).saturating_add(budget::slots::<QValue>(r.capacity() - r.len()))
+            }))
+            .saturating_add(st.sub.as_ref().map_or(0, |s| {
+                bsl_vm::retained_hash_bytes::<[u8; 16]>(s.ids.capacity()).unwrap_or(u64::MAX)
+            }))
+            .saturating_add(st.levels.as_ref().map_or(0, |m| {
+                bsl_vm::retained_hash_bytes::<([u8; 16], i64)>(m.capacity()).unwrap_or(u64::MAX)
+            }))
+    }
     pub(crate) fn release(&self) {
         if let Ok(mut st) = self.state.try_borrow_mut() {
+            st.current = None;
+            st.current_paid = None;
             st.src = Src::Done;
+            st.buffer_bytes = 0;
+            st.buffer_paid = None;
+            st.sub = None;
+            st.levels = None;
+            st.state_paid = None;
+            st.memory = None;
         }
     }
 
-    fn start(&self, ex: &mut Execution, st: &mut State) -> Result<(), HostError> {
+    fn read<T>(&self, operation: impl FnOnce() -> CallResult<T>) -> CallResult<T> {
+        let result = operation();
+        if matches!(&result, Err(bsl_vm::CallError::Exc(bsl_vm::Exception::Fatal(f))) if f.kind == bsl_vm::FatalKind::Memory)
+        {
+            self.release();
+        }
+        result
+    }
+
+    fn start(&self, ex: &mut Execution, st: &mut State) -> CallResult<()> {
         let Src::Pending(p) = std::mem::replace(&mut st.src, Src::Done) else {
             return Ok(());
         };
         let (ctx, stmt) = *p;
-        let security = InterimSelectionSecurity::for_call(ex)?;
+        let security = InterimSelectionSecurity::for_call(ex, &self.app)?;
         let lowered = bind(&self.app, &ctx, &stmt, &security)?;
-        let txn = self.app.store().read().map_err(|e| store_error(&e))?;
+        let mut txn = self
+            .app
+            .store()
+            .read()
+            .map_err(|e| store_call_error(ex, e))?;
+        let limit = self
+            .app
+            .options()
+            .query_mem_limit
+            .min(ex.options().memory_limit.unwrap_or(u64::MAX))
+            .saturating_sub(ex.retained_workspace_bytes());
+        let memory = txn
+            .read_memory(limit)
+            .map_err(|e| store_call_error(ex, e))?;
+        st.state_paid = Some(
+            memory
+                .try_reserve(MemoryCategory::Execution, self.overhead(st))
+                .map_err(|_| ex.out_of_memory())?,
+        );
+        st.memory = Some(memory.clone());
         let Some(guard) = StreamGuard::take(self.app.live_streams()) else {
             let cancel = AtomicBool::new(false);
+            let request = RequestMemory {
+                budget: memory.clone(),
+                row_limit: limit,
+            };
+            let paid = memory
+                .try_reserve(MemoryCategory::Execution, 0)
+                .map_err(|_| ex.out_of_memory())?;
             let env = ExecEnv {
                 collation: ctx.collation.as_ref(),
+                native: None,
                 cancel: &cancel,
                 stop: None,
-                mem_limit: self.app.options().query_mem_limit,
+                mem_limit: self
+                    .app
+                    .options()
+                    .query_mem_limit
+                    .min(ex.options().memory_limit.unwrap_or(u64::MAX)),
                 max_number_limbs: MAX_LIMBS,
-                memory: None,
-                lease: None,
+                memory: Some(&request),
+                lease: Some(&paid),
                 evictor: None,
             };
-            let res = execute_store(&lowered, &*txn, &ctx.map, &env).map_err(|e| exec_error(&e))?;
+            let res = execute_store(&lowered, &*txn, &ctx.map, &env)
+                .map_err(|e| execution_error(ex, e))?;
             drop(txn);
+            st.buffer_bytes = res
+                .rows
+                .iter()
+                .fold(budget::slots::<Vec<QValue>>(res.rows.capacity()), |n, r| {
+                    n.saturating_add(query_exec::ops::row_cap_bytes(r))
+                });
+            budget::reserve(ex, self.bytes(st))?;
             st.src = Src::Rows(res.rows.into());
+            st.buffer_paid = Some(paid);
             return Ok(());
         };
         let env = ExecEnvOwned {
             collation: ctx.collation.clone(),
+            native: None,
             cancel: Arc::new(AtomicBool::new(false)),
-            mem_limit: self.app.options().query_mem_limit,
+            mem_limit: self
+                .app
+                .options()
+                .query_mem_limit
+                .min(ex.options().memory_limit.unwrap_or(u64::MAX)),
             max_number_limbs: MAX_LIMBS,
         };
-        let rows =
-            stream(Arc::new(lowered), txn, ctx.map.clone(), env).map_err(|e| exec_error(&e))?;
+        let rows = query_exec::stream::stream_admitted(
+            Arc::new(lowered),
+            txn,
+            ctx.map.clone(),
+            env,
+            memory,
+        )
+        .map_err(|e| execution_error(ex, e))?;
         st.src = Src::Running(rows, guard);
         Ok(())
     }
 
-    fn advance(&self, ex: &mut Execution) -> Result<bool, HostError> {
+    fn advance(&self, ex: &mut Execution) -> CallResult<bool> {
+        let result = self.advance_inner(ex);
+        if result.is_err() {
+            self.release();
+        }
+        result
+    }
+
+    fn reconcile_state(&self, ex: &Execution, st: &State) -> CallResult<()> {
+        if let Some(paid) = &st.state_paid {
+            let extra = paid.bytes().saturating_sub(self.overhead(st));
+            paid.shrink(extra).map_err(|_| ex.out_of_memory())?;
+        }
+        Ok(())
+    }
+
+    fn advance_inner(&self, ex: &mut Execution) -> CallResult<bool> {
         let mut st = self
             .state
             .try_borrow_mut()
@@ -567,6 +711,12 @@ impl SelectionObject {
             self.start(ex, &mut st)?;
         }
         loop {
+            if st.current.is_some()
+                && st.current_paid.is_none()
+                && let Src::Running(rows, _) = &mut st.src
+            {
+                st.current_paid = rows.take_current_payment();
+            }
             let item = match &mut st.src {
                 Src::Running(rows, _) => rows.next(),
                 Src::Rows(rows) => rows.pop_front().map(Ok),
@@ -575,25 +725,61 @@ impl SelectionObject {
             let row = match item {
                 None => {
                     st.src = Src::Done;
+                    st.buffer_bytes = 0;
                     return Ok(false);
                 }
                 Some(Err(e)) => {
                     st.src = Src::Done;
-                    return Err(exec_error(&e));
+                    st.buffer_bytes = 0;
+                    st.buffer_paid = None;
+                    return Err(execution_error(ex, e));
                 }
                 Some(Ok(row)) => row,
             };
-            if let Some(sub) = st.sub.as_mut() {
-                match sub.judge(&row) {
-                    Verdict::Skip => continue,
+            let growth = st
+                .sub
+                .as_ref()
+                .map_or(0, |s| {
+                    budget::hash_growth::<[u8; 16]>(s.ids.capacity(), s.ids.len())
+                })
+                .saturating_add(st.levels.as_ref().map_or(0, |m| {
+                    budget::hash_growth::<([u8; 16], i64)>(m.capacity(), m.len())
+                }));
+            if let Some(paid) = &st.state_paid {
+                paid.try_grow(growth).map_err(|_| ex.out_of_memory())?;
+            }
+            if let Err(error) = budget::reserve(
+                ex,
+                self.bytes(&st)
+                    .saturating_add(budget::query_row(&row))
+                    .saturating_add(growth),
+            ) {
+                st.src = Src::Done;
+                st.buffer_bytes = 0;
+                st.current = None;
+                return Err(error.into());
+            }
+            if matches!(st.src, Src::Rows(_)) {
+                st.buffer_bytes = st.buffer_bytes.saturating_sub(budget::query_row(&row));
+            }
+            if let Some(verdict) = st.sub.as_mut().map(|sub| sub.judge(&row)) {
+                match verdict {
+                    Verdict::Skip => {
+                        self.reconcile_state(ex, &st)?;
+                        continue;
+                    }
                     Verdict::Take => {}
                     Verdict::Stop => {
                         st.src = Src::Done;
+                        st.buffer_bytes = 0;
                         return Ok(false);
                     }
                 }
             }
             st.level = self.level_of(&mut st, &row);
+            self.reconcile_state(ex, &st)?;
+            st.current = None;
+            st.current_paid = None;
             st.current = Some(row);
             return Ok(true);
         }
@@ -625,7 +811,7 @@ impl SelectionObject {
         }
     }
 
-    fn field(&self, i: usize) -> Result<Value, HostError> {
+    fn field(&self, ex: &mut Execution, i: usize) -> CallResult<Value> {
         let def = self.app.model().obj(self.obj);
         let fd = def.fields.get(i);
         let st = self.state.borrow();
@@ -638,15 +824,31 @@ impl SelectionObject {
             .position(|c| *c == Some(i))
             .and_then(|c| row.get(c))
         {
-            Some(q) => to_value(&self.app, q, fd),
+            Some(q) => {
+                let conversion = match q {
+                    QValue::String(s) => (s.len_utf16() as u64)
+                        .saturating_mul(12)
+                        .saturating_add(256),
+                    QValue::Number(n) => budget::slots::<u32>(n.backing_capacity_limbs()),
+                    _ => 256,
+                };
+                let _converted = st
+                    .memory
+                    .as_ref()
+                    .map(|memory| memory.try_reserve(MemoryCategory::Execution, conversion))
+                    .transpose()
+                    .map_err(|_| ex.out_of_memory())?;
+                budget::reserve(ex, self.bytes(&st).saturating_add(conversion))?;
+                Ok(to_value(&self.app, q, fd)?)
+            }
             None => match fd {
-                Some(fd) => default_of(&self.app, fd),
+                Some(fd) => Ok(default_of(&self.app, fd)?),
                 None => Ok(Value::Undefined),
             },
         }
     }
 
-    fn data_version(&self) -> Value {
+    fn data_version(&self, ex: &mut Execution) -> CallResult<Value> {
         let st = self.state.borrow();
         match st
             .current
@@ -654,8 +856,29 @@ impl SelectionObject {
             .zip(self.version_col)
             .and_then(|(row, c)| row.get(c))
         {
-            Some(QValue::String(t)) => Value::from(t.to_string_lossy().as_str()),
-            _ => Value::Undefined,
+            Some(QValue::String(t)) => {
+                let _converted = st
+                    .memory
+                    .as_ref()
+                    .map(|memory| {
+                        memory.try_reserve(
+                            MemoryCategory::Execution,
+                            (t.len_utf16() as u64)
+                                .saturating_mul(12)
+                                .saturating_add(256),
+                        )
+                    })
+                    .transpose()
+                    .map_err(|_| ex.out_of_memory())?;
+                budget::reserve(
+                    ex,
+                    self.bytes(&st)
+                        .saturating_add((t.len_utf16() as u64).saturating_mul(12))
+                        .saturating_add(256),
+                )?;
+                Ok(Value::from(t.to_string_lossy().as_str()))
+            }
+            _ => Ok(Value::Undefined),
         }
     }
 
@@ -684,34 +907,36 @@ impl HostObject for SelectionObject {
     }
 
     fn get(&self, ex: &mut Execution, m: MemberId) -> CallResult<Value> {
-        if (ATTR_BASE..TAB_BASE).contains(&m.0) {
-            return Ok(self.field((m.0 - ATTR_BASE) as usize)?);
-        }
-        if m.0 >= TAB_BASE {
-            let tab = (m.0 - TAB_BASE) as usize;
-            return match self.current_ref() {
-                Some(r) => tabular_value(ex, &self.app, r, tab),
-                None => Ok(Value::Undefined),
-            };
-        }
-        match self.member(ex, m) {
-            Some((false, "ВерсияДанных")) => Ok(self.data_version()),
-            Some((false, ru)) => {
-                let def = self.app.model().obj(self.obj);
-                match field_index(def, ru) {
-                    Some(i) => Ok(self.field(i)?),
-                    None if ru == "ЭтоГруппа" && def.behavior.hierarchical => {
-                        Ok(match self.state.borrow().current {
-                            Some(_) => Value::Bool(false),
-                            None => Value::Undefined,
-                        })
-                    }
-                    None => Err(self.not_implemented(ru).into()),
-                }
+        self.read(|| {
+            if (ATTR_BASE..TAB_BASE).contains(&m.0) {
+                return self.field(ex, (m.0 - ATTR_BASE) as usize);
             }
-            Some((true, ru)) => Err(self.not_implemented(ru).into()),
-            None => Err(self.not_implemented(&m.0.to_string()).into()),
-        }
+            if m.0 >= TAB_BASE {
+                let tab = (m.0 - TAB_BASE) as usize;
+                return match self.current_ref() {
+                    Some(r) => tabular_value(ex, &self.app, r, tab),
+                    None => Ok(Value::Undefined),
+                };
+            }
+            match self.member(ex, m) {
+                Some((false, "ВерсияДанных")) => self.data_version(ex),
+                Some((false, ru)) => {
+                    let def = self.app.model().obj(self.obj);
+                    match field_index(def, ru) {
+                        Some(i) => self.field(ex, i),
+                        None if ru == "ЭтоГруппа" && def.behavior.hierarchical => {
+                            Ok(match self.state.borrow().current {
+                                Some(_) => Value::Bool(false),
+                                None => Value::Undefined,
+                            })
+                        }
+                        None => Err(self.not_implemented(ru).into()),
+                    }
+                }
+                Some((true, ru)) => Err(self.not_implemented(ru).into()),
+                None => Err(self.not_implemented(&m.0.to_string()).into()),
+            }
+        })
     }
 
     fn set(&self, ex: &mut Execution, m: MemberId, _: Value) -> CallResult<()> {
@@ -723,7 +948,7 @@ impl HostObject for SelectionObject {
     }
 
     fn call(&self, ex: &mut Execution, m: MemberId, _: &mut [Arg]) -> CallResult<Value> {
-        match self.member(ex, m) {
+        self.read(|| match self.member(ex, m) {
             Some((true, "Следующий")) => Ok(Value::Bool(self.advance(ex)?)),
             Some((true, "ПолучитьОбъект")) => match self.current_ref() {
                 Some(r) => crate::objects::get_object(ex, &self.app, r),
@@ -734,7 +959,7 @@ impl HostObject for SelectionObject {
             }
             Some((_, ru)) => Err(self.not_implemented(ru).into()),
             None => Err(self.not_implemented(&m.0.to_string()).into()),
-        }
+        })
     }
 
     fn find_member(&self, name: &str) -> Option<MemberId> {
@@ -761,11 +986,16 @@ pub(crate) fn select(
     obj: ObjId,
     spec: SelectSpec,
 ) -> CallResult<Value> {
-    InterimSelectionSecurity::for_call(ex)?;
+    InterimSelectionSecurity::for_call(ex, app)?;
     let arc = app
         .arc()
         .ok_or_else(|| internal("the application is gone"))?;
     let p = prepare(app, obj, &spec)?;
+    budget::reserve(
+        ex,
+        budget::rc_size::<SelectionObject>()
+            .saturating_add(budget::slots::<Option<usize>>(p.cols.capacity())),
+    )?;
     let ty = app
         .types()
         .and_then(|t| t.type_of(obj, Category::Selection))
@@ -798,6 +1028,11 @@ pub(crate) fn select(
             sub,
             level: -1,
             levels: (spec.hierarchical && p.parent_col.is_some()).then(Default::default),
+            buffer_bytes: 0,
+            memory: None,
+            buffer_paid: None,
+            state_paid: None,
+            current_paid: None,
         }),
     });
     if let Some(c) = call_ctx(ex) {
@@ -815,27 +1050,49 @@ pub(crate) fn find_one(
     obj: ObjId,
     mut spec: SelectSpec,
 ) -> CallResult<Value> {
-    let security = InterimSelectionSecurity::for_call(ex)?;
+    let security = InterimSelectionSecurity::for_call(ex, app)?;
     spec.top = Some(1);
     let p = prepare(app, obj, &spec)?;
+    let mut _found_payment = None;
     let found = if p.empty {
         None
     } else {
         let lowered = bind(app, &p.ctx, &p.stmt, &security)?;
-        let txn = app.store().read().map_err(|e| store_error(&e))?;
+        let mut txn = app.store().read().map_err(|e| store_call_error(ex, e))?;
+        let limit = app
+            .options()
+            .query_mem_limit
+            .min(ex.options().memory_limit.unwrap_or(u64::MAX))
+            .saturating_sub(ex.retained_workspace_bytes());
+        let memory = txn
+            .read_memory(limit)
+            .map_err(|e| store_call_error(ex, e))?;
+        let request = RequestMemory {
+            budget: memory.clone(),
+            row_limit: limit,
+        };
+        let paid = memory
+            .try_reserve(MemoryCategory::Execution, 0)
+            .map_err(|_| ex.out_of_memory())?;
         let cancel = AtomicBool::new(false);
         let env = ExecEnv {
             collation: p.ctx.collation.as_ref(),
+            native: None,
             cancel: &cancel,
             stop: None,
-            mem_limit: app.options().query_mem_limit,
+            mem_limit: app
+                .options()
+                .query_mem_limit
+                .min(ex.options().memory_limit.unwrap_or(u64::MAX)),
             max_number_limbs: MAX_LIMBS,
-            memory: None,
-            lease: None,
+            memory: Some(&request),
+            lease: Some(&paid),
             evictor: None,
         };
-        let res = execute_store(&lowered, &*txn, &p.ctx.map, &env).map_err(|e| exec_error(&e))?;
+        let res =
+            execute_store(&lowered, &*txn, &p.ctx.map, &env).map_err(|e| execution_error(ex, e))?;
         drop(txn);
+        _found_payment = Some(paid);
         res.rows.into_iter().next()
     };
     let id = found

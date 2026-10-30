@@ -1,0 +1,15 @@
+exit 0
+--- stdout
+Исследовать резервную копию MS SQL Server
+
+Usage: yellowcode bak [OPTIONS] <COMMAND>
+
+Commands:
+  inspect  Проверить структуру резервной копии без её восстановления
+  convert  Восстановить копию через MS SQL Server и сохранить CF, DT или 1CD
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+      --platform-build <BUILD>  Точная версия эмулируемой платформы (не режим совместимости конфигурации) [default: 8.5.1.1529]
+  -h, --help                    Print help
+--- stderr

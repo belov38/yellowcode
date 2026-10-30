@@ -44,6 +44,10 @@ impl TreeBuild for BinNode {
 }
 
 impl LogicalSchema {
+    pub fn from_bin_legacy_indexes(root: &BinNode) -> Result<LogicalSchema> {
+        super::tree::decode_legacy_indexes(root, WHAT)
+    }
+
     pub fn from_bin(root: &BinNode) -> Result<LogicalSchema> {
         decode(root, WHAT)
     }

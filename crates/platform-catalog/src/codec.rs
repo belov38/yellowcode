@@ -10,24 +10,41 @@ pub(crate) const MAX_PLATFORM: usize = 64;
 pub(crate) const MAX_INFLATED: u64 = 64 << 20;
 
 #[derive(Default)]
-struct W(Vec<u8>);
+struct W(Vec<u8>, Option<u64>, bool);
 
 impl W {
+    fn bytes(&mut self, bytes: &[u8]) {
+        if self.1.is_none() {
+            self.0.extend_from_slice(bytes);
+        }
+    }
+    fn heap(&mut self, bytes: usize) {
+        if let Some(total) = self.1 {
+            match u64::try_from(bytes)
+                .ok()
+                .and_then(|bytes| total.checked_add(bytes))
+            {
+                Some(total) => self.1 = Some(total),
+                None => self.2 = true,
+            }
+        }
+    }
     fn u8(&mut self, v: u8) {
-        self.0.push(v);
+        self.bytes(&[v]);
     }
     fn bool(&mut self, v: bool) {
         self.u8(u8::from(v));
     }
     fn u16(&mut self, v: u16) {
-        self.0.extend_from_slice(&v.to_le_bytes());
+        self.bytes(&v.to_le_bytes());
     }
     fn len(&mut self, n: usize) {
-        self.0.extend_from_slice(&(n as u32).to_le_bytes());
+        self.bytes(&(n as u32).to_le_bytes());
     }
     fn str(&mut self, s: &str) {
+        self.heap(s.len());
         self.len(s.len());
-        self.0.extend_from_slice(s.as_bytes());
+        self.bytes(s.as_bytes());
     }
     fn opt<T>(&mut self, v: &Option<T>, f: impl FnOnce(&mut W, &T)) {
         match v {
@@ -39,6 +56,10 @@ impl W {
         }
     }
     fn vec<T>(&mut self, v: &[T], f: impl Fn(&mut W, &T)) {
+        match v.len().checked_mul(std::mem::size_of::<T>()) {
+            Some(bytes) => self.heap(bytes),
+            None => self.2 = true,
+        }
         self.len(v.len());
         for x in v {
             f(self, x);
@@ -97,7 +118,7 @@ fn w_type(w: &mut W, t: &TypeInfo) {
     w.bool(t.serializable);
     w.bool(t.server_exchange);
     w.opt(&t.xdto, |w, x| w_names(w, &x.namespace, &x.name));
-    w.opt(&t.guid, |w, g| w.0.extend_from_slice(g));
+    w.opt(&t.guid, |w, g| w.bytes(g));
     w.opt(&t.since, |w, s| w.str(s));
     w.opt(&t.compat_mode, |w, s| w.str(s));
     w.opt(&t.presentation_ru, |w, s| w.str(s));
@@ -126,7 +147,7 @@ fn w_type(w: &mut W, t: &TypeInfo) {
     w.vec(&t.constructors, w_sig);
     w.vec(&t.values, |w, v| {
         w_names(w, &v.name_ru, &v.name_en);
-        w.opt(&v.ordinal, |w, n| w.0.extend_from_slice(&n.to_le_bytes()));
+        w.opt(&v.ordinal, |w, n| w.bytes(&n.to_le_bytes()));
         w.opt(&v.presentation_ru, |w, s| w.str(s));
         w.opt(&v.presentation_en, |w, s| w.str(s));
     });
@@ -157,21 +178,44 @@ fn w_table(w: &mut W, t: &QueryTableInfo) {
     });
 }
 
+fn w_data(w: &mut W, d: &CatalogData) {
+    w.vec(&d.types, w_type);
+    w.vec(&d.global_properties, w_prop);
+    w.vec(&d.global_methods, w_global);
+    w.vec(&d.query_tables, w_table);
+    w.vec(&d.query_table_groups, |w, g| {
+        w.str(&g.id);
+        w_names(w, &g.name_ru, &g.name_en);
+    });
+}
+pub(crate) fn copy_bytes(d: &CatalogData) -> Result<u64, memory_budget::BudgetError> {
+    let mut writer = W(Vec::new(), Some(0), false);
+    w_data(&mut writer, d);
+    if writer.2 {
+        return Err(memory_budget::BudgetError::Overflow);
+    }
+    Ok(writer.1.unwrap_or(0))
+}
+
 type R<T> = Result<T, DecodeError>;
 
 fn err<T>(msg: &str) -> R<T> {
     Err(DecodeError(msg.to_string()))
 }
 
-struct Rd<'a>(&'a [u8]);
+struct Rd<'a> {
+    input: &'a [u8],
+    count: Option<u64>,
+    exact: bool,
+}
 
 impl<'a> Rd<'a> {
     fn take(&mut self, n: usize) -> R<&'a [u8]> {
-        if n > self.0.len() {
+        if n > self.input.len() {
             return err("unexpected end of data");
         }
-        let (a, b) = self.0.split_at(n);
-        self.0 = b;
+        let (a, b) = self.input.split_at(n);
+        self.input = b;
         Ok(a)
     }
     fn u8(&mut self) -> R<u8> {
@@ -196,7 +240,23 @@ impl<'a> Rd<'a> {
         let n = self.u32()? as usize;
         let b = self.take(n)?;
         match std::str::from_utf8(b) {
-            Ok(s) => Ok(s.to_string()),
+            Ok(s) => {
+                if let Some(total) = self.count {
+                    self.count = Some(
+                        total
+                            .checked_add(n as u64)
+                            .ok_or_else(|| DecodeError("allocation size overflow".into()))?,
+                    );
+                    Ok(String::new())
+                } else {
+                    let mut value = String::new();
+                    value
+                        .try_reserve_exact(n)
+                        .map_err(|_| DecodeError("allocation failed".into()))?;
+                    value.push_str(s);
+                    Ok(value)
+                }
+            }
             Err(_) => err("invalid UTF-8"),
         }
     }
@@ -209,12 +269,28 @@ impl<'a> Rd<'a> {
     }
     fn vec<T>(&mut self, f: impl Fn(&mut Self) -> R<T>) -> R<Vec<T>> {
         let n = self.u32()? as usize;
-        if n > self.0.len() {
+        if n > self.input.len() {
             return err("element count exceeds remaining data");
         }
-        let mut v = Vec::with_capacity(n.min(1024));
-        for _ in 0..n {
-            v.push(f(self)?);
+        let mut v = Vec::new();
+        if let Some(total) = self.count {
+            let bytes = n
+                .checked_mul(std::mem::size_of::<T>())
+                .ok_or_else(|| DecodeError("allocation size overflow".into()))?;
+            self.count = Some(
+                total
+                    .checked_add(bytes as u64)
+                    .ok_or_else(|| DecodeError("allocation size overflow".into()))?,
+            );
+            for _ in 0..n {
+                drop(f(self)?);
+            }
+        } else {
+            v.try_reserve_exact(if self.exact { n } else { n.min(1024) })
+                .map_err(|_| DecodeError("allocation failed".into()))?;
+            for _ in 0..n {
+                v.push(f(self)?);
+            }
         }
         Ok(v)
     }
@@ -396,6 +472,11 @@ fn r_table(r: &mut Rd) -> R<QueryTableInfo> {
 }
 
 fn r_data(r: &mut Rd) -> R<CatalogData> {
+    if let Some(bytes) = r.input.first_chunk::<4>()
+        && u32::from_le_bytes(*bytes) > u32::from(u16::MAX) + 1
+    {
+        return err("too many types");
+    }
     let types = r.vec(r_type)?;
     if types.len() > usize::from(u16::MAX) + 1 {
         return err("too many types");
@@ -456,9 +537,19 @@ impl Catalog {
             Ok(_) => return err("inflated data too large"),
             Err(e) => return Err(DecodeError(format!("inflate: {e}"))),
         }
-        let mut r = Rd(&raw);
+        let mut count = Rd {
+            input: &raw,
+            count: Some(0),
+            exact: true,
+        };
+        let _ = r_data(&mut count)?;
+        let mut r = Rd {
+            input: &raw,
+            count: None,
+            exact: true,
+        };
         let data = r_data(&mut r)?;
-        if !r.0.is_empty() {
+        if !r.input.is_empty() {
             return err("trailing bytes");
         }
         let c = Catalog::from_data(data);
@@ -486,5 +577,106 @@ impl Catalog {
         let mut enc = DeflateEncoder::new(head, Compression::best());
         let _ = enc.write_all(&w.0);
         enc.finish().unwrap_or_default()
+    }
+}
+
+const INFLATE_WORKSPACE: u64 = 128 << 10;
+
+impl Catalog {
+    pub fn decode_with_memory(
+        bytes: &[u8],
+        budget: &memory_budget::MemoryBudget,
+    ) -> Result<crate::AdmittedCatalog, crate::ManagedDecodeError> {
+        use memory_budget::{BudgetError, Category};
+        let workspace = budget.try_reserve(Category::ReaderWorking, INFLATE_WORKSPACE)?;
+        let result = (|| -> Result<_, DecodeError> {
+            let (platform, body) = split_header(bytes)?;
+            let mut count = 0usize;
+            {
+                let mut decoder = DeflateDecoder::new(body);
+                let mut chunk = [0u8; 8192];
+                loop {
+                    let n = decoder
+                        .read(&mut chunk)
+                        .map_err(|_| DecodeError("inflate failed".into()))?;
+                    if n == 0 {
+                        break;
+                    }
+                    count = count
+                        .checked_add(n)
+                        .ok_or_else(|| DecodeError("inflated data too large".into()))?;
+                    if count as u64 > MAX_INFLATED {
+                        return err("inflated data too large");
+                    }
+                }
+            }
+            Ok((platform, body, count))
+        })();
+        let (platform, body, count) = match result {
+            Ok(parts) => parts,
+            Err(error) => return Err(crate::ManagedDecodeError::data(error, workspace)),
+        };
+        let raw_charge = budget.try_reserve(Category::ReaderWorking, count as u64)?;
+        let mut raw = Vec::new();
+        raw.try_reserve_exact(count)
+            .map_err(|_| BudgetError::AllocationFailed)?;
+        raw.resize(count, 0);
+        let parsed = (|| -> Result<_, DecodeError> {
+            {
+                let mut decoder = DeflateDecoder::new(body);
+                decoder
+                    .read_exact(&mut raw)
+                    .map_err(|_| DecodeError("inflate failed".into()))?;
+            }
+            let mut reader = Rd {
+                input: &raw,
+                count: Some(0),
+                exact: true,
+            };
+            let _ = r_data(&mut reader)?;
+            if !reader.input.is_empty() {
+                return err("trailing bytes");
+            }
+            Ok(reader.count.unwrap_or(0))
+        })();
+        let typed = match parsed {
+            Ok(bytes) => bytes,
+            Err(error) => return Err(crate::ManagedDecodeError::data(error, workspace)),
+        };
+        let charge = budget.try_reserve(
+            Category::Metadata,
+            typed
+                .checked_add(platform.len() as u64)
+                .and_then(|n| n.checked_add(std::mem::size_of::<Catalog>() as u64))
+                .ok_or(BudgetError::Overflow)?,
+        )?;
+        let mut reader = Rd {
+            input: &raw,
+            count: None,
+            exact: true,
+        };
+        let data = match r_data(&mut reader) {
+            Ok(data) => data,
+            Err(error) => return Err(crate::ManagedDecodeError::data(error, workspace)),
+        };
+        charge.try_grow(crate::index::Indexes::bytes(&data)?)?;
+        let ix = crate::index::Indexes::try_build(&data)?;
+        let mut platform_text = String::new();
+        platform_text
+            .try_reserve_exact(platform.len())
+            .map_err(|_| BudgetError::AllocationFailed)?;
+        platform_text.push_str(platform);
+        let value = Catalog {
+            data,
+            ix,
+            platform: platform_text,
+        };
+        drop(raw);
+        drop(raw_charge);
+        drop(workspace);
+        Ok(crate::AdmittedCatalog {
+            value,
+            _charge: charge,
+        })
     }
 }

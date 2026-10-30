@@ -27,7 +27,7 @@ pub(crate) fn register(reg: &mut Registry) {
     }
 }
 
-fn managed_here(info: &TypeInfo) -> bool {
+pub(crate) fn managed_here(info: &TypeInfo) -> bool {
     info.kind == TypeKind::Enum
         && (info.avail.has(Context::Server) || info.enum_global)
         && !info.values.is_empty()
@@ -121,6 +121,28 @@ fn member_name(t: TypeIdx, m: MemberId) -> &'static str {
 }
 
 impl HostObject for EnumValue {
+    fn session_edges(&self, _: &mut dyn bsl_vm::SessionEdges) -> bool {
+        true
+    }
+    fn session_transfer_supported(&self) -> bool {
+        true
+    }
+    fn retained_memory(&self, _: &mut dyn bsl_vm::RetainedMemory) -> Result<bool, Exception> {
+        Ok(true)
+    }
+    fn session_transfer(
+        &self,
+        out: &mut dyn bsl_vm::SessionExport,
+    ) -> Result<Option<Box<dyn bsl_vm::SessionObject>>, Exception> {
+        out.reserve(std::mem::size_of::<crate::session::Leaf<SharedEnum>>() as u64)?;
+        Ok(Some(Box::new(crate::session::Leaf {
+            value: SharedEnum {
+                t: self.t,
+                index: self.index,
+            },
+            restore_bytes: crate::collections::retained_rc_size::<Self>(),
+        })))
+    }
     fn type_id(&self) -> TypeId {
         TypeId::of_catalog(self.t)
     }

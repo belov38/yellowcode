@@ -15,13 +15,8 @@ const IMMUTABLE: &str = "max-age=31536000, immutable";
 const DEFAULT_W: u32 = 1440;
 const DEFAULT_H: u32 = 900;
 
-fn json_reply(status: u16, body: &serde_json::Value) -> Response {
-    Response {
-        status,
-        content_type: "application/json; charset=utf-8",
-        body: serde_json::to_vec(body).unwrap_or_else(|_| b"null".to_vec()),
-        ..Default::default()
-    }
+fn json_reply<T: serde::Serialize + ?Sized>(status: u16, body: &T) -> Response {
+    super::memory::json(status, body)
 }
 
 fn error(status: u16, msg: &str) -> Response {
@@ -95,7 +90,8 @@ pub(super) fn message_page(status: u16, text: &str, refresh: bool) -> Response {
             "<!DOCTYPE html><html><head><meta charset=\"utf-8\">{meta}<title>{esc}</title></head>\
              <body style=\"font: 13px sans-serif; color: #555; margin: 16px\">{esc}</body></html>"
         )
-        .into_bytes(),
+        .into_bytes()
+        .into(),
         csp: Some(FORM_CSP),
         ..Default::default()
     }
@@ -105,9 +101,35 @@ fn binary(content_type: &'static str, body: Vec<u8>) -> Response {
     Response {
         status: 200,
         content_type,
-        body,
+        body: body.into(),
         cache_control: Some(IMMUTABLE),
         ..Default::default()
+    }
+}
+
+#[derive(serde::Serialize)]
+struct PreviewJson<'a> {
+    title: &'a str,
+    viewport: [f32; 2],
+    content: [f32; 2],
+    boxes: &'a [form_layout::ItemBox],
+    stubs: &'a std::collections::BTreeMap<String, u32>,
+    skipped: &'a std::collections::BTreeMap<String, u32>,
+    warnings: &'a [String],
+    ms: u64,
+}
+impl<'a> From<&'a Preview> for PreviewJson<'a> {
+    fn from(preview: &'a Preview) -> Self {
+        Self {
+            title: &preview.title,
+            viewport: [preview.viewport.w, preview.viewport.h],
+            content: [preview.layout.content.w, preview.layout.content.h],
+            boxes: &preview.layout.boxes,
+            stubs: &preview.form.stats.stubs,
+            skipped: &preview.form.stats.skipped,
+            warnings: &preview.layout.warnings,
+            ms: preview.millis as u64,
+        }
     }
 }
 
@@ -123,14 +145,15 @@ pub fn handle(state: &State, req: &Request) -> Option<Response> {
                         prefix: "/res".into(),
                     },
                 )
-                .into_bytes(),
+                .into_bytes()
+                .into(),
                 csp: Some(FORM_CSP),
                 ..Default::default()
             },
             Err(e) => e,
         },
         "/api/form" => match build(state, req) {
-            Ok(p) => json_reply(200, &form::preview_json(&p)),
+            Ok(p) => json_reply(200, &PreviewJson::from(&p)),
             Err(e) => e,
         },
         "/api/form/roles" => {

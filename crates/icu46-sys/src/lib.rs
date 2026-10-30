@@ -10,9 +10,14 @@ use std::sync::OnceLock;
 
 mod bounded;
 mod ffi;
+#[cfg(feature = "managed")]
+pub mod managed;
 #[cfg(feature = "regex")]
 pub mod regex;
 pub use bounded::{IcuStatus, SortKeyWrite};
+#[cfg(feature = "testing")]
+#[doc(hidden)]
+pub use managed as testing;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Strength {
@@ -60,14 +65,54 @@ fn init() -> Result<(), IcuError> {
     init_status().map_err(|error| IcuError::new(error.code))
 }
 
+unsafe fn init_step(step: u8, status: &mut ffi::UErrorCode) {
+    unsafe {
+        match step {
+            1 => ffi::udata_setFileAccess_46(ffi::UDATA_NO_FILES, status),
+            2 => ffi::u_setDataDirectory_46(c"".as_ptr()),
+            3 => ffi::uloc_setDefault_46(c"root".as_ptr(), status),
+            _ => ffi::udata_setCommonData_46(DATA.0.as_ptr().cast(), status),
+        }
+    }
+}
+
+#[cfg(feature = "managed")]
+pub(crate) fn init_managed(call: &managed::runtime::NativeCall) -> Result<(), i32> {
+    let mut status = ffi::U_ZERO_ERROR;
+    for step in 1..=4 {
+        call.set_boundary(managed::runtime::Boundary::Init(step));
+        unsafe { init_step(step, &mut status) };
+        if status > ffi::U_ZERO_ERROR {
+            return Err(status);
+        }
+        if call.failed() {
+            return Err(ffi::U_MEMORY_ALLOCATION_ERROR);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "managed")]
+fn legacy_entry() -> Result<(), IcuStatus> {
+    use managed::runtime::RuntimeError;
+    managed::runtime::legacy_entry().map_err(|error| IcuStatus {
+        code: match error {
+            RuntimeError::RestartRequired(_) => ffi::U_MEMORY_ALLOCATION_ERROR,
+            _ => ffi::U_INVALID_STATE_ERROR,
+        },
+    })
+}
+#[cfg(not(feature = "managed"))]
+fn legacy_entry() -> Result<(), IcuStatus> {
+    Ok(())
+}
+
 fn init_status() -> Result<(), IcuStatus> {
+    legacy_entry()?;
     *INIT.get_or_init(|| {
         let mut status = ffi::U_ZERO_ERROR;
-        unsafe {
-            ffi::udata_setFileAccess_46(ffi::UDATA_NO_FILES, &mut status);
-            ffi::u_setDataDirectory_46(c"".as_ptr());
-            ffi::uloc_setDefault_46(c"root".as_ptr(), &mut status);
-            ffi::udata_setCommonData_46(DATA.0.as_ptr().cast(), &mut status);
+        for step in 1..=4 {
+            unsafe { init_step(step, &mut status) };
         }
         if status > ffi::U_ZERO_ERROR {
             Err(IcuStatus { code: status })
@@ -119,6 +164,9 @@ impl Collator {
         src.extend_from_slice(text);
         src.push(0u16);
         let mut cap = cap.clamp(1, i32::MAX as usize - SORT_KEY_SLACK);
+        if legacy_entry().is_err() {
+            return Vec::new();
+        }
         loop {
             let mut buf = vec![0u8; cap + SORT_KEY_SLACK];
             let need = unsafe {

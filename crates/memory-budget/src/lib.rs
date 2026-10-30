@@ -12,6 +12,7 @@ pub use lock::{Guard as LockGuard, Lock};
 pub mod boxed;
 pub use boxed::BudgetedBox;
 pub mod buffer;
+pub mod desktop;
 pub mod discovery;
 pub mod policy;
 #[doc(hidden)]

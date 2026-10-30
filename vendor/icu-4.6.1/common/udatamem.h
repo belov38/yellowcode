@@ -20,6 +20,7 @@
 #define __UDATAMEM_H__
 
 #include "unicode/udata.h"
+#include "managed_memory.h"
 #include "ucmndata.h"
 
 struct UDataMemory {
@@ -43,6 +44,10 @@ struct UDataMemory {
 };
 
 U_CFUNC UDataMemory *UDataMemory_createNewInstance(UErrorCode *pErr);
+U_CFUNC UDataMemory *managed_data_create_46(UManagedOwner46 owner, UErrorCode *pErr);
+U_CAPI UDataMemory * U_EXPORT2 managed_udata_openChoice_46(
+    const char *, const char *, const char *, UDataMemoryIsAcceptable *, void *,
+    UManagedOwner46, UErrorCode *);
 U_CFUNC void         UDatamemory_assign  (UDataMemory *dest, UDataMemory *source);
 U_CFUNC void         UDataMemory_init    (UDataMemory *This);
 U_CFUNC UBool        UDataMemory_isLoaded(const UDataMemory *This);

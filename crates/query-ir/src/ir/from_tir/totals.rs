@@ -121,9 +121,10 @@ impl<'a> Builder<'a> {
     pub(super) fn totals_prepare(&mut self, q: &'a Query, t: &'a tir::Totals) -> R<()> {
         let hits = hit_spans(t);
         let mut extra: Vec<&'a TExpr> = Vec::new();
+        let items = q.parts.first().map(|s| s.items.as_slice()).unwrap_or(&[]);
         for p in &t.points {
             if let ControlPoint::Field(f) = p
-                && f.col.is_none()
+                && tir::totals_point_column(f, items).is_none()
             {
                 extra.push(&f.expr);
             }
@@ -212,7 +213,8 @@ impl<'a> Builder<'a> {
                 point_exprs.push(None);
                 continue;
             };
-            let column = match f.col {
+            let selected = tir::totals_point_column(f, &first.items);
+            let column = match selected {
                 Some(c) => {
                     if u16::try_from(c).is_ok_and(|c| self.present.contains(&c)) {
                         return later("ИТОГИ по колонке представления", "Q4");
@@ -221,7 +223,7 @@ impl<'a> Builder<'a> {
                 }
                 None => self.extra_col(&f.expr)?,
             };
-            let base = match (&f.alias, f.col) {
+            let base = match (&f.alias, selected) {
                 (Some(a), _) => a.clone(),
                 (None, Some(c)) => self.col_names.get(c).cloned().unwrap_or_default(),
                 (None, None) => self.hidden_point_name(&f.expr),
@@ -233,7 +235,7 @@ impl<'a> Builder<'a> {
                 format!("{base}{n}")
             };
             *n += 1;
-            let source = match f.col {
+            let source = match selected {
                 Some(c) => first.items.get(c).map(|i| &i.expr),
                 None => Some(&f.expr),
             };

@@ -170,7 +170,7 @@ fn run_handler(
     let mut data: Vec<(&str, Value)> = Vec::with_capacity(names.len());
     for n in &names {
         if let Some(i) = field_index(def, n) {
-            data.push((n.as_str(), row.value(app, obj, i)?));
+            data.push((n.as_str(), row.value(ex, app, obj, i)?));
         }
     }
     let presentation = Place::temp(Value::from(""));
@@ -276,7 +276,7 @@ fn standard(ex: &mut Execution, app: &Application, obj: ObjId, row: &ReadRow) ->
     let attr = |ex: &mut Execution, a: StdAttr| -> CallResult<Option<Str>> {
         match def.fields.iter().position(|f| f.std == Some(a)) {
             Some(i) => {
-                let v = row.value(app, obj, i)?;
+                let v = row.value(ex, app, obj, i)?;
                 Ok(Some(ex.present(&v).map_err(CallError::Exc)?))
             }
             None => Ok(None),

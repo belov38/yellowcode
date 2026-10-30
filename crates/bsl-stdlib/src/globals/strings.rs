@@ -130,7 +130,11 @@ pub(super) fn register(reg: &mut Registry) {
     global(reg, "СтрСравнить", "StrCompare", |ex, a| {
         let x = arg_str(ex, a.first())?;
         let y = arg_str(ex, a.get(1))?;
-        let ord = ex.env().collation().compare_secondary(x.units(), y.units());
+        let ord = ex
+            .env()
+            .collation()
+            .try_compare_secondary(x.units(), y.units());
+        let ord = ord.map_err(|error| ex.collation_error(error))?;
         Ok(int_value(match ord {
             Ordering::Less => -1,
             Ordering::Equal => 0,

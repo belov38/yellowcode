@@ -11,6 +11,7 @@ pub mod data;
 pub mod format;
 pub mod grammar;
 pub mod locale;
+pub mod locale_key;
 pub mod nstr;
 pub mod parse;
 pub mod pattern;

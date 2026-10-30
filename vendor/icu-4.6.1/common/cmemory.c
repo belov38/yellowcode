@@ -20,6 +20,7 @@
 */
 #include "unicode/uclean.h"
 #include "cmemory.h"
+#include "managed_memory.h"
 #include <stdlib.h>
 
 /* uprv_malloc(0) returns a pointer to this read-only data. */                
@@ -122,3 +123,43 @@ U_CFUNC UBool cmemory_inUse() {
     return gHeapInUse;
 }
 
+
+#if U_MANAGED_MEMORY_ENABLED_46 || defined(U_MANAGED_MEMORY_TESTING_46)
+static UManagedAllocFn46 *pOwnedAlloc46;
+static UManagedFailedFn46 *pFailed46;
+#endif
+
+U_CAPI void * U_EXPORT2
+managed_malloc_46(size_t size, int32_t role, int32_t site) {
+#if U_MANAGED_MEMORY_ENABLED_46 || defined(U_MANAGED_MEMORY_TESTING_46)
+    if (size > 0 && pOwnedAlloc46 != NULL) {
+        UManagedOwner46 owner;
+        owner.role = role;
+        owner.site = site;
+        gHeapInUse = TRUE;
+        return (*pOwnedAlloc46)(pContext, owner, size);
+    }
+#endif
+    return uprv_malloc(size);
+}
+
+U_CAPI UBool U_EXPORT2 managed_failed_46(void) {
+#if U_MANAGED_MEMORY_ENABLED_46 || defined(U_MANAGED_MEMORY_TESTING_46)
+    return pFailed46 != NULL && (*pFailed46)(pContext);
+#else
+    return FALSE;
+#endif
+}
+
+#if U_MANAGED_MEMORY_ENABLED_46 || defined(U_MANAGED_MEMORY_TESTING_46)
+U_CAPI void U_EXPORT2 managed_owned_install_46(UManagedAllocFn46 *alloc,
+        UManagedFailedFn46 *failed, int32_t *status) {
+    if (U_FAILURE((UErrorCode)*status)) return;
+    if (gHeapInUse || alloc == NULL || failed == NULL || pAlloc == NULL) {
+        *status = U_INVALID_STATE_ERROR;
+        return;
+    }
+    pOwnedAlloc46 = alloc;
+    pFailed46 = failed;
+}
+#endif

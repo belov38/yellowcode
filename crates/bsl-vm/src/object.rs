@@ -47,10 +47,46 @@ pub(crate) fn restart_creation_numbers() {
 const NOT_INDEXED: &str = "bsl:IDS_RTE_NOTINDEXED";
 const NOT_ENUM: &str = "bsl:IDS_RTE_NOTENUM";
 
+pub trait RetainedMemory {
+    fn work(&mut self, units: u64) -> Result<(), Exception>;
+    fn mutable(&mut self);
+    fn bytes(&mut self, bytes: u64) -> Result<(), Exception>;
+    fn allocation(&mut self, identity: usize, bytes: u64) -> Result<bool, Exception>;
+    fn value(&mut self, value: &Value) -> Result<(), Exception>;
+    fn string(&mut self, value: &Str) -> Result<(), Exception>;
+}
+
 pub trait HostObject: Any {
+    fn property_names(&self, _ex: &mut Execution, _retained: u64) -> CallResult<Option<Vec<Str>>> {
+        Ok(None)
+    }
+    fn session_transfer_supported(&self) -> bool {
+        false
+    }
+    fn session_edges(&self, _visit: &mut dyn crate::SessionEdges) -> bool {
+        false
+    }
+    fn session_clear(&self) {}
+    fn session_transfer(
+        &self,
+        _out: &mut dyn crate::SessionExport,
+    ) -> Result<Option<Box<dyn crate::SessionObject>>, Exception> {
+        Ok(None)
+    }
+    fn retained_memory(&self, _visit: &mut dyn RetainedMemory) -> Result<bool, Exception> {
+        Ok(false)
+    }
     fn type_id(&self) -> TypeId;
     fn as_any(&self) -> &dyn Any;
     fn get(&self, ex: &mut Execution, m: MemberId) -> CallResult<Value>;
+    fn get_with_retained(
+        &self,
+        ex: &mut Execution,
+        m: MemberId,
+        _retained: u64,
+    ) -> CallResult<Value> {
+        self.get(ex, m)
+    }
     fn set(&self, ex: &mut Execution, m: MemberId, v: Value) -> CallResult<()>;
     fn call(&self, ex: &mut Execution, m: MemberId, args: &mut [Arg]) -> CallResult<Value>;
 
@@ -106,11 +142,30 @@ pub trait HostObject: Any {
         None
     }
 
+    fn charge_equals(
+        &self,
+        _ex: &mut Execution,
+        _other: &dyn HostObject,
+    ) -> Result<bool, Exception> {
+        Ok(false)
+    }
+
+    fn point_in_time_key(&self, _ex: &Execution) -> Option<([u8; 16], [u8; 16])> {
+        None
+    }
+
     fn is_empty_value(&self) -> bool {
         false
     }
 
     fn to_shared(&self) -> Option<SharedValue> {
         None
+    }
+
+    fn reuse_fields(
+        &self,
+        _visit: &mut dyn FnMut(&Str, &Value) -> Result<(), Exception>,
+    ) -> Result<bool, Exception> {
+        Ok(false)
     }
 }

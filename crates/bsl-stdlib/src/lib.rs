@@ -4,6 +4,7 @@
 )]
 #![forbid(unsafe_code)]
 
+pub mod api;
 mod binary;
 pub mod bind;
 #[cfg(feature = "collate")]
@@ -16,6 +17,7 @@ mod globals;
 mod json;
 pub mod present;
 pub mod serial;
+mod session;
 mod sort;
 mod symbols;
 mod text;

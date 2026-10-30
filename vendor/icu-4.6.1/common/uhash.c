@@ -219,7 +219,8 @@ _uhash_allocate(UHashtable *hash,
     hash->length = PRIMES[primeIndex];
 
     p = hash->elements = (UHashElement*)
-        uprv_malloc(sizeof(UHashElement) * hash->length);
+        managed_malloc_46(sizeof(UHashElement) * hash->length,
+                          hash->arrayOwner.role, hash->arrayOwner.site);
 
     if (hash->elements == NULL) {
         *status = U_MEMORY_ALLOCATION_ERROR;
@@ -248,12 +249,14 @@ _uhash_init(UHashtable *result,
               UKeyComparator *keyComp,
               UValueComparator *valueComp,
               int32_t primeIndex,
+              UManagedOwner46 arrayOwner,
               UErrorCode *status)
 {
     if (U_FAILURE(*status)) return NULL;
     U_ASSERT(keyHash != NULL);
     U_ASSERT(keyComp != NULL);
 
+    result->arrayOwner      = arrayOwner;
     result->keyHasher       = keyHash;
     result->keyComparator   = keyComp;
     result->valueComparator = valueComp;
@@ -276,18 +279,22 @@ _uhash_create(UHashFunction *keyHash,
               UKeyComparator *keyComp,
               UValueComparator *valueComp,
               int32_t primeIndex,
+              int32_t role, int32_t tableSite, int32_t arraySite,
               UErrorCode *status) {
     UHashtable *result;
+    UManagedOwner46 arrayOwner;
+    arrayOwner.role = role;
+    arrayOwner.site = arraySite;
 
     if (U_FAILURE(*status)) return NULL;
 
-    result = (UHashtable*) uprv_malloc(sizeof(UHashtable));
+    result = (UHashtable*) managed_malloc_46(sizeof(UHashtable), role, tableSite);
     if (result == NULL) {
         *status = U_MEMORY_ALLOCATION_ERROR;
         return NULL;
     }
 
-    _uhash_init(result, keyHash, keyComp, valueComp, primeIndex, status);
+    _uhash_init(result, keyHash, keyComp, valueComp, primeIndex, arrayOwner, status);
     result->allocated       = TRUE;
 
     if (U_FAILURE(*status)) {
@@ -393,6 +400,7 @@ _uhash_rehash(UHashtable *hash, UErrorCode *status) {
 
     UHashElement *old = hash->elements;
     int32_t oldLength = hash->length;
+    int8_t oldPrimeIndex = hash->primeIndex;
     int32_t newPrimeIndex = hash->primeIndex;
     int32_t i;
 
@@ -412,7 +420,8 @@ _uhash_rehash(UHashtable *hash, UErrorCode *status) {
 
     if (U_FAILURE(*status)) {
         hash->elements = old;
-        hash->length = oldLength;       
+        hash->length = oldLength;
+        hash->primeIndex = oldPrimeIndex;
         return;
     }
 
@@ -533,28 +542,36 @@ _uhash_put(UHashtable *hash,
  ********************************************************************/
 
 U_CAPI UHashtable* U_EXPORT2
+managed_uhash_open_46(UHashFunction *keyHash, UKeyComparator *keyComp,
+                     UValueComparator *valueComp, int32_t role,
+                     int32_t tableSite, int32_t arraySite, UErrorCode *status) {
+    return _uhash_create(keyHash, keyComp, valueComp, DEFAULT_PRIME_INDEX,
+                         role, tableSite, arraySite, status);
+}
+
+U_CAPI UHashtable* U_EXPORT2
 uhash_open(UHashFunction *keyHash, 
            UKeyComparator *keyComp,
            UValueComparator *valueComp,
            UErrorCode *status) {
 
-    return _uhash_create(keyHash, keyComp, valueComp, DEFAULT_PRIME_INDEX, status);
+    return _uhash_create(keyHash, keyComp, valueComp, DEFAULT_PRIME_INDEX, 0, 0, 0, status);
 }
 
 U_CAPI UHashtable* U_EXPORT2
-uhash_openSize(UHashFunction *keyHash, 
-               UKeyComparator *keyComp,
-               UValueComparator *valueComp,
-               int32_t size,
-               UErrorCode *status) {
+managed_uhash_openSize_46(UHashFunction *keyHash, UKeyComparator *keyComp,
+                         UValueComparator *valueComp, int32_t size,
+                         int32_t role, int32_t tableSite, int32_t arraySite,
+                         UErrorCode *status) {
+    int32_t i=0;
+    while(i<(PRIMES_LENGTH-1) && PRIMES[i]<size) ++i;
+    return _uhash_create(keyHash, keyComp, valueComp, i, role, tableSite, arraySite, status);
+}
 
-    /* Find the smallest index i for which PRIMES[i] >= size. */
-    int32_t i = 0;
-    while (i<(PRIMES_LENGTH-1) && PRIMES[i]<size) {
-        ++i;
-    }
-
-    return _uhash_create(keyHash, keyComp, valueComp, i, status);
+U_CAPI UHashtable* U_EXPORT2
+uhash_openSize(UHashFunction *keyHash, UKeyComparator *keyComp,
+               UValueComparator *valueComp, int32_t size, UErrorCode *status) {
+    return managed_uhash_openSize_46(keyHash, keyComp, valueComp, size, 0, 0, 0, status);
 }
 
 U_CAPI UHashtable* U_EXPORT2
@@ -564,7 +581,8 @@ uhash_init(UHashtable *fillinResult,
            UValueComparator *valueComp,
            UErrorCode *status) {
 
-    return _uhash_init(fillinResult, keyHash, keyComp, valueComp, DEFAULT_PRIME_INDEX, status);
+    UManagedOwner46 owner = { 0, 0 };
+    return _uhash_init(fillinResult, keyHash, keyComp, valueComp, DEFAULT_PRIME_INDEX, owner, status);
 }
 
 U_CAPI void U_EXPORT2

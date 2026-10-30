@@ -107,6 +107,13 @@ allocIndex2Block(UNewTrie2 *trie);
 
 U_CAPI UTrie2 * U_EXPORT2
 utrie2_open(uint32_t initialValue, uint32_t errorValue, UErrorCode *pErrorCode) {
+    UManagedOwner46 owner = { 0, 0 };
+    return managed_utrie2_open_46(initialValue, errorValue, owner, owner, pErrorCode);
+}
+
+U_CAPI UTrie2 * U_EXPORT2
+managed_utrie2_open_46(uint32_t initialValue, uint32_t errorValue,
+    UManagedOwner46 wrapperOwner, UManagedOwner46 frozenOwner, UErrorCode *pErrorCode) {
     UTrie2 *trie;
     UNewTrie2 *newTrie;
     uint32_t *data;
@@ -116,7 +123,7 @@ utrie2_open(uint32_t initialValue, uint32_t errorValue, UErrorCode *pErrorCode) 
         return NULL;
     }
 
-    trie=(UTrie2 *)uprv_malloc(sizeof(UTrie2));
+    trie=(UTrie2 *)managed_malloc_46(sizeof(UTrie2), wrapperOwner.role, wrapperOwner.site);
     newTrie=(UNewTrie2 *)uprv_malloc(sizeof(UNewTrie2));
     data=(uint32_t *)uprv_malloc(UNEWTRIE2_INITIAL_DATA_LENGTH*4);
     if(trie==NULL || newTrie==NULL || data==NULL) {
@@ -128,6 +135,7 @@ utrie2_open(uint32_t initialValue, uint32_t errorValue, UErrorCode *pErrorCode) 
     }
 
     uprv_memset(trie, 0, sizeof(UTrie2));
+    trie->frozenOwner=frozenOwner;
     trie->initialValue=initialValue;
     trie->errorValue=errorValue;
     trie->highStart=0x110000;
@@ -291,6 +299,9 @@ utrie2_clone(const UTrie2 *other, UErrorCode *pErrorCode) {
         return NULL;
     }
     uprv_memcpy(trie, other, sizeof(UTrie2));
+    /* A generic clone is a new Operation receiver, not its source cache. */
+    trie->frozenOwner.role=0;
+    trie->frozenOwner.site=0;
 
     if(other->memory!=NULL) {
         trie->memory=uprv_malloc(other->length);
@@ -1321,7 +1332,7 @@ utrie2_freeze(UTrie2 *trie, UTrie2ValueBits valueBits, UErrorCode *pErrorCode) {
         length+=newTrie->dataLength*4;
     }
 
-    trie->memory=uprv_malloc(length);
+    trie->memory=managed_malloc_46(length, trie->frozenOwner.role, trie->frozenOwner.site);
     if(trie->memory==NULL) {
         *pErrorCode=U_MEMORY_ALLOCATION_ERROR;
         return;

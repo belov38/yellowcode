@@ -5,7 +5,7 @@ use std::sync::{Mutex, PoisonError};
 use crate::blobstore::BlobStore;
 use crate::catalog::{Catalog, CatalogEntry, ROOT_CONTENT_BLOCK};
 use crate::collate::{Collate, Strength};
-use crate::error::{Error, Location, Result, Unsupported};
+use crate::error::{Error, Location, Result, Unsupported, brief};
 use crate::format::bytes::u32le;
 use crate::format::descr::{IndexDescr, TableDescr};
 use crate::format::index_page::{
@@ -232,7 +232,7 @@ impl BlockUse {
             BlockUse::Value { row, field } => {
                 let name = d
                     .and_then(|d| d.fields.get(usize::from(field)))
-                    .map_or("?", |f| f.name.as_str());
+                    .map_or("?", |f| brief(&f.name));
                 format!("record {row} field {name}")
             }
         }
@@ -287,7 +287,7 @@ enum IxUse {
 
 impl IxUse {
     fn describe(self, d: &TableDescr) -> String {
-        let name = |pos: usize| d.indexes.get(pos).map_or("?", |i| i.name.as_str());
+        let name = |pos: usize| d.indexes.get(pos).map_or("?", |i| brief(&i.name));
         match self {
             IxUse::Header => "the header".into(),
             IxUse::Free => "a free page".into(),
@@ -451,18 +451,34 @@ impl Watched<'_> {
             .unwrap_or_else(PoisonError::into_inner)
             .take()
     }
+
+    fn watch<T>(&self, r: Result<T>) -> Result<T> {
+        if let Err(e) = &r
+            && !e.is_fatal()
+        {
+            *self.failure.lock().unwrap_or_else(PoisonError::into_inner) = Some(e.to_string());
+        }
+        r
+    }
 }
 
 impl Collate for Watched<'_> {
     fn sort_key(&self, locale: &str, strength: Strength, text: &[u16]) -> Result<Vec<u8>> {
-        let r = match self.inner {
+        self.watch(match self.inner {
             Some(c) => c.sort_key(locale, strength, text),
             None => Err(Error::Unsupported(Unsupported::NoCollator)),
-        };
-        if let Err(e) = &r {
-            *self.failure.lock().unwrap_or_else(PoisonError::into_inner) = Some(e.to_string());
-        }
-        r
+        })
+    }
+
+    #[cfg(feature = "icu")]
+    fn paid_sort_key(
+        &self,
+        locale: &str,
+        strength: Strength,
+        text: &[u16],
+    ) -> Option<Result<memory_budget::BudgetedVec<u8>>> {
+        let key = self.inner?.paid_sort_key(locale, strength, text)?;
+        Some(self.watch(key))
     }
 }
 
@@ -496,8 +512,8 @@ struct IndexCx<'x> {
 impl IndexCx<'_> {
     fn at(&self, page: Option<u32>) -> Location {
         Location::Index {
-            table: self.t.descr().name.clone(),
-            index: self.idx.name.clone(),
+            table: brief(&self.t.descr().name).to_owned(),
+            index: brief(&self.idx.name).to_owned(),
             page,
         }
     }
@@ -566,7 +582,7 @@ impl<'a> Checker<'a> {
     }
 
     fn name(&self, owner: u32) -> &str {
-        self.names.get(owner as usize).map_or("?", String::as_str)
+        self.names.get(owner as usize).map_or("?", |n| brief(n))
     }
 
     fn check_coverage(&mut self) {
@@ -772,7 +788,7 @@ impl<'a> Checker<'a> {
     fn check_table(&mut self, entry: &CatalogEntry, keys: KeyCtx) -> Result<()> {
         self.tables += 1;
         let d = &*entry.descr;
-        let name = d.name.clone();
+        let name = brief(&d.name).to_owned();
         let table = || Location::Table(name.clone());
         let [data_h, blob_h, index_h] = d.files;
         let data = self.open_file(data_h, format!("the data file of {name}"), true)?;
@@ -833,7 +849,7 @@ impl<'a> Checker<'a> {
     }
 
     fn check_records(&mut self, t: &TableRead) -> Result<Vec<bool>> {
-        let name = t.descr().name.clone();
+        let name = brief(&t.descr().name).to_owned();
         let at = |row: u32| Location::Record {
             table: name.clone(),
             row,
@@ -925,7 +941,7 @@ impl<'a> Checker<'a> {
     ) -> Result<()> {
         let d = t.descr();
         let l = t.layout();
-        let name = &d.name;
+        let name = brief(&d.name);
         let fields: Vec<usize> = d
             .fields
             .iter()
@@ -935,7 +951,7 @@ impl<'a> Checker<'a> {
             .collect();
         let mut listed = Listed::default();
         let mut blocks = Blocks::new(store.map_or(0, BlobStore::nblocks));
-        let table = || Location::Table(name.clone());
+        let table = || Location::Table(name.to_owned());
         if let Some(s) = store {
             match s.free_blocks(self.pr) {
                 Ok(chain) => {
@@ -951,7 +967,7 @@ impl<'a> Checker<'a> {
             .filter_map(|(row, _)| u32::try_from(row).ok());
         for row in rows.filter(|_| !fields.is_empty()) {
             let record = || Location::Record {
-                table: name.clone(),
+                table: name.to_owned(),
                 row,
             };
             let rec = match t.raw_record(row) {
@@ -962,7 +978,7 @@ impl<'a> Checker<'a> {
                 }
             };
             for &i in &fields {
-                let fname = d.fields.get(i).map_or("?", |f| f.name.as_str());
+                let fname = d.fields.get(i).map_or("?", |f| brief(&f.name));
                 let r = match decode_field(d, l, i, &rec) {
                     Ok(Value::Null) => continue,
                     Ok(
@@ -998,7 +1014,7 @@ impl<'a> Checker<'a> {
                 if r.len == 0 {
                     listed.add(
                         Location::Blob {
-                            table: name.clone(),
+                            table: name.to_owned(),
                             block: r.start,
                         },
                         format!(
@@ -1027,7 +1043,7 @@ impl<'a> Checker<'a> {
                     let block = list.first().copied().unwrap_or(r.start);
                     listed.add(
                         Location::Blob {
-                            table: name.clone(),
+                            table: name.to_owned(),
                             block,
                         },
                         format!(
@@ -1044,7 +1060,7 @@ impl<'a> Checker<'a> {
             listed.add_kind(
                 Kind::Unused,
                 Location::Blob {
-                    table: name.clone(),
+                    table: name.to_owned(),
                     block: b,
                 },
                 format!("block {b} is neither used by a value nor free"),
@@ -1072,7 +1088,7 @@ impl<'a> Checker<'a> {
         keys: KeyCtx,
     ) -> Result<()> {
         let d = t.descr();
-        let name = d.name.clone();
+        let name = brief(&d.name).to_owned();
         let table = || Location::Table(name.clone());
         let Some(file) = file else {
             if !d.indexes.is_empty() && d.files[2] == 0 {
@@ -1185,8 +1201,8 @@ impl<'a> Checker<'a> {
         let mut listed = Listed::default();
         self.index_tree(tx, pos, idx, descr_ptr, pages, &mut listed)?;
         let at = Location::Index {
-            table: tx.t.descr().name.clone(),
-            index: idx.name.clone(),
+            table: brief(&tx.t.descr().name).to_owned(),
+            index: brief(&idx.name).to_owned(),
             page: None,
         };
         listed.flush(&mut self.out, at, "problems of the index");
@@ -1204,8 +1220,8 @@ impl<'a> Checker<'a> {
     ) -> Result<()> {
         let d = tx.t.descr();
         let at = |page| Location::Index {
-            table: d.name.clone(),
-            index: idx.name.clone(),
+            table: brief(&d.name).to_owned(),
+            index: brief(&idx.name).to_owned(),
             page,
         };
         let relocate = |e: Error, page: u32| -> Result<Violation> {
@@ -1607,7 +1623,7 @@ impl<'a> Checker<'a> {
                 listed.add_kind(
                     Kind::Keys,
                     cx.at(Some(no)),
-                    format!("row {row}: key mismatch in field {}", fld.name),
+                    format!("row {row}: key mismatch in field {}", brief(&fld.name)),
                 );
             }
         }

@@ -2,18 +2,18 @@ mod array;
 mod codec;
 mod columns;
 mod compare;
+mod fill;
 mod fixed;
 mod map;
 mod pair;
+mod retained;
 mod retire;
 mod structure;
 mod value_list;
 mod value_table;
 mod value_tree;
-#[allow(unused_imports, reason = "internal producer type for Task14 API")]
-pub(crate) use value_table::ValueTable;
-#[allow(unused_imports, reason = "internal producer type for Task14 API")]
-pub(crate) use value_tree::ValueTree;
+pub use value_table::ValueTable;
+pub use value_tree::ValueTree;
 mod xdto;
 pub use value_list::{new_value_list, value_list_items};
 
@@ -26,6 +26,7 @@ pub(crate) use xdto::xdto_codecs;
 pub use map::{map_pairs, map_put, new_fixed_map, new_map};
 pub(crate) use pair::KeyValue;
 pub(crate) use structure::is_name;
+pub(crate) use structure::{copy_number, copy_value};
 
 use crate::bind::msg;
 use crate::enums::type_by_id;
@@ -73,6 +74,11 @@ pub(crate) fn types() -> &'static Types {
 }
 
 pub(crate) fn register(reg: &mut Registry) {
+    reg.global_fn(
+        "ЗаполнитьЗначенияСвойств",
+        "FillPropertyValues",
+        Arc::new(fill::fill),
+    );
     let t = types();
     let ctor = |f: fn(&mut Execution, &mut [bsl_vm::Arg]) -> bsl_vm::CallResult<Value>| TypeImpl {
         ctor: Some(Arc::new(f)),
@@ -168,6 +174,8 @@ pub(crate) fn release(values: Vec<Value>) {
                 stack.extend(row.take_values());
             } else if let Some(kv) = any.downcast_ref::<KeyValue>() {
                 stack.extend(kv.take());
+            } else if let Some(boundary) = any.downcast_ref::<crate::values::boundary::Boundary>() {
+                stack.push(boundary.take());
             }
         }
         drop(o);
@@ -227,3 +235,8 @@ pub(crate) fn snapshot(v: &Value) -> Option<Snapshot> {
     }
     map::map_pairs(v).map(Snapshot::Map)
 }
+
+pub(crate) mod accounting;
+pub use accounting::{
+    RetainedChargeError, retained_charge, retained_rc_size, retained_shallow_bytes,
+};

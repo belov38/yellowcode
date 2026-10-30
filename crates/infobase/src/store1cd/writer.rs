@@ -16,6 +16,12 @@ fn ended() -> StoreError {
 }
 
 impl TableSource for TxnCell {
+    fn set_read_budget(&mut self, _: memory_budget::MemoryBudget) -> StoreResult<()> {
+        Err(StoreError::Unsupported(
+            "admitted reads require a read snapshot".into(),
+        ))
+    }
+
     fn table(&self, name: &str) -> StoreResult<onecd::TableRead<'_>> {
         self.borrow_dependent()
             .as_ref()

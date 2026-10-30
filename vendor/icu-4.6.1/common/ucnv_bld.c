@@ -36,6 +36,7 @@
 #include "ucnv_imp.h"
 #include "uhash.h"
 #include "umutex.h"
+#include "umutex_static.h"
 #include "cstring.h"
 #include "cmemory.h"
 #include "ucln_cmn.h"
@@ -151,7 +152,7 @@ static struct {
 
 /*initializes some global variables */
 static UHashtable *SHARED_DATA_HASHTABLE = NULL;
-static UMTX        cnvCacheMutex = NULL;  /* Mutex for synchronizing cnv cache access. */
+UMTX_STATIC(cnvCacheMutex, umtx_converterStatic_46); /* Converter cache access. */
                                           /*  Note:  the global mutex is used for      */
                                           /*         reference count updates.          */
 
@@ -236,17 +237,37 @@ isCnvAcceptable(void *context,
 /**
  * Un flatten shared data from a UDATA..
  */
+static UConverterSharedData *
+ucnv_cloneSharedData(const UConverterSharedData *initial, UConverterLoadArgs *pArgs,
+                     UErrorCode *status) {
+    UConverterSharedData *data;
+    /* Only the shared-cache destination owns retained backing. Uncached package
+     * and loadability-probe wrappers remain on the original Operation scope. */
+    int32_t role=(!pArgs->onlyTestIsLoadable &&
+                  (pArgs->pkg==NULL || *pArgs->pkg==0)) ? 12 : 0;
+    if(U_FAILURE(*status)) return NULL;
+    if(managed_failed_46()) { *status=U_MEMORY_ALLOCATION_ERROR; return NULL; }
+    data=(UConverterSharedData *)managed_malloc_46(sizeof(UConverterSharedData), role, 1204);
+    if(data==NULL) { *status=U_MEMORY_ALLOCATION_ERROR; return NULL; }
+    uprv_memcpy(data, initial, sizeof(UConverterSharedData));
+    return data;
+}
+
 static UConverterSharedData*
 ucnv_data_unFlattenClone(UConverterLoadArgs *pArgs, UDataMemory *pData, UErrorCode *status)
 {
     /* UDataInfo info; -- necessary only if some converters have different formatVersion */
-    const uint8_t *raw = (const uint8_t *)udata_getMemory(pData);
-    const UConverterStaticData *source = (const UConverterStaticData *) raw;
+    const uint8_t *raw;
+    const UConverterStaticData *source;
     UConverterSharedData *data;
-    UConverterType type = (UConverterType)source->conversionType;
+    UConverterType type;
 
-    if(U_FAILURE(*status))
-        return NULL;
+    if(status==NULL || U_FAILURE(*status)) return NULL;
+    if(managed_failed_46()) { *status=U_MEMORY_ALLOCATION_ERROR; return NULL; }
+    raw=(const uint8_t *)udata_getMemory(pData);
+    if(raw==NULL) { *status=U_INVALID_TABLE_FORMAT; return NULL; }
+    source=(const UConverterStaticData *)raw;
+    type=(UConverterType)source->conversionType;
 
     if( (uint16_t)type >= UCNV_NUMBER_OF_SUPPORTED_CONVERTER_TYPES ||
         converterData[type] == NULL ||
@@ -257,14 +278,8 @@ ucnv_data_unFlattenClone(UConverterLoadArgs *pArgs, UDataMemory *pData, UErrorCo
         return NULL;
     }
 
-    data = (UConverterSharedData *)uprv_malloc(sizeof(UConverterSharedData));
-    if(data == NULL) {
-        *status = U_MEMORY_ALLOCATION_ERROR;
-        return NULL;
-    }
-
-    /* copy initial values from the static structure for this type */
-    uprv_memcpy(data, converterData[type], sizeof(UConverterSharedData));
+    data=ucnv_cloneSharedData(converterData[type], pArgs, status);
+    if(data==NULL) return NULL;
 
 #if 0 /* made UConverterMBCSTable part of UConverterSharedData -- markus 20031107 */
     /*
@@ -403,45 +418,38 @@ getAlgorithmicTypeFromName(const char *realName)
 /* Stores the shared data in the SHARED_DATA_HASHTABLE
  * @param data The shared data
  */
+static UHashtable *
+ucnv_openSharedDataCache(int32_t initialSize, UErrorCode *err) {
+    return managed_uhash_openSize_46(uhash_hashChars, uhash_compareChars, NULL,
+                                    initialSize, 12, 1202, 1203, err);
+}
+
 static void
-ucnv_shareConverterData(UConverterSharedData * data)
+ucnv_shareConverterData(UConverterSharedData *data, UErrorCode *err)
 {
-    UErrorCode err = U_ZERO_ERROR;
-    /*Lazy evaluates the Hashtable itself */
-    /*void *sanity = NULL;*/
+    if(err==NULL || U_FAILURE(*err)) return;
+    if(managed_failed_46()) { *err=U_MEMORY_ALLOCATION_ERROR; return; }
 
-    if (SHARED_DATA_HASHTABLE == NULL)
-    {
-        SHARED_DATA_HASHTABLE = uhash_openSize(uhash_hashChars, uhash_compareChars, NULL,
-                            ucnv_io_countKnownConverters(&err)*UCNV_CACHE_LOAD_FACTOR,
-                            &err);
-        ucln_common_registerCleanup(UCLN_COMMON_UCNV, ucnv_cleanup);
-
-        if (U_FAILURE(err))
+    if(SHARED_DATA_HASHTABLE==NULL) {
+        UErrorCode aliasStatus=U_ZERO_ERROR;
+        int32_t count=ucnv_io_countKnownConverters(&aliasStatus);
+        UHashtable *candidate;
+        if(U_FAILURE(aliasStatus)) {
+            /* Missing alias data can leave an already loaded converter uncached.
+             * Allocation refusal still fails the call, even if a callee erased it. */
+            if(aliasStatus==U_MEMORY_ALLOCATION_ERROR || managed_failed_46())
+                *err=U_MEMORY_ALLOCATION_ERROR;
             return;
+        }
+        candidate=ucnv_openSharedDataCache(count*UCNV_CACHE_LOAD_FACTOR, err);
+        if(U_FAILURE(*err) || candidate==NULL) return;
+        SHARED_DATA_HASHTABLE=candidate;
+        ucln_common_registerCleanup(UCLN_COMMON_UCNV, ucnv_cleanup);
     }
 
-    /* ### check to see if the element is not already there! */
-
-    /*
-    sanity =   ucnv_getSharedConverterData (data->staticData->name);
-    if(sanity != NULL)
-    {
-    UCNV_DEBUG_LOG("put:overwrite!",data->staticData->name,sanity);
-    }
-    UCNV_DEBUG_LOG("put:chk",data->staticData->name,sanity);
-    */
-
-    /* Mark it shared */
-    data->sharedDataCached = TRUE;
-
-    uhash_put(SHARED_DATA_HASHTABLE,
-            (void*) data->staticData->name, /* Okay to cast away const as long as
-            keyDeleter == NULL */
-            data,
-            &err);
-    UCNV_DEBUG_LOG("put", data->staticData->name,data);
-
+    /* A refused insertion leaves the caller owning its uncached candidate. */
+    uhash_put(SHARED_DATA_HASHTABLE, (void *)data->staticData->name, data, err);
+    if(U_SUCCESS(*err)) data->sharedDataCached=TRUE;
 }
 
 /*  Look up a converter name in the shared data cache.                    */
@@ -537,6 +545,8 @@ ucnv_load(UConverterLoadArgs *pArgs, UErrorCode *err) {
         return NULL;
     }
 
+    if(managed_failed_46()) { *err=U_MEMORY_ALLOCATION_ERROR; return NULL; }
+
     if(pArgs->pkg != NULL && *pArgs->pkg != 0) {
         /* application-provided converters are not currently cached */
         return createConverterFromFile(pArgs, err);
@@ -554,7 +564,11 @@ ucnv_load(UConverterLoadArgs *pArgs, UErrorCode *err) {
         else if (!pArgs->onlyTestIsLoadable)
         {
             /* share it with other library clients */
-            ucnv_shareConverterData(mySharedConverterData);
+            ucnv_shareConverterData(mySharedConverterData, err);
+            if(U_FAILURE(*err)) {
+                ucnv_unload(mySharedConverterData);
+                return NULL;
+            }
         }
     }
     else
@@ -823,7 +837,15 @@ ucnv_loadSharedData(const char *converterName,
 }
 
 UConverter *
-ucnv_createConverter(UConverter *myUConverter, const char *converterName, UErrorCode * err)
+ucnv_createConverter(UConverter *myUConverter, const char *converterName, UErrorCode *err)
+{
+    UManagedOwner46 owner={0,0};
+    return managed_ucnv_createConverter_46(myUConverter, converterName, err, owner);
+}
+
+U_CFUNC UConverter *
+managed_ucnv_createConverter_46(UConverter *myUConverter, const char *converterName,
+                               UErrorCode *err, UManagedOwner46 owner)
 {
     UConverterNamePieces stackPieces;
     UConverterLoadArgs stackArgs={ (int32_t)sizeof(UConverterLoadArgs) };
@@ -836,10 +858,10 @@ ucnv_createConverter(UConverter *myUConverter, const char *converterName, UError
 
         mySharedConverterData = ucnv_loadSharedData(converterName, &stackPieces, &stackArgs, err);
 
-        myUConverter = ucnv_createConverterFromSharedData(
+        myUConverter = managed_ucnv_fromShared_46(
             myUConverter, mySharedConverterData,
             &stackArgs,
-            err);
+            err, owner);
 
         if(U_SUCCESS(*err)) {
             UTRACE_EXIT_PTR_STATUS(myUConverter, *err);
@@ -977,6 +999,16 @@ ucnv_createConverterFromSharedData(UConverter *myUConverter,
                                    UConverterLoadArgs *pArgs,
                                    UErrorCode *err)
 {
+    UManagedOwner46 owner={0,0};
+    return managed_ucnv_fromShared_46(myUConverter, mySharedConverterData, pArgs, err, owner);
+}
+
+U_CFUNC UConverter *
+managed_ucnv_fromShared_46(UConverter *myUConverter,
+                          UConverterSharedData *mySharedConverterData,
+                          UConverterLoadArgs *pArgs, UErrorCode *err,
+                          UManagedOwner46 owner)
+{
     UBool isCopyLocal;
 
     if(U_FAILURE(*err)) {
@@ -985,7 +1017,7 @@ ucnv_createConverterFromSharedData(UConverter *myUConverter,
     }
     if(myUConverter == NULL)
     {
-        myUConverter = (UConverter *) uprv_malloc (sizeof (UConverter));
+        myUConverter = (UConverter *)managed_malloc_46(sizeof(UConverter), owner.role, owner.site);
         if(myUConverter == NULL)
         {
             *err = U_MEMORY_ALLOCATION_ERROR;
@@ -999,6 +1031,7 @@ ucnv_createConverterFromSharedData(UConverter *myUConverter,
 
     /* initialize the converter */
     uprv_memset(myUConverter, 0, sizeof(UConverter));
+    myUConverter->managedRole = owner.role;
     myUConverter->isCopyLocal = isCopyLocal;
     /*myUConverter->isExtraLocal = FALSE;*/ /* Set by the memset call */
     myUConverter->sharedData = mySharedConverterData;

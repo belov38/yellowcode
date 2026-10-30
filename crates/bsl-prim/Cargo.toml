@@ -10,10 +10,11 @@ autobenches = false
 
 [features]
 default = ["icu"]
-icu = ["dep:icu46-sys"]
+icu = ["dep:icu46-sys", "dep:memory-budget", "icu46-sys/managed"]
 
 [dependencies]
 icu46-sys = { path = "../icu46-sys", optional = true }
+memory-budget = { path = "../memory-budget", optional = true }
 
 [lints.clippy]
 dbg_macro = "warn"

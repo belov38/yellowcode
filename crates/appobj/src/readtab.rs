@@ -92,7 +92,21 @@ pub(crate) fn tabular_value(
     r: RefValue,
     tab: usize,
 ) -> CallResult<Value> {
-    let rows = Rc::new(read_tabular(ex, app, r, tab)?);
+    tabular_value_with_live(ex, app, r, tab, 0)
+}
+
+pub(crate) fn tabular_value_with_live(
+    ex: &mut Execution,
+    app: &Arc<Application>,
+    r: RefValue,
+    tab: usize,
+    live: u64,
+) -> CallResult<Value> {
+    let wrapper =
+        crate::read_budget::rc_size::<ReadTab>() + crate::read_budget::rc_size::<Vec<Vec<Value>>>();
+    crate::read_budget::reserve(ex, live.saturating_add(wrapper))?;
+    let rows = Rc::new(read_tabular(ex, app, r, tab, live.saturating_add(wrapper))?);
+    let bytes = wrapper.saturating_add(crate::read_budget::rows(&rows, rows.capacity()));
     let types = app
         .types()
         .ok_or_else(|| internal("the types are not registered"))?;
@@ -109,7 +123,15 @@ pub(crate) fn tabular_value(
         ty,
         row_ty,
         rows,
+        bytes,
     })))
+}
+
+pub(crate) fn retained_bytes(value: &Value) -> u64 {
+    value
+        .as_object()
+        .and_then(|o| o.as_any().downcast_ref::<ReadTab>())
+        .map_or(0, |t| t.bytes)
 }
 
 fn internal(text: &str) -> HostError {
@@ -123,6 +145,7 @@ struct ReadTab {
     ty: TypeId,
     row_ty: TypeId,
     rows: Rc<Vec<Vec<Value>>>,
+    bytes: u64,
 }
 
 impl ReadTab {
@@ -130,15 +153,21 @@ impl ReadTab {
         self.app.model().obj(self.obj).tabular.get(self.tab)
     }
 
-    fn row(&self, i: usize) -> Option<Value> {
-        self.rows.get(i)?;
-        Some(Value::Object(Rc::new(ReadTabRow {
+    fn row(&self, ex: &mut Execution, i: usize) -> CallResult<Value> {
+        self.rows.get(i).ok_or_else(off_bound)?;
+        crate::read_budget::reserve(
+            ex,
+            self.bytes
+                .saturating_add(crate::read_budget::rc_size::<ReadTabRow>()),
+        )?;
+        Ok(Value::Object(Rc::new(ReadTabRow {
             app: self.app.clone(),
             obj: self.obj,
             tab: self.tab,
             ty: self.row_ty,
             rows: self.rows.clone(),
             at: i,
+            bytes: self.bytes,
         })))
     }
 
@@ -157,6 +186,13 @@ fn index_arg(args: &[Arg], ex: &mut Execution) -> CallResult<usize> {
 }
 
 impl HostObject for ReadTab {
+    fn retained_memory(
+        &self,
+        visit: &mut dyn bsl_vm::RetainedMemory,
+    ) -> Result<bool, bsl_vm::Exception> {
+        crate::read_budget::visit_rows(&self.rows, visit)?;
+        Ok(true)
+    }
     fn type_id(&self) -> TypeId {
         self.ty
     }
@@ -220,7 +256,7 @@ impl HostObject for ReadTab {
             )),
             Op::Get => {
                 let i = index_arg(args, ex)?;
-                self.row(i).ok_or_else(|| off_bound().into())
+                self.row(ex, i)
             }
             Op::IndexOf => {
                 let v = crate::meta::arg_value(ex, args, 0)?;
@@ -258,16 +294,16 @@ impl HostObject for ReadTab {
         Some(self.rows.len())
     }
 
-    fn iter_get(&self, _: &mut Execution, i: usize) -> CallResult<Value> {
-        self.row(i).ok_or_else(|| off_bound().into())
+    fn iter_get(&self, ex: &mut Execution, i: usize) -> CallResult<Value> {
+        self.row(ex, i)
     }
 
-    fn index_get(&self, _: &mut Execution, key: &Value) -> CallResult<Value> {
+    fn index_get(&self, ex: &mut Execution, key: &Value) -> CallResult<Value> {
         let Value::Number(n) = key else {
             return Err(crate::meta::type_mismatch(1).into());
         };
         let i = usize::try_from(n.trunc_to_i64_saturating()).map_err(|_| off_bound())?;
-        self.row(i).ok_or_else(|| off_bound().into())
+        self.row(ex, i)
     }
 
     fn index_set(&self, _: &mut Execution, _: &Value, _: Value) -> CallResult<()> {
@@ -282,9 +318,17 @@ struct ReadTabRow {
     ty: TypeId,
     rows: Rc<Vec<Vec<Value>>>,
     at: usize,
+    bytes: u64,
 }
 
 impl HostObject for ReadTabRow {
+    fn retained_memory(
+        &self,
+        visit: &mut dyn bsl_vm::RetainedMemory,
+    ) -> Result<bool, bsl_vm::Exception> {
+        crate::read_budget::visit_rows(&self.rows, visit)?;
+        Ok(true)
+    }
     fn type_id(&self) -> TypeId {
         self.ty
     }
@@ -326,11 +370,17 @@ impl HostObject for ReadTabRow {
         else {
             return Err(internal("no such column").into());
         };
-        self.rows
+        let value = self
+            .rows
             .get(self.at)
             .and_then(|r| r.get(i))
-            .cloned()
-            .ok_or_else(|| internal("no such column").into())
+            .ok_or_else(|| internal("no such column"))?;
+        crate::read_budget::reserve(
+            ex,
+            self.bytes
+                .saturating_add(crate::read_budget::value_heap(value)),
+        )?;
+        Ok(value.clone())
     }
 
     fn set(&self, _: &mut Execution, _: MemberId, _: Value) -> CallResult<()> {

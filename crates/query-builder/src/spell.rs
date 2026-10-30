@@ -13,6 +13,7 @@ type Key = (u32, u32);
 struct FieldName {
     alias: Option<String>,
     tail: Vec<Option<String>>,
+    column_case_only: bool,
 }
 
 #[derive(Default)]
@@ -27,11 +28,14 @@ fn key(s: query_syntax::Span) -> Key {
 
 pub(crate) fn apply(schema: &mut Schema, compiled: &[Arc<CompiledStmt>], qs: &QuerySchema) {
     let ru = qs.script() == ScriptVariant::Russian;
+    let ordinary_query = schema.mode == query_syntax::ParseMode::Query;
     for (st, c) in schema.batch.iter_mut().zip(compiled) {
         let Stmt::Select(q) = st else { continue };
         let mut collect = Collect {
             qs,
             ru,
+            ordinary_query,
+            qualify_only: false,
             out: Renames::default(),
             implicit: HashSet::new(),
         };
@@ -42,6 +46,8 @@ pub(crate) fn apply(schema: &mut Schema, compiled: &[Arc<CompiledStmt>], qs: &Qu
         let sp = Spell {
             qs,
             ru,
+            ordinary_query,
+            qualify_only: false,
             r: &collect.out,
             columns: RefCell::new(None),
         };
@@ -59,6 +65,7 @@ pub(crate) fn spelled_alias(
     ru: bool,
     src: &tir::Source,
     implicit: bool,
+    ordinary: bool,
 ) -> String {
     let tir::From::Table { id, .. } = &src.from else {
         return src.alias.clone();
@@ -69,6 +76,10 @@ pub(crate) fn spelled_alias(
     let ru_name = table_name(qs, *id, true);
     let en_name = table_name(qs, *id, false);
     let a = fold_name(&src.alias);
+    let configured = if ru { &ru_name } else { &en_name };
+    if ordinary && !implicit && a == fold_name(last_segment(configured)) {
+        return src.alias.clone();
+    }
     if a == fold_name(last_segment(&ru_name)) || a == fold_name(last_segment(&en_name)) {
         last_segment(&table_name(qs, *id, ru)).to_string()
     } else {
@@ -93,6 +104,8 @@ fn last_segment(s: &str) -> &str {
 struct Collect<'a> {
     qs: &'a QuerySchema,
     ru: bool,
+    ordinary_query: bool,
+    qualify_only: bool,
     out: Renames,
     implicit: HashSet<usize>,
 }
@@ -140,8 +153,17 @@ impl<'a> Collect<'a> {
         let mut sources = Vec::new();
         flat(&sel.sources, &mut sources);
         for s in &sources {
-            if let tir::From::Subquery(q) = &s.from {
-                self.query(q, &mut Vec::new());
+            match &s.from {
+                tir::From::Subquery(q) => self.query(q, &mut Vec::new()),
+                tir::From::Table { args, .. } if self.ordinary_query => {
+                    let outer = self.qualify_only;
+                    self.qualify_only = true;
+                    for arg in args.iter().flatten() {
+                        self.expr(arg, &mut Vec::new());
+                    }
+                    self.qualify_only = outer;
+                }
+                _ => {}
             }
         }
         stack.push(sources.clone());
@@ -279,19 +301,34 @@ impl<'a> Collect<'a> {
                 .qs
                 .field(t, f)
                 .map(|f| if self.ru { &f.name_ru } else { &f.name_en }.clone()),
+            (Col::Column(i), _) if self.ordinary_query => match &src.from {
+                tir::From::Temp(t) => t.columns.get(usize::from(i)).map(|c| c.name.clone()),
+                tir::From::Subquery(q) => q
+                    .parts
+                    .first()
+                    .and_then(|p| p.items.get(usize::from(i)))
+                    .map(|c| c.name.clone()),
+                _ => None,
+            },
             _ => None,
         };
+        let column_case_only = matches!(col, Col::Column(_)) && own.is_some();
         let mut tail = vec![own];
         tail.extend(derefs.iter().map(|d| self.deref_name(d)));
         let implicit = self
             .implicit
             .contains(&(*src as *const tir::Source as usize));
-        let alias = spelled_alias(self.qs, self.ru, src, implicit);
+        let alias = if self.qualify_only {
+            src.alias.clone()
+        } else {
+            spelled_alias(self.qs, self.ru, src, implicit, self.ordinary_query)
+        };
         self.out.fields.insert(
             key(span),
             FieldName {
                 alias: (!alias.is_empty()).then_some(alias),
                 tail,
+                column_case_only,
             },
         );
     }
@@ -300,6 +337,8 @@ impl<'a> Collect<'a> {
 struct Spell<'a> {
     qs: &'a QuerySchema,
     ru: bool,
+    ordinary_query: bool,
+    qualify_only: bool,
     r: &'a Renames,
     columns: RefCell<Option<HashSet<String>>>,
 }
@@ -376,7 +415,14 @@ impl Spell<'_> {
 
     fn source(&self, s: &mut Source) {
         match &mut s.table {
-            Table::Named { path, .. } => self.table_path(path),
+            Table::Named { path, args } => {
+                self.table_path(path);
+                if self.ordinary_query
+                    && let Some(args) = args
+                {
+                    self.arguments(args.iter_mut().flatten());
+                }
+            }
             Table::Subquery(q) => self.select_query(q),
             Table::Param(_) => {}
         }
@@ -415,13 +461,34 @@ impl Spell<'_> {
 
     fn ast_source(&self, s: &mut ast::Source) {
         match &mut s.table {
-            ast::TableRef::Named { path, .. } => self.table_path(path),
+            ast::TableRef::Named { path, args } => {
+                self.table_path(path);
+                if self.ordinary_query
+                    && let Some(args) = args
+                {
+                    self.arguments(args.args.iter_mut().flatten());
+                }
+            }
             ast::TableRef::Subquery { query, .. } => self.ast_query(query),
             ast::TableRef::Param(_) => {}
         }
         for j in &mut s.joins {
             self.ast_source(&mut j.right);
             self.expr(&mut j.on);
+        }
+    }
+
+    fn arguments<'a>(&self, args: impl Iterator<Item = &'a mut ast::VtArg>) {
+        let spelling = Self {
+            qs: self.qs,
+            ru: self.ru,
+            ordinary_query: self.ordinary_query,
+            qualify_only: true,
+            r: self.r,
+            columns: RefCell::new(None),
+        };
+        for arg in args {
+            spelling.expr(&mut arg.expr);
         }
     }
 
@@ -482,7 +549,9 @@ impl Spell<'_> {
             }
             ExprKind::Deref { expr, deref } => {
                 self.expr(expr);
-                if let Some(names) = self.r.casts.get(&key(span)) {
+                if !self.qualify_only
+                    && let Some(names) = self.r.casts.get(&key(span))
+                {
                     for (id, n) in deref.iter_mut().zip(names) {
                         set_text(id, n.as_deref());
                     }
@@ -495,7 +564,9 @@ impl Spell<'_> {
                 if let CastType::Table(p) = ty {
                     self.table_path(p);
                 }
-                if let Some(names) = self.r.casts.get(&key(span)) {
+                if !self.qualify_only
+                    && let Some(names) = self.r.casts.get(&key(span))
+                {
                     for (id, n) in deref.iter_mut().zip(names) {
                         set_text(id, n.as_deref());
                     }
@@ -513,7 +584,11 @@ impl Spell<'_> {
                     id.text = w.text.clone();
                 }
             }
-            ExprKind::Value { path, .. } => self.value_path(path),
+            ExprKind::Value { path, .. } => {
+                if !self.ordinary_query {
+                    self.value_path(path);
+                }
+            }
         }
     }
 
@@ -533,9 +608,21 @@ impl Spell<'_> {
         let Some(prefix) = p.parts.len().checked_sub(f.tail.len()) else {
             return;
         };
-        for (i, n) in f.tail.iter().enumerate() {
-            if let Some(id) = p.parts.get_mut(prefix + i) {
-                set_text(id, n.as_deref());
+        if self.qualify_only && prefix != 0 {
+            return;
+        }
+        if !self.qualify_only {
+            for (i, n) in f.tail.iter().enumerate() {
+                if let Some(id) = p.parts.get_mut(prefix + i) {
+                    if i == 0
+                        && f.column_case_only
+                        && n.as_ref()
+                            .is_some_and(|name| fold_name(name) != fold_name(&id.text))
+                    {
+                        continue;
+                    }
+                    set_text(id, n.as_deref());
+                }
             }
         }
         match (&f.alias, prefix) {
@@ -558,7 +645,7 @@ impl Spell<'_> {
     }
 
     fn table_path(&self, p: &mut ast::Path) {
-        if p.parts.len() < 2 {
+        if self.qualify_only || p.parts.len() < 2 {
             return;
         }
         let parts: Vec<&str> = p.parts.iter().map(|x| &*x.text).collect();

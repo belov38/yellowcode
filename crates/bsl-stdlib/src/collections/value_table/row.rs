@@ -57,6 +57,71 @@ pub(crate) struct TableRow {
     pub(super) record: Rc<RowRecord>,
 }
 impl TableRow {
+    pub(in crate::collections) fn prepare_fill(
+        &self,
+        ex: &mut Execution,
+        member: MemberId,
+        value: Value,
+        retained: u64,
+    ) -> CallResult<(Value, [u64; 2])> {
+        self.writable()?;
+        let stamp = [self.state.revision.get(), self.state.columns.revision()];
+        ex.charge(self.state.columns.len() as u64 + self.record.cells.borrow().0.len() as u64)?;
+        let column = member
+            .0
+            .checked_sub(COLUMN_BASE)
+            .and_then(|id| self.state.columns.record(id))
+            .ok_or_else(|| not_implemented(idx("ValueTableRow"), member))?;
+        let adjusted = adjust_cell(ex, &column.value_type(), value, retained)?;
+        self.check_fill(member, stamp)?;
+        Ok((adjusted, stamp))
+    }
+
+    pub(in crate::collections) fn check_fill(
+        &self,
+        member: MemberId,
+        stamp: [u64; 2],
+    ) -> CallResult<()> {
+        self.state.check_revision(stamp[0], stamp[1])?;
+        self.writable()?;
+        if !self
+            .record
+            .cells
+            .borrow()
+            .0
+            .iter()
+            .any(|(id, _)| Some(*id) == member.0.checked_sub(COLUMN_BASE))
+        {
+            return Err(changed().into());
+        }
+        Ok(())
+    }
+
+    pub(in crate::collections) fn publish_fill(&self, member: MemberId, value: &mut Value) {
+        let mut cells = self.record.cells.borrow_mut();
+        if let Some((_, cell)) = cells
+            .0
+            .iter_mut()
+            .find(|(id, _)| Some(*id) == member.0.checked_sub(COLUMN_BASE))
+        {
+            std::mem::swap(cell, value);
+        } else {
+            unreachable!("prepared table cell disappeared")
+        }
+        drop(cells);
+        let before = self.record.bytes.get();
+        let after = self.record.calculate_bytes();
+        self.record.bytes.set(after);
+        self.state.records_bytes.set(
+            self.state
+                .records_bytes
+                .get()
+                .saturating_sub(before)
+                .saturating_add(after),
+        );
+        self.state.bump();
+    }
+
     pub(in crate::collections) fn retirement_work(&self) -> u64 {
         (self.state.len() as u64).saturating_add(self.state.columns.len() as u64)
     }
@@ -85,11 +150,11 @@ impl TableRow {
         }
         Ok(())
     }
-    fn read(&self, ex: &mut Execution, id: u32) -> CallResult<Value> {
+    fn read(&self, ex: &mut Execution, id: u32, retained: u64) -> CallResult<Value> {
         let cells = self.record.cells.borrow();
         ex.charge(cells.0.len() as u64)?;
         match cells.0.iter().find(|(key, _)| *key == id) {
-            Some((_, value)) => clone_cell(ex, value, 0),
+            Some((_, value)) => clone_cell(ex, value, retained),
             None => Ok(Value::Undefined),
         }
     }
@@ -156,6 +221,28 @@ impl Drop for TableRow {
     }
 }
 impl HostObject for TableRow {
+    fn property_names(&self, ex: &mut Execution, retained: u64) -> CallResult<Option<Vec<Str>>> {
+        self.state.columns.property_names(ex, retained).map(Some)
+    }
+    fn session_edges(&self, visit: &mut dyn bsl_vm::SessionEdges) -> bool {
+        visit.backing(self.state.clone()) && visit.backing(self.record.clone())
+    }
+    fn session_clear(&self) {}
+    fn session_transfer_supported(&self) -> bool {
+        true
+    }
+    fn session_transfer(
+        &self,
+        out: &mut dyn bsl_vm::SessionExport,
+    ) -> Result<Option<Box<dyn bsl_vm::SessionObject>>, bsl_vm::Exception> {
+        super::session::capture(&self.state, Some(&self.record), out).map(Some)
+    }
+    fn retained_memory(
+        &self,
+        visit: &mut dyn bsl_vm::RetainedMemory,
+    ) -> Result<bool, bsl_vm::Exception> {
+        crate::collections::accounting::project(self, visit)
+    }
     fn type_id(&self) -> TypeId {
         TypeId::of_catalog(idx("ValueTableRow"))
     }
@@ -163,12 +250,20 @@ impl HostObject for TableRow {
         self
     }
     fn get(&self, ex: &mut Execution, m: MemberId) -> CallResult<Value> {
+        self.get_with_retained(ex, m, 0)
+    }
+    fn get_with_retained(
+        &self,
+        ex: &mut Execution,
+        m: MemberId,
+        retained: u64,
+    ) -> CallResult<Value> {
         ex.charge(self.state.columns.len() as u64)?;
         let column =
             m.0.checked_sub(COLUMN_BASE)
                 .and_then(|id| self.state.columns.record(id))
                 .ok_or_else(|| not_implemented(idx("ValueTableRow"), m))?;
-        self.read(ex, column.id)
+        self.read(ex, column.id, retained)
     }
     fn set(&self, ex: &mut Execution, m: MemberId, value: Value) -> CallResult<()> {
         ex.charge(self.state.columns.len() as u64)?;
@@ -194,7 +289,7 @@ impl HostObject for TableRow {
                     Ok(Value::Undefined)
                 } else {
                     self.state.check_revision(revision, schema)?;
-                    self.read(ex, column.id)
+                    self.read(ex, column.id, 0)
                 }
             }
             _ => Err(not_implemented(idx("ValueTableRow"), m).into()),
@@ -219,7 +314,7 @@ impl HostObject for TableRow {
     }
     fn index_get(&self, ex: &mut Execution, key: &Value) -> CallResult<Value> {
         let column = self.state.columns.cell_column(ex, key)?;
-        self.read(ex, column.id)
+        self.read(ex, column.id, 0)
     }
     fn index_set(&self, ex: &mut Execution, key: &Value, value: Value) -> CallResult<()> {
         let column = self.state.columns.cell_column(ex, key)?;

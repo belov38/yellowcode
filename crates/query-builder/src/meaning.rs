@@ -16,7 +16,7 @@ pub fn fingerprint(text: &str, mode: ParseMode, ctx: &Ctx<'_>) -> Result<Vec<Str
         .iter()
         .map(|s| {
             with_deep_stack(s.typed.max_depth, || {
-                let s = normalize(s, &auto);
+                let s = normalize(s, &auto, mode);
                 erase(&format!("{s:?}"))
             })
         })
@@ -73,10 +73,13 @@ fn span_len(s: &str) -> Option<usize> {
     Some(s.len() - t.len())
 }
 
-fn normalize(s: &CompiledStmt, auto: &[String]) -> CompiledStmt {
+fn normalize(s: &CompiledStmt, auto: &[String], mode: ParseMode) -> CompiledStmt {
     let mut c = s.clone();
     if let tir::StmtKind::Query(q) = &mut c.typed.kind {
         query(q);
+        if mode == ParseMode::Query {
+            totals_binding(q);
+        }
         labels(q, auto);
         let gone = group_params(q);
         c.params.retain(|p| !gone.contains(&p.name));
@@ -87,6 +90,23 @@ fn normalize(s: &CompiledStmt, auto: &[String]) -> CompiledStmt {
         }
     }
     c
+}
+
+fn totals_binding(q: &mut tir::Query) {
+    let Some(first) = q.parts.first() else { return };
+    let Some(totals) = &mut q.totals else { return };
+    for point in &mut totals.points {
+        let tir::ControlPoint::Field(field) = point else {
+            continue;
+        };
+        if field.col.is_none()
+            && let Some(column) = tir::totals_point_column(field, &first.items)
+            && let Some(item) = first.items.get(column)
+        {
+            field.col = Some(column);
+            field.expr.clone_from(&item.expr);
+        }
+    }
 }
 
 fn is_separator(name: &str) -> bool {

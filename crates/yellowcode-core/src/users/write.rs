@@ -45,6 +45,7 @@ pub struct UserWriteSnapshot {
     pub users: Vec<Card>,
     pub roles: Vec<RoleChoice>,
     pub writable: bool,
+    pub supported_actions: &'static [&'static str],
     pub reason: Option<String>,
 }
 #[derive(Debug, Serialize)]
@@ -64,8 +65,10 @@ pub enum UserWriteError {
     UnsupportedLayout(&'static str),
     #[error("empty password policy, algorithm or recovery is not qualified")]
     UnsupportedPolicy,
-    #[error("native 1C lock interoperability is not qualified on this platform")]
+    #[error("this user operation is not qualified on this platform")]
     UnsupportedPlatform,
+    #[error("infobase source is busy")]
+    SourceBusy,
     #[error("the source changed or this snapshot has already been used; refresh it")]
     StaleRevision,
     #[error("no such infobase user")]

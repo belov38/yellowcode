@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 use yellowcode_core::viewer::Lang;
+use yellowcode_core::viewer::memory::{Process, Session};
 use yellowcode_core::viewer::state::{State, Viewer};
 
 use recent::Recent;
@@ -130,10 +131,12 @@ pub struct AppState {
     since: Mutex<Option<Instant>>,
     load_id: AtomicU64,
     loaders: AtomicUsize,
+    memory: Result<Process, memory_budget::BudgetError>,
+    pending_memory: Mutex<Option<(u64, Arc<Session>)>>,
     lang: Lang,
     names: Option<PathBuf>,
     smoke: bool,
-    memory: Option<yellowcode_core::viewer::source::OpenMemory>,
+    cli_memory: Option<yellowcode_core::viewer::source::OpenMemory>,
     gate: Arc<Gate>,
 }
 
@@ -145,6 +148,24 @@ impl AppState {
         names: Option<PathBuf>,
         smoke: bool,
     ) -> AppState {
+        Self::with_process(
+            recent,
+            recent_file,
+            lang,
+            names,
+            smoke,
+            Process::unlimited(),
+        )
+    }
+
+    fn with_process(
+        recent: Recent,
+        recent_file: PathBuf,
+        lang: Lang,
+        names: Option<PathBuf>,
+        smoke: bool,
+        memory: Result<Process, memory_budget::BudgetError>,
+    ) -> AppState {
         AppState {
             skins: yellowcode_core::viewer::skin::Skins::store(),
             current: RwLock::new(None),
@@ -154,11 +175,50 @@ impl AppState {
             since: Mutex::new(None),
             load_id: AtomicU64::new(0),
             loaders: AtomicUsize::new(0),
+            memory,
+            pending_memory: Mutex::new(None),
             lang,
             names,
             smoke,
-            memory: None,
+            cli_memory: None,
             gate: Gate::new(MAX_WORKERS, QUEUE_CAP),
+        }
+    }
+
+    fn memory_session(
+        &self,
+        path: &Path,
+        facts: memory_budget::desktop::Facts,
+    ) -> Result<Arc<Session>, String> {
+        let policy = match &self.cli_memory {
+            Some(memory) => memory_budget::desktop::resolve(
+                memory_budget::desktop::Selection::Bytes(memory.budget()),
+                facts,
+            )
+            .map_err(|e| e.to_string())?,
+            None => lock(&self.recent).clone().memory_policy(path, facts)?,
+        };
+        let process = self.memory.as_ref().map_err(ToString::to_string)?;
+        process.refresh(facts);
+        process.open(policy).map_err(|e| e.to_string())
+    }
+
+    fn bind_memory(&self, id: u64, session: Arc<Session>) -> Result<(), String> {
+        let status = lock(&self.status);
+        if self.load_id.load(Ordering::SeqCst) != id || !matches!(*status, Status::Loading { .. }) {
+            session.cancel();
+            return Err("loading cancelled".into());
+        }
+        *lock(&self.pending_memory) = Some((id, session));
+        Ok(())
+    }
+
+    fn take_pending_memory(&self, id: u64) -> Option<Arc<Session>> {
+        let mut pending = lock(&self.pending_memory);
+        if pending.as_ref().is_some_and(|(owner, _)| *owner == id) {
+            pending.take().map(|(_, session)| session)
+        } else {
+            None
         }
     }
 
@@ -182,8 +242,14 @@ impl AppState {
 
     pub fn abort(&self, id: u64) {
         self.loaders.fetch_sub(1, Ordering::SeqCst);
+        let mut status = lock(&self.status);
         if self.load_id.load(Ordering::SeqCst) == id {
-            *lock(&self.status) = Status::Idle;
+            *status = Status::Idle;
+        }
+        let pending = self.take_pending_memory(id);
+        drop(status);
+        if let Some(session) = pending {
+            session.cancel();
         }
     }
 
@@ -213,6 +279,11 @@ impl AppState {
         }
         self.load_id.fetch_add(1, Ordering::SeqCst);
         *status = Status::Idle;
+        let pending = lock(&self.pending_memory).take();
+        drop(status);
+        if let Some((_, session)) = pending {
+            session.cancel();
+        }
         true
     }
 
@@ -222,8 +293,11 @@ impl AppState {
             let name = yellowcode_core::viewer::tree::config_name(&state.cfg);
             (Arc::new(Viewer::from_loaded(state)), name)
         });
+        let mut previous = None;
+        let pending;
         let out = {
             let mut status = lock(&self.status);
+            pending = self.take_pending_memory(id);
             if self.load_id.load(Ordering::SeqCst) != id {
                 Finish::Discarded
             } else {
@@ -233,7 +307,7 @@ impl AppState {
                         if let Some(old) = current.as_ref() {
                             old.shutdown();
                         }
-                        *current = Some(viewer);
+                        previous = current.replace(viewer);
                         drop(current);
                         {
                             let mut r = lock(&self.recent);
@@ -256,6 +330,16 @@ impl AppState {
                 }
             }
         };
+        if !matches!(out, Finish::Ready(_))
+            && let Some(session) = pending
+        {
+            session.cancel();
+        }
+        if let Some(old) = previous
+            && let Some(session) = &old.snapshot().session
+        {
+            session.close();
+        }
         self.loaders.fetch_sub(1, Ordering::SeqCst);
         out
     }
@@ -290,6 +374,7 @@ pub struct RecentOut {
     path: String,
     label: String,
     exists: bool,
+    memory: recent::MemorySetting,
     kind: recent::Kind,
     origin: recent::Origin,
     recent_rank: Option<usize>,
@@ -306,7 +391,12 @@ fn event(path: &str, name: Option<String>, error: Option<String>) -> SourceEvent
 fn start_load(app: &AppHandle, path: String) -> Result<(), String> {
     let path = resolved(Path::new(&path)).unwrap_or(path);
     let st = app.state::<AppState>();
+    let session = st.memory_session(Path::new(&path), memory_budget::desktop::facts())?;
     let id = st.begin(&path)?;
+    if let Err(error) = st.bind_memory(id, session.clone()) {
+        st.abort(id);
+        return Err(error);
+    }
     if let Err(e) = show_splash(app) {
         st.abort(id);
         return Err(e.to_string());
@@ -318,17 +408,12 @@ fn start_load(app: &AppHandle, path: String) -> Result<(), String> {
         let (lang, names) = (st.lang, st.names.clone());
         let src = PathBuf::from(&path);
         let loaded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let memory = match &st.memory {
-                Some(memory) => memory.clone(),
-                None => yellowcode_core::viewer::source::OpenMemory::resolve(None)
-                    .map_err(|e| e.to_string())?,
-            };
-            State::load_stages_with_memory(
+            State::load_stages_with_session(
                 &src,
                 names.as_deref(),
                 lang,
                 Viewer::OPEN,
-                &memory,
+                session,
                 &mut |stage| {
                     st.report_progress(id, stage, |status| {
                         let _ = app2.emit("source-progress", status);
@@ -429,14 +514,40 @@ fn close_splash(app: &AppHandle) {
     }
 }
 
+#[derive(Serialize)]
+struct MemoryPreview {
+    effective_mib: Option<u64>,
+    ceiling_mib: Option<u64>,
+    fallback: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    external_visibility: Option<&'static str>,
+}
+
+#[tauri::command(async)]
+fn preview_source_memory(memory: recent::MemorySetting) -> Result<MemoryPreview, String> {
+    let policy = memory.resolve(memory_budget::desktop::facts())?;
+    Ok(MemoryPreview {
+        effective_mib: (!policy.unlimited).then_some(policy.budget / (1 << 20)),
+        ceiling_mib: policy.ceiling.map(|bytes| bytes / (1 << 20)),
+        fallback: policy.fallback,
+        external_visibility: match policy.external_visibility {
+            memory_budget::discovery::Visibility::Visible => None,
+            memory_budget::discovery::Visibility::Partial => Some("partial"),
+            memory_budget::discovery::Visibility::Unknown => Some("unknown"),
+        },
+    })
+}
+
 #[tauri::command(async)]
 fn save_source(
     state: tauri::State<'_, AppState>,
     old: Option<String>,
     path: String,
     name: String,
+    memory: recent::MemorySetting,
     origin: Option<recent::Origin>,
 ) -> Result<String, String> {
+    memory.resolve(memory_budget::desktop::facts())?;
     let path = resolved(Path::new(&path)).unwrap_or(path);
     let metadata_only = old.as_deref() == Some(path.as_str())
         && lock(&state.recent)
@@ -448,7 +559,13 @@ fn save_source(
     }
     let mut recent = lock(&state.recent);
     let mut updated = recent.clone();
-    let saved = updated.set(old.as_deref().map(Path::new), Path::new(&path), &name)?;
+    let saved = updated.set_memory(
+        old.as_deref().map(Path::new),
+        Path::new(&path),
+        &name,
+        memory,
+        memory_budget::desktop::facts(),
+    )?;
     let saved_path = saved
         .to_str()
         .ok_or("source path must be valid Unicode")?
@@ -466,7 +583,7 @@ fn save_source(
 #[tauri::command]
 fn startup_dialog_size(window: tauri::WebviewWindow, dialog: &str) -> Result<(), String> {
     let (width, height) = match dialog {
-        "wizard" => (490.0, 490.0),
+        "wizard" => (490.0, 650.0),
         "settings" => (548.0, 704.0),
         "" => (820.0, 500.0),
         _ => return Err("unknown startup dialog".into()),
@@ -499,6 +616,11 @@ fn dismiss_load_error(app: AppHandle) {
 #[tauri::command]
 fn quit(app: AppHandle) {
     app.exit(0);
+}
+
+#[tauri::command]
+fn restart_application(app: AppHandle) {
+    app.restart();
 }
 
 #[tauri::command]
@@ -550,6 +672,7 @@ fn source_output(items: &[recent::RecentItem], history: &[recent::RecentItem]) -
                 label: recent::menu_label(&i.path),
                 exists: i.exists,
                 name: i.name,
+                memory: i.memory,
                 kind: i.kind,
                 origin: i.origin,
                 recent_rank: history.iter().position(|h| h.path == i.path),
@@ -584,7 +707,7 @@ fn cancel_load(app: AppHandle) {
     }
 }
 
-fn reply_to_http(r: bridge::Reply) -> tauri::http::Response<Vec<u8>> {
+fn reply_to_http(r: bridge::Reply, respond: impl FnOnce(tauri::http::Response<Vec<u8>>)) {
     let mut b = tauri::http::Response::builder()
         .status(r.status)
         .header("Content-Type", r.content_type)
@@ -593,11 +716,14 @@ fn reply_to_http(r: bridge::Reply) -> tauri::http::Response<Vec<u8>> {
     if let Some(csp) = r.csp {
         b = b.header("Content-Security-Policy", csp);
     }
-    b.body(r.body).unwrap_or_else(|_| {
-        let mut e = tauri::http::Response::new(b"error\n".to_vec());
-        *e.status_mut() = tauri::http::StatusCode::INTERNAL_SERVER_ERROR;
-        e
-    })
+    r.body.deliver(|bytes| {
+        let response = b.body(bytes).unwrap_or_else(|_| {
+            let mut e = tauri::http::Response::new(b"error\n".to_vec());
+            *e.status_mut() = tauri::http::StatusCode::INTERNAL_SERVER_ERROR;
+            e
+        });
+        respond(response);
+    });
 }
 
 fn serve_scheme(
@@ -637,7 +763,7 @@ fn serve_scheme(
     let skins = st.skins.clone();
     gate.run(move |accepted| {
         if !accepted {
-            responder.respond(reply_to_http(bridge::busy()));
+            reply_to_http(bridge::busy(), |response| responder.respond(response));
             return;
         }
         let reply = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -659,7 +785,7 @@ fn serve_scheme(
         .unwrap_or_else(|_| bridge::internal_error());
         let smoke_done =
             app.state::<AppState>().smoke && target == "/api/info" && reply.status == 200;
-        responder.respond(reply_to_http(reply));
+        reply_to_http(reply, |response| responder.respond(response));
         if smoke_done {
             println!(
                 "smoke: /api/info answered {:.2} s after the process start",
@@ -738,14 +864,6 @@ pub fn run_from_args(args: Vec<String>) -> i32 {
             return 2;
         }
     };
-    if let Err(error) = yellowcode_core::platform::select(
-        opts.platform_build
-            .as_deref()
-            .unwrap_or(yellowcode_core::platform::DEFAULT_BUILD),
-    ) {
-        eprintln!("yellowcode: {error}");
-        return 2;
-    }
     let lang = match opts.lang.as_deref() {
         None | Some("ru") => Lang::Ru,
         Some("en") => Lang::En,
@@ -754,19 +872,53 @@ pub fn run_from_args(args: Vec<String>) -> i32 {
             return 2;
         }
     };
-    let memory =
-        match yellowcode_core::viewer::source::OpenMemory::resolve(opts.memory_limit.clone()) {
-            Ok(memory) => memory,
-            Err(error) => {
-                eprintln!("yellowcode: {error}");
-                return if yellowcode_core::service::memory::is_config_error(&*error) {
-                    2
-                } else {
-                    1
-                };
+    let cli_memory = match &opts.memory_limit {
+        Some(limit) => {
+            match yellowcode_core::viewer::source::OpenMemory::resolve(Some(limit.clone())) {
+                Ok(memory) => Some(memory),
+                Err(error) => {
+                    eprintln!("yellowcode: {error}");
+                    return if yellowcode_core::service::memory::is_config_error(&*error) {
+                        2
+                    } else {
+                        1
+                    };
+                }
             }
-        };
-    match run(opts, lang, memory) {
+        }
+        None => None,
+    };
+    let process = match Process::unlimited() {
+        Ok(process) => process,
+        Err(error) => {
+            eprintln!("yellowcode: {error}");
+            return 1;
+        }
+    };
+    let build = opts
+        .platform_build
+        .as_deref()
+        .unwrap_or(yellowcode_core::platform::DEFAULT_BUILD);
+    let selected = {
+        let root = process.budget().root_budget();
+        yellowcode_core::platform::DiscoverySnapshot::capture(&root).and_then(|snapshot| {
+            let selected = yellowcode_core::platform::select_from_roots_with_memory(
+                build,
+                snapshot.roots(),
+                &root,
+            );
+            drop(snapshot);
+            selected
+        })
+    };
+    if let Err(error) = selected {
+        eprintln!(
+            "yellowcode: {}",
+            yellowcode_core::platform::managed_message(build, &error)
+        );
+        return 2;
+    }
+    match run(opts, lang, process, cli_memory) {
         Ok(()) => 0,
         Err(e) => {
             eprintln!("yellowcode: {e}");
@@ -788,7 +940,8 @@ fn skin_root(app: &AppHandle) -> tauri::Result<PathBuf> {
 fn run(
     opts: Options,
     lang: Lang,
-    memory: yellowcode_core::viewer::source::OpenMemory,
+    process: Process,
+    cli_memory: Option<yellowcode_core::viewer::source::OpenMemory>,
 ) -> tauri::Result<()> {
     process_start();
     let smoke = opts.smoke;
@@ -820,11 +973,13 @@ fn run(
             convert::pick_conversion_output,
             pick_source,
             save_source,
+            preview_source_memory,
             startup_language,
             startup_version,
             startup_dialog_size,
             dismiss_load_error,
             quit,
+            restart_application,
             open_source,
             recent,
             sources,
@@ -844,8 +999,9 @@ fn run(
                 .unwrap_or_else(|_| std::env::temp_dir().join("onec-viewer"));
             let recent_file = dir.join("recent.json");
             let recent = Recent::load_unchecked(&recent_file);
-            let mut state = AppState::new(recent, recent_file, lang, names, smoke);
-            state.memory = Some(memory);
+            let mut state =
+                AppState::with_process(recent, recent_file, lang, names, smoke, Ok(process));
+            state.cli_memory = cli_memory;
             state.skins = Arc::new(Mutex::new(yellowcode_core::viewer::skin::Skins::installed(
                 &skin_root(app.handle())?,
             )));

@@ -1,0 +1,13 @@
+exit 0
+--- stdout
+Проверить структуру резервной копии без её восстановления
+
+Usage: yellowcode bak inspect [OPTIONS] <SOURCE>
+
+Arguments:
+  <SOURCE>  Файл резервной копии MS SQL Server
+
+Options:
+      --platform-build <BUILD>  Точная версия эмулируемой платформы (не режим совместимости конфигурации) [default: 8.5.1.1529]
+  -h, --help                    Print help
+--- stderr

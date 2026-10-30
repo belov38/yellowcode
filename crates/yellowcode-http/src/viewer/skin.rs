@@ -2,12 +2,7 @@ use super::http::{Request, Response};
 use yellowcode_core::viewer::skin::Store;
 
 fn json(status: u16, value: serde_json::Value) -> Response {
-    Response {
-        status,
-        content_type: "application/json; charset=utf-8",
-        body: serde_json::to_vec(&value).unwrap_or_default(),
-        ..Default::default()
-    }
+    super::memory::json(status, &value)
 }
 
 pub fn handle(store: &Store, req: &Request) -> Option<Response> {
@@ -46,7 +41,7 @@ pub fn handle(store: &Store, req: &Request) -> Option<Response> {
         return Some(Response {
             status: 200,
             content_type: "text/css; charset=utf-8",
-            body: skins.css().into_bytes(),
+            body: skins.css().into_bytes().into(),
             ..Default::default()
         });
     }
@@ -60,7 +55,7 @@ pub fn handle(store: &Store, req: &Request) -> Option<Response> {
             } else {
                 "image/png"
             },
-            body: bytes.to_vec(),
+            body: bytes.to_vec().into(),
             csp: Some("default-src 'none'; style-src 'unsafe-inline'; sandbox"),
             ..Default::default()
         },

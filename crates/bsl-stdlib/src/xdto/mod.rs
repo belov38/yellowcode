@@ -3,6 +3,9 @@ mod factory;
 mod io_json;
 mod io_xml;
 mod objects;
+#[cfg(all(test, feature = "collate"))]
+#[path = "../../tests/support/serial_s4_xdto_resources.rs"]
+mod s4_resources;
 mod serializer;
 mod types;
 mod value_map;
@@ -17,6 +20,7 @@ pub(crate) use io_xml::{ReadMode, read_xml, read_xml_mode, write_xml};
 pub(crate) use types::comparison_input_len;
 pub(crate) use value_map::core;
 pub use value_map::{ReservedXdtoName, XdtoCodec, XdtoCtx, register_xdto_codec};
+pub(crate) use value_map::{type_from_qname, type_qname};
 
 use crate::bind::{key_error, msg, with_other};
 use crate::enums::type_by_id;

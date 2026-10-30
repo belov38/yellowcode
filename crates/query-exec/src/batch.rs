@@ -40,6 +40,22 @@ pub enum BatchError {
     Exec(ExecError),
 }
 
+impl BatchError {
+    fn retains_compile_storage(&self) -> bool {
+        !matches!(
+            self,
+            Self::Exec(
+                ExecError::Memory(_)
+                    | ExecError::Structure(_)
+                    | ExecError::Later { .. }
+                    | ExecError::Native(_)
+                    | ExecError::Rights(_)
+                    | ExecError::Fatal(_)
+            )
+        )
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct StmtRun {
     pub outcome: StmtOutcome,
@@ -243,7 +259,8 @@ fn run_batch_inner(
 ) -> Result<Vec<StmtRun>, BatchError> {
     forget(host, temp);
     let r = run_batch_leased(host, text, params, temp, mode, mem, observations);
-    if r.is_err()
+    if r.as_ref()
+        .is_err_and(|error| !error.retains_compile_storage())
         && let Some(mem) = mem
     {
         mem.release(mem.compile.bytes());
@@ -526,7 +543,11 @@ fn step(
             obs.finish(false);
         }
     }
-    if let Some(st) = stage {
+    if !r
+        .as_ref()
+        .is_err_and(|failure| failure.err.retains_compile_storage())
+        && let Some(st) = stage
+    {
         st.mem.release(leased);
     }
     r

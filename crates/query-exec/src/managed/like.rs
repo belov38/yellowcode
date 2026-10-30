@@ -11,6 +11,7 @@ use std::{borrow::Borrow, collections::hash_map::RandomState, hash::BuildHasher}
 pub enum LikeError {
     Memory(BudgetError),
     Icu(icu46_sys::IcuStatus),
+    Runtime(icu46_sys::managed::runtime::RuntimeError),
     Column,
 }
 impl From<BudgetError> for LikeError {
@@ -23,6 +24,7 @@ impl From<CollationError> for LikeError {
         match error {
             CollationError::Budget(e) => Self::Memory(e),
             CollationError::Icu(e) => Self::Icu(e),
+            CollationError::Runtime(e) => Self::Runtime(e),
         }
     }
 }
@@ -31,6 +33,7 @@ impl std::fmt::Display for LikeError {
         match self {
             Self::Memory(e) => e.fmt(f),
             Self::Icu(e) => e.fmt(f),
+            Self::Runtime(e) => write!(f, "{e:?}"),
             Self::Column => f.write_str("invalid LIKE column"),
         }
     }

@@ -1,6 +1,6 @@
 [package]
 name = "onec-desktop"
-version = "0.1.0-alpha.13"
+version = "0.1.0-alpha.14"
 edition = "2024"
 rust-version = "1.99.1"
 license = "MIT OR Apache-2.0"
@@ -16,6 +16,7 @@ serde_json = "1"
 sha2 = "0.10"
 dunce = "1"
 tempfile = "3"
+memory-budget = { path = "../crates/memory-budget" }
 yellowcode-core = { path = "../crates/yellowcode-core" }
 yellowcode-http = { path = "../crates/yellowcode-http" }
 yellowcode-cli = { path = "../crates/yellowcode-cli" }

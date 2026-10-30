@@ -26,7 +26,7 @@ struct Output<'a> {
     schema_version: u32,
     statements: Statements<'a>,
     elapsed_ms: u64,
-    error: &'a Option<ErrorOut>,
+    error: Option<&'a ErrorOut>,
     cancelled: bool,
     timed_out: bool,
 }
@@ -68,7 +68,7 @@ struct Statements<'a> {
 impl<'a> Statements<'a> {
     fn iter(self) -> impl Iterator<Item = Statement<'a>> {
         self.report
-            .statements
+            .statements()
             .iter()
             .enumerate()
             .map(move |(index, stmt)| match stmt {
@@ -97,7 +97,7 @@ impl<'a> Statements<'a> {
 impl Serialize for Statements<'_> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeSeq;
-        let mut seq = serializer.serialize_seq(Some(self.report.statements.len()))?;
+        let mut seq = serializer.serialize_seq(Some(self.report.statements().len()))?;
         for stmt in self.iter() {
             seq.serialize_element(&stmt)?;
         }
@@ -169,7 +169,7 @@ pub fn write_report(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> crate::Result<()> {
-    for (index, statement) in report.statements.iter().enumerate() {
+    for (index, statement) in report.statements().iter().enumerate() {
         if let Stmt::Result { columns, .. } = statement
             && (columns.iter().any(|column| column.kind == CellKind::Nested)
                 || report
@@ -183,8 +183,8 @@ pub fn write_report(
         }
     }
     if matches!(format, Format::Csv)
-        && report.error.is_none()
-        && !matches!(report.statements.as_slice(), [Stmt::Result { .. }])
+        && report.error().is_none()
+        && !matches!(report.statements(), [Stmt::Result { .. }])
     {
         return Err("CSV requires exactly one tabular result and no other batch statements".into());
     }
@@ -327,12 +327,12 @@ fn encode_report(
             schema_version: 1,
             statements,
             elapsed_ms: report.elapsed_ms,
-            error: &report.error,
+            error: report.error(),
             cancelled: report.cancelled,
             timed_out,
         };
         write_json(out, &output)?;
-    } else if report.error.is_none() {
+    } else if report.error().is_none() {
         for statement in statements.iter() {
             match statement {
                 Statement::Result { columns, rows, .. } if matches!(format, Format::Csv) => {

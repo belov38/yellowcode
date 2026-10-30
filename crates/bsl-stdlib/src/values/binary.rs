@@ -62,6 +62,31 @@ pub(super) fn ctor(ex: &mut Execution, args: &mut [Arg]) -> CallResult<Value> {
 }
 
 impl HostObject for BinaryData {
+    fn session_edges(&self, _: &mut dyn bsl_vm::SessionEdges) -> bool {
+        true
+    }
+    fn session_transfer_supported(&self) -> bool {
+        true
+    }
+    fn session_transfer(
+        &self,
+        out: &mut dyn bsl_vm::SessionExport,
+    ) -> Result<Option<Box<dyn bsl_vm::SessionObject>>, Exception> {
+        out.reserve(16)?;
+        Ok(Some(Box::new(SessionBinary(self.bytes.clone()))))
+    }
+    fn retained_memory(
+        &self,
+        visit: &mut dyn bsl_vm::RetainedMemory,
+    ) -> Result<bool, bsl_vm::Exception> {
+        visit.allocation(
+            Arc::as_ptr(&self.bytes).cast::<()>() as usize,
+            (self.bytes.len() as u64).saturating_add(
+                (2 * std::mem::size_of::<usize>() + std::mem::align_of::<usize>() - 1) as u64,
+            ),
+        )?;
+        Ok(true)
+    }
     fn type_id(&self) -> TypeId {
         TypeId::of_catalog(types().binary)
     }
@@ -107,6 +132,34 @@ impl HostObject for BinaryData {
         Some(SharedValue::Object(Arc::new(SharedBinary(
             self.bytes.clone(),
         ))))
+    }
+}
+
+struct SessionBinary(Arc<[u8]>);
+impl bsl_vm::SessionObject for SessionBinary {
+    fn retained_memory(&self, visit: &mut dyn bsl_vm::RetainedMemory) -> Result<(), Exception> {
+        visit
+            .allocation(
+                Arc::as_ptr(&self.0).cast::<()>() as usize,
+                crate::session::shared_bytes(&*self.0),
+            )
+            .map(|_| ())
+    }
+    fn create(
+        &self,
+        _: &mut Execution,
+        _: &mut bsl_vm::SessionImports,
+    ) -> Result<Value, Exception> {
+        Ok(Value::Object(Rc::new(BinaryData {
+            bytes: self.0.clone(),
+        })))
+    }
+    fn fill(&self, _: &mut Execution, _: &Value, _: Vec<Value>) -> Result<(), Exception> {
+        Ok(())
+    }
+    fn clear(&self, _: &Value) {}
+    fn restore_bytes(&self, _: usize) -> u64 {
+        32
     }
 }
 
@@ -208,4 +261,16 @@ impl crate::serial::codec::ValueCodec for BinaryCodec {
             None => Err(r.format_error(ex)),
         }
     }
+}
+
+pub(crate) fn binary_retained_layout(value: &Value) -> Option<(usize, u64)> {
+    let actual: &dyn Any = value.as_object()?.as_ref();
+    let data = actual.downcast_ref::<BinaryData>()?;
+    let bytes = std::alloc::Layout::new::<[usize; 2]>()
+        .extend(std::alloc::Layout::array::<u8>(data.bytes.len()).ok()?)
+        .ok()?
+        .0
+        .pad_to_align()
+        .size() as u64;
+    Some((Arc::as_ptr(&data.bytes) as *const () as usize, bytes))
 }

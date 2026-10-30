@@ -1,10 +1,14 @@
+mod accounting;
+mod session;
+pub(super) use accounting::object as retained_object;
 mod bridge;
 mod column_data;
 mod copy;
-mod row;
+pub(super) mod row;
 mod rows;
 mod schema;
 mod search;
+mod sort;
 use super::{
     columns::{ColumnRecord, Columns, PreparedSchemaChange, SchemaChange, SchemaRows},
     creation_number, method_name, not_implemented, position, property_name, release, type_name,
@@ -25,7 +29,7 @@ use std::{
     rc::Rc,
 };
 
-pub(crate) struct ValueTree {
+pub struct ValueTree {
     state: Rc<TreeState>,
 }
 struct Cells(Vec<(u32, Value)>);
@@ -312,6 +316,29 @@ pub(super) fn ctor(ex: &mut Execution, _: &mut [Arg]) -> CallResult<Value> {
     state.tree(ex)
 }
 impl HostObject for ValueTree {
+    fn to_shared(&self) -> Option<bsl_vm::SharedValue> {
+        bsl_vm::SharedValue::from_object(self)
+    }
+
+    fn session_edges(&self, visit: &mut dyn bsl_vm::SessionEdges) -> bool {
+        visit.backing(self.state.clone())
+    }
+    fn session_clear(&self) {}
+    fn session_transfer_supported(&self) -> bool {
+        true
+    }
+    fn session_transfer(
+        &self,
+        out: &mut dyn bsl_vm::SessionExport,
+    ) -> Result<Option<Box<dyn bsl_vm::SessionObject>>, bsl_vm::Exception> {
+        session::capture(&self.state, None, 0, out).map(Some)
+    }
+    fn retained_memory(
+        &self,
+        visit: &mut dyn bsl_vm::RetainedMemory,
+    ) -> Result<bool, bsl_vm::Exception> {
+        crate::collections::accounting::project(self, visit)
+    }
     fn type_id(&self) -> TypeId {
         TypeId::of_catalog(idx("ValueTree"))
     }

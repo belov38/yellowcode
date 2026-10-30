@@ -4,7 +4,9 @@ pub(crate) mod errinfo;
 pub mod internal;
 pub(crate) mod kind;
 pub(crate) mod oldxml;
+pub(crate) mod s4_codecs;
 pub mod storage;
+mod typedesc;
 pub(crate) mod xmlvalue;
 
 use bsl_vm::{Exception, Execution, FatalError, FatalKind};

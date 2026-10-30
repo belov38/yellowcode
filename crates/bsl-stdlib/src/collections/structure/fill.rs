@@ -1,10 +1,6 @@
+use super::super::retained::text_bytes;
 use super::*;
 use std::mem::size_of;
-
-fn text_bytes(text: &Str) -> u64 {
-    ((size_of::<Vec<u16>>() + 2 * size_of::<usize>()) as u64)
-        .saturating_add((text.backing_capacity_units() as u64).saturating_mul(2))
-}
 
 fn direct_value_bytes(value: &Value) -> u64 {
     match value {
@@ -61,26 +57,70 @@ fn source_bytes(fields: &Fields, ex: &mut Execution) -> CallResult<u64> {
     reason = "internal property inventory for the pending Task10 consumer"
 )]
 impl Structure {
+    pub(in crate::collections) fn prepare_fill(
+        &self,
+        _ex: &mut Execution,
+        member: MemberId,
+        value: Value,
+        _retained: u64,
+    ) -> CallResult<(Value, [u64; 2])> {
+        self.check_fill(member, [0; 2])?;
+        Ok((value, [0; 2]))
+    }
+
+    pub(in crate::collections) fn check_fill(
+        &self,
+        member: MemberId,
+        _stamp: [u64; 2],
+    ) -> CallResult<()> {
+        if self.fixed {
+            return Err(HostError::key(msg::PROP_NOT_WRITABLE).raw().into());
+        }
+        if self.fields.borrow().by_member(member).is_none() {
+            return Err(not_implemented(self.type_idx(), member).into());
+        }
+        Ok(())
+    }
+
+    pub(in crate::collections) fn publish_fill(&self, member: MemberId, value: &mut Value) {
+        let mut fields = self.fields.borrow_mut();
+        if let Some(index) = fields.by_member(member) {
+            std::mem::swap(&mut fields.entries[index].value, value);
+        } else {
+            unreachable!("prepared structure property disappeared")
+        }
+    }
+
+    pub(crate) fn property_names_retained(
+        &self,
+        ex: &mut Execution,
+        retained: u64,
+    ) -> CallResult<Vec<Str>> {
+        copy_property_names(&self.fields.borrow(), ex, retained)
+    }
+
     pub(crate) fn property_names(&self, ex: &mut Execution, retained: u64) -> CallResult<Vec<Str>> {
         let fields = self.fields.borrow();
         let live = source_bytes(&fields, ex)?
             .saturating_add(retained)
             .saturating_add(size_of::<Vec<Str>>() as u64);
-        ex.charge(fields.entries.len() as u64)?;
-        admit_live(
-            ex,
-            live.saturating_add(
-                (fields.entries.len() as u64).saturating_mul(size_of::<Str>() as u64),
-            ),
-        )?;
-        let mut result = super::super::vec_with_capacity::<Str>(ex, fields.entries.len() as u64)?;
-        admit_live(
-            ex,
-            live.saturating_add((result.capacity() as u64).saturating_mul(size_of::<Str>() as u64)),
-        )?;
-        result.extend(fields.entries.iter().map(|field| field.key.clone()));
-        Ok(result)
+        copy_property_names(&fields, ex, live)
     }
+}
+
+fn copy_property_names(fields: &Fields, ex: &mut Execution, live: u64) -> CallResult<Vec<Str>> {
+    ex.charge(fields.entries.len() as u64)?;
+    admit_live(
+        ex,
+        live.saturating_add((fields.entries.len() as u64).saturating_mul(size_of::<Str>() as u64)),
+    )?;
+    let mut result = super::super::vec_with_capacity::<Str>(ex, fields.entries.len() as u64)?;
+    admit_live(
+        ex,
+        live.saturating_add((result.capacity() as u64).saturating_mul(size_of::<Str>() as u64)),
+    )?;
+    result.extend(fields.entries.iter().map(|field| field.key.clone()));
+    Ok(result)
 }
 
 fn admit_live(ex: &mut Execution, live: u64) -> CallResult<()> {
@@ -135,22 +175,34 @@ impl Structure {
             return Ok(None);
         };
         let value = &fields.entries[index].value;
-        if let Value::Number(number) = value {
-            ex.charge(number.size_hint_limbs() / 64 + 1)?;
-            let copy = number
-                .try_clone_with(|limbs| {
-                    admit_live(ex, live.saturating_add((limbs as u64).saturating_mul(4)))
-                })
-                .map_err(|error| match error {
-                    bsl_prim::number::NumberAllocError::Reserve(error) => error,
-                    _ => ex.out_of_memory().into(),
-                })?;
-            admit_live(
-                ex,
-                live.saturating_add((copy.backing_capacity_limbs() as u64).saturating_mul(4)),
-            )?;
-            return Ok(Some(Value::Number(copy)));
-        }
-        Ok(Some(value.clone()))
+        Ok(Some(copy_value(ex, value, live)?))
     }
+}
+
+pub(crate) fn copy_value(ex: &mut Execution, value: &Value, live: u64) -> CallResult<Value> {
+    if let Value::Number(number) = value {
+        return copy_number(ex, number, live).map(Value::Number);
+    }
+    Ok(value.clone())
+}
+
+pub(crate) fn copy_number(
+    ex: &mut Execution,
+    number: &bsl_prim::Number,
+    live: u64,
+) -> CallResult<bsl_prim::Number> {
+    ex.charge(number.size_hint_limbs() / 64 + 1)?;
+    let copy = number
+        .try_clone_with(|limbs| {
+            admit_live(ex, live.saturating_add((limbs as u64).saturating_mul(4)))
+        })
+        .map_err(|error| match error {
+            bsl_prim::number::NumberAllocError::Reserve(error) => error,
+            _ => ex.out_of_memory().into(),
+        })?;
+    admit_live(
+        ex,
+        live.saturating_add((copy.backing_capacity_limbs() as u64).saturating_mul(4)),
+    )?;
+    Ok(copy)
 }

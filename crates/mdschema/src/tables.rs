@@ -1,7 +1,7 @@
 use crate::spec::*;
+use crate::{FactJson, FactMap};
 use serde::Deserialize;
 use serde_json::Value;
-use std::collections::HashMap;
 
 #[derive(Debug, Clone, thiserror::Error)]
 #[error("embedded schema: {0}")]
@@ -11,31 +11,31 @@ type Pairs<T> = Vec<(String, T)>;
 
 #[derive(Debug)]
 pub struct Schema {
-    resource: &'static crate::SchemaResource,
-    kinds: HashMap<String, KindSpec>,
-    tag_props: HashMap<String, Pairs<PropSpec>>,
-    hp_templates: HashMap<String, HashMap<String, PropSpec>>,
-    fd_template: HashMap<String, PropSpec>,
-    classes_top: Pairs<String>,
-    class_index: HashMap<String, usize>,
-    types: HashMap<String, PlatformType>,
-    stdattrs: HashMap<String, HashMap<String, String>>,
-    bag: HashMap<String, BagProp>,
-    ui: Ui,
-    modules: HashMap<String, Pairs<String>>,
-    order: HashMap<String, Vec<String>>,
-    counts: HashMap<String, u32>,
-    xdto: HashMap<String, Vec<XdtoProp>>,
-    folders: Pairs<String>,
-    folder_index: HashMap<String, usize>,
-    kind_order: Vec<String>,
-    gentypes: HashMap<String, Vec<String>>,
-    gt_name: HashMap<String, String>,
-    cfg_classes: Vec<String>,
-    ui_tables: UiTables,
-    std_pictures: HashMap<String, String>,
-    config_props: Vec<ConfigPropSpec>,
-    config_index: HashMap<String, usize>,
+    pub(crate) resource: &'static crate::SchemaResource,
+    pub(crate) kinds: FactMap<String, KindSpec>,
+    pub(crate) tag_props: FactMap<String, Pairs<PropSpec>>,
+    pub(crate) hp_templates: FactMap<String, FactMap<String, PropSpec>>,
+    pub(crate) fd_template: FactMap<String, PropSpec>,
+    pub(crate) classes_top: Pairs<String>,
+    pub(crate) class_index: Vec<usize>,
+    pub(crate) types: FactMap<String, PlatformType>,
+    pub(crate) stdattrs: FactMap<String, FactMap<String, String>>,
+    pub(crate) bag: FactMap<String, BagProp>,
+    pub(crate) ui: Ui,
+    pub(crate) modules: FactMap<String, Pairs<String>>,
+    pub(crate) order: FactMap<String, Vec<String>>,
+    pub(crate) counts: FactMap<String, u32>,
+    pub(crate) xdto: FactMap<String, Vec<XdtoProp>>,
+    pub(crate) folders: Pairs<String>,
+    pub(crate) folder_index: Vec<usize>,
+    pub(crate) kind_order: Vec<String>,
+    pub(crate) gentypes: FactMap<String, Vec<String>>,
+    pub(crate) gt_name: FactMap<String, String>,
+    pub(crate) cfg_classes: Vec<String>,
+    pub(crate) ui_tables: UiTables,
+    pub(crate) std_pictures: FactMap<String, String>,
+    pub(crate) config_props: Vec<ConfigPropSpec>,
+    pub(crate) config_index: Vec<usize>,
 }
 
 pub fn schema() -> Result<&'static Schema, SchemaError> {
@@ -53,32 +53,32 @@ struct ClassesFile {
 
 #[derive(Deserialize)]
 struct ModulesFile {
-    modules: HashMap<String, Ordered<String>>,
+    modules: FactMap<String, Ordered<String>>,
 }
 
 #[derive(Deserialize)]
 struct OrderFile {
-    order: HashMap<String, Vec<String>>,
+    order: FactMap<String, Vec<String>>,
     #[serde(default)]
-    counts: HashMap<String, u32>,
+    counts: FactMap<String, u32>,
 }
 
 #[derive(Deserialize)]
 struct BagFile {
-    props: HashMap<String, BagProp>,
+    props: FactMap<String, BagProp>,
 }
 
 #[derive(Deserialize)]
 struct GenFile {
     folders: Vec<(String, String)>,
-    gentypes: HashMap<String, Vec<String>>,
-    gt_name: HashMap<String, String>,
+    gentypes: FactMap<String, Vec<String>>,
+    gt_name: FactMap<String, String>,
     cfg_classes: Vec<String>,
 }
 
 #[derive(Deserialize)]
 struct PicturesFile {
-    std_pictures: HashMap<String, String>,
+    std_pictures: FactMap<String, String>,
 }
 
 #[derive(Deserialize)]
@@ -86,12 +86,30 @@ struct ConfigFile {
     props: Vec<(String, Value, String, Value)>,
 }
 
-fn index_of<T>(pairs: &[(String, T)]) -> HashMap<String, usize> {
-    let mut m = HashMap::new();
-    for (i, (k, _)) in pairs.iter().enumerate() {
-        m.entry(k.clone()).or_insert(i);
-    }
-    m
+pub(crate) fn sort_ordinals<T>(indices: &mut Vec<usize>, rows: &[T], key: impl Fn(&T) -> &str) {
+    indices.sort_unstable_by(|a, b| {
+        rows.get(*a)
+            .map(&key)
+            .cmp(&rows.get(*b).map(&key))
+            .then(a.cmp(b))
+    });
+    indices.dedup_by(|a, b| rows.get(*a).map(&key) == rows.get(*b).map(&key));
+}
+fn index_of<T>(rows: &[T], key: impl Fn(&T) -> &str) -> Vec<usize> {
+    let mut out = (0..rows.len()).collect();
+    sort_ordinals(&mut out, rows, key);
+    out
+}
+fn find_ordinal<T>(
+    indices: &[usize],
+    rows: &[T],
+    wanted: &str,
+    key: impl Fn(&T) -> &str,
+) -> Option<usize> {
+    let at = indices
+        .binary_search_by(|i| rows.get(*i).map(&key).cmp(&Some(wanted)))
+        .ok()?;
+    indices.get(at).copied()
 }
 
 fn path_of(v: &Value) -> Result<Vec<usize>, SchemaError> {
@@ -118,24 +136,27 @@ fn config_path(v: &Value) -> Result<Option<ConfigPath>, SchemaError> {
 
 impl Schema {
     pub(crate) fn load(resource: &'static crate::SchemaResource) -> Result<Schema, SchemaError> {
-        let kinds: HashMap<String, KindSpec> = parse("kinds.json", resource.json("kinds.json")?)?;
-        let tag_props: HashMap<String, Ordered<PropSpec>> =
+        let kinds: FactMap<String, KindSpec> = parse("kinds.json", resource.json("kinds.json")?)?;
+        let tag_props: FactMap<String, Ordered<PropSpec>> =
             parse("tag_props.json", resource.json("tag_props.json")?)?;
         let tag_props = tag_props.into_iter().map(|(k, v)| (k, v.0)).collect();
         let hp_templates = parse("hp_templates.json", resource.json("hp_templates.json")?)?;
         let fd_template = parse("fd_template.json", resource.json("fd_template.json")?)?;
         let classes: ClassesFile = parse("classes.json", resource.json("classes.json")?)?;
         let classes_top = classes.top.0;
-        let class_index = index_of(&classes_top);
+        let class_index = index_of(&classes_top, |(k, _)| k.as_str());
 
-        let types = crate::type_names::parse_platform_types(resource.json("types.json")?)?;
+        let types: FactMap<String, PlatformType> =
+            crate::type_names::parse_platform_types(resource.json("types.json")?)?
+                .into_iter()
+                .collect();
 
         let raw_std: serde_json::Map<String, Value> =
             parse("stdattrs.json", resource.json("stdattrs.json")?)?;
-        let mut stdattrs = HashMap::new();
+        let mut stdattrs = FactMap::new();
         for (kind, v) in raw_std {
             if v.is_object() {
-                let m: HashMap<String, String> = serde_json::from_value(v)
+                let m: FactMap<String, String> = serde_json::from_value(v)
                     .map_err(|e| SchemaError(format!("stdattrs.json: {kind}: {e}")))?;
                 stdattrs.insert(kind, m);
             }
@@ -146,7 +167,7 @@ impl Schema {
         let modules: ModulesFile = parse("modules.json", resource.json("modules.json")?)?;
         let order: OrderFile = parse("order.json", resource.json("order.json")?)?;
 
-        let raw_xdto: HashMap<String, Vec<RawXdtoProp>> =
+        let raw_xdto: FactMap<String, Vec<RawXdtoProp>> =
             parse("xdto_md.json", resource.json("xdto_md.json")?)?;
         let xdto = raw_xdto
             .into_iter()
@@ -155,7 +176,7 @@ impl Schema {
 
         let gen_file: GenFile = parse("gen.json", resource.json("gen.json")?)?;
         let folders = gen_file.folders;
-        let folder_index = index_of(&folders);
+        let folder_index = index_of(&folders, |(k, _)| k.as_str());
         let kind_order = folders.iter().map(|(k, _)| k.clone()).collect();
 
         let ui_tables = parse("ui_tables.json", resource.json("ui_tables.json")?)?;
@@ -168,16 +189,10 @@ impl Schema {
                 name,
                 path,
                 codec,
-                extra,
+                extra: FactJson::Legacy(extra),
             });
         }
-        let config_index = {
-            let mut m = HashMap::new();
-            for (i, p) in config_props.iter().enumerate() {
-                m.entry(p.name.clone()).or_insert(i);
-            }
-            m
-        };
+        let config_index = index_of(&config_props, |p| p.name.as_str());
 
         Ok(Schema {
             resource,
@@ -217,7 +232,7 @@ impl Schema {
     }
 
     pub fn class_kind(&self, class: &str) -> Option<&str> {
-        let i = *self.class_index.get(class)?;
+        let i = find_ordinal(&self.class_index, &self.classes_top, class, |(k, _)| k)?;
         self.classes_top.get(i).map(|(_, k)| k.as_str())
     }
 
@@ -292,7 +307,7 @@ impl Schema {
     }
 
     pub fn folder(&self, kind: &str) -> Option<&str> {
-        let i = *self.folder_index.get(kind)?;
+        let i = find_ordinal(&self.folder_index, &self.folders, kind, |(k, _)| k)?;
         self.folders.get(i).map(|(_, f)| f.as_str())
     }
 
@@ -325,6 +340,11 @@ impl Schema {
     }
 
     pub fn config_prop(&self, name: &str) -> Option<&ConfigPropSpec> {
-        self.config_props.get(*self.config_index.get(name)?)
+        self.config_props.get(find_ordinal(
+            &self.config_index,
+            &self.config_props,
+            name,
+            |p| p.name.as_str(),
+        )?)
     }
 }

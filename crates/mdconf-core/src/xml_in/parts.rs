@@ -209,7 +209,7 @@ fn configuration(cfg: &mut Configuration, cx: &mut Context<'_>) -> Result<()> {
                         .and_then(|m| m.as_object())
                         .map(|m| {
                             m.iter()
-                                .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.into())))
+                                .filter_map(|(k, v)| Some((k.to_owned(), v.as_str()?.into())))
                                 .collect()
                         })
                         .unwrap_or_else(|| {

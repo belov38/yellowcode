@@ -51,9 +51,17 @@ fn replace(write: &mut WriteTxn<'_>, table: &str, column: &str, bytes: &[u8]) {
 }
 
 pub fn create(root: &Path) -> PathBuf {
+    create_in_locale(root, "ru_RU")
+}
+
+pub fn create_in_locale(root: &Path, locale: &str) -> PathBuf {
     let cf = mdconf::CfFile::open(&cf_fixtures::fixture_dir("types").join("p.cf")).unwrap();
     let dir = root.join("База ёжий");
-    infobase::create::create_empty(&dir, &Default::default()).unwrap();
+    let opts = infobase::create::CreateOptions {
+        locale: locale.into(),
+        ..Default::default()
+    };
+    infobase::create::create_empty(&dir, &opts).unwrap();
     let cfg = mdconf::Configuration::load(&cf, &Default::default()).unwrap();
     let seed = infobase::seed::seed();
     let mut names = seed.dbnames.clone();
@@ -255,6 +263,23 @@ pub fn populate_invoices_with(
                     .map(FieldValue::Date)
             }
             StdField::Number => Some(FieldValue::String(format!("ё-{n:05}"))),
+            _ => None,
+        },
+    );
+}
+
+pub fn populate_goods_named(dir: &Path, names: &[&str]) {
+    populate(
+        dir,
+        "Catalog.Goods",
+        names.len() as u64,
+        false,
+        &|n, std, t| match std {
+            StdField::Id => Some(reference(t, n)),
+            StdField::Folder => Some(FieldValue::Bool(true)),
+            StdField::Marked => Some(FieldValue::Bool(false)),
+            StdField::Code => Some(FieldValue::Number(Numeric::from_i64(n as i64))),
+            StdField::Description => Some(FieldValue::String(names[n as usize - 1].to_string())),
             _ => None,
         },
     );

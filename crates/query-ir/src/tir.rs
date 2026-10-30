@@ -66,6 +66,52 @@ pub struct TotalsField {
     pub alias: Option<String>,
 }
 
+pub fn totals_point_column(f: &TotalsField, items: &[Item]) -> Option<usize> {
+    if f.col.is_some() {
+        return f.col;
+    }
+    if !matches!(f.expr.kind, TKind::Field { .. }) {
+        return None;
+    }
+    let mut matching = items
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| same_point_field(&item.expr, &f.expr));
+    let (column, _) = matching.next()?;
+    matching.next().is_none().then_some(column)
+}
+
+fn same_point_field(a: &TExpr, b: &TExpr) -> bool {
+    match (&a.kind, &b.kind) {
+        (
+            TKind::Field {
+                level: al,
+                source: as_,
+                col: ac,
+                derefs: ad,
+            },
+            TKind::Field {
+                level: bl,
+                source: bs,
+                col: bc,
+                derefs: bd,
+            },
+        ) => {
+            a.ty == b.ty
+                && al == bl
+                && as_ == bs
+                && ac == bc
+                && ad.len() == bd.len()
+                && ad.iter().zip(bd).all(|(x, y)| {
+                    x.targets == y.targets
+                        && (!x.targets.is_empty()
+                            || bsl_prim::fold_name(&x.name) == bsl_prim::fold_name(&y.name))
+                })
+        }
+        _ => false,
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TotalsHierarchy {
     No,

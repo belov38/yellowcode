@@ -63,7 +63,7 @@ pub mod access;
 pub mod build;
 pub use access::{AccessPredicate, compile_access_condition};
 pub mod exec_error;
-pub use exec_error::{ExecError, RuntimeError};
+pub use exec_error::{ExecError, NativeError, RuntimeError};
 pub mod host;
 pub use host::{
     Access, AccessPolicy, FieldSet, HostError, PredefinedName, PresentationInput, SeparatorFilter,

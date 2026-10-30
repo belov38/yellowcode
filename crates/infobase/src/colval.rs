@@ -60,21 +60,30 @@ pub fn to_onecd(v: &ColumnValue, ty: ColType) -> Result<Value> {
     if ty == ColType::RV {
         return Err(Error::Unsupported("row version column value".into()));
     }
+    into_onecd(v.clone(), ty)
+}
+
+pub fn into_onecd(v: ColumnValue, ty: ColType) -> Result<Value> {
+    if ty == ColType::RV {
+        return Err(Error::Unsupported("row version column value".into()));
+    }
     Ok(match (v, ty) {
         (ColumnValue::Null, _) => Value::Null,
-        (ColumnValue::Str(s), ColType::NC(_)) => Value::Char(s.clone()),
-        (ColumnValue::Str(s), ColType::NVC(_)) => Value::VarChar(s.clone()),
+        (ColumnValue::Str(s), ColType::NC(_)) => Value::Char(s),
+        (ColumnValue::Str(s), ColType::NVC(_)) => Value::VarChar(s),
         (ColumnValue::Str(s), ColType::NT) => Value::NText(BlobVal::Data(
             s.encode_utf16().flat_map(u16::to_le_bytes).collect(),
         )),
-        (ColumnValue::Bytes(b), ColType::B(_) | ColType::VB(_)) => Value::Binary(b.clone()),
-        (ColumnValue::Bytes(b), ColType::I) => Value::Image(BlobVal::Data(b.clone())),
-        (ColumnValue::Bool(b), ColType::L) => Value::Bool(*b),
-        (ColumnValue::Number(n), ColType::N(..)) => Value::Numeric(n.clone()),
-        (ColumnValue::DateTime(d), ColType::DT) => Value::DateTime(*d),
-        _ => return Err(mismatch(v, ty)),
+        (ColumnValue::Bytes(b), ColType::B(_) | ColType::VB(_)) => Value::Binary(b),
+        (ColumnValue::Bytes(b), ColType::I) => Value::Image(BlobVal::Data(b)),
+        (ColumnValue::Bool(b), ColType::L) => Value::Bool(b),
+        (ColumnValue::Number(n), ColType::N(..)) => Value::Numeric(n),
+        (ColumnValue::DateTime(d), ColType::DT) => Value::DateTime(d),
+        (v, ty) => return Err(mismatch(&v, ty)),
     })
 }
+
+pub const NT_COPY_FACTOR: usize = 6;
 
 fn blob_bytes(
     b: &BlobVal,

@@ -35,7 +35,9 @@ mod corpus_index;
 
 #[cfg(feature = "icu")]
 pub use collate::IcuCollate;
-pub use collate::{Collate, Strength};
+#[cfg(feature = "icu")]
+pub use collate::KeyRequest;
+pub use collate::{Collate, Strength, scoped_key_cancel, with_key_cancel};
 pub use db::{
     CreateOptions, Database, DbInfo, Locking, Mode, OpenOptions, ReadTxn, RowId, SyncMode, WriteTxn,
 };

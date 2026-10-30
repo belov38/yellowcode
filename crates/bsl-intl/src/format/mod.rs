@@ -4,8 +4,8 @@ pub mod spec;
 
 use crate::data::{WordsData, decode_words};
 use crate::locale::{Locale, locale};
+use crate::locale_key::language_of_key;
 use crate::present::bool_to_string;
-use crate::words::language_of;
 use bsl_prim::{BslDate, Number};
 pub use spec::{FormatSpec, parse_spec};
 use std::sync::OnceLock;
@@ -41,7 +41,7 @@ fn format_bool(b: bool, spec: &FormatSpec, session: &Locale) -> String {
             Some(loc) => all
                 .get(loc.language())
                 .or_else(|| all.get(FALLBACK_LANGUAGE)),
-            None => all.get(&language_of(Some(name), session)),
+            None => all.get(&language_of_key(Some(name), session)),
         },
     };
     match found {

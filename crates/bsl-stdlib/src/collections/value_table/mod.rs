@@ -1,3 +1,6 @@
+mod accounting;
+mod session;
+pub(super) use accounting::object as retained_object;
 mod bridge;
 mod column_data;
 mod copy;
@@ -26,7 +29,7 @@ use std::{
     rc::Rc,
 };
 
-pub(crate) struct ValueTable {
+pub struct ValueTable {
     state: Rc<TableState>,
 }
 struct TableState {
@@ -36,6 +39,7 @@ struct TableState {
     revision: Cell<u64>,
     next_id: Cell<u64>,
     records_bytes: Cell<u64>,
+    producer_capacity_extra: Cell<Option<(u64, u64, u64)>>,
     hash: i32,
 }
 fn changed() -> HostError {
@@ -179,7 +183,7 @@ impl TableState {
         } else {
             self.len()
         };
-        self.insert_row(ex, i, rev, schema, None)
+        self.insert_row(ex, i, rev, schema, None, None)
     }
     fn insert_row(
         self: &Rc<Self>,
@@ -188,10 +192,11 @@ impl TableState {
         rev: u64,
         schema: u64,
         source: Option<&[Value]>,
+        producer_extra: Option<u64>,
     ) -> CallResult<Value> {
         let id = self.next_id.get();
         let next = id.checked_add(1).ok_or_else(|| ex.out_of_memory())?;
-        let mut base = self.live(ex)?;
+        let mut base = self.live(ex)?.saturating_add(producer_extra.unwrap_or(0));
         if let Some(source) = source {
             ex.charge(source.len() as u64)?;
             base = base.saturating_add(
@@ -231,6 +236,9 @@ impl TableState {
                 default_cell(ex, column, live)?
             };
             live = live.saturating_add(value_bytes(&value));
+            if producer_extra.is_some() {
+                live = live.saturating_add(bridge::capacity_extra(&value));
+            }
             ex.reserve(live)?;
             cells.0.push((column.id, value));
             self.check_revision(rev, schema)?;
@@ -451,6 +459,7 @@ pub(super) fn ctor(ex: &mut Execution, _: &mut [Arg]) -> CallResult<Value> {
         revision: Cell::new(0),
         next_id: Cell::new(0),
         records_bytes: Cell::new(0),
+        producer_capacity_extra: Cell::new(None),
         hash: creation_number(),
     });
     let observer: Rc<dyn SchemaRows> = state.clone();
@@ -458,6 +467,29 @@ pub(super) fn ctor(ex: &mut Execution, _: &mut [Arg]) -> CallResult<Value> {
     state.table(ex)
 }
 impl HostObject for ValueTable {
+    fn to_shared(&self) -> Option<bsl_vm::SharedValue> {
+        bsl_vm::SharedValue::from_object(self)
+    }
+
+    fn session_edges(&self, visit: &mut dyn bsl_vm::SessionEdges) -> bool {
+        visit.backing(self.state.clone())
+    }
+    fn session_clear(&self) {}
+    fn session_transfer_supported(&self) -> bool {
+        true
+    }
+    fn session_transfer(
+        &self,
+        out: &mut dyn bsl_vm::SessionExport,
+    ) -> Result<Option<Box<dyn bsl_vm::SessionObject>>, bsl_vm::Exception> {
+        session::capture(&self.state, None, out).map(Some)
+    }
+    fn retained_memory(
+        &self,
+        visit: &mut dyn bsl_vm::RetainedMemory,
+    ) -> Result<bool, bsl_vm::Exception> {
+        crate::collections::accounting::project(self, visit)
+    }
     fn type_id(&self) -> TypeId {
         TypeId::of_catalog(idx("ValueTable"))
     }
@@ -466,7 +498,7 @@ impl HostObject for ValueTable {
     }
     fn get(&self, _: &mut Execution, m: MemberId) -> CallResult<Value> {
         match property_name(idx("ValueTable"), m) {
-            Some("Columns") => Ok(self.columns()),
+            Some("Columns") => Ok(Value::Object(self.state.columns.clone())),
             Some("Indexes") => Ok(Value::Object(self.state.indexes.clone())),
             _ => Err(not_implemented(idx("ValueTable"), m).into()),
         }

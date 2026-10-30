@@ -1,13 +1,12 @@
 use std::collections::HashMap;
 
-use bsl_prim::{Collation, Number, Strength};
+use bsl_prim::{Number, Strength};
 use query_ir::{ExecError, QType, QValue};
 use query_syntax::Func;
 
 use super::{charge_string, code_points, fatal, push_units, str_value};
 use crate::model::{HashModel, block, vec_block};
 use crate::ops::MemBudget;
-use crate::source::ExecEnv;
 
 fn text(v: &QValue) -> Result<&[u16], ExecError> {
     match v {
@@ -41,7 +40,7 @@ pub(super) fn pad_fixed(v: QValue, ty: &QType, mem: &MemBudget<'_>) -> Result<QV
 }
 
 struct Classes<'c> {
-    coll: &'c dyn Collation,
+    coll: crate::coll::ExecCollation<'c>,
     mem: &'c MemBudget<'c>,
     by_cp: HashMap<u32, u32>,
     by_cp_model: HashModel,
@@ -50,7 +49,7 @@ struct Classes<'c> {
 }
 
 impl<'c> Classes<'c> {
-    fn new(coll: &'c dyn Collation, mem: &'c MemBudget<'c>) -> Self {
+    fn new(coll: crate::coll::ExecCollation<'c>, mem: &'c MemBudget<'c>) -> Self {
         Classes {
             coll,
             mem,
@@ -68,7 +67,7 @@ impl<'c> Classes<'c> {
         let mut u = Vec::with_capacity(2);
         push_units(cp, &mut u);
         self.mem.grow_scratch(block(32))?;
-        let key = self.coll.sort_key(Strength::Secondary, &u);
+        let key = self.coll.sort_key(Strength::Secondary, &u)?;
         let next = self.by_key.len() as u32;
         let id = match self.by_key.get(&key) {
             Some(&id) => id,
@@ -231,7 +230,7 @@ pub fn present(v: &QValue) -> Result<Vec<u16>, ExecError> {
 pub(super) fn call(
     f: Func,
     args: &[QValue],
-    env: &ExecEnv<'_>,
+    coll: crate::coll::ExecCollation<'_>,
     mem: &MemBudget<'_>,
 ) -> Result<QValue, ExecError> {
     let arg = |i: usize| args.get(i).ok_or_else(|| fatal("too few arguments"));
@@ -293,7 +292,7 @@ pub(super) fn call(
             if needle.is_empty() {
                 return Ok(len_value(1));
             }
-            let mut cl = Classes::new(env.collation, mem);
+            let mut cl = Classes::new(coll, mem);
             let ((h, offs), (nd, _)) = (cl.of_text(hay)?, cl.of_text(needle)?);
             let pos = occurrences(&h, &nd, mem)?
                 .first()
@@ -307,7 +306,7 @@ pub(super) fn call(
                 bounded(hay)?;
                 return Ok(str_value(hay.to_vec()));
             }
-            let mut cl = Classes::new(env.collation, mem);
+            let mut cl = Classes::new(coll, mem);
             let ((h, offs), (nd, _)) = (cl.of_text(hay)?, cl.of_text(needle)?);
             let occ = occurrences(&h, &nd, mem)?;
             let needle_units: u64 = occ

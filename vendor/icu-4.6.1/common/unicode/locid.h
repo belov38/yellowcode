@@ -725,13 +725,17 @@ private:
 
     UBool fIsBogus;
 
+    // Receiver role, never copied from the source of an assignment.
+    int32_t memoryRole46;
+    static const Locale &getBogus46();
+
     static const Locale &getLocale(int locid);
 
     /**
      * A friend to allow the default locale to be set by either the C or C++ API.
      * @internal
      */
-    friend void locale_set_default_internal(const char *);
+    friend void locale_set_default_internal(const char *, UErrorCode &);
 };
 
 inline UBool

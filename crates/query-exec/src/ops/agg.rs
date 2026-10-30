@@ -186,12 +186,12 @@ impl<'a> HashAggregate<'a> {
                             cx.mem.keep_scratch(key)?;
                             cx.mem.grow(table)?;
                             self.held += key + table;
-                            let old = st.add_distinct(k, v, cx.env)?;
+                            let old = st.add_distinct(k, v, cx.env, cx.coll)?;
                             release(old, cx, &mut self.held);
                         }
                         continue;
                     }
-                    st.add(arg.as_ref(), cx.env)?;
+                    st.add_with(arg.as_ref(), cx.env, cx.coll)?;
                 }
             }
         }

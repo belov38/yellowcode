@@ -1,7 +1,8 @@
 use crate::data::{PluralCondition, PluralOperand, PluralRelation};
 use crate::error::{LibError, msg};
-use crate::format::{FmtValue, FormatEnv, format, parse_spec, words};
+use crate::format::{FmtValue, FormatEnv, format, words};
 use crate::locale::{Locale, locale};
+use crate::locale_key::{KeyCase, locale_key};
 use crate::present::number_to_string;
 use bsl_prim::Number;
 
@@ -149,7 +150,7 @@ pub fn string_with_number(
         return Err(LibError::new(msg::PARAM_VALUE).with_arg(1));
     };
     let loc = fmt
-        .and_then(|f| parse_spec(f).locale)
+        .and_then(|f| locale_key(f, KeyCase::Exact))
         .and_then(|name| locale(&name))
         .unwrap_or(session);
     let cat = category(loc.name(), kind, &Operands::of_number(n));

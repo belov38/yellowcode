@@ -69,7 +69,7 @@ fn generic_subnames(
             if let Some(nm) = nm.as_str() {
                 seen.entry(child)
                     .or_default()
-                    .entry(suf.as_str())
+                    .entry(suf)
                     .or_default()
                     .insert(nm);
             }

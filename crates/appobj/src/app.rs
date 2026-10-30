@@ -29,6 +29,7 @@ pub struct AppOpen {
 
 #[derive(Clone)]
 pub struct AppOptions {
+    pub read_only_scope: Option<crate::ReadOnlyScope>,
     pub lock_timeout: Duration,
     pub compile_cache: Option<Arc<CompileCache>>,
     pub uuid_node: Option<[u8; 6]>,
@@ -41,6 +42,7 @@ pub struct AppOptions {
 impl Default for AppOptions {
     fn default() -> AppOptions {
         AppOptions {
+            read_only_scope: None,
             lock_timeout: Duration::from_secs(20),
             compile_cache: None,
             uuid_node: None,
@@ -87,7 +89,10 @@ pub(crate) struct QueryCtx {
 }
 
 impl Application {
-    pub fn open(o: AppOpen) -> Result<Arc<Application>> {
+    pub fn open(mut o: AppOpen) -> Result<Arc<Application>> {
+        if let Some(scope) = &o.options.read_only_scope {
+            o.store = scope.bind(o.store)?;
+        }
         let mut model = AppModel::build(o.config)?;
         model.bind(o.store.storage())?;
         let compat = compat_of(&model)?;
@@ -289,11 +294,9 @@ impl Application {
     ) -> std::result::Result<SessionState, SessionError> {
         let state = SessionState::new(start, self.model.session_params.len());
         hooks.zones_set(&state)?;
-        for m in self.modules.global_modules(ExecContext::Server) {
-            if let Err(e) = self.modules.compiled_or_fatal(m, ex.lang()) {
-                return Err(SessionError::GlobalModule(e));
-            }
-        }
+        self.modules
+            .initialize_globals(ex.lang())
+            .map_err(SessionError::GlobalModule)?;
         self.begin_call(ex, state, CallOptions::default());
         let r = self.run_session_module(ex);
         let (state, _) = self.end_call(ex);

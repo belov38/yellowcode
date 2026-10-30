@@ -21,6 +21,7 @@
 #include "regexcmp.h"
 #include "regeximp.h"
 #include "regexst.h"
+#include "managed_memory.h"
 
 U_NAMESPACE_BEGIN
 
@@ -32,6 +33,16 @@ U_NAMESPACE_BEGIN
 RegexPattern::RegexPattern() {
     UErrorCode status = U_ZERO_ERROR;
     u_init(&status);
+
+    // A memory failure of the internal u_init (its status or the managed
+    // allocation latch) is kept: the fields are left destructible without
+    // allocating and compile() deletes this pattern. Missing data stays
+    // nonfatal, as before.
+    if (status == U_MEMORY_ALLOCATION_ERROR || managed_failed_46()) {
+        initFields();
+        fDeferredStatus = U_MEMORY_ALLOCATION_ERROR;
+        return;
+    }
 
     // Init all of this instances data.
     init();
@@ -138,7 +149,7 @@ RegexPattern &RegexPattern::operator = (const RegexPattern &other) {
 //                Bring an uninitialized RegexPattern up to a default state.
 //
 //--------------------------------------------------------------------------
-void RegexPattern::init() {
+void RegexPattern::initFields() {
     fFlags            = 0;
     fCompiledPat      = 0;
     fLiteralText.remove();
@@ -162,6 +173,10 @@ void RegexPattern::init() {
 
     fPattern          = NULL; // will be set later
     fPatternString    = NULL; // may be set later
+}
+
+void RegexPattern::init() {
+    initFields();
     fCompiledPat      = new UVector64(fDeferredStatus);
     fGroupMap         = new UVector32(fDeferredStatus);
     fSets             = new UVector(fDeferredStatus);
@@ -171,7 +186,7 @@ void RegexPattern::init() {
         return;
     }
     if (fCompiledPat == NULL  || fGroupMap == NULL || fSets == NULL ||
-        fInitialChars == NULL || fInitialChars8 == NULL) {
+        fInitialChars == NULL || fInitialChars8 == NULL || fInitialChars->isBogus()) {
         fDeferredStatus = U_MEMORY_ALLOCATION_ERROR;
         return;
     }
@@ -190,7 +205,8 @@ void RegexPattern::zap() {
     delete fCompiledPat;
     fCompiledPat = NULL;
     int i;
-    for (i=1; i<fSets->size(); i++) {
+    // A refused constructor allocation can leave fSets NULL.
+    for (i=1; fSets != NULL && i<fSets->size(); i++) {
         UnicodeSet *s;
         s = (UnicodeSet *)fSets->elementAt(i);
         if (s != NULL) {
@@ -487,6 +503,12 @@ RegexMatcher *RegexPattern::matcher(UErrorCode &status)  const {
     retMatcher = new RegexMatcher(this);
     if (retMatcher == NULL) {
         status = U_MEMORY_ALLOCATION_ERROR;
+        return NULL;
+    }
+    if (U_FAILURE(retMatcher->fDeferredStatus)) {
+        /* A partially constructed matcher is never returned as a success. */
+        status = retMatcher->fDeferredStatus;
+        delete retMatcher;
         return NULL;
     }
     return retMatcher;

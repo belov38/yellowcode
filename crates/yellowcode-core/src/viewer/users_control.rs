@@ -31,6 +31,7 @@ impl UsersControl {
             source: users::source_identity(source).ok(),
             grant: Mutex::new(Grant::default()),
         };
+        drop(super::consoles::lock(&control.grant));
         control.readers.register_session();
         control
     }

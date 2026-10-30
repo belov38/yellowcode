@@ -12,6 +12,7 @@ pub(crate) enum MethodRef {
 }
 
 pub(crate) struct Frame {
+    pub reuse: Option<crate::reuse::Pending>,
     pub method: MethodRef,
     pub module: Arc<CompiledModule>,
     pub inst: Option<ModuleInstanceRef>,
@@ -22,11 +23,20 @@ pub(crate) struct Frame {
     pub handler_exc: Option<Rc<ErrorInfo>>,
     pub handlers: Vec<Rc<ErrorInfo>>,
     pub flags: ExecFlags,
+    pub safe_depth: u64,
+    pub privileged_depth: u64,
     pub outer: Option<usize>,
     pub used: u64,
 }
 
 impl Frame {
+    pub fn mode_flags(&self) -> ExecFlags {
+        ExecFlags {
+            safe_mode: self.flags.safe_mode || self.safe_depth != 0,
+            privileged: self.flags.privileged || self.privileged_depth != 0,
+        }
+    }
+
     pub fn code(&self) -> Option<&MethodCode> {
         code_of(&self.module, self.method)
     }

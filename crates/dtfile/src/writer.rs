@@ -10,7 +10,7 @@ use crate::elements::{RawEvent, RawWriter, Source};
 use crate::reader::{Event, TableHead};
 use crate::{Error, Result, rows};
 
-const FOLDER_CHUNK: usize = 250;
+pub(crate) const FOLDER_CHUNK: usize = 250;
 const DB_CHUNK: usize = 16_384;
 
 pub struct DtWriter<W: Write> {
@@ -18,6 +18,7 @@ pub struct DtWriter<W: Write> {
     db: Option<Vec<TableHead>>,
     next: usize,
     cur: Option<(TableHead, usize)>,
+    poisoned: bool,
 }
 
 fn head_diff(got: &TableHead, want: &TableHead) -> Option<String> {
@@ -46,6 +47,7 @@ impl<W: Write> DtWriter<W> {
             db: None,
             next: 0,
             cur: None,
+            poisoned: false,
         })
     }
 
@@ -117,6 +119,11 @@ impl<W: Write> DtWriter<W> {
     }
 
     pub fn row(&mut self, values: &[ColumnValue]) -> Result<()> {
+        if self.poisoned {
+            return Err(Error::Unsupported(
+                "writer has an incomplete streamed row".into(),
+            ));
+        }
         let DtWriter { raw, cur, .. } = self;
         let (head, chunk) = cur
             .as_ref()
@@ -125,7 +132,52 @@ impl<W: Write> DtWriter<W> {
         raw.row_with(|w| rows::write_row(w, &head.columns, values, *chunk))
     }
 
+    pub fn row_folder_stream(
+        &mut self,
+        metadata: &[ColumnValue],
+        length: u64,
+        input: &mut impl std::io::Read,
+    ) -> Result<()> {
+        if self.poisoned {
+            return Err(Error::Unsupported(
+                "writer has an incomplete streamed row".into(),
+            ));
+        }
+        let DtWriter {
+            raw, cur, poisoned, ..
+        } = self;
+        let (head, chunk) = cur
+            .as_ref()
+            .ok_or_else(|| Error::Unsupported("element order: row outside a table".into()))?;
+        if !matches!(head.source, Source::Folder(_)) || metadata.len() != 5 {
+            return Err(Error::Unsupported("expected folder row metadata".into()));
+        }
+        let Some(ColumnValue::Number(size)) = metadata.get(4) else {
+            return Err(Error::Unsupported("missing folder data size".into()));
+        };
+        let expected = onecd::Numeric::parse(&length.to_string())
+            .ok_or_else(|| Error::Unsupported("invalid folder data size".into()))?;
+        if !size.eq_value(&expected) {
+            return Err(Error::Unsupported("folder data size mismatch".into()));
+        }
+        let mut values = metadata.to_vec();
+        values.push(ColumnValue::Bytes(Vec::new()));
+        rows::check_row(&head.phys_name, &head.columns, &values)?;
+        let result = raw.row_with(|w| {
+            rows::write_folder_stream(w, &head.columns, metadata, *chunk, length, input)
+        });
+        if result.is_err() {
+            *poisoned = true;
+        }
+        result
+    }
+
     pub fn end_table(&mut self) -> Result<()> {
+        if self.poisoned {
+            return Err(Error::Unsupported(
+                "writer has an incomplete streamed row".into(),
+            ));
+        }
         self.raw.event(&RawEvent::TableEnd)?;
         self.cur = None;
         Ok(())
@@ -163,6 +215,11 @@ impl<W: Write> DtWriter<W> {
     }
 
     pub fn finish(self) -> Result<W> {
+        if self.poisoned {
+            return Err(Error::Unsupported(
+                "writer has an incomplete streamed row".into(),
+            ));
+        }
         self.raw.finish()
     }
 }

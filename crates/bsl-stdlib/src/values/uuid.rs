@@ -20,6 +20,22 @@ impl Uuid {
 }
 
 impl HostObject for Uuid {
+    fn session_edges(&self, _: &mut dyn bsl_vm::SessionEdges) -> bool {
+        true
+    }
+    fn session_transfer_supported(&self) -> bool {
+        true
+    }
+    fn session_transfer(
+        &self,
+        out: &mut dyn bsl_vm::SessionExport,
+    ) -> Result<Option<Box<dyn bsl_vm::SessionObject>>, Exception> {
+        out.reserve(16)?;
+        Ok(Some(Box::new(SessionUuid(self.bytes))))
+    }
+    fn retained_memory(&self, _: &mut dyn bsl_vm::RetainedMemory) -> Result<bool, Exception> {
+        Ok(true)
+    }
     fn type_id(&self) -> TypeId {
         TypeId::of_catalog(types().uuid)
     }
@@ -55,6 +71,27 @@ impl HostObject for Uuid {
 
     fn to_shared(&self) -> Option<SharedValue> {
         Some(SharedValue::Object(Arc::new(SharedUuid(self.bytes))))
+    }
+}
+
+struct SessionUuid([u8; 16]);
+impl bsl_vm::SessionObject for SessionUuid {
+    fn retained_memory(&self, _: &mut dyn bsl_vm::RetainedMemory) -> Result<(), Exception> {
+        Ok(())
+    }
+    fn create(
+        &self,
+        _: &mut Execution,
+        _: &mut bsl_vm::SessionImports,
+    ) -> Result<Value, Exception> {
+        Ok(new_uuid(self.0))
+    }
+    fn fill(&self, _: &mut Execution, _: &Value, _: Vec<Value>) -> Result<(), Exception> {
+        Ok(())
+    }
+    fn clear(&self, _: &Value) {}
+    fn restore_bytes(&self, _: usize) -> u64 {
+        32
     }
 }
 

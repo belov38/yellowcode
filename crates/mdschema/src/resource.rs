@@ -41,13 +41,17 @@ pub struct SchemaResource {
     formats: &'static [u8],
     tables: &'static [u8],
     count: u16,
-    schema: OnceLock<Result<Schema, String>>,
-    pub(crate) rights: OnceLock<Result<crate::rights::RightsTables, String>>,
-    pub(crate) templates: OnceLock<Result<crate::templates::TemplateTables, String>>,
+    pub(crate) schema: crate::managed::Cell<Schema>,
+    pub(crate) learned: crate::managed::Cell<crate::FactMap<String, crate::KindSpec>>,
+    #[cfg(any(test, feature = "testing"))]
+    pub(crate) learned_legacy_builds: std::sync::atomic::AtomicUsize,
+    pub(crate) binding: crate::managed::Binding,
+    pub(crate) rights: crate::managed::Cell<crate::rights::RightsTables>,
+    pub(crate) templates: crate::managed::Cell<crate::templates::TemplateTables>,
     pub(crate) events: OnceLock<Result<BTreeMap<String, String>, String>>,
-    pub(crate) stdattrs: OnceLock<Result<Vec<crate::forms::KindStdAttrs>, String>>,
+    pub(crate) stdattrs: crate::managed::Cell<Vec<crate::forms::KindStdAttrs>>,
     pub(crate) forms: Mutex<HashMap<crate::forms::Key, Arc<crate::forms::FormTables>>>,
-    pub(crate) upgrade: OnceLock<Result<crate::forms_upgrade::UpgradeTables, SchemaError>>,
+    pub(crate) upgrade: crate::managed::Cell<crate::forms_upgrade::UpgradeTables>,
 }
 impl std::fmt::Debug for SchemaResource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -158,13 +162,17 @@ impl SchemaResource {
             formats,
             tables,
             count,
-            schema: OnceLock::new(),
-            rights: OnceLock::new(),
-            templates: OnceLock::new(),
+            schema: crate::managed::Cell::new(),
+            learned: crate::managed::Cell::new(),
+            #[cfg(any(test, feature = "testing"))]
+            learned_legacy_builds: std::sync::atomic::AtomicUsize::new(0),
+            binding: crate::managed::Binding::new(),
+            rights: crate::managed::Cell::new(),
+            templates: crate::managed::Cell::new(),
             events: OnceLock::new(),
-            stdattrs: OnceLock::new(),
+            stdattrs: crate::managed::Cell::new(),
             forms: Mutex::new(HashMap::new()),
-            upgrade: OnceLock::new(),
+            upgrade: crate::managed::Cell::new(),
         };
         let required = crate::static_schema().tables();
         if usize::from(count) != required.len() + 2
@@ -205,10 +213,12 @@ impl SchemaResource {
             .ok_or_else(|| SchemaError(format!("resource table missing: {name}")))
     }
     pub fn schema(&'static self) -> Result<&'static Schema, SchemaError> {
-        self.schema
-            .get_or_init(|| Schema::load(self).map_err(|e| e.0))
-            .as_ref()
-            .map_err(|e| SchemaError(e.clone()))
+        if self.require_embedded().is_ok() {
+            return self
+                .embedded_schema()
+                .map_err(|e| SchemaError(e.to_string()));
+        }
+        self.schema.legacy_plain(|| Schema::load(self))
     }
     pub fn require_embedded(&self) -> Result<(), ResourceError> {
         if std::ptr::eq(self, embedded_resource()?) {

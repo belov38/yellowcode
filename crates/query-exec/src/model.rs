@@ -1,3 +1,4 @@
+use crate::coll::{ExecCollation, Keys};
 use bsl_prim::{Collation, Strength};
 use query_ir::{ColumnInfo, ExecError, NestedResult, QType, QValue};
 
@@ -203,6 +204,14 @@ pub fn charge_key(
     coll: &dyn Collation,
     charge: &mut dyn FnMut(u64) -> Result<(), ExecError>,
 ) -> Result<u64, ExecError> {
+    try_charge_key(v, ExecCollation::Legacy(coll), charge)
+}
+
+pub fn try_charge_key(
+    v: &QValue,
+    coll: ExecCollation<'_>,
+    charge: &mut dyn FnMut(u64) -> Result<(), ExecError>,
+) -> Result<u64, ExecError> {
     let walk = walk_bytes(v);
     let (_, peak) = key_sizes_charged(v, coll, charge)?;
     charge(peak - walk)?;
@@ -211,43 +220,77 @@ pub fn charge_key(
 
 pub fn key_sizes_charged(
     v: &QValue,
-    coll: &dyn Collation,
+    coll: ExecCollation<'_>,
     charge: &mut dyn FnMut(u64) -> Result<(), ExecError>,
 ) -> Result<(u64, u64), ExecError> {
     let walk = walk_bytes(v);
     if walk > 0 {
         charge(walk)?;
     }
-    Ok(key_sizes(v, coll))
+    key_sizes_with(v, coll)
 }
 
 pub fn walk_bytes(v: &QValue) -> u64 {
     match v {
-        QValue::String(s) if crate::key::key_text(&s.0).len() > PREFLIGHT_UNITS => {
-            block(2 * crate::key::key_text(&s.0).len() as u64 + 2)
-        }
+        QValue::String(s) => text_walk_bytes(crate::key::key_text(&s.0)),
         _ => 0,
     }
 }
 
+fn text_walk_bytes(text: &[u16]) -> u64 {
+    if text.len() > PREFLIGHT_UNITS {
+        block(2 * text.len() as u64 + 2)
+    } else {
+        0
+    }
+}
+
+pub fn try_charge_totals_key(
+    v: &QValue,
+    coll: ExecCollation<'_>,
+    charge: &mut dyn FnMut(u64) -> Result<(), ExecError>,
+) -> Result<u64, ExecError> {
+    let QValue::String(s) = v else {
+        return try_charge_key(v, coll, charge);
+    };
+    let walk = text_walk_bytes(&s.0);
+    if walk > 0 {
+        charge(walk)?;
+    }
+    let (_, peak) = text_key_sizes(&s.0, coll)?;
+    charge(peak.saturating_sub(walk))?;
+    Ok(peak.max(walk))
+}
+
 pub fn key_sizes(v: &QValue, coll: &dyn Collation) -> (u64, u64) {
+    crate::coll::infallible(key_sizes_with(v, coll))
+}
+
+pub fn try_key_sizes(v: &QValue, coll: ExecCollation<'_>) -> Result<(u64, u64), ExecError> {
+    key_sizes_with(v, coll)
+}
+
+fn key_sizes_with<C: Keys>(v: &QValue, coll: C) -> Result<(u64, u64), C::Error> {
     let QValue::String(s) = v else {
         let n = block(2 * key_bound(v));
-        return (n, n);
+        return Ok((n, n));
     };
-    let text = crate::key::key_text(&s.0);
+    text_key_sizes(crate::key::key_text(&s.0), coll)
+}
+
+fn text_key_sizes<C: Keys>(text: &[u16], coll: C) -> Result<(u64, u64), C::Error> {
     let units = text.len() as u64;
     let bound = || {
-        let peak = block(2 * key_bound(v));
+        let peak = block(2 * (1 + 40 * units + 64));
         (block(37 * units + 48).min(peak), peak)
     };
     if text.len() <= PREFLIGHT_UNITS {
-        return bound();
+        return Ok(bound());
     }
-    match coll.sort_key_len(Strength::Secondary, text) {
+    Ok(match coll.key_len(Strength::Secondary, text)? {
         Some(need) => (block(need as u64 + 1), icu_build_cost(units, need as u64)),
         None => bound(),
-    }
+    })
 }
 
 fn icu_build_cost(units: u64, need: u64) -> u64 {

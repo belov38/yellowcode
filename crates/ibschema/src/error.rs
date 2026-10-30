@@ -34,3 +34,13 @@ pub enum Error {
     #[error("unsupported object {0}")]
     UnsupportedObject(String),
 }
+
+pub const NAME_BYTES: usize = 256;
+
+pub fn diagnostic_name(name: &str) -> String {
+    let mut end = name.len().min(NAME_BYTES);
+    while !name.is_char_boundary(end) {
+        end -= 1;
+    }
+    name.get(..end).unwrap_or_default().to_owned()
+}

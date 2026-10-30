@@ -1,8 +1,7 @@
 use crate::bind::session_locale;
-use bsl_intl::format::{FmtValue, FormatEnv, format};
 use bsl_intl::present::{bool_to_string, date_to_string, number_to_string};
 use bsl_prim::{BslDate, Number, Str};
-use bsl_vm::{Exception, Execution, HostObject, Value};
+use bsl_vm::{Exception, Execution, HostObject, Lang, Value};
 
 const BYTES_PER_LIMB: u64 = 18;
 
@@ -135,14 +134,8 @@ fn date_text(ex: &Execution, d: BslDate) -> String {
 }
 
 fn bool_text(ex: &Execution, b: bool) -> String {
-    let lang = ex.env().config_language();
-    let plain = |c: char| c.is_ascii_alphanumeric() || c == '_';
-    if lang.is_empty() || lang.eq_ignore_ascii_case("ru") || !lang.chars().all(plain) {
-        return bool_to_string(b).to_string();
+    match ex.env().presentation_language() {
+        Lang::Ru => bool_to_string(b).to_owned(),
+        Lang::En => if b { "Yes" } else { "No" }.to_owned(),
     }
-    let Some(session) = session_locale(ex) else {
-        return bool_to_string(b).to_string();
-    };
-    let spec: Vec<u16> = format!("Л={lang}").encode_utf16().collect();
-    format(FmtValue::Bool(b), &spec, &FormatEnv { session })
 }

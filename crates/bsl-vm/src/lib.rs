@@ -17,8 +17,13 @@ pub mod object;
 pub mod ops;
 pub mod place;
 pub mod registry;
+mod retained_workspace;
+mod reuse;
 pub mod runtime;
+mod session_graph;
 pub mod shared;
+pub use session_graph::retire::{SessionBacking, SessionEdges};
+pub use session_graph::{SessionExport, SessionImports, SessionObject, session_shared_bytes};
 pub mod types;
 pub mod value;
 
@@ -29,14 +34,15 @@ pub use error::{
 pub use fs::{FileSystem, FsError, FsErrorKind, FsStat};
 pub use host::{
     AppHost, AppSerializer, AppXdto, AppXdtoProp, AppXdtoValue, ExecFlags, GuardedOp,
-    ModuleContext, ModuleInstanceRef, ModuleRef, ReuseStore, SessionEnv,
+    IbRegionalSettings, ModuleContext, ModuleInstanceRef, ModuleRef, ReuseStore, SessionEnv,
 };
 pub use lang::{error_info_of, error_info_value};
 pub use module::module_init_error;
-pub use object::{CallError, CallResult, HostObject, creation_number};
+pub use object::{CallError, CallResult, HostObject, RetainedMemory, creation_number};
 pub use ops::{BinOp, CmpOp};
 pub use place::{Arg, Place};
 pub use registry::{AppTypeInfo, CtorFn, GlobalFn, GlobalProp, Presenter, Registry, TypeImpl};
+pub use retained_workspace::{RetainedWorkspace, retained_hash_bytes};
 pub use runtime::{
     CALL_UNIT, ExecOptions, Execution, MESSAGE_CAP_BYTES, MESSAGE_CAP_COUNT, Runtime, StackWeights,
     UserMessage,

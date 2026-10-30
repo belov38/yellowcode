@@ -27,8 +27,15 @@ U_NAMESPACE_BEGIN
     fTypes = 0;
 }*/
 
-DictionaryBreakEngine::DictionaryBreakEngine(uint32_t breakTypes) {
+static UManagedOwner46 thaiFieldOwner(int32_t role, int32_t site) {
+    UManagedOwner46 owner={role, role==0 ? 0 : site};
+    return owner;
+}
+
+DictionaryBreakEngine::DictionaryBreakEngine(uint32_t breakTypes, UErrorCode &status, int32_t role)
+    : fSet(thaiFieldOwner(role, 1110)) {
     fTypes = breakTypes;
+    if (fSet.isBogus() || managed_failed_46()) status=U_MEMORY_ALLOCATION_ERROR;
 }
 
 DictionaryBreakEngine::~DictionaryBreakEngine() {
@@ -81,10 +88,11 @@ DictionaryBreakEngine::findBreaks( UText *text,
 }
 
 void
-DictionaryBreakEngine::setCharacters( const UnicodeSet &set ) {
+DictionaryBreakEngine::setCharacters(const UnicodeSet &set, UErrorCode &status) {
     fSet = set;
     // Compact for caching
     fSet.compact();
+    if (fSet.isBogus() || managed_failed_46()) status=U_MEMORY_ALLOCATION_ERROR;
 }
 
 /*void
@@ -211,13 +219,28 @@ PossibleWord::markCurrent() {
 // Minimum number of characters for two words
 #define THAI_MIN_WORD_SPAN (THAI_MIN_WORD * 2)
 
-ThaiBreakEngine::ThaiBreakEngine(const TrieWordDictionary *adoptDictionary, UErrorCode &status)
-    : DictionaryBreakEngine((1<<UBRK_WORD) | (1<<UBRK_LINE)),
+ThaiBreakEngine::ThaiBreakEngine(const TrieWordDictionary *adoptDictionary, UErrorCode &status, int32_t role)
+    : DictionaryBreakEngine((1<<UBRK_WORD) | (1<<UBRK_LINE), status, role),
+      fThaiWordSet(thaiFieldOwner(role, 1120)),
+      fEndWordSet(thaiFieldOwner(role, 1130)),
+      fBeginWordSet(thaiFieldOwner(role, 1140)),
+      fSuffixSet(thaiFieldOwner(role, 1150)),
+      fMarkSet(thaiFieldOwner(role, 1160)),
       fDictionary(adoptDictionary)
 {
+    if (U_FAILURE(status) || fThaiWordSet.isBogus() || fEndWordSet.isBogus() ||
+        fBeginWordSet.isBogus() || fSuffixSet.isBogus() || fMarkSet.isBogus() ||
+        managed_failed_46()) {
+        status=U_MEMORY_ALLOCATION_ERROR;
+        return;
+    }
     fThaiWordSet.applyPattern(UNICODE_STRING_SIMPLE("[[:Thai:]&[:LineBreak=SA:]]"), status);
     if (U_SUCCESS(status)) {
-        setCharacters(fThaiWordSet);
+        setCharacters(fThaiWordSet, status);
+    }
+    if (U_FAILURE(status) || fThaiWordSet.isBogus() || managed_failed_46()) {
+        status=U_MEMORY_ALLOCATION_ERROR;
+        return;
     }
     fMarkSet.applyPattern(UNICODE_STRING_SIMPLE("[[:Thai:]&[:LineBreak=SA:]&[:M:]]"), status);
     fMarkSet.add(0x0020);
@@ -234,6 +257,9 @@ ThaiBreakEngine::ThaiBreakEngine(const TrieWordDictionary *adoptDictionary, UErr
     fEndWordSet.compact();
     fBeginWordSet.compact();
     fSuffixSet.compact();
+    if (U_FAILURE(status) || fThaiWordSet.isBogus() || fEndWordSet.isBogus() ||
+        fBeginWordSet.isBogus() || fSuffixSet.isBogus() || fMarkSet.isBogus() ||
+        managed_failed_46()) status=U_MEMORY_ALLOCATION_ERROR;
 }
 
 ThaiBreakEngine::~ThaiBreakEngine() {

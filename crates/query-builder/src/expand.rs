@@ -183,7 +183,13 @@ fn source_aliases(ms: &[Source], ts: &[tir::Source], cx: &Cx<'_>) -> Vec<String>
 
 fn aliases_in(ms: &[Source], ts: &[tir::Source], cx: &Cx<'_>, out: &mut Vec<String>) {
     for (m, t) in ms.iter().zip(ts) {
-        out.push(spell::spelled_alias(cx.qs, cx.ru, t, m.alias.is_none()));
+        out.push(spell::spelled_alias(
+            cx.qs,
+            cx.ru,
+            t,
+            m.alias.is_none(),
+            !cx.dcs,
+        ));
         for (mj, tj) in m.joins.iter().zip(&t.joins) {
             aliases_in(
                 std::slice::from_ref(&mj.right),

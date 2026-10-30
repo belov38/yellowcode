@@ -30,6 +30,7 @@
 #include "uinvchar.h"
 #include "uresdata.h"
 #include "uresimp.h"
+#include "udatamem.h"
 
 #define LENGTHOF(array) (int32_t)(sizeof(array)/sizeof((array)[0]))
 
@@ -243,11 +244,12 @@ U_CFUNC void
 res_load(ResourceData *pResData,
          const char *path, const char *name, UErrorCode *errorCode) {
     UVersionInfo formatVersion;
+    UManagedOwner46 owner = { 4, 406 };
 
     uprv_memset(pResData, 0, sizeof(ResourceData));
 
     /* load the ResourceBundle file */
-    pResData->data=udata_openChoice(path, "res", name, isAcceptable, formatVersion, errorCode);
+    pResData->data=managed_udata_openChoice_46(path, "res", name, isAcceptable, formatVersion, owner, errorCode);
     if(U_FAILURE(*errorCode)) {
         return;
     }

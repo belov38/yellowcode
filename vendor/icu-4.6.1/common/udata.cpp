@@ -28,6 +28,7 @@ might have to #include some other header
 #include "unicode/uversion.h"
 #include "charstr.h"
 #include "cmemory.h"
+#include "managed_memory.h"
 #include "cstring.h"
 #include "putilimp.h"
 #include "ucln_cmn.h"
@@ -135,12 +136,21 @@ setCommonICUData(UDataMemory *pData,     /*  The new common data.  Belongs to ca
                                          /*    changed by another thread before we got to it.     */
                  UErrorCode *pErr)
 {
-    UDataMemory  *newCommonData = UDataMemory_createNewInstance(pErr);
+    UDataMemory *newCommonData;
     int32_t i;
     UBool didUpdate = FALSE;
     if (U_FAILURE(*pErr)) {
         return FALSE;
     }
+    /* The mini-cache owns candidates from allocation through publication or
+     * losing-candidate destruction. The data image itself remains borrowed. */
+    newCommonData = (UDataMemory *)managed_malloc_46(sizeof(UDataMemory), 2, 201);
+    if (newCommonData == NULL) {
+        *pErr = U_MEMORY_ALLOCATION_ERROR;
+        return FALSE;
+    }
+    UDataMemory_init(newCommonData);
+    newCommonData->heapAllocated = TRUE;
 
     /*  For the assignment, other threads must cleanly see either the old            */
     /*    or the new, not some partially initialized new.  The old can not be        */
@@ -242,8 +252,8 @@ static void U_CALLCONV DataCacheElement_deleter(void *pDCEl) {
  *     Get the hash table used to store the data cache entries.
  *     Lazy create it if it doesn't yet exist.
  */
-static UHashtable *udata_getHashTable() {
-    UErrorCode   err = U_ZERO_ERROR;
+static UHashtable *udata_getHashTable(UErrorCode *status) {
+    if (U_FAILURE(*status)) return NULL;
     UBool        cacheIsInitialized;
     UHashtable  *tHT = NULL;
 
@@ -253,7 +263,8 @@ static UHashtable *udata_getHashTable() {
         return gCommonDataCache;
     }
 
-    tHT = uhash_open(uhash_hashChars, uhash_compareChars, NULL, &err);
+    tHT = managed_uhash_open_46(uhash_hashChars, uhash_compareChars, NULL,
+                                3, 301, 302, status);
     /* Check for null pointer. */
     if (tHT == NULL) {
     	return NULL; /* TODO:  Handle this error better. */
@@ -271,7 +282,7 @@ static UHashtable *udata_getHashTable() {
         uhash_close(tHT);
     }
 
-    if (U_FAILURE(err)) {
+    if (U_FAILURE(*status)) {
         return NULL;      /* TODO:  handle this error better.  */
     }
     return gCommonDataCache;
@@ -279,7 +290,7 @@ static UHashtable *udata_getHashTable() {
 
 
 
-static UDataMemory *udata_findCachedData(const char *path)
+static UDataMemory *udata_findCachedData(const char *path, UErrorCode *status)
 {
     UHashtable        *htable;
     UDataMemory       *retVal = NULL;
@@ -287,7 +298,8 @@ static UDataMemory *udata_findCachedData(const char *path)
     const char        *baseName;
 
     baseName = findBasename(path);   /* Cache remembers only the base name, not the full path. */
-    htable = udata_getHashTable();
+    htable = udata_getHashTable(status);
+    if (htable == NULL) return NULL;
     umtx_lock(NULL);
     el = (DataCacheElement *)uhash_get(htable, baseName);
     umtx_unlock(NULL);
@@ -316,34 +328,43 @@ static UDataMemory *udata_cacheDataItem(const char *path, UDataMemory *item, UEr
     /* Create a new DataCacheElement - the thingy we store in the hash table -
      * and copy the supplied path and UDataMemoryItems into it.
      */
-    newElement = (DataCacheElement *)uprv_malloc(sizeof(DataCacheElement));
+    newElement = (DataCacheElement *)managed_malloc_46(sizeof(DataCacheElement), 3, 303);
     if (newElement == NULL) {
         *pErr = U_MEMORY_ALLOCATION_ERROR;
         return NULL;
     }
-    newElement->item = UDataMemory_createNewInstance(pErr);
-    if (U_FAILURE(*pErr)) {
+    newElement->name = NULL;
+    newElement->item = (UDataMemory *)managed_malloc_46(sizeof(UDataMemory), 3, 304);
+    if (newElement->item == NULL) {
+        *pErr = U_MEMORY_ALLOCATION_ERROR;
         uprv_free(newElement);
         return NULL;
     }
+    UDataMemory_init(newElement->item);
+    newElement->item->heapAllocated = TRUE;
     UDatamemory_assign(newElement->item, item);
+    /* The candidate now owns any mapping, including on failed insertion. */
+    UDataMemory_init(item);
 
     baseName = findBasename(path);
     nameLen = (int32_t)uprv_strlen(baseName);
-    newElement->name = (char *)uprv_malloc(nameLen+1);
+    newElement->name = (char *)managed_malloc_46(nameLen+1, 3, 305);
     if (newElement->name == NULL) {
         *pErr = U_MEMORY_ALLOCATION_ERROR;
-        uprv_free(newElement->item);
-        uprv_free(newElement);
+        DataCacheElement_deleter(newElement);
         return NULL;
     }
     uprv_strcpy(newElement->name, baseName);
 
     /* Stick the new DataCacheElement into the hash table.
     */
-    htable = udata_getHashTable();
+    htable = udata_getHashTable(pErr);
+    if (htable == NULL) {
+        DataCacheElement_deleter(newElement);
+        return NULL;
+    }
     umtx_lock(NULL);
-    oldValue = (DataCacheElement *)uhash_get(htable, path);
+    oldValue = (DataCacheElement *)uhash_get(htable, baseName);
     if (oldValue != NULL) {
         subErr = U_USING_DEFAULT_WARNING;
     }
@@ -357,15 +378,15 @@ static UDataMemory *udata_cacheDataItem(const char *path, UDataMemory *item, UEr
     umtx_unlock(NULL);
 
 #ifdef UDATA_DEBUG
-    fprintf(stderr, "Cache: [%s] <<< %p : %s. vFunc=%p\n", newElement->name, 
-    newElement->item, u_errorName(subErr), newElement->item->vFuncs);
+    fprintf(stderr, "Cache: [%s] insertion: %s\n", path, u_errorName(subErr));
 #endif
 
     if (subErr == U_USING_DEFAULT_WARNING || U_FAILURE(subErr)) {
         *pErr = subErr; /* copy sub err unto fillin ONLY if something happens. */
-        uprv_free(newElement->name);
-        uprv_free(newElement->item);
-        uprv_free(newElement);
+        /* uhash_put adopts and deletes its value even on failure. */
+        if (subErr == U_USING_DEFAULT_WARNING) {
+            DataCacheElement_deleter(newElement);
+        }
         return oldValue ? oldValue->item : NULL;
     }
 
@@ -704,7 +725,8 @@ openCommonData(const char *path,          /*  Path from OpenChoice?          */
    /*   Note that the cache is keyed by the base name only.  The rest of the path,   */
    /*     if any, is not considered.                                                 */
    {
-        UDataMemory  *dataToReturn = udata_findCachedData(inBasename);
+        UDataMemory  *dataToReturn = udata_findCachedData(inBasename, pErrorCode);
+        if (U_FAILURE(*pErrorCode)) return NULL;
         if (dataToReturn != NULL) {
             return dataToReturn;
         }
@@ -751,7 +773,10 @@ openCommonData(const char *path,          /*  Path from OpenChoice?          */
     /* Cache the UDataMemory struct for this .dat file,
      *   so we won't need to hunt it down and map it again next time
      *   something is needed from it.                */
-    return udata_cacheDataItem(inBasename, &tData, pErrorCode);
+    UDataMemory *result = udata_cacheDataItem(inBasename, &tData, pErrorCode);
+    /* Close a mapping if ownership did not reach a cache candidate. */
+    udata_close(&tData);
+    return result;
 }
 
 
@@ -896,7 +921,8 @@ checkDataItem
  UErrorCode               *nonFatalErr,     /* Error code if this data was not acceptable  */
                                             /*   but openChoice should continue with       */
                                             /*   trying to get data from fallback path.    */
- UErrorCode               *fatalErr         /* Bad error, caller should return immediately */
+ UErrorCode               *fatalErr,        /* Bad error, caller should return immediately */
+ UManagedOwner46           owner
  )
 {
     UDataMemory  *rDataMem = NULL;          /* the new UDataMemory, to be returned.        */
@@ -909,7 +935,7 @@ checkDataItem
         pHeader->dataHeader.magic2==0x27 &&
         (isAcceptable==NULL || isAcceptable(context, type, name, &pHeader->info))
     ) {
-        rDataMem=UDataMemory_createNewInstance(fatalErr);
+        rDataMem=managed_data_create_46(owner, fatalErr);
         if (U_FAILURE(*fatalErr)) {
             return NULL;
         }
@@ -932,7 +958,7 @@ static UDataMemory *doLoadFromIndividualFiles(const char *pkgName,
             const char *path, const char *type, const char *name,
              UDataMemoryIsAcceptable *isAcceptable, void *context,
              UErrorCode *subErrorCode,
-             UErrorCode *pErrorCode)
+             UErrorCode *pErrorCode, UManagedOwner46 owner)
 {
     const char         *pathBuffer;
     UDataMemory         dataMemory;
@@ -949,7 +975,7 @@ static UDataMemory *doLoadFromIndividualFiles(const char *pkgName,
 #endif
         if(uprv_mapFile(&dataMemory, pathBuffer))
         {
-            pEntryData = checkDataItem(dataMemory.pHeader, isAcceptable, context, type, name, subErrorCode, pErrorCode);
+            pEntryData = checkDataItem(dataMemory.pHeader, isAcceptable, context, type, name, subErrorCode, pErrorCode, owner);
             if (pEntryData != NULL) {
                 /* Data is good.
                 *  Hand off ownership of the backing memory to the user's UDataMemory.
@@ -990,7 +1016,7 @@ static UDataMemory *doLoadFromCommonData(UBool isICUData, const char * /*pkgName
             const char *path, const char *type, const char *name,
              UDataMemoryIsAcceptable *isAcceptable, void *context,
              UErrorCode *subErrorCode,
-             UErrorCode *pErrorCode)
+             UErrorCode *pErrorCode, UManagedOwner46 owner)
 {
     UDataMemory        *pEntryData;
     const DataHeader   *pHeader;
@@ -1007,6 +1033,10 @@ static UDataMemory *doLoadFromCommonData(UBool isICUData, const char * /*pkgName
      */
     for (commonDataIndex = isICUData ? 0 : -1;;) {
         pCommonData=openCommonData(path, commonDataIndex, subErrorCode); /** search for pkg **/
+        if (*subErrorCode == U_MEMORY_ALLOCATION_ERROR || managed_failed_46()) {
+            *pErrorCode = U_MEMORY_ALLOCATION_ERROR;
+            return NULL;
+        }
 
         if(U_SUCCESS(*subErrorCode) && pCommonData!=NULL) {
             int32_t length;
@@ -1018,7 +1048,7 @@ static UDataMemory *doLoadFromCommonData(UBool isICUData, const char * /*pkgName
 #endif
 
             if(pHeader!=NULL) {
-                pEntryData = checkDataItem(pHeader, isAcceptable, context, type, name, subErrorCode, pErrorCode);
+                pEntryData = checkDataItem(pHeader, isAcceptable, context, type, name, subErrorCode, pErrorCode, owner);
 #ifdef UDATA_DEBUG
                 fprintf(stderr, "pEntryData=%p\n", pEntryData);
 #endif
@@ -1081,7 +1111,7 @@ static UDataMemory *doLoadFromCommonData(UBool isICUData, const char * /*pkgName
 static UDataMemory *
 doOpenChoice(const char *path, const char *type, const char *name,
              UDataMemoryIsAcceptable *isAcceptable, void *context,
-             UErrorCode *pErrorCode)
+             UErrorCode *pErrorCode, UManagedOwner46 owner)
 {
     UDataMemory         *retVal = NULL;
 
@@ -1222,7 +1252,7 @@ doOpenChoice(const char *path, const char *type, const char *name,
         /* #2 */
         retVal = doLoadFromCommonData(isICUData, 
                             pkgName.data(), dataPath, tocEntryPathSuffix, tocEntryName.data(),
-                            path, type, name, isAcceptable, context, &subErrorCode, pErrorCode);
+                            path, type, name, isAcceptable, context, &subErrorCode, pErrorCode, owner);
         if((retVal != NULL) || U_FAILURE(*pErrorCode)) {
             return retVal;
         }
@@ -1237,7 +1267,7 @@ doOpenChoice(const char *path, const char *type, const char *name,
         /* Check to make sure that there is a dataPath to iterate over */
         if ((dataPath && *dataPath) || !isICUData) {
             retVal = doLoadFromIndividualFiles(pkgName.data(), dataPath, tocEntryPathSuffix,
-                            path, type, name, isAcceptable, context, &subErrorCode, pErrorCode);
+                            path, type, name, isAcceptable, context, &subErrorCode, pErrorCode, owner);
             if((retVal != NULL) || U_FAILURE(*pErrorCode)) {
                 return retVal;
             }
@@ -1252,7 +1282,7 @@ doOpenChoice(const char *path, const char *type, const char *name,
 #endif
         retVal = doLoadFromCommonData(isICUData,
                             pkgName.data(), dataPath, tocEntryPathSuffix, tocEntryName.data(),
-                            path, type, name, isAcceptable, context, &subErrorCode, pErrorCode);
+                            path, type, name, isAcceptable, context, &subErrorCode, pErrorCode, owner);
         if((retVal != NULL) || U_FAILURE(*pErrorCode)) {
             return retVal;
         }
@@ -1267,7 +1297,7 @@ doOpenChoice(const char *path, const char *type, const char *name,
 #endif
         retVal = doLoadFromCommonData(isICUData,
                             pkgName.data(), "", tocEntryPathSuffix, tocEntryName.data(),
-                            path, type, name, isAcceptable, context, &subErrorCode, pErrorCode);
+                            path, type, name, isAcceptable, context, &subErrorCode, pErrorCode, owner);
         if((retVal != NULL) || U_FAILURE(*pErrorCode)) {
             return retVal;
         }
@@ -1304,7 +1334,8 @@ udata_open(const char *path, const char *type, const char *name,
         *pErrorCode=U_ILLEGAL_ARGUMENT_ERROR;
         return NULL;
     } else {
-        return doOpenChoice(path, type, name, NULL, NULL, pErrorCode);
+        UManagedOwner46 owner = { 0, 0 };
+        return doOpenChoice(path, type, name, NULL, NULL, pErrorCode, owner);
     }
 }
 
@@ -1324,11 +1355,26 @@ udata_openChoice(const char *path, const char *type, const char *name,
         *pErrorCode=U_ILLEGAL_ARGUMENT_ERROR;
         return NULL;
     } else {
-        return doOpenChoice(path, type, name, isAcceptable, context, pErrorCode);
+        UManagedOwner46 owner = { 0, 0 };
+        return doOpenChoice(path, type, name, isAcceptable, context, pErrorCode, owner);
     }
 }
 
 
+
+/* Private receiver-aware path. Only the returned descriptor inherits owner;
+ * path/CharString/parser working storage remains Operation. */
+U_CAPI UDataMemory * U_EXPORT2
+managed_udata_openChoice_46(const char *path, const char *type, const char *name,
+    UDataMemoryIsAcceptable *isAcceptable, void *context, UManagedOwner46 owner,
+    UErrorCode *status) {
+    if (status == NULL || U_FAILURE(*status)) return NULL;
+    if (name == NULL || *name == 0 || isAcceptable == NULL) {
+        *status = U_ILLEGAL_ARGUMENT_ERROR;
+        return NULL;
+    }
+    return doOpenChoice(path, type, name, isAcceptable, context, status, owner);
+}
 
 U_CAPI void U_EXPORT2
 udata_getInfo(UDataMemory *pData, UDataInfo *pInfo) {

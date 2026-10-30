@@ -626,6 +626,7 @@ private:
     //  Implementation Methods
     //
     void        init();            // Common initialization, for use by constructors.
+    void        initFields();      // Field reset of init(), without allocation.
     void        zap();             // Common cleanup
 #ifdef REGEX_DEBUG
     void        dumpOp(int32_t index) const;

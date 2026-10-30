@@ -139,11 +139,53 @@ pub(crate) fn from_analysis(
     compiled: &[Arc<CompiledStmt>],
     qs: &query_ir::QuerySchema,
 ) {
+    let ordinary = schema.mode == query_syntax::ParseMode::Query;
     for (st, c) in schema.batch.iter_mut().zip(compiled) {
         if let (Stmt::Select(q), tir::StmtKind::Query(tq)) = (st, &c.typed.kind) {
             query(q, tq, qs);
+            if ordinary {
+                reserve_result_aliases(q, tq);
+            }
         }
     }
+}
+
+fn reserve_result_aliases(q: &mut SelectQuery, tq: &tir::Query) {
+    if q.into.is_some() || derive(q) != q.names {
+        return;
+    }
+    let Some(sel) = tq.parts.first() else {
+        return;
+    };
+    if q.names.len() != sel.items.len()
+        || q.names
+            .iter()
+            .zip(&sel.items)
+            .any(|(name, item)| name.as_deref() != Some(item.name.as_str()))
+    {
+        return;
+    }
+    let Some(op) = q.operators.first() else {
+        return;
+    };
+    if !op.fields.iter().all(|f| {
+        matches!(&f.kind, ItemKind::Expr(e)
+            if f.alias.is_some() || !matches!(e.kind, ExprKind::Param(_)))
+    }) {
+        return;
+    }
+    let aliases = alias_set(&op.sources);
+    let mut names = Names::default();
+    for field in &op.fields {
+        if let Some(alias) = &field.alias {
+            names.alias(&alias.name.text);
+        }
+    }
+    q.names = op
+        .fields
+        .iter()
+        .map(|field| item_name(field, &aliases, &mut names))
+        .collect();
 }
 
 fn query(q: &mut SelectQuery, tq: &tir::Query, qs: &query_ir::QuerySchema) {

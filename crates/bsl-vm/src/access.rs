@@ -1,5 +1,6 @@
 use crate::error::info::CallKind;
 use crate::error::{Exception, HostError};
+use crate::object::CallError;
 use crate::place::Arg;
 use crate::runtime::Execution;
 use crate::types::{MemberId, MemberKind, TypeId};
@@ -76,12 +77,45 @@ impl Execution {
         self.finish(r, CallKind::GetAttr, &shown)
     }
 
+    pub fn get_member_with_retained(
+        &mut self,
+        obj: &Value,
+        name: &str,
+        retained: u64,
+    ) -> Result<Value, Exception> {
+        let o = self.receiver(obj, name)?;
+        let m = self.field(o, obj.type_id(), name, Access::Get)?;
+        let r = o.get_with_retained(self, m, retained);
+        let shown = self.member_in_variant(obj.type_id(), name, false);
+        self.finish(r, CallKind::GetAttr, &shown)
+    }
+
     pub fn set_member(&mut self, obj: &Value, name: &str, v: Value) -> Result<(), Exception> {
         let o = self.receiver(obj, name)?;
         let m = self.field(o, obj.type_id(), name, Access::Set)?;
         let r = o.set(self, m, v).map(|()| Value::Undefined);
         let shown = self.member_in_variant(obj.type_id(), name, false);
         self.finish(r, CallKind::SetAttr, &shown).map(|_| ())
+    }
+
+    pub fn prepare_member_write<T>(
+        &mut self,
+        obj: &Value,
+        name: &str,
+        prepare: impl FnOnce(&mut Self, MemberId) -> crate::CallResult<T>,
+    ) -> Result<T, Exception> {
+        let o = self.receiver(obj, name)?;
+        let member = self.field(o, obj.type_id(), name, Access::Set)?;
+        match prepare(self, member) {
+            Ok(value) => Ok(value),
+            Err(error) => {
+                let shown = self.member_in_variant(obj.type_id(), name, false);
+                match self.finish(Err(error), CallKind::SetAttr, &shown) {
+                    Err(error) => Err(error),
+                    Ok(_) => unreachable!(),
+                }
+            }
+        }
     }
 
     pub fn index_get(&mut self, obj: &Value, key: &Value) -> Result<Value, Exception> {
@@ -110,10 +144,16 @@ impl Execution {
             Some(f) => f(self, args),
             None => Err(HostError::not_implemented(type_name, CTOR_MEMBER).into()),
         };
-        let kind = CallKind::Ctor {
-            type_name: type_name.to_owned(),
-        };
-        self.finish(r, kind, type_name)
+        match r {
+            Ok(value) => Ok(value),
+            Err(CallError::Exc(error)) => Err(error),
+            Err(error @ CallError::Host(_)) => {
+                let kind = CallKind::Ctor {
+                    type_name: type_name.to_owned(),
+                };
+                self.finish(Err(error), kind, type_name)
+            }
+        }
     }
 
     pub fn construct_by_name(&mut self, name: &str, args: &mut [Arg]) -> Result<Value, Exception> {

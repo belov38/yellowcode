@@ -24,6 +24,7 @@
 #include "unicode/ucnv.h"
 #include "unicode/ucnv_err.h"
 #include "ucnv_cnv.h"
+#include "managed_memory.h"
 #include "ucnvmbcs.h"
 #include "ucnv_ext.h"
 #include "udataswp.h"
@@ -124,9 +125,13 @@ struct UConverterSharedData {
     UConverterMBCSTable mbcs;
 };
 
+U_CFUNC UConverter *managed_ucnv_createConverter_46(UConverter *, const char *, UErrorCode *, UManagedOwner46);
+U_CFUNC UConverter *managed_ucnv_fromShared_46(UConverter *, UConverterSharedData *, UConverterLoadArgs *, UErrorCode *, UManagedOwner46);
+
 /* Defines a UConverter, the lightweight mutable part the user sees */
 
 struct UConverter {
+    int32_t managedRole; /* Explicit default-cache receiver; per-use objects use zero. */
     /*
      * Error function pointer called when conversion issues
      * occur during a ucnv_fromUnicode call

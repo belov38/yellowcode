@@ -464,6 +464,22 @@ impl EntrySource for Spool {
             what: "charged source requires stored_owned".into(),
         })
     }
+    fn stored_inflated_bounded(
+        &self,
+        name: &str,
+        limit: u64,
+    ) -> mdconf::Result<Option<mdconf::Inflated>> {
+        mdconf::BudgetedEntries::new(self, self.budget.clone()).stored_inflated_bounded(name, limit)
+    }
+    fn stored_inflated_checked(
+        &self,
+        name: &str,
+        limit: u64,
+        check: &dyn Fn() -> mdconf::Result<()>,
+    ) -> mdconf::Result<Option<mdconf::Inflated>> {
+        mdconf::BudgetedEntries::new(self, self.budget.clone())
+            .stored_inflated_checked(name, limit, check)
+    }
     fn list_owned(&self) -> mdconf::Result<mdconf::EntryList> {
         let mut list =
             BudgetedVec::try_with_capacity(&self.budget, Category::Metadata, self.items.len())

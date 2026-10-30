@@ -26,6 +26,26 @@
       editing: "Edit source", confirm: "Remove the source from the list? Its file will remain on disk.", required: "Enter a source name and path.", missing: "Source unavailable", unavailable: "Not implemented in Yellowcode", container: "Reading container…", "dt-config": "Extracting DT CONFIG (metadata only)…", metadata: "Loading metadata and modules…", tree: "Building configuration tree…", statistics: "Preparing statistics…", builtin: "1C Classic"
     }
   };
+  Object.assign(texts.ru, {
+    "error-restart": "Перезапустить",
+    "restart-text": "Приложению не хватило памяти для сравнения строк (ICU). Продолжить работу можно только после перезапуска приложения."
+  });
+  Object.assign(texts.en, {
+    "error-restart": "Restart",
+    "restart-text": "The application ran out of memory for string comparison (ICU). Work can continue only after the application restarts."
+  });
+  Object.assign(texts.ru, {
+    "memory-label": "Память движка:", "memory-auto": "Без ограничения", "memory-limited": "Ограничить", "memory-mib-label": "Лимит, МиБ (от 256):",
+    "memory-help": "Применяется при следующем открытии базы. Память выделяется по мере необходимости. Интерфейс, установленные скины и среда выполнения дополнительно используют память процесса.",
+    "memory-invalid": "Укажите целое число МиБ от 256 в пределах безопасного максимума или выберите «Без ограничения».", "memory-unlimited": "Память движка не ограничивается",
+    "memory-resolved": "Бюджет движка: ", "memory-ceiling": "; безопасный максимум: ", "memory-unknown": "; безопасный максимум неизвестен", "memory-fallback": "; резервная политика: сведения о памяти недоступны", "memory-partial": "; внешние ограничения памяти определены лишь частично", "memory-unknown-limits": "; внешние ограничения памяти не удалось определить", "memory-checking": "Проверка бюджета…", "memory-refused": "Бюджет недоступен. Уменьшите лимит или освободите память и повторите. "
+  });
+  Object.assign(texts.en, {
+    "memory-label": "Engine memory:", "memory-auto": "No limit", "memory-limited": "Limit", "memory-mib-label": "Limit, MiB (minimum 256):",
+    "memory-help": "Applies the next time this base opens. Memory is allocated on demand. The UI, installed skins and runtime use additional process memory.",
+    "memory-invalid": "Enter a whole number of MiB from 256 up to the safe ceiling, or choose No limit.", "memory-unlimited": "Engine memory is not limited",
+    "memory-resolved": "Engine budget: ", "memory-ceiling": "; safe ceiling: ", "memory-unknown": "; safe ceiling unknown", "memory-fallback": "; conservative fallback policy: memory facts unavailable", "memory-partial": "; external memory limits are only partially known", "memory-unknown-limits": "; external memory limits could not be determined", "memory-checking": "Checking budget…", "memory-refused": "Budget unavailable. Lower the limit or free memory and retry. "
+  });
     function node(tag, content, className) {
       var n = document.createElement(tag); if (content) n.textContent = content; if (className) n.className = className; return n;
     }
@@ -78,7 +98,9 @@
     host.append(inert(node("button", text("Удалять неиспользуемые версии…", "Remove unused versions…"), "setup-link")));
   }
   function error(e) {
-    $("error-text").textContent = String(e);
+    var restart = /restart the application/.test(String(e));
+    $("error-text").textContent = restart ? t("restart-text") + "\n\n" + String(e) : String(e);
+    $("error-restart").hidden = !restart;
     if (!$("error").open) $("error").showModal();
   }
   function closeError() {
@@ -86,6 +108,7 @@
     if (splash && tauri && tauri.core) tauri.core.invoke("dismiss_load_error").catch(error);
   }
   $("error-close").onclick = closeError;
+  $("error-restart").onclick = function () { invoke("restart_application").catch(error); };
   $("error").addEventListener("cancel", function (e) { e.preventDefault(); closeError(); });
   if (!tauri || !tauri.core) { translate(); error("This page works inside the desktop application only."); return; }
   var invoke = tauri.core.invoke;
@@ -178,6 +201,10 @@
     $("wizard-title").textContent = t(item ? "editing" : "wizard-title");
     $("source-name").value = item ? item.name : "";
     $("source-input").value = item ? item.path : "";
+    var memory = item && item.memory || { mode: "auto" };
+    $("memory-mode").value = memory.mode;
+    $("memory-mib").value = memory.mode === "limited" ? String(memory.mib) : "1024";
+    previewMemory();
     $("source-origin").value = item ? item.origin || "one_c" : section === "yellowcode" ? "yellowcode" : "one_c";
     invoke("startup_dialog_size", { dialog: "wizard" }).catch(error);
     $("wizard").showModal(); $("source-name").focus();
@@ -196,17 +223,51 @@
   }
   $("pick-file").onclick = function () { pickSource(false); };
   $("pick-folder").onclick = function () { pickSource(true); };
+  var memoryRequest = 0, saving = false;
+  function memoryError(e) {
+    var ceiling = String(e).match(/safe ceiling of ([0-9]+) MiB/);
+    return t("memory-refused") + (ceiling ? t("memory-ceiling").replace(/^; /, "") + ceiling[1] + " MiB" : "");
+  }
+  function memorySetting() {
+    if ($("memory-mode").value === "auto") return { mode: "auto" };
+    var raw = $("memory-mib").value;
+    if (!/^[0-9]+$/.test(raw) || !Number.isSafeInteger(Number(raw)) || Number(raw) < 256) throw new Error(t("memory-invalid"));
+    return { mode: "limited", mib: Number(raw) };
+  }
+  function previewMemory() {
+    var request = ++memoryRequest, memory;
+    $("memory-mib").disabled = $("memory-mode").value === "auto";
+    $("finish").disabled = true;
+    $("memory-preview").dataset.invalid = "false";
+    try { memory = memorySetting(); } catch (e) {
+      $("memory-preview").textContent = e.message; $("memory-preview").dataset.invalid = "true"; return;
+    }
+    $("memory-preview").textContent = t("memory-checking");
+    invoke("preview_source_memory", { memory: memory }).then(function (p) {
+      if (request !== memoryRequest) return;
+      $("memory-preview").textContent = p.effective_mib === null ? t("memory-unlimited") : t("memory-resolved") + p.effective_mib + " MiB" + (p.ceiling_mib === null ? t("memory-unknown") : t("memory-ceiling") + p.ceiling_mib + " MiB") + (p.fallback ? t("memory-fallback") : "") + (p.external_visibility === "partial" ? t("memory-partial") : p.external_visibility === "unknown" ? t("memory-unknown-limits") : "");
+      $("finish").disabled = saving;
+    }).catch(function (e) {
+      if (request !== memoryRequest) return;
+      $("memory-preview").textContent = memoryError(e);
+      $("memory-preview").dataset.invalid = "true";
+    });
+  }
+  $("memory-mode").onchange = previewMemory;
+  $("memory-mib").oninput = previewMemory;
   function finish() {
     if ($("finish").disabled) return;
     var name = $("source-name").value.trim(), path = $("source-input").value.trim();
     if (!name || !path) { error(t("required")); return; }
-    $("finish").disabled = true;
-    invoke("save_source", { old: oldPath, path: path, name: name, origin: $("source-origin").value }).then(function (saved) {
+    var memory;
+    try { memory = memorySetting(); } catch (e) { error(e.message); return; }
+    saving = true; $("finish").disabled = true;
+    invoke("save_source", { old: oldPath, path: path, name: name, memory: memory, origin: $("source-origin").value }).then(function (saved) {
       selected = saved || path; $("wizard").close(); return loadRecent().then(function () {
         var item = catalog.find(function (entry) { return entry.path === (saved || path); });
         if (item) { selected = item.path; $("source-search").value = ""; switchSection(category(item)); }
       });
-    }).catch(error).finally(function () { $("finish").disabled = false; });
+    }).catch(function (e) { error(/Memory (budget|size overflow)/.test(String(e)) ? memoryError(e) : e); }).finally(function () { saving = false; previewMemory(); });
   }
   $("finish").onclick = finish;
   $("wizard").addEventListener("keydown", function (e) {

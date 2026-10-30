@@ -339,7 +339,7 @@ fn columns_model(columns: &[Column]) -> u64 {
         .saturating_add(names)
 }
 
-fn store_error(e: ibschema::store::StoreError) -> TableReadError {
+pub(crate) fn store_error(e: ibschema::store::StoreError) -> TableReadError {
     match e {
         ibschema::store::StoreError::Memory(m) => TableReadError::Memory(m),
         other => TableReadError::Storage(other.to_string()),
@@ -495,7 +495,7 @@ impl Console {
         cursor: Option<&str>,
         options: PageOptions,
     ) -> Result<TablePage, TableReadError> {
-        use TableReadError::{Invalid, Storage, Unsupported};
+        use TableReadError::{Invalid, Unsupported};
         if !(1..=10_000).contains(&limit) {
             return Err(Invalid("limit must be between 1 and 10000".into()));
         }
@@ -517,7 +517,7 @@ impl Console {
         let stored = self
             .base
             .stored_table(table)
-            .map_err(Storage)?
+            .map_err(store_error)?
             .ok_or_else(|| {
                 Unsupported("only mapped, stored main object tables are supported".into())
             })?;
@@ -696,36 +696,80 @@ pub struct IndexField {
 pub struct AvailableIndex {
     pub name: String,
     pub fields: Vec<IndexField>,
+    #[serde(skip)]
+    pub(crate) paid: Option<memory_budget::Reservation>,
 }
+
+const REASON_BYTES: usize = 128;
+const NAME_BYTES: usize = 256;
+
+pub(crate) fn brief(name: &str) -> &str {
+    let mut end = name.len().min(NAME_BYTES);
+    while !name.is_char_boundary(end) {
+        end -= 1;
+    }
+    name.get(..end).unwrap_or_default()
+}
+
+fn prepare(
+    budget: Option<&memory_budget::MemoryBudget>,
+    bytes: u64,
+) -> Result<Option<memory_budget::Reservation>, TableReadError> {
+    budget
+        .map(|b| {
+            b.try_reserve(memory_budget::Category::Execution, bytes)
+                .map_err(TableReadError::Memory)
+        })
+        .transpose()
+}
+
 pub(crate) fn available_indexes(
     stored: &query_testhost::StoredTable<'_>,
     indexes: &[ibschema::store::IndexAccess],
-) -> Vec<AvailableIndex> {
-    indexes
+    budget: Option<&memory_budget::MemoryBudget>,
+) -> Result<Vec<AvailableIndex>, TableReadError> {
+    let list = u64::try_from(
+        indexes
+            .len()
+            .saturating_mul(std::mem::size_of::<AvailableIndex>()),
+    )
+    .unwrap_or(u64::MAX);
+    let entry_bytes = |ix: &ibschema::store::IndexAccess| -> u64 {
+        let fields = ix.fields.iter().fold(0usize, |sum, (f, _)| {
+            let name = stored.index_field_name(*f).map_or(32, str::len);
+            sum.saturating_add(std::mem::size_of::<IndexField>() + REASON_BYTES + name)
+        });
+        u64::try_from(ix.name.len().saturating_add(fields)).unwrap_or(u64::MAX)
+    };
+    let total = indexes
         .iter()
-        .map(|ix| AvailableIndex {
+        .fold(list, |sum, ix| sum.saturating_add(entry_bytes(ix)));
+    let mut paid = prepare(budget, total)?;
+    let mut out = Vec::with_capacity(indexes.len());
+    for ix in indexes {
+        let mut fields = Vec::with_capacity(ix.fields.len());
+        for (f, reason) in &ix.fields {
+            let name = stored.index_field_name(*f);
+            let reason = if name.is_none() {
+                Some("field is not mapped to query metadata".into())
+            } else {
+                reason.clone()
+            };
+            fields.push(IndexField {
+                name: name
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| format!("storage#{}", f.0)),
+                conditions: reason.is_none(),
+                reason,
+            });
+        }
+        out.push(AvailableIndex {
             name: ix.name.clone(),
-            fields: ix
-                .fields
-                .iter()
-                .map(|(f, reason)| {
-                    let name = stored.index_field_name(*f);
-                    let reason = if name.is_none() {
-                        Some("field is not mapped to query metadata".into())
-                    } else {
-                        reason.clone()
-                    };
-                    IndexField {
-                        name: name
-                            .map(str::to_owned)
-                            .unwrap_or_else(|| format!("storage#{}", f.0)),
-                        conditions: reason.is_none(),
-                        reason,
-                    }
-                })
-                .collect(),
-        })
-        .collect()
+            fields,
+            paid: paid.take(),
+        });
+    }
+    Ok(out)
 }
 #[derive(Serialize)]
 pub struct TableAccess {
@@ -892,7 +936,7 @@ impl Console {
     ) -> Result<query_testhost::StoredTable<'_>, TableReadError> {
         self.base
             .stored_table(table)
-            .map_err(TableReadError::Storage)?
+            .map_err(store_error)?
             .ok_or_else(|| {
                 TableReadError::Unsupported(
                     "only mapped, stored main object and tabular tables are supported".into(),
@@ -906,8 +950,7 @@ impl Console {
         request: &TableIndexRequest,
     ) -> Result<u64, TableReadError> {
         let stored = self.stored_of(table)?;
-        let indexes = stored.indexes().map_err(TableReadError::Storage)?;
-        let keys = self.index_keys(&stored, &indexes, request, false)?;
+        let keys = self.index_keys(&stored, request, false)?;
         stored
             .count_index_rows(keys.ix.id, keys.lo(), keys.hi())
             .map_err(store_error)
@@ -920,8 +963,7 @@ impl Console {
         options: PageOptions,
     ) -> Result<bool, TableReadError> {
         let stored = self.stored_of(table)?;
-        let indexes = stored.indexes().map_err(TableReadError::Storage)?;
-        let keys = self.index_keys(&stored, &indexes, request, options.ref_pairs)?;
+        let keys = self.index_keys(&stored, request, options.ref_pairs)?;
         let dir = match keys.normalized.order {
             IndexOrder::Asc => Direction::Forward,
             IndexOrder::Desc => Direction::Backward,
@@ -946,14 +988,13 @@ impl Console {
         }
         let schema = self.base.schema();
         let stored = self.stored_of(table)?;
-        let indexes = stored.indexes().map_err(TableReadError::Storage)?;
-        let available = || available_indexes(&stored, &indexes);
-        let reject = |error: String| TableReadError::IndexRejected {
-            error,
-            available_indexes: available(),
-        };
-        let keys = self.index_keys(&stored, &indexes, request, options.ref_pairs)?;
-        let ix = keys.ix;
+        let reject = |error: String| self.rejected(&stored, error);
+        let keys = self.index_keys(&stored, request, options.ref_pairs)?;
+        let ix = &keys.ix;
+        let _cursor = prepare(
+            self.base.memory_budget(),
+            u64::try_from(cursor.map_or(0, |c| c.len().saturating_mul(4))).unwrap_or(u64::MAX),
+        )?;
         let (lo, hi) = (keys.lo(), keys.hi());
         let normalized = keys.normalized.clone();
         let filter = options.filter.normalized();
@@ -970,7 +1011,7 @@ impl Console {
             }
             let key = URL_SAFE_NO_PAD.decode(&c.key).map_err(|_| Invalid("invalid cursor key".into()))?;
             if key.len() != ix.key_len { return Err(Invalid("invalid cursor key length".into())); }
-            Ok(IndexPosition { key, row: RowHandle(c.row) })
+            Ok(IndexPosition::new(key, RowHandle(c.row)))
         }).transpose()?;
         let dir = match normalized.order {
             IndexOrder::Asc => Direction::Forward,
@@ -979,14 +1020,18 @@ impl Console {
         if let Some(prefix) = options.prefix_bytes() {
             stored.set_blob_prefix(Some(prefix));
         }
-        let access = || TableAccess {
-            index: ix.name.clone(),
-            fields: available()
-                .into_iter()
-                .find(|a| a.name == ix.name)
-                .map(|a| a.fields.into_iter().map(|f| f.name).collect())
-                .unwrap_or_default(),
-            order: normalized.order,
+        let access = || -> Result<TableAccess, TableReadError> {
+            let listed =
+                available_indexes(&stored, std::slice::from_ref(ix), self.base.memory_budget())?;
+            Ok(TableAccess {
+                index: ix.name.clone(),
+                fields: listed
+                    .into_iter()
+                    .next()
+                    .map(|a| a.fields.into_iter().map(|f| f.name).collect())
+                    .unwrap_or_default(),
+                order: normalized.order,
+            })
         };
         if let Some(filter) = filter {
             let iter = stored
@@ -1069,7 +1114,7 @@ impl Console {
                 columns,
                 rows,
                 next_cursor,
-                access: Some(access()),
+                access: Some(access()?),
                 filter: Some(filter),
                 scanned: Some(consumed),
                 _retained: retained,
@@ -1146,22 +1191,23 @@ impl Console {
             next_cursor,
             _retained: retained,
             cut,
-            access: Some(access()),
+            access: Some(access()?),
             filter: None,
             scanned: None,
         })
     }
 }
 
-struct IndexKeys<'i> {
-    ix: &'i ibschema::store::IndexAccess,
+struct IndexKeys {
+    ix: ibschema::store::IndexAccess,
     normalized: TableIndexRequest,
     eq: Vec<FieldValue>,
     lower: Option<Vec<FieldValue>>,
     upper: Option<Vec<FieldValue>>,
+    _prepared: Option<memory_budget::Reservation>,
 }
 
-impl IndexKeys<'_> {
+impl IndexKeys {
     fn lo(&self) -> Bound<&[FieldValue]> {
         match self.lower.as_deref() {
             Some(v) if self.normalized.range.gt.is_some() => Bound::Excluded(v),
@@ -1182,13 +1228,58 @@ impl IndexKeys<'_> {
 }
 
 impl Console {
-    fn index_keys<'i>(
+    fn rejected(&self, stored: &query_testhost::StoredTable<'_>, error: String) -> TableReadError {
+        let listed = stored
+            .indexes()
+            .map_err(store_error)
+            .and_then(|indexes| available_indexes(stored, &indexes, self.base.memory_budget()));
+        match listed {
+            Ok(available_indexes) => TableReadError::IndexRejected {
+                error,
+                available_indexes,
+            },
+            Err(e) => e,
+        }
+    }
+
+    fn normalization_bytes(&self, request: &TableIndexRequest) -> u64 {
+        let ref_name = self
+            .base
+            .ref_kinds_borrowed()
+            .map(|(_, name)| name.len())
+            .max()
+            .unwrap_or(0);
+        let range = &request.range;
+        let ends = [&range.gt, &range.gte, &range.lt, &range.lte];
+        let texts = request
+            .eq
+            .iter()
+            .map(String::len)
+            .chain(ends.iter().filter_map(|e| e.as_ref().map(String::len)));
+        let conditions = request.eq.len() + ends.iter().filter(|e| e.is_some()).count();
+        let per_text = |len: usize| {
+            len.saturating_mul(8)
+                .saturating_add(ref_name)
+                .saturating_add(256 + std::mem::size_of::<String>() * 2)
+        };
+        let bytes = texts
+            .fold(request.index.len().saturating_mul(2), |sum, len| {
+                sum.saturating_add(per_text(len))
+            })
+            .saturating_add(
+                conditions
+                    .saturating_add(1)
+                    .saturating_mul(3 * std::mem::size_of::<FieldValue>()),
+            );
+        u64::try_from(bytes).unwrap_or(u64::MAX)
+    }
+
+    fn index_keys(
         &self,
         stored: &query_testhost::StoredTable<'_>,
-        indexes: &'i [ibschema::store::IndexAccess],
         request: &TableIndexRequest,
         ref_pairs: bool,
-    ) -> Result<IndexKeys<'i>, TableReadError> {
+    ) -> Result<IndexKeys, TableReadError> {
         use TableReadError::Invalid;
         if (request.range.gt.is_some() && request.range.gte.is_some())
             || (request.range.lt.is_some() && request.range.lte.is_some())
@@ -1197,14 +1288,13 @@ impl Console {
                 "range accepts one lower and one upper bound".into(),
             ));
         }
-        let reject = |error: String| TableReadError::IndexRejected {
-            error,
-            available_indexes: available_indexes(stored, indexes),
-        };
-        let ix = indexes
-            .iter()
-            .find(|ix| ix.name.eq_ignore_ascii_case(&request.index))
-            .ok_or_else(|| reject(format!("no mapped index named {}", request.index)))?;
+        let prepared = prepare(self.base.memory_budget(), self.normalization_bytes(request))?;
+        let reject = |error: String| self.rejected(stored, error);
+        let access = stored
+            .index_named(&request.index)
+            .map_err(store_error)?
+            .ok_or_else(|| reject(format!("no mapped index named {}", brief(&request.index))))?;
+        let ix = &access;
         let range = &request.range;
         let has_range =
             range.gt.is_some() || range.gte.is_some() || range.lt.is_some() || range.lte.is_some();
@@ -1267,12 +1357,14 @@ impl Console {
                     })?;
                     let (of, id) = self.base.parse_reference(text, table).ok_or_else(|| {
                         reject(format!(
-                            "condition must be a reference {name}(<uuid>) or a bare uuid"
+                            "condition must be a reference {}(<uuid>) or a bare uuid",
+                            brief(name)
                         ))
                     })?;
                     if of != table {
                         return Err(reject(format!(
-                            "reference of another type; the field holds {name}"
+                            "reference of another type; the field holds {}",
+                            brief(name)
                         )));
                     }
                     *text = format!("{name}({})", query_ir::uuid_of(&id));
@@ -1317,11 +1409,12 @@ impl Console {
             &mut normalized.range.lte
         })?;
         Ok(IndexKeys {
-            ix,
+            ix: access,
             normalized,
             eq,
             lower,
             upper,
+            _prepared: prepared,
         })
     }
 }

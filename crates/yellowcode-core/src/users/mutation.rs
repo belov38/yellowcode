@@ -1,5 +1,6 @@
 use super::{metadata::Facts, snapshot, *};
 use onecd::{Numeric, RowId, TableDescr, WriteTxn};
+#[cfg(any(not(unix), test))]
 use std::sync::Arc;
 use v8users::{
     BslDate, Uuid16,
@@ -7,8 +8,11 @@ use v8users::{
     user::{NewUser, SERVICE_ROW_ID, UserData, UserRow},
 };
 type Result<T> = std::result::Result<T, UserWriteError>;
-fn storage(_: onecd::Error) -> UserWriteError {
-    UserWriteError::StorageBeforeCommit
+pub(super) fn storage(error: onecd::Error) -> UserWriteError {
+    match error {
+        onecd::Error::Locked { .. } => UserWriteError::SourceBusy,
+        _ => UserWriteError::StorageBeforeCommit,
+    }
 }
 fn layout(_: v8users::Error) -> UserWriteError {
     UserWriteError::UnsupportedLayout("user DATA projection")
@@ -478,13 +482,17 @@ fn names(name: Option<&str>, full: Option<&str>) -> Result<()> {
 }
 enum ClearAdmission {
     Public,
+    #[cfg(all(feature = "testing", unix))]
+    SealedInput(String),
     #[cfg(any(test, feature = "testing"))]
     SealedFixture,
 }
 impl ClearAdmission {
     fn admitted(&self) -> bool {
         match self {
-            Self::Public => true,
+            Self::Public => super::qualification::public_clear(),
+            #[cfg(all(feature = "testing", unix))]
+            Self::SealedInput(_) => true,
             #[cfg(any(test, feature = "testing"))]
             Self::SealedFixture => true,
         }
@@ -504,6 +512,18 @@ pub(super) fn apply_fixture_clear(
 ) -> Result<UserWriteOutcome> {
     apply_transaction(base, request, ClearAdmission::SealedFixture)
 }
+#[cfg(all(feature = "testing", unix))]
+pub(super) fn apply_qualified_clear(
+    base: &Path,
+    request: &UserWriteRequest,
+    source: &str,
+) -> Result<UserWriteOutcome> {
+    apply_transaction(
+        base,
+        request,
+        ClearAdmission::SealedInput(source.to_owned()),
+    )
+}
 fn apply_transaction(
     base: &Path,
     request: &UserWriteRequest,
@@ -521,12 +541,36 @@ fn apply_transaction(
         }
         _ => {}
     }
-    if !cfg!(windows) {
+    let clearing = matches!(request.action, UserAction::ClearPassword { .. });
+    if (clearing && !clear_admission.admitted())
+        || (!cfg!(windows) && !(cfg!(any(target_os = "linux", target_os = "macos")) && clearing))
+    {
         return Err(UserWriteError::UnsupportedPlatform);
     }
     let path = snapshot::path(base)?;
+    #[cfg(test)]
+    tests::transaction_event("before-open");
+    #[cfg(unix)]
+    let source = super::source::Source::open(&path, onecd::Mode::ReadWrite)?;
+    #[cfg(unix)]
+    let db = source.database(onecd::Mode::ReadWrite)?;
+    #[cfg(not(unix))]
     let db = Database::open(&path, OpenOptions::read_write()).map_err(storage)?;
+    #[cfg(test)]
+    tests::transaction_event("opened");
+    #[cfg(unix)]
+    let witness = {
+        source.verify_path()?;
+        source.witness()?
+    };
+    #[cfg(not(unix))]
     let witness = snapshot::witness(&path)?;
+    #[cfg(all(feature = "testing", unix))]
+    if let ClearAdmission::SealedInput(pin) = &clear_admission
+        && !snapshot::matches_pin(&witness, pin)
+    {
+        return Err(UserWriteError::UnsupportedSource);
+    }
     snapshot::consume(&request.revision, &path, &witness)?;
     let tx = db.read();
     if !db.verify().map_err(storage)?.violations.is_empty() {
@@ -595,6 +639,13 @@ fn apply_transaction(
         .map(|r| (r.data.roles(), r.card.role_set))
         .collect();
     let mut sets = v8users::roles::RoleSets::from_rows(&sets, counter);
+    if matches!(request.action, UserAction::ClearPassword { .. })
+        && (directory.service.is_none() || sets.max() > counter)
+    {
+        return Err(UserWriteError::UnsupportedLayout(
+            "служебный счётчик ролей не согласован с наборами ролей — требуется проверка в 1С",
+        ));
+    }
     let mut changed = target.map_or(BslDate::EMPTY, |r| r.changed);
     let data = match &request.action {
         UserAction::Create { draft } => {
@@ -699,11 +750,14 @@ fn apply_transaction(
     if let Some(card) = user.as_mut() {
         resolve_roles(std::slice::from_mut(card), &facts.cfg)
             .map_err(|_| UserWriteError::UnsupportedLayout("public output limit"))?;
-        let key = name_key(&card.name).map_err(|_| UserWriteError::InvalidInput("name"))?;
+        let request = onecd::KeyRequest::when_bound(None);
+        let key = name_key(&card.name, request.as_ref())
+            .map_err(|_| UserWriteError::InvalidInput("name"))?;
         for other in cards.iter().filter(|c| c.id != card.id) {
-            if name_key(&other.name)
+            if name_key(&other.name, request.as_ref())
                 .map_err(|_| UserWriteError::UnsupportedLayout("stored name collation"))?
-                == key
+                .bytes()
+                == key.bytes()
             {
                 return Err(UserWriteError::InvalidInput("duplicate name"));
             }
@@ -822,12 +876,31 @@ fn apply_transaction(
     if data_total.is_none_or(|n| n > MAX_TOTAL_DATA) {
         return Err(UserWriteError::InvalidInput("result DATA budget"));
     }
-    if snapshot::witness(&path)? != witness {
+    #[cfg(unix)]
+    let current = {
+        source.verify_path()?;
+        source.witness()?
+    };
+    #[cfg(not(unix))]
+    let current = snapshot::witness(&path)?;
+    if current != witness {
         return Err(UserWriteError::StaleRevision);
     }
-    finish(write, || {
+    #[cfg(test)]
+    tests::transaction_event("commit");
+    let result = finish(write, || {
+        #[cfg(unix)]
+        source
+            .sync_parent()
+            .map_err(|_| UserWriteError::CommittedUnverified)?;
+        #[cfg(unix)]
+        let reopened = source
+            .database(onecd::Mode::ReadOnly)
+            .map_err(|_| UserWriteError::CommittedUnverified)?;
+        #[cfg(not(unix))]
         let raw = onecd::FileStorage::open(&path, false)
             .map_err(|_| UserWriteError::CommittedUnverified)?;
+        #[cfg(not(unix))]
         let reopened = Database::open_storage(Arc::new(raw), OpenOptions::read_only())
             .map_err(|_| UserWriteError::CommittedUnverified)?;
         verify_committed(&reopened, &outcome, prepared.as_ref(), &related)?;
@@ -836,10 +909,25 @@ fn apply_transaction(
                 .verify(&reopened.read())
                 .map_err(|_| UserWriteError::CommittedUnverified)?;
         }
+        #[cfg(unix)]
+        let after = {
+            source
+                .verify_path()
+                .map_err(|_| UserWriteError::CommittedUnverified)?;
+            source
+                .witness()
+                .map_err(|_| UserWriteError::CommittedUnverified)?
+        };
+        #[cfg(not(unix))]
         let after = snapshot::witness(&path).map_err(|_| UserWriteError::CommittedUnverified)?;
         snapshot::register(outcome.revision.clone(), path.clone(), after)
             .map_err(|_| UserWriteError::CommittedUnverified)
-    })?;
+    });
+    #[cfg(unix)]
+    if matches!(result, Err(UserWriteError::CommitUnknown)) && source.refused_before_write() {
+        return Err(UserWriteError::StaleRevision);
+    }
+    result?;
     Ok(outcome)
 }
 struct Related {
@@ -1012,7 +1100,38 @@ fn local_now() -> Result<BslDate> {
     )
     .ok_or(UserWriteError::StorageBeforeCommit)
 }
-#[cfg(not(windows))]
+#[cfg(unix)]
+#[allow(unsafe_code)]
+fn local_now() -> Result<BslDate> {
+    let mut seconds = 0;
+    if unsafe { libc::time(&mut seconds) } == -1 {
+        return Err(UserWriteError::StorageBeforeCommit);
+    }
+    let mut time = std::mem::MaybeUninit::<libc::tm>::uninit();
+    if unsafe { libc::localtime_r(&seconds, time.as_mut_ptr()) }.is_null() {
+        return Err(UserWriteError::StorageBeforeCommit);
+    }
+    let time = unsafe { time.assume_init() };
+    let part = |n: i32| u32::try_from(n).map_err(|_| UserWriteError::StorageBeforeCommit);
+    BslDate::from_parts(
+        part(
+            time.tm_year
+                .checked_add(1900)
+                .ok_or(UserWriteError::StorageBeforeCommit)?,
+        )?,
+        part(
+            time.tm_mon
+                .checked_add(1)
+                .ok_or(UserWriteError::StorageBeforeCommit)?,
+        )?,
+        part(time.tm_mday)?,
+        part(time.tm_hour)?,
+        part(time.tm_min)?,
+        part(time.tm_sec)?,
+    )
+    .ok_or(UserWriteError::StorageBeforeCommit)
+}
+#[cfg(not(any(unix, windows)))]
 fn local_now() -> Result<BslDate> {
     Err(UserWriteError::UnsupportedPlatform)
 }

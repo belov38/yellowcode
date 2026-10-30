@@ -123,6 +123,7 @@ fn builtins() {
             .chain(crate::collections::xdto_codecs())
             .chain(crate::ui::xdto_codecs())
             .chain(crate::values::period::xdto_codecs())
+            .chain(crate::typedesc::xdto_codecs())
         {
             t.add_builtin(idx, c);
         }

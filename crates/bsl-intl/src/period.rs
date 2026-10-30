@@ -1,9 +1,9 @@
 use crate::calendar::{Period, begin_of, end_of};
 use crate::format::{FALLBACK_LANGUAGE, words};
 use crate::locale::{Locale, locale};
+use crate::locale_key::{KeyCase, language_of_key, locale_key};
 use crate::pattern::render_date_pattern;
 use crate::present::{date_to_string, short_date};
-use crate::words::{language_of, locale_key};
 use bsl_prim::BslDate;
 
 const DAY: usize = 0;
@@ -33,9 +33,9 @@ pub fn period_presentation(
     if begin == BslDate::EMPTY && end == BslDate::EMPTY {
         return String::new();
     }
-    let key = fmt.and_then(locale_key);
+    let key = fmt.and_then(|fmt| locale_key(fmt, KeyCase::AnyCase));
     let loc = key.as_deref().and_then(locale).unwrap_or(session);
-    let language = language_of(key.as_deref(), session);
+    let language = language_of_key(key.as_deref(), session);
     let all = &words().period;
     let patterns = all
         .get(&language)

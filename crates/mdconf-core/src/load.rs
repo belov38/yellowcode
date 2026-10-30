@@ -16,6 +16,17 @@ pub use md_model::{LoadProfile, Stages};
 pub struct MeterRefusal(pub memory_budget::MemoryLimit);
 
 pub trait LoadMeter: Send + Sync {
+    fn schema_budget(&self) -> Option<memory_budget::MemoryBudget> {
+        None
+    }
+
+    fn schema_cancelled(&self) -> bool {
+        false
+    }
+
+    fn checkpoint(&self) -> Result<()> {
+        Ok(())
+    }
     fn admit(&self, entry: &str, inflated: u64) -> std::result::Result<(), MeterRefusal>;
     fn hold(&self, entry: &str, bytes: u64) -> std::result::Result<(), MeterRefusal> {
         let _ = (entry, bytes);
@@ -238,6 +249,37 @@ fn load_selected(
     compat: u32,
 ) -> Result<Configuration> {
     resource.require_embedded()?;
+    if let Some(meter) = opts.meter.as_ref() {
+        meter.checkpoint()?;
+        if let Some(root) = meter.schema_budget() {
+            resource.prepare_with_memory(mdschema::SchemaGroup::Schema, &root)?;
+            match resource
+                .prepare_learned_kinds_with_memory_checked(&root, &|| meter.schema_cancelled())
+            {
+                Err(mdschema::ManagedSchemaError::Cancelled) => {
+                    meter.checkpoint()?;
+                    return Err(Error::Io(std::io::Error::new(
+                        std::io::ErrorKind::Interrupted,
+                        "schema preparation cancelled",
+                    )));
+                }
+                result => {
+                    result?;
+                }
+            }
+            meter.checkpoint()?;
+            resource.prepare_with_memory(mdschema::SchemaGroup::StdAttrs, &root)?;
+            if stages.contains(Stages::RIGHTS) {
+                resource.prepare_with_memory(mdschema::SchemaGroup::Rights, &root)?;
+            }
+            if stages.contains(Stages::TEMPLATES) {
+                resource.prepare_with_memory(mdschema::SchemaGroup::Templates, &root)?;
+            }
+            if stages.contains(Stages::FORMS) {
+                resource.prepare_with_memory(mdschema::SchemaGroup::Upgrade, &root)?;
+            }
+        }
+    }
     let schema = resource.schema()?;
     let root_info = entries.root_info()?;
     let id = root_info.id();

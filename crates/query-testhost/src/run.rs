@@ -1,3 +1,4 @@
+use crate::FailureChain;
 use crate::batch_memory::BatchMemory;
 use crate::exec_host::TestHost;
 use crate::host::{TestBase, project_root};
@@ -87,7 +88,7 @@ enum Stop {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RunFailure {
-    pub chain: Vec<String>,
+    pub chain: FailureChain,
     pub at: Option<(u32, u32)>,
     pub later: Option<&'static str>,
 }
@@ -95,7 +96,7 @@ pub struct RunFailure {
 impl RunFailure {
     fn err(chain: Vec<String>) -> RunFailure {
         RunFailure {
-            chain,
+            chain: FailureChain::unbudgeted(chain),
             at: None,
             later: None,
         }
@@ -103,7 +104,7 @@ impl RunFailure {
 
     fn later(what: &'static str) -> RunFailure {
         RunFailure {
-            chain: Vec::new(),
+            chain: FailureChain::unbudgeted(Vec::new()),
             at: None,
             later: Some(what),
         }
@@ -114,7 +115,7 @@ impl From<RunFailure> for Stop {
     fn from(f: RunFailure) -> Stop {
         match f.later {
             Some(w) => Stop::Unsupported(w),
-            None => Stop::Err(f.chain),
+            None => Stop::Err(f.chain.to_vec()),
         }
     }
 }
@@ -169,9 +170,96 @@ fn compile_chain(e: &CompileError, text: &str, lang: Lang, base: &TestBase) -> R
         c = x.cause.as_deref();
     }
     RunFailure {
-        chain,
+        chain: FailureChain::unbudgeted(chain),
         at: e.at.map(|a| (a.pos.line, a.pos.col)),
         later: None,
+    }
+}
+
+fn message_bound(error: &query_syntax::QueryError, lang: Lang) -> u64 {
+    let arg = |arg: &query_syntax::MsgArg| match arg {
+        query_syntax::MsgArg::Text(text) => text.len() as u64,
+        _ => 1024,
+    };
+    let arguments = error
+        .subst
+        .iter()
+        .chain(error.quoted.iter())
+        .fold(0u64, |n, a| n.saturating_add(arg(a)));
+    (error.msg.text(lang).len() as u64 + 64)
+        .saturating_mul(arguments.saturating_add(1))
+        .saturating_add(error.detail.as_ref().map_or(0, |s| s.len() as u64))
+        .saturating_add(1024)
+        .saturating_mul(8)
+}
+pub fn compile_failure_budgeted(
+    error: &CompileError,
+    text: &str,
+    lang: Lang,
+    base: &TestBase,
+) -> RunFailure {
+    let mut bytes = (text.len() as u64).saturating_mul(8).saturating_add(4096);
+    let mut node = Some(error);
+    while let Some(error) = node {
+        bytes = bytes.saturating_add(message_bound(error, lang));
+        node = error.cause.as_deref();
+    }
+    let at = error.at.map(|a| (a.pos.line, a.pos.col));
+    let chain = FailureChain::render(base.memory_budget(), bytes, || {
+        compile_chain(error, text, lang, base).chain.to_vec()
+    });
+    RunFailure {
+        chain,
+        at,
+        later: None,
+    }
+}
+fn batch_failure_budgeted(
+    error: BatchError,
+    text: &str,
+    lang: Lang,
+    base: &TestBase,
+) -> RunFailure {
+    match error {
+        BatchError::Compile(error) => compile_failure_budgeted(&error, text, lang, base),
+        BatchError::Exec(error) => {
+            let mut bytes = 4096u64;
+            match &error {
+                ExecError::Runtime(runtime) | ExecError::Rights(runtime) => {
+                    for error in &runtime.chain {
+                        let mut node = Some(error);
+                        while let Some(error) = node {
+                            bytes = bytes.saturating_add(message_bound(error, lang));
+                            node = error.cause.as_deref();
+                        }
+                    }
+                }
+                ExecError::Host(host) => {
+                    let mut node = Some(host);
+                    while let Some(host) = node {
+                        bytes = bytes
+                            .saturating_add((host.message.len() as u64).saturating_mul(8))
+                            .saturating_add(256);
+                        node = host.cause.as_deref();
+                    }
+                }
+                ExecError::Fatal(text) => {
+                    bytes = bytes.saturating_add((text.len() as u64).saturating_mul(8));
+                }
+                _ => (),
+            }
+            let mut later = None;
+            let chain = FailureChain::render(base.memory_budget(), bytes, || {
+                let failure = exec_chain(&error, lang, base);
+                later = failure.later;
+                failure.chain.to_vec()
+            });
+            RunFailure {
+                chain,
+                at: None,
+                later,
+            }
+        }
     }
 }
 
@@ -198,6 +286,7 @@ fn exec_chain(e: &ExecError, lang: Lang, base: &TestBase) -> RunFailure {
         ExecError::Fatal(s) => vec![format!("internal: {s}")],
         ExecError::Later { .. } => vec![e.to_string()],
         ExecError::Memory(m) => vec![m.public_text().to_string()],
+        ExecError::Native(n) => vec![n.to_string()],
         ExecError::Structure(l) => vec![
             "MEMORY_LIMIT: execution".to_string(),
             ExecError::structure_text(*l).to_string(),
@@ -258,6 +347,8 @@ fn run_inner(host: &TestHost<'_>, case: &Value) -> Result<Value, Stop> {
     let walk_kind = case["walk"].as_str().unwrap_or("");
     let unload_kind = case["unload"].as_str().unwrap_or("");
     let syntax = query_syntax::parse_batch(text, ParseMode::Query).ok();
+    let env = host.env();
+    let mut walk_collation = None;
     let mut results = Vec::with_capacity(runs.len());
     for (statement, run) in runs.iter().enumerate() {
         let walked = match &run.outcome {
@@ -283,7 +374,14 @@ fn run_inner(host: &TestHost<'_>, case: &Value) -> Result<Value, Stop> {
                     })
                 })
                 .collect();
-            let coll = base.collation.as_ref();
+            if walk_collation.is_none() {
+                walk_collation = Some(
+                    query_exec::coll::open(&env)
+                        .map_err(|e| Stop::from(exec_chain(&e, lang, base)))?,
+                );
+            }
+            let coll =
+                query_exec::coll::route(&env, walk_collation.as_ref().and_then(Option::as_ref));
             let rows = crate::walks::rows_json(res, walk_kind, base, lang, coll)
                 .map_err(|e| Stop::Err(crate::walks::walk_error(&e, "Выбрать", lang)))?;
             let mut r = json!({
@@ -500,7 +598,7 @@ pub fn run_text_cancel_budgeted(
     let evictor: Arc<dyn memory_budget::Evictor + Send + Sync> = memory.evictor.clone();
     let mut temp = TempTables::with_lease(Arc::clone(&memory.exec), evictor);
     let runs = run_batch_budgeted(&host, text, params, &mut temp, exec, &memory.mem())
-        .map_err(|e| batch_failure(e, text, lang, base))?;
+        .map_err(|e| batch_failure_budgeted(e, text, lang, base))?;
     Ok(runs.into_iter().map(|r| stmt_run(r, base)).collect())
 }
 
@@ -557,6 +655,177 @@ pub fn explain_text(
         ir,
         plan,
         executed: batch.stmts.len().saturating_sub(1),
+    })
+}
+
+pub fn explain_text_budgeted(
+    base: &TestBase,
+    text: &str,
+    params: &CaseParams,
+    mode: RunMode,
+    cancel: &AtomicBool,
+    memory: &BatchMemory,
+) -> Result<ExplainRun, RunFailure> {
+    let failure = |error| batch_failure_budgeted(error, text, mode.lang, base);
+    let structure = |limit| {
+        failure(BatchError::Exec(ExecError::Structure(match limit {
+            query_syntax::PublicParseLimit::Statements => memory_budget::StructureLimit::Statements,
+            query_syntax::PublicParseLimit::Columns => memory_budget::StructureLimit::Columns,
+            query_syntax::PublicParseLimit::Depth => memory_budget::StructureLimit::Depth,
+        })))
+    };
+    let grow = |bytes| {
+        memory
+            .outer
+            .try_grow_or_evict(bytes, memory.evictor())
+            .map_err(|error| failure(BatchError::Exec(ExecError::Memory(error))))
+    };
+    let check_cancel = || {
+        if cancel.load(std::sync::atomic::Ordering::Acquire) {
+            Err(RunFailure::err(vec!["Выполнение прервано".into()]))
+        } else {
+            Ok(())
+        }
+    };
+    check_cancel()?;
+    let pre = query_syntax::public_preflight(text).map_err(structure)?;
+    grow(memory.model.parse(&pre, text.len()))?;
+    let batch = query_ir::compile_batch_public(text, ParseMode::Query, base.schema())
+        .map_err(|query_ir::CompileRefusal::Structure(limit)| structure(limit))?
+        .map_err(|error| compile_failure_budgeted(&error, text, mode.lang, base))?;
+    let mut schemas = TempMap::default();
+    let mut ir = Vec::with_capacity(batch.stmts.len());
+    let build_error = |error| match error {
+        BuildError::Later { what, .. } => RunFailure::later(what),
+        BuildError::Internal(message) => RunFailure::err(vec![format!("internal: {message}")]),
+        BuildError::Compile(error) => compile_failure_budgeted(&error, text, mode.lang, base),
+    };
+    for i in 0..batch.stmts.len() {
+        check_cancel()?;
+        grow(memory.model.sema(
+            &pre,
+            i,
+            memory.max_ref_fanout,
+            memory.max_table_width,
+            schemas.len(),
+        ))?;
+        let statement = analyze_stmt(
+            &batch,
+            text,
+            i,
+            base.schema(),
+            &AnalyzeOptions {
+                temp_tables: &schemas,
+                params,
+                mode: AnalyzeMode::Execute,
+                inter: mode.inter,
+            },
+        )
+        .map_err(|error| compile_failure_budgeted(&error, text, mode.lang, base))?;
+        if let Some(name) = &statement.drop {
+            schemas.remove(name);
+            ir.push(format!("DROP {name}"));
+            continue;
+        }
+        if let Some(query_ir::TempOut::Put(table)) = &statement.temp_out {
+            schemas.insert(table.clone());
+        }
+        let stats = query_ir::sema::stats::stats(&statement);
+        if stats.columns > query_exec::batch::PUBLIC_MAX_COLUMNS {
+            return Err(structure(query_syntax::PublicParseLimit::Columns));
+        }
+        check_cancel()?;
+        grow(memory.model.build(&stats))?;
+        let built = build_stmt(&statement, base.schema()).map_err(build_error)?;
+        ir.push(query_ir::ir::print(&built, base.schema()));
+    }
+    if cancel.load(std::sync::atomic::Ordering::Acquire) {
+        return Err(RunFailure::err(vec!["Выполнение прервано".into()]));
+    }
+    let host = TestHost::with_memory(base, mode.lang, cancel, memory)
+        .map_err(|error| RunFailure::err(vec![format!("internal: {error}")]))?;
+    let evictor: Arc<dyn memory_budget::Evictor + Send + Sync> = memory.evictor.clone();
+    let mut temp = TempTables::with_lease(Arc::clone(&memory.exec), evictor);
+    let last = batch.stmts.len().saturating_sub(1);
+    if last > 0 {
+        let start = batch
+            .stmts
+            .get(last)
+            .map(|statement| match statement {
+                query_syntax::ast::Stmt::Query(query) => query.span.start,
+                query_syntax::ast::Stmt::Drop(drop) => drop.span.start,
+            })
+            .unwrap_or(0) as usize;
+        let prefix = text.get(..start).unwrap_or("");
+        #[cfg(test)]
+        prefix_tests::checkpoint(memory, cancel);
+        let runs = run_batch_budgeted(
+            &host,
+            prefix,
+            params,
+            &mut temp,
+            ExecMode::Batch,
+            &memory.mem(),
+        )
+        .map_err(failure)?;
+        drop(runs);
+    }
+    check_cancel()?;
+    grow(memory.model.sema(
+        &pre,
+        last,
+        memory.max_ref_fanout,
+        memory.max_table_width,
+        temp.len(),
+    ))?;
+    let statement = analyze_stmt(
+        &batch,
+        text,
+        last,
+        base.schema(),
+        &AnalyzeOptions {
+            temp_tables: temp.schemas(),
+            params,
+            mode: AnalyzeMode::Execute,
+            inter: false,
+        },
+    )
+    .map_err(|error| compile_failure_budgeted(&error, text, mode.lang, base))?;
+    let plan = if statement.drop.is_some() {
+        String::new()
+    } else {
+        grow(
+            memory
+                .model
+                .build(&query_ir::sema::stats::stats(&statement)),
+        )?;
+        let built = build_stmt(&statement, base.schema()).map_err(build_error)?;
+        grow(memory.model.lower(
+            &query_ir::ir::stats::stats(&built),
+            memory.max_predefined_bytes,
+        ))?;
+        let lowered = query_ir::bind(
+            &built,
+            &query_ir::BindCtx {
+                security: query_ir::host::SecurityCtx {
+                    access: host.access(),
+                    session: host.session(),
+                },
+                schema: base.schema(),
+                storage: host.storage(),
+                map: host.map(),
+                params,
+                host: &host,
+            },
+        )
+        .map_err(|error| failure(BatchError::Exec(error)))?;
+        let source = host.read_source();
+        query_exec::plan::explain_temps(&lowered, &*source, Some(&temp), host.plan_options())
+    };
+    Ok(ExplainRun {
+        ir,
+        plan,
+        executed: last,
     })
 }
 

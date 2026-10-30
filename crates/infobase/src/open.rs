@@ -486,7 +486,12 @@ impl Infobase {
                     probe("open:rules");
                     grow(rules_bytes, false)?;
                     let warn = opts.schema_check == SchemaCheck::Warn;
-                    let base = present_service_tables(&seed().schema, &dbnames);
+                    let seed =
+                        crate::seed::seed_with_memory(&budget).map_err(|error| match error {
+                            crate::seed::SeedMemoryError::Budget(error) => Error::Memory(error),
+                            error => Error::Seed(error),
+                        })?;
+                    let base = present_service_tables(&seed.schema, &dbnames);
                     let built = rules::build(
                         &cfg,
                         &mut (*dbnames).clone(),

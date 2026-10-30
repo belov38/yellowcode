@@ -296,7 +296,7 @@ const LSTR: PropSpec = PropSpec {
     rel_header: None,
     fd: None,
     codec: Codec::LStr,
-    map: std::collections::BTreeMap::new(),
+    map: mdschema::FactMap::new(),
     xml_type: None,
     path2: None,
     false_if: None,
@@ -436,25 +436,17 @@ fn is_field_desc(fd: Option<&Node>) -> bool {
 
 fn order_props<'n>(
     xprops: &[&'n str],
-    context_obs: Option<&'n [String]>,
-    tag_obs: &'n [String],
+    context_obs: Option<overlay::ObservedOrder<'n>>,
+    tag_obs: overlay::ObservedOrder<'n>,
 ) -> Vec<&'n str> {
     let known: HashSet<&str> = xprops.iter().copied().collect();
     if let Some(obs) = context_obs {
-        return obs
-            .iter()
-            .map(String::as_str)
-            .filter(|n| known.contains(n))
-            .collect();
+        return obs.iter().filter(|n| known.contains(n)).collect();
     }
     if tag_obs.is_empty() {
         return xprops.to_vec();
     }
-    let mut out: Vec<&str> = tag_obs
-        .iter()
-        .map(String::as_str)
-        .filter(|n| known.contains(n))
-        .collect();
+    let mut out: Vec<&str> = tag_obs.iter().filter(|n| known.contains(n)).collect();
     let mut seen: HashSet<&str> = out.iter().copied().collect();
     for (i, &p) in xprops.iter().enumerate() {
         if seen.contains(p) {

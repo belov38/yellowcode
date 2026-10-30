@@ -1,0 +1,48 @@
+exit 0
+--- stdout
+Восстановить копию через MS SQL Server и сохранить CF, DT или 1CD
+
+Usage: yellowcode bak convert [OPTIONS] --server <SERVER> --to <TO> --output <OUTPUT> <SOURCE>
+
+Arguments:
+  <SOURCE>  Путь к BAK на машине SQL Server
+
+Options:
+      --platform-build <BUILD>
+          Точная версия эмулируемой платформы (не режим совместимости конфигурации) [default: 8.5.1.1529]
+      --server <SERVER>
+          Имя экземпляра SQL Server
+      --backup-set <BACKUP_SET>
+          Номер набора резервной копии в BAK (позиция из RESTORE HEADERONLY) [default: 1]
+      --to <TO>
+          Формат результата [possible values: cf, dt, 1cd]
+      --output <OUTPUT>
+          Путь к новому файлу на машине с Yellowcode
+      --user <USER>
+          Логин SQL Server; пароль берётся из SQLCMDPASSWORD
+      --sqlcmd <SQLCMD>
+          Путь к Microsoft sqlcmd (ODBC) [default: sqlcmd]
+      --sqlcmd-lifecycle-timeout <SQLCMD_LIFECYCLE_TIMEOUT>
+          Общий срок каждой команды sqlcmd в секундах (по умолчанию 1800 + 120 на остановку); очистка получает отдельный срок
+      --trust-server-certificate
+          Доверять сертификату SQL Server без проверки его цепочки
+      --memory-limit <MEMORY_LIMIT>
+          Только для 1CD: бюджет памяти восстановления DT (auto или B/KiB/MiB/GiB); не ограничивает MS SQL Server
+  -h, --help
+          Print help
+
+Путь SOURCE должен быть доступен службе SQL Server на машине сервера.
+Если BAK содержит несколько наборов, выберите позицию через --backup-set; по умолчанию используется первая.
+CF содержит основную конфигурацию, но не прикладные данные или расширения.
+Пока поддерживаются одна data- и одна log-часть, без TDE.
+CF и DT: CONFIG до 16 ГиБ, не более 1 млн файлов и 1024 частей на файл; строка ответа sqlcmd до 128 МиБ. Имена должны быть ASCII, Attributes — нулевым.
+1CD: CONFIG проходит через DT и загружается частями; действуют ограничения памяти и формата 1CD. Поддерживаемые локали: ru_RU, en_US.
+DT/1CD: остальные файловые разделы — до 1024 частей и 64 МиБ на файл, с нулевыми Attributes; действуют ограничения на данные и память.
+DT и 1CD — экспериментальный ограниченный перенос с управляемыми блокировками; обычные непустые пользователи и неподтверждённые хранилища не поддерживаются.
+Разделённые пользователи поддерживаются при одном общем реквизите с разделением данных и совместимости 80501; остальные общие реквизиты не поддерживаются.
+DT требует проверенный служебный профиль и целиком учитывает локальное двоичное хранилище.
+При аварийном прерывании SQL может оставить временную базу и её файлы; имя базы выводится в stderr.
+Для SQL-аутентификации задайте --user и переменную SQLCMDPASSWORD; без --user используется доверенное подключение.
+Нужен Microsoft sqlcmd (ODBC) и права на создание временной базы.
+Пример: yellowcode bak convert 'C:\Backup\base.bak' --server localhost --to cf --output base.cf
+--- stderr

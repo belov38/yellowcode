@@ -254,6 +254,91 @@ impl Drop for Map {
 }
 
 impl HostObject for Map {
+    fn to_shared(&self) -> Option<bsl_vm::SharedValue> {
+        bsl_vm::SharedValue::from_object(self)
+    }
+
+    fn session_edges(&self, visit: &mut dyn bsl_vm::SessionEdges) -> bool {
+        self.table
+            .borrow()
+            .pairs
+            .iter()
+            .all(|(key, value)| visit.value(&key.value) && visit.value(value))
+            && self
+                .order
+                .borrow()
+                .as_ref()
+                .is_none_or(|order| visit.backing(Rc::new(SessionOrder(order.clone()))))
+    }
+    fn session_clear(&self) {
+        drop(self.take_all());
+        self.order.borrow_mut().take();
+    }
+    fn session_transfer_supported(&self) -> bool {
+        true
+    }
+    fn session_transfer(
+        &self,
+        out: &mut dyn bsl_vm::SessionExport,
+    ) -> Result<Option<Box<dyn bsl_vm::SessionObject>>, bsl_vm::Exception> {
+        let table = self.table.borrow();
+        out.reserve(
+            (std::mem::size_of::<SessionMap>() + table.pairs.len() * std::mem::size_of::<i32>())
+                as u64,
+        )?;
+        let mut hashes = Vec::new();
+        hashes
+            .try_reserve_exact(table.pairs.len())
+            .map_err(|_| out.memory_error())?;
+        for (key, value) in table.pairs.iter() {
+            hashes.push(key.hash);
+            out.value(&key.value)?;
+            out.value(value)?;
+        }
+        Ok(Some(Box::new(SessionMap {
+            hashes,
+            buckets: table.pairs.bucket_count(),
+            fixed: self.fixed,
+            hash: self.hash,
+            next: table.next,
+        })))
+    }
+    fn retained_memory(
+        &self,
+        visit: &mut dyn bsl_vm::RetainedMemory,
+    ) -> Result<bool, bsl_vm::Exception> {
+        visit.mutable();
+        let table = self.table.borrow();
+        visit.bytes(
+            table
+                .pairs
+                .backing_bytes()
+                .saturating_add(
+                    (table.numbers.capacity() as u64)
+                        .saturating_mul(2 * (std::mem::size_of::<(usize, i32)>() as u64 + 1)),
+                )
+                .saturating_add(32),
+        )?;
+        if let Some(order) = self.order.borrow().as_ref()
+            && visit.allocation(
+                Rc::as_ptr(order) as usize,
+                (std::mem::size_of::<Vec<(Value, Value)>>() + 2 * std::mem::size_of::<usize>())
+                    as u64
+                    + (order.capacity() as u64)
+                        .saturating_mul(std::mem::size_of::<(Value, Value)>() as u64),
+            )?
+        {
+            for (key, value) in order.iter() {
+                visit.value(key)?;
+                visit.value(value)?;
+            }
+        }
+        for (key, value) in table.pairs.iter() {
+            visit.value(&key.value)?;
+            visit.value(value)?;
+        }
+        Ok(true)
+    }
     fn type_id(&self) -> TypeId {
         TypeId::of_catalog(self.type_idx())
     }
@@ -271,32 +356,34 @@ impl HostObject for Map {
     }
 
     fn call(&self, ex: &mut Execution, m: MemberId, args: &mut [Arg]) -> CallResult<Value> {
-        let t = self.type_idx();
-        match method_name(t, m) {
-            Some("Count") => Ok(Value::from(self.len() as i64)),
-            Some("Get") => {
-                let k = arg_value(ex, args.first())?;
-                Ok(self.table.borrow().get(ex, k))
+        ex.with_reuse_check(|ex| {
+            let t = self.type_idx();
+            match method_name(t, m) {
+                Some("Count") => Ok(Value::from(self.len() as i64)),
+                Some("Get") => {
+                    let k = arg_value(ex, args.first())?;
+                    Ok(self.table.borrow().get(ex, k))
+                }
+                Some("Insert") if !self.fixed => {
+                    let k = arg_value(ex, args.first())?;
+                    let v = arg_value(ex, args.get(1))?;
+                    self.put(ex, k, v)?;
+                    Ok(Value::Undefined)
+                }
+                Some("Delete") if !self.fixed => {
+                    let k = arg_value(ex, args.first())?;
+                    self.changed();
+                    let old = self.table.borrow_mut().remove(ex, k);
+                    drop(old);
+                    Ok(Value::Undefined)
+                }
+                Some("Clear") if !self.fixed => {
+                    release(self.take_all());
+                    Ok(Value::Undefined)
+                }
+                _ => Err(not_implemented(t, m).into()),
             }
-            Some("Insert") if !self.fixed => {
-                let k = arg_value(ex, args.first())?;
-                let v = arg_value(ex, args.get(1))?;
-                self.put(ex, k, v)?;
-                Ok(Value::Undefined)
-            }
-            Some("Delete") if !self.fixed => {
-                let k = arg_value(ex, args.first())?;
-                self.changed();
-                let old = self.table.borrow_mut().remove(ex, k);
-                drop(old);
-                Ok(Value::Undefined)
-            }
-            Some("Clear") if !self.fixed => {
-                release(self.take_all());
-                Ok(Value::Undefined)
-            }
-            _ => Err(not_implemented(t, m).into()),
-        }
+        })
     }
 
     fn index_get(&self, ex: &mut Execution, key: &Value) -> CallResult<Value> {
@@ -304,44 +391,50 @@ impl HostObject for Map {
     }
 
     fn index_set(&self, ex: &mut Execution, key: &Value, v: Value) -> CallResult<()> {
-        if self.fixed {
-            return Err(HostError::key(msg::INDEXED_READONLY).into());
-        }
-        self.put(ex, key.clone(), v)
+        ex.with_reuse_check(|ex| {
+            if self.fixed {
+                return Err(HostError::key(msg::INDEXED_READONLY).into());
+            }
+            self.put(ex, key.clone(), v)
+        })
     }
 
     fn iter_keys(&self, ex: &mut Execution) -> CallResult<Option<Vec<Value>>> {
-        reserve_values(ex, self.len() as u64)?;
-        Ok(Some(
-            self.table
-                .borrow()
-                .pairs
-                .iter()
-                .map(|(k, _)| k.value.clone())
-                .collect(),
-        ))
+        ex.with_reuse_check(|ex| {
+            reserve_values(ex, self.len() as u64)?;
+            Ok(Some(
+                self.table
+                    .borrow()
+                    .pairs
+                    .iter()
+                    .map(|(k, _)| k.value.clone())
+                    .collect(),
+            ))
+        })
     }
 
     fn iter_value(&self, ex: &mut Execution, key: &Value) -> CallResult<Option<Value>> {
-        let table = self.table.borrow();
-        let Some(k) = table.key(ex, key.clone()) else {
-            return Ok(None);
-        };
-        Ok(table
-            .pairs
-            .get(&k)
-            .map(|v| KeyValue::new_value(key.clone(), v.clone())))
+        ex.with_reuse_check(|ex| {
+            let table = self.table.borrow();
+            let Some(k) = table.key(ex, key.clone()) else {
+                return Ok(None);
+            };
+            Ok(table
+                .pairs
+                .get(&k)
+                .map(|v| KeyValue::new_value(key.clone(), v.clone())))
+        })
     }
 
     fn iter_len(&self, _ex: &mut Execution) -> Option<usize> {
         Some(self.len())
     }
 
-    fn iter_get(&self, _ex: &mut Execution, i: usize) -> CallResult<Value> {
-        match self.ordered().get(i) {
+    fn iter_get(&self, ex: &mut Execution, i: usize) -> CallResult<Value> {
+        ex.with_reuse_check(|_ex| match self.ordered().get(i) {
             Some((k, v)) => Ok(KeyValue::new_value(k.clone(), v.clone())),
             None => Err(HostError::key(msg::INDEX_OFFBOUND).into()),
-        }
+        })
     }
 
     fn presentation(&self, ex: &mut Execution) -> CallResult<Option<Str>> {
@@ -353,8 +446,96 @@ impl HostObject for Map {
     }
 }
 
+struct SessionMap {
+    hashes: Vec<i32>,
+    buckets: usize,
+    fixed: bool,
+    hash: i32,
+    next: i32,
+}
+struct SessionOrder(Order);
+impl bsl_vm::SessionBacking for SessionOrder {
+    fn session_owner(&self) -> Option<(usize, usize)> {
+        Some((Rc::as_ptr(&self.0) as usize, Rc::strong_count(&self.0)))
+    }
+    fn session_edges(&self, visit: &mut dyn bsl_vm::SessionEdges) -> bool {
+        self.0
+            .iter()
+            .all(|(key, value)| visit.value(key) && visit.value(value))
+    }
+}
+impl bsl_vm::SessionObject for SessionMap {
+    fn retained_memory(
+        &self,
+        visit: &mut dyn bsl_vm::RetainedMemory,
+    ) -> Result<(), bsl_vm::Exception> {
+        visit.bytes((self.hashes.capacity() * std::mem::size_of::<i32>()) as u64)
+    }
+    fn create(
+        &self,
+        _: &mut Execution,
+        _: &mut bsl_vm::SessionImports,
+    ) -> Result<Value, bsl_vm::Exception> {
+        Ok(Value::Object(Rc::new(Map {
+            table: RefCell::new(Table::default()),
+            order: RefCell::new(None),
+            fixed: self.fixed,
+            hash: self.hash,
+        })))
+    }
+    fn fill(
+        &self,
+        ex: &mut Execution,
+        shell: &Value,
+        children: Vec<Value>,
+    ) -> Result<(), bsl_vm::Exception> {
+        if let Some(map) = Map::of(shell) {
+            let mut table = map.table.borrow_mut();
+            table.next = self.next;
+            table.pairs = BoostMap::try_with_buckets(self.buckets, self.hashes.len())
+                .ok_or_else(|| ex.out_of_memory())?;
+            table
+                .numbers
+                .try_reserve(self.hashes.len())
+                .map_err(|_| ex.out_of_memory())?;
+            let mut children = children.into_iter().rev();
+            for &hash in self.hashes.iter().rev() {
+                let (Some(value), Some(key)) = (children.next(), children.next()) else {
+                    return Err(ex.out_of_memory());
+                };
+                if own_hash(ex, &key).is_none()
+                    && let Some(id) = identity(&key)
+                {
+                    table.numbers.insert(id, hash);
+                }
+                drop(table.pairs.insert(Key { value: key, hash }, value));
+            }
+        }
+        Ok(())
+    }
+    fn clear(&self, shell: &Value) {
+        if let Some(map) = Map::of(shell) {
+            drop(map.take_all());
+        }
+    }
+    fn restore_bytes(&self, children: usize) -> u64 {
+        (children as u64)
+            .saturating_mul(256)
+            .saturating_add(256)
+            .saturating_add((self.buckets * std::mem::size_of::<u32>()) as u64)
+    }
+}
+
 pub fn map_pairs(v: &Value) -> Option<Vec<(Value, Value)>> {
-    Some(Map::of(v)?.ordered().to_vec())
+    Some(
+        Map::of(v)?
+            .table
+            .borrow()
+            .pairs
+            .iter()
+            .map(|(key, value)| (key.value.clone(), value.clone()))
+            .collect(),
+    )
 }
 
 pub fn new_map() -> Value {
@@ -362,10 +543,10 @@ pub fn new_map() -> Value {
 }
 
 pub fn map_put(ex: &mut Execution, m: &Value, k: Value, v: Value) -> CallResult<()> {
-    match Map::of(m) {
+    ex.with_reuse_check(|ex| match Map::of(m) {
         Some(map) if !map.fixed => map.put(ex, k, v),
         _ => Err(type_mismatch(1).into()),
-    }
+    })
 }
 
 pub(super) fn ctor(ex: &mut Execution, args: &mut [Arg]) -> CallResult<Value> {

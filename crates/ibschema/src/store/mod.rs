@@ -4,10 +4,13 @@ use std::time::Duration;
 use crate::fields::FieldValue;
 use crate::storage::{FieldId, IndexId, StorageMap, TableId};
 
+mod blob;
 pub mod gate;
+pub use blob::charged_blob;
 #[cfg(feature = "testing")]
 pub mod mem;
 pub use gate::{WriterGate, WriterTicket};
+pub use onecd::{scoped_key_cancel, with_key_cancel};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct RowHandle(pub u64);
@@ -15,11 +18,37 @@ pub struct RowHandle(pub u64);
 pub type Row = Vec<FieldValue>;
 pub type RowIter<'a> = Box<dyn Iterator<Item = StoreResult<(RowHandle, Row)>> + 'a>;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct IndexPosition {
     pub key: Vec<u8>,
     pub row: RowHandle,
+    _paid: Option<memory_budget::Reservation>,
 }
+
+impl IndexPosition {
+    pub fn new(key: Vec<u8>, row: RowHandle) -> IndexPosition {
+        IndexPosition {
+            key,
+            row,
+            _paid: None,
+        }
+    }
+
+    pub fn paid(key: Vec<u8>, row: RowHandle, paid: memory_budget::Reservation) -> IndexPosition {
+        IndexPosition {
+            key,
+            row,
+            _paid: Some(paid),
+        }
+    }
+}
+
+impl PartialEq for IndexPosition {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key && self.row == other.row
+    }
+}
+impl Eq for IndexPosition {}
 pub type PositionedRows<'a> = Box<dyn Iterator<Item = StoreResult<(IndexPosition, Row)>> + 'a>;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -94,13 +123,14 @@ fn bad_value_at(e: StoreError, at: u64) -> StoreError {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct IndexAccess {
     pub id: IndexId,
     pub name: String,
     pub key_len: usize,
     pub fields: Vec<(FieldId, Option<String>)>,
     pub ref_pairs: Vec<FieldId>,
+    pub paid: Option<memory_budget::Reservation>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,6 +149,9 @@ pub trait Store: Send + Sync {
 }
 
 pub trait ReadTxn {
+    fn read_memory(&mut self, _limit: u64) -> StoreResult<memory_budget::MemoryBudget> {
+        Err(StoreError::Unsupported("admitted reads unavailable".into()))
+    }
     fn scan(&self, t: TableId) -> StoreResult<RowIter<'_>>;
     fn scan_after(&self, t: TableId, after: RowHandle) -> StoreResult<RowIter<'_>> {
         Ok(Box::new(self.scan(t)?.filter(move |row| match row {
@@ -138,6 +171,12 @@ pub trait ReadTxn {
         Err(StoreError::Unsupported(
             "positioned indexes unavailable".into(),
         ))
+    }
+    fn index_named(&self, t: TableId, name: &str) -> StoreResult<Option<IndexAccess>> {
+        Ok(self
+            .indexes(t)?
+            .into_iter()
+            .find(|a| a.name.eq_ignore_ascii_case(name)))
     }
     fn range_after(
         &self,
@@ -347,9 +386,25 @@ pub enum StoreError {
     Backend(Box<dyn std::error::Error + Send + Sync>),
     #[error("{0}")]
     Memory(memory_budget::MemoryLimit),
+    #[error("{}", if memory.is_some() { "MEMORY_LIMIT: native: restart the application" } else { "native ICU allocation failed: restart the application" })]
+    NativeRestart {
+        memory: Option<memory_budget::MemoryLimit>,
+    },
+    #[error("cancelled")]
+    Cancelled,
 }
 
 impl StoreError {
+    pub fn from_budget(error: memory_budget::BudgetError) -> Self {
+        Self::Memory(match error {
+            memory_budget::BudgetError::Limit(limit) => limit,
+            _ => memory_budget::MemoryLimit {
+                category: memory_budget::Category::Execution,
+                requested: u64::MAX,
+                reason: memory_budget::LimitReason::InvalidSize,
+            },
+        })
+    }
     pub fn from_schema(e: crate::Error) -> StoreError {
         match e {
             crate::Error::ValueDoesNotFit { table, column, why } => {

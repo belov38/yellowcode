@@ -15,8 +15,10 @@ pub struct Request {
     pub body: Vec<u8>,
 }
 
+pub use crate::body::{Body, JsonError, json_with_memory};
+
 #[derive(Default)]
-pub struct Response<B = Vec<u8>> {
+pub struct Response<B = Body> {
     pub status: u16,
     pub content_type: &'static str,
     pub body: B,

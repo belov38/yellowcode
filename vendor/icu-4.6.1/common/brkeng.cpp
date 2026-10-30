@@ -17,6 +17,7 @@
 #include "unicode/chariter.h"
 #include "unicode/ures.h"
 #include "unicode/udata.h"
+#include "udatamem.h"
 #include "unicode/putil.h"
 #include "unicode/ustring.h"
 #include "unicode/uscript.h"
@@ -68,7 +69,8 @@ UnhandledEngine::~UnhandledEngine() {
 UBool
 UnhandledEngine::handles(UChar32 c, int32_t breakType) const {
     return (breakType >= 0 && breakType < (int32_t)(sizeof(fHandled)/sizeof(fHandled[0]))
-        && fHandled[breakType] != 0 && fHandled[breakType]->contains(c));
+        && fHandled[breakType] != 0 && !fHandled[breakType]->isBogus()
+        && fHandled[breakType]->contains(c));
 }
 
 int32_t
@@ -104,6 +106,7 @@ UnhandledEngine::handleCharacter(UChar32 c, int32_t breakType) {
                 return;
             }
         }
+        if (fHandled[breakType]->isBogus() || managed_failed_46()) return;
         if (!fHandled[breakType]->contains(c)) {
             UErrorCode status = U_ZERO_ERROR;
             // Apply the entire script of the character.
@@ -117,7 +120,7 @@ UnhandledEngine::handleCharacter(UChar32 c, int32_t breakType) {
  ******************************************************************
  */
 
-ICULanguageBreakFactory::ICULanguageBreakFactory(UErrorCode &/*status*/) {
+ICULanguageBreakFactory::ICULanguageBreakFactory(UErrorCode &/*status*/, int32_t role) : managedRole(role) {
     fEngines = 0;
 }
 
@@ -164,15 +167,13 @@ ICULanguageBreakFactory::getEngineFor(UChar32 c, int32_t breakType) {
     }
     
     if (needsInit) {
-        UStack  *engines = new UStack(_deleteEngine, NULL, status);
-        if (U_SUCCESS(status) && engines == NULL) {
-            status = U_MEMORY_ALLOCATION_ERROR;
-        }
-        else if (U_FAILURE(status)) {
+        UManagedOwner46 owner={managedRole, managedRole==0 ? 0 : 1105};
+        void *backing=managed_malloc_46(sizeof(UStack), managedRole, managedRole==0 ? 0 : 1104);
+        UStack *engines=backing==NULL ? NULL : new (backing) UStack(_deleteEngine, NULL, 8, status, owner);
+        if (engines==NULL || U_FAILURE(status) || managed_failed_46()) {
             delete engines;
-            engines = NULL;
-        }
-        else {
+            return NULL;
+        } else {
             umtx_lock(NULL);
             if (fEngines == NULL) {
                 fEngines = engines;
@@ -190,7 +191,11 @@ ICULanguageBreakFactory::getEngineFor(UChar32 c, int32_t breakType) {
     // We didn't find an engine the first time through, or there was no
     // stack. Create an engine.
     const LanguageBreakEngine *newlbe = loadEngineFor(c, breakType);
-    
+    if (managed_failed_46()) {
+        delete newlbe;
+        return NULL;
+    }
+
     // Now get the lock, and see if someone else has created it in the
     // meantime
     umtx_lock(NULL);
@@ -204,8 +209,10 @@ ICULanguageBreakFactory::getEngineFor(UChar32 c, int32_t breakType) {
     }
     if (lbe == NULL && newlbe != NULL) {
         fEngines->push((void *)newlbe, status);
-        lbe = newlbe;
-        newlbe = NULL;
+        if (U_SUCCESS(status)) {
+            lbe = newlbe;
+            newlbe = NULL;
+        }
     }
     umtx_unlock(NULL);
     
@@ -223,9 +230,12 @@ ICULanguageBreakFactory::loadEngineFor(UChar32 c, int32_t breakType) {
         if (dict != NULL) {
             const LanguageBreakEngine *engine = NULL;
             switch(code) {
-            case USCRIPT_THAI:
-                engine = new ThaiBreakEngine(dict, status);
+            case USCRIPT_THAI: {
+                void *backing=managed_malloc_46(sizeof(ThaiBreakEngine), managedRole,
+                                               managedRole==0 ? 0 : 1108);
+                engine=backing==NULL ? NULL : new (backing) ThaiBreakEngine(dict, status, managedRole);
                 break;
+            }
             default:
                 break;
             }
@@ -269,20 +279,46 @@ ICULanguageBreakFactory::loadDictionaryFor(UScriptCode script, int32_t /*breakTy
         dictnbuff[len]=0; // nul terminate
     }
     ures_close(b);
-    UDataMemory *file = udata_open(U_ICUDATA_BRKITR, ext, dictnbuff, &status);
-    if (U_SUCCESS(status)) {
-        const CompactTrieDictionary *dict = new CompactTrieDictionary(
-            file, status);
-        if (U_SUCCESS(status) && dict == NULL) {
-            status = U_MEMORY_ALLOCATION_ERROR;
-        }
-        if (U_FAILURE(status)) {
-            delete dict;
-            dict = NULL;
-        }
-        return dict;
+    return openDictionaryData(U_ICUDATA_BRKITR, ext, dictnbuff, status);
+}
+
+/* udata_open accepts every otherwise valid data header; the compact dictionary
+ * constructor below checks its own payload magic. Preserve that acceptance. */
+static UBool U_CALLCONV dictionaryDataAcceptable(void *, const char *, const char *,
+                                                const UDataInfo *) {
+    return TRUE;
+}
+
+const CompactTrieDictionary *
+ICULanguageBreakFactory::openDictionaryData(const char *path, const char *type,
+                                            const char *name, UErrorCode &status) {
+    UManagedOwner46 owner={managedRole, managedRole==0 ? 0 : 1106};
+    UDataMemory *file = managed_udata_openChoice_46(path, type, name,
+        dictionaryDataAcceptable, NULL, owner, &status);
+    return adoptDictionary(file, status);
+}
+
+const CompactTrieDictionary *
+ICULanguageBreakFactory::adoptDictionary(UDataMemory *file, UErrorCode &status) {
+    if (U_FAILURE(status) || file==NULL) {
+        if (U_SUCCESS(status)) status=U_ILLEGAL_ARGUMENT_ERROR;
+        udata_close(file);
+        return NULL;
     }
-    return NULL;
+    void *backing=managed_malloc_46(sizeof(CompactTrieDictionary), managedRole,
+                                   managedRole==0 ? 0 : 1107);
+    if (backing==NULL) {
+        udata_close(file);
+        status=U_MEMORY_ALLOCATION_ERROR;
+        return NULL;
+    }
+    const CompactTrieDictionary *dict=new (backing) CompactTrieDictionary(file, status);
+    if (U_FAILURE(status) || managed_failed_46()) {
+        if (U_SUCCESS(status)) status=U_MEMORY_ALLOCATION_ERROR;
+        delete dict;
+        return NULL;
+    }
+    return dict;
 }
 
 U_NAMESPACE_END

@@ -64,6 +64,15 @@ impl<'a> ManagedConfigTxnSource<'a> {
         Self::read_in(txn, name, budget)
     }
     pub fn read_in(txn: &'a ReadTxn, name: &str, budget: &'a MemoryBudget) -> Result<Self> {
+        Self::read_in_checked(txn, name, budget, &|| Ok(()))
+    }
+    pub fn read_in_checked(
+        txn: &'a ReadTxn,
+        name: &str,
+        budget: &'a MemoryBudget,
+        check: &dyn Fn() -> Result<()>,
+    ) -> Result<Self> {
+        check()?;
         if !txn
             .memory_budget()
             .is_some_and(|ledger| ledger.same_instance(budget))
@@ -76,8 +85,8 @@ impl<'a> ManagedConfigTxnSource<'a> {
             .find_table(name)?
             .ok_or_else(|| bad("missing CONFIG table"))?;
         let data_column = column(&table, "BINARYDATA")?;
-        let rows = collect_rows(&table, budget)?;
-        let index = build_index(rows, budget)?;
+        let rows = collect_rows(&table, budget, check)?;
+        let index = build_index(rows, budget, check)?;
         Ok(Self {
             table,
             index,
@@ -97,7 +106,24 @@ impl<'a> ManagedConfigTxnSource<'a> {
     pub fn stored_bounded(&self, name: &str, limit: usize) -> Result<Option<Charged<Vec<u8>>>> {
         self.read_data(name, Some(limit))
     }
+    pub fn stored_bounded_checked(
+        &self,
+        name: &str,
+        limit: usize,
+        check: &dyn Fn() -> Result<()>,
+    ) -> Result<Option<Charged<Vec<u8>>>> {
+        self.read_data_checked(name, Some(limit), check)
+    }
     fn read_data(&self, name: &str, cap: Option<usize>) -> Result<Option<Charged<Vec<u8>>>> {
+        self.read_data_checked(name, cap, &|| Ok(()))
+    }
+    fn read_data_checked(
+        &self,
+        name: &str,
+        cap: Option<usize>,
+        check: &dyn Fn() -> Result<()>,
+    ) -> Result<Option<Charged<Vec<u8>>>> {
+        check()?;
         let Ok(at) = self.index.by_name.binary_search_by(|&index| {
             self.index
                 .metadata
@@ -125,6 +151,7 @@ impl<'a> ManagedConfigTxnSource<'a> {
         }
         let mut output = BudgetedVec::try_with_capacity(self.budget, Category::Metadata, total)?;
         for part in &entry.parts {
+            check()?;
             let row = self
                 .table
                 .get_managed(part.slot, self.budget, Category::Metadata, u64::MAX)?
@@ -142,6 +169,7 @@ impl<'a> ManagedConfigTxnSource<'a> {
 fn collect_rows(
     table: &TableRead<'_>,
     budget: &MemoryBudget,
+    check: &dyn Fn() -> Result<()>,
 ) -> Result<BudgetedVec<Charged<PartRow>>> {
     let name_column = column(table, "FILENAME")?;
     let data_column = column(table, "BINARYDATA")?;
@@ -152,6 +180,7 @@ fn collect_rows(
     let part_column = table.descr().field("PARTNO").map(|(index, _)| index);
     let mut rows = BudgetedVec::new(budget, Category::Metadata)?;
     for slot in 1..table.num_slots() {
+        check()?;
         let Some(row) = table.get_managed(slot, budget, Category::Metadata, u64::MAX)? else {
             continue;
         };
@@ -187,10 +216,12 @@ fn collect_rows(
             metadata,
         }))?;
     }
+    check()?;
     rows.sort_unstable_by(|first, second| {
         lower_cmp(&first.name, &second.name).then_with(|| first.number.cmp(&second.number))
     });
     for pair in rows.windows(2) {
+        check()?;
         let [first, second] = pair else { continue };
         if lower_cmp(&first.name, &second.name) == Ordering::Equal {
             if first.name != second.name {
@@ -204,6 +235,7 @@ fn collect_rows(
     let mut previous_name: Option<&str> = None;
     let mut earliest = RowId::MAX;
     for row in rows.iter() {
+        check()?;
         if previous_name != Some(row.name.as_str()) {
             previous_name = Some(&row.name);
             earliest = RowId::MAX;
@@ -226,7 +258,9 @@ fn collect_rows(
 fn build_index(
     mut rows: BudgetedVec<Charged<PartRow>>,
     budget: &MemoryBudget,
+    check: &dyn Fn() -> Result<()>,
 ) -> Result<Charged<Index>> {
+    check()?;
     let groups = usize::from(!rows.is_empty())
         + rows
             .windows(2)
@@ -234,6 +268,7 @@ fn build_index(
             .count();
     let mut staged = BudgetedVec::try_with_capacity(budget, Category::Metadata, groups)?;
     while let Some(last) = rows.last() {
+        check()?;
         let count = rows
             .iter()
             .rev()
@@ -243,6 +278,7 @@ fn build_index(
         let mut selected = None;
         let mut first_slot = RowId::MAX;
         for _ in 0..count {
+            check()?;
             let part = rows.pop().ok_or_else(|| bad("missing CONFIG part index"))?;
             first_slot = first_slot.min(part.part.slot);
             parts.try_push(part.part)?;
@@ -277,6 +313,7 @@ fn build_index(
             });
         staged.try_push(entry)?;
     }
+    check()?;
     staged.sort_unstable_by_key(|entry| std::cmp::Reverse(entry.first_slot));
     let metadata =
         BudgetedVec::try_with_capacity(budget, Category::Metadata, groups)?.into_charged_vec();
@@ -284,6 +321,7 @@ fn build_index(
         BudgetedVec::try_with_capacity(budget, Category::Metadata, groups)?.into_charged_vec();
     let mut output = metadata.try_zip(stored)?;
     while let Some(entry) = staged.pop() {
+        check()?;
         output = output
             .try_zip(entry)?
             .map(|((mut metadata, mut stored), entry)| {
@@ -294,6 +332,7 @@ fn build_index(
     }
     let mut by_name = BudgetedVec::try_with_capacity(budget, Category::Metadata, groups)?;
     for index in 0..groups {
+        check()?;
         by_name.try_push(index)?;
     }
     Ok(output
@@ -330,7 +369,9 @@ fn recoverable_content_error(error: &Error) -> bool {
             | onecd::Error::TxnTooLarge
             | onecd::Error::SnapshotTooOld
             | onecd::Error::Constraint(_)
-            | onecd::Error::NotFound(_) => false,
+            | onecd::Error::NotFound(_)
+            | onecd::Error::NativeRestart { .. }
+            | onecd::Error::Cancelled => false,
         },
         Error::Inflate(error) => match error {
             zraw::ManagedInflateError::Corrupt
@@ -340,7 +381,8 @@ fn recoverable_content_error(error: &Error) -> bool {
             | zraw::ManagedInflateError::TooLarge(_)
             | zraw::ManagedInflateError::Zlib(_) => false,
         },
-        Error::Memory(_)
+        Error::Seed(_)
+        | Error::Memory(_)
         | Error::InconsistentStatic(_)
         | Error::Dt(_)
         | Error::Schema(_)

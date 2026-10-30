@@ -196,7 +196,7 @@ _SCSUOpen(UConverter *cnv,
     if(pArgs->onlyTestIsLoadable) {
         return;
     }
-    cnv->extraInfo=uprv_malloc(sizeof(SCSUData));
+    cnv->extraInfo=managed_malloc_46(sizeof(SCSUData), cnv->managedRole, cnv->managedRole==0 ? 0 : 1206);
     if(cnv->extraInfo!=NULL) {
         if(locale!=NULL && locale[0]=='j' && locale[1]=='a' && (locale[2]==0 || locale[2]=='_')) {
             ((SCSUData *)cnv->extraInfo)->locale=l_ja;

@@ -31,10 +31,19 @@ pub(crate) fn to_ast_marked(s: &Schema, conv: Conventions) -> ast::Batch {
         s.batch
             .iter()
             .map(|st| match st {
-                Stmt::Select(q) => ast::Stmt::Query(Box::new(ast::QueryStmt {
-                    query: query(q, conv, false),
-                    span: SP,
-                })),
+                Stmt::Select(q) => {
+                    let mut query = query(q, conv, false);
+                    if conv == Conventions::OneC
+                        && s.mode == query_syntax::ParseMode::Query
+                        && let Some(totals) = &mut query.totals
+                    {
+                        canon::totals_aliases(
+                            totals,
+                            query.parts.first().map_or(&[], |p| &p.items),
+                        );
+                    }
+                    ast::Stmt::Query(Box::new(ast::QueryStmt { query, span: SP }))
+                }
                 Stmt::Drop(t) => ast::Stmt::Drop(ast::DropStmt {
                     kw: SP,
                     name: ident(t),

@@ -15,6 +15,7 @@
 #include "unicode/utypes.h"
 #include "unicode/uobject.h"
 #include "uhash.h"
+#include "managed_memory.h"
 
 U_NAMESPACE_BEGIN
 
@@ -106,6 +107,8 @@ private:
 
     UKeyComparator *comparer;
 
+    UManagedOwner46 managedOwner;
+
 public:
     UVector(UErrorCode &status);
 
@@ -114,6 +117,10 @@ public:
     UVector(UObjectDeleter *d, UKeyComparator *c, UErrorCode &status);
 
     UVector(UObjectDeleter *d, UKeyComparator *c, int32_t initialCapacity, UErrorCode &status);
+
+    // Private receiver owner, selected before any backing allocation.
+    UVector(UObjectDeleter *d, UKeyComparator *c, int32_t initialCapacity,
+            UErrorCode &status, UManagedOwner46 owner);
 
     virtual ~UVector();
 
@@ -310,6 +317,9 @@ public:
     UStack(UObjectDeleter *d, UKeyComparator *c, UErrorCode &status);
 
     UStack(UObjectDeleter *d, UKeyComparator *c, int32_t initialCapacity, UErrorCode &status);
+
+    UStack(UObjectDeleter *d, UKeyComparator *c, int32_t initialCapacity,
+           UErrorCode &status, UManagedOwner46 owner);
 
     virtual ~UStack();
 

@@ -148,13 +148,6 @@ pub(crate) fn register(app: &std::sync::Arc<crate::Application>, reg: &mut bsl_v
     use bsl_vm::{Arg, CallResult, Execution, HostError, Value};
 
     reg.global_fn(
-        "ПривилегированныйРежим",
-        "PrivilegedMode",
-        std::sync::Arc::new(|ex: &mut Execution, _: &mut [Arg]| -> CallResult<Value> {
-            Ok(Value::Bool(ex.effective_flags().privileged))
-        }),
-    );
-    reg.global_fn(
         "ИмяПользователя",
         "UserName",
         std::sync::Arc::new(|ex: &mut Execution, _: &mut [Arg]| -> CallResult<Value> {

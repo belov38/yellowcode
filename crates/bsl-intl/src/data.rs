@@ -9,6 +9,7 @@ pub struct LocaleData {
     pub decimal: String,
     pub group: String,
     pub minus: String,
+    pub first_day_of_week: u8,
     pub months: [Vec<String>; 4],
     pub days: [Vec<String>; 4],
     pub am_pm: [String; 2],

@@ -109,10 +109,10 @@ impl HostObject for ModuleValue {
         code.export.then(|| kind_of(code))
     }
     fn presentation(&self, ex: &mut Execution) -> CallResult<Option<Str>> {
-        let lang = ex.lang();
-        Ok(Some(Str::from(
-            ex.runtime().types().presentation(self.ty, lang),
-        )))
+        Ok(Some(Str::from(match ex.script_variant() {
+            Lang::Ru => "ОбщийМодуль",
+            Lang::En => "CommonModule",
+        })))
     }
     fn equals(&self, other: &dyn HostObject) -> Option<bool> {
         let other = other.as_any().downcast_ref::<ModuleValue>()?;

@@ -1,3 +1,4 @@
+use crate::FactJson;
 use crate::tables::SchemaError;
 use serde_json::{Map, Value};
 
@@ -5,8 +6,8 @@ use serde_json::{Map, Value};
 pub struct RightsTables {
     pub rights: Vec<(String, String)>,
     pub rights_by_kind: Vec<(String, Vec<String>)>,
-    pub cmdi: Value,
-    pub configdump: Value,
+    pub cmdi: FactJson,
+    pub configdump: FactJson,
 }
 
 pub fn rights_tables() -> Result<&'static RightsTables, SchemaError> {
@@ -14,10 +15,12 @@ pub fn rights_tables() -> Result<&'static RightsTables, SchemaError> {
 }
 impl crate::SchemaResource {
     pub fn rights_tables(&'static self) -> Result<&'static RightsTables, SchemaError> {
-        self.rights
-            .get_or_init(|| RightsTables::load(self).map_err(|e| e.0))
-            .as_ref()
-            .map_err(|e| SchemaError(e.clone()))
+        if self.require_embedded().is_ok() {
+            return self
+                .embedded_rights()
+                .map_err(|e| SchemaError(e.to_string()));
+        }
+        self.rights.legacy_plain(|| RightsTables::load(self))
     }
 }
 
@@ -71,8 +74,8 @@ impl RightsTables {
         Ok(RightsTables {
             rights,
             rights_by_kind,
-            cmdi: parse("cmdi.json", resource.json("rights/cmdi.json")?)?,
-            configdump: parse("configdump.json", resource.json("rights/configdump.json")?)?,
+            cmdi: parse("cmdi.json", resource.json("rights/cmdi.json")?)?.into(),
+            configdump: parse("configdump.json", resource.json("rights/configdump.json")?)?.into(),
         })
     }
 }

@@ -30,6 +30,92 @@ fn sources(dir: &Path, ext: &str) -> Vec<PathBuf> {
     files
 }
 
+fn mutex_test_sources(files: Vec<PathBuf>) -> Vec<PathBuf> {
+    if env::var_os("CARGO_FEATURE_TESTING").is_none() {
+        return files;
+    }
+    let out = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR"));
+    files
+        .into_iter()
+        .map(|source| {
+            let name = source.file_name().expect("source file name");
+            let helper = match name.to_str() {
+                Some("umutex.c") => "mutex_global.h",
+                Some("uresbund.c") => "mutex_resource.h",
+                Some("ucnv_bld.c") => "mutex_converter.h",
+                Some("uinit.c") => "mutex_init.h",
+                Some("icuplug.c") => "plugin_probe.h",
+                Some("locid.cpp") => "locale_graph.h",
+                Some("udata.cpp") => "common_graph.h",
+                Some("normalizer2.cpp") => "normalizer_graph.h",
+                Some("ucol_res.cpp") => "collator_graph.h",
+                Some("ucol_bld.cpp") => "inverse_graph.h",
+                Some("regexst.cpp") => "regex_graph.h",
+                Some("uniset_props.cpp") => "property_graph.h",
+                Some("rbbi.cpp") => "break_graph.h",
+                Some("ustr_cnv.c") => "converter_graph.h",
+                Some("cmemory.c") => "owned_memory.h",
+                _ => return source,
+            };
+            let helper = PathBuf::from("tests/native").join(helper);
+            let include = |path: &Path| {
+                let path = std::path::absolute(path).expect("native test source");
+                let path = path.to_string_lossy().replace('\\', "/");
+                format!("#include \"{path}\"\n")
+            };
+            let wrapper = out.join(name);
+            let body = if name == "umutex.c" {
+                let mut body = fs::read_to_string(&source).expect("mutex source");
+                for marker in ["umtx_lock(UMTX *mutex)\n{", "umtx_init(UMTX *mutex) {"] {
+                    assert_eq!(body.matches(marker).count(), 1, "mutex observer anchor");
+                    body = body.replace(
+                        marker,
+                        &(marker.to_owned() + "\n    mutex_test_observe(mutex);"),
+                    );
+                }
+                "#include \"unicode/utypes.h\"\nstatic void mutex_test_observe(const void *p);\n"
+                    .to_owned()
+                    + &body
+                    + &include(&helper)
+            } else if name == "icuplug.c" {
+                include(Path::new("tests/native/plugin_prefix.h"))
+                    + &include(&source)
+                    + &include(&helper)
+            } else {
+                include(&source) + &include(&helper)
+            };
+            fs::write(&wrapper, body).expect("native test wrapper");
+            wrapper
+        })
+        .collect()
+}
+
+fn plugin_legacy_source(common: &Path) -> PathBuf {
+    let source = std::path::absolute(common.join("icuplug.c")).expect("plugin source");
+    let prefix = std::path::absolute("tests/native/plugin_prefix.h").expect("plugin prefix");
+    let helper = std::path::absolute("tests/native/plugin_probe.h").expect("plugin helper");
+    let symbols = fs::read_to_string(common.join("unicode/urename.h")).expect("renames");
+    let mut body = "#include \"unicode/utypes.h\"\n".to_owned();
+    for line in symbols.lines() {
+        let mut words = line.split_whitespace();
+        if words.next() == Some("#define")
+            && let Some(name) = words.next().filter(|name| name.starts_with("uplug_"))
+        {
+            body += &format!("#undef {name}\n#define {name} legacy_{name}\n");
+        }
+    }
+    body += "#undef U_ENABLE_DYLOAD\n#define U_ENABLE_DYLOAD 1\n#define MUTEX_PLUGIN_LEGACY 1\n";
+    for path in [&prefix, &source, &helper] {
+        body += &format!(
+            "#include \"{}\"\n",
+            path.to_string_lossy().replace('\\', "/")
+        );
+    }
+    let out = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR")).join("plugin_legacy.c");
+    fs::write(&out, body).expect("legacy plugin wrapper");
+    out
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Target {
     Unix,
@@ -85,15 +171,34 @@ fn build(cpp: bool, implementation: &str, dirs: &Dirs, target: Target) -> cc::Bu
     let mut b = cc::Build::new();
     b.cpp(cpp)
         .define("U_STATIC_IMPLEMENTATION", None)
+        .define("U_ENABLE_DYLOAD", "0")
+        .define("U_ENABLE_TRACING", "0")
+        .define("ICU_USE_THREADS", "1")
+        .define("UCLN_NO_AUTO_CLEANUP", "1")
         .define(implementation, None)
         .warnings(false)
         .extra_warnings(false)
         .cargo_warnings(false)
         .opt_level(2);
+    if env::var_os("CARGO_FEATURE_MANAGED").is_some() {
+        b.define("U_MANAGED_MEMORY_ENABLED_46", "1");
+    }
+    if env::var_os("CARGO_FEATURE_TESTING").is_some() {
+        b.define("U_MANAGED_MEMORY_TESTING_46", "1");
+    }
     if let Some(platform) = &dirs.platform {
         b.include(platform);
     }
     b.include(&dirs.common).include(&dirs.i18n);
+    let config = std::path::absolute("include/native_config.h").expect("native config pins");
+    if target == Target::WindowsMsvc {
+        b.flag(format!("/FI{}", config.display()));
+    } else {
+        b.flag("-include").flag(config);
+    }
+    if target != Target::Unix {
+        b.define("_WIN32_WINNT", "0x0A00");
+    }
     if cpp && target != Target::WindowsMsvc {
         b.std("gnu++98");
     }
@@ -117,23 +222,44 @@ fn main() {
     for p in [&vendor, &include] {
         println!("cargo:rerun-if-changed={}", p.display());
     }
+    println!("cargo:rerun-if-changed=tests/native");
 
     let mut objects = build(false, "U_I18N_IMPLEMENTATION", &dirs, target)
         .files(sources(&dirs.i18n, "c"))
         .compile_intermediates();
     objects.extend(
         build(true, "U_I18N_IMPLEMENTATION", &dirs, target)
-            .files(sources(&dirs.i18n, "cpp"))
+            .files(mutex_test_sources(sources(&dirs.i18n, "cpp")))
             .compile_intermediates(),
     );
     objects.extend(
         build(false, "U_COMMON_IMPLEMENTATION", &dirs, target)
-            .files(sources(&dirs.common, "c"))
+            .files(mutex_test_sources(sources(&dirs.common, "c")))
             .file(&stubdata)
             .compile_intermediates(),
     );
+    if env::var_os("CARGO_FEATURE_TESTING").is_some() {
+        objects.extend(
+            build(false, "U_COMMON_IMPLEMENTATION", &dirs, target)
+                .file("tests/native/mutex_bridge.c")
+                .file(plugin_legacy_source(&dirs.common))
+                .compile_intermediates(),
+        );
+    }
+    if env::var_os("CARGO_FEATURE_TESTING").is_some() {
+        objects.extend(
+            build(false, "U_COMMON_IMPLEMENTATION", &dirs, target)
+                .file("tests/native/managed_abi.c")
+                .compile_intermediates(),
+        );
+        objects.extend(
+            build(true, "U_COMMON_IMPLEMENTATION", &dirs, target)
+                .file("tests/native/managed_abi.cpp")
+                .compile_intermediates(),
+        );
+    }
     build(true, "U_COMMON_IMPLEMENTATION", &dirs, target)
-        .files(sources(&dirs.common, "cpp"))
+        .files(mutex_test_sources(sources(&dirs.common, "cpp")))
         .objects(objects)
         .compile("icu46");
 

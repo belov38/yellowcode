@@ -1,6 +1,6 @@
+use crate::FactMap;
 use crate::SchemaError;
 use serde_json::Value;
-use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Domain {
@@ -37,14 +37,14 @@ pub struct Context {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdditionSub {
     pub len: usize,
-    pub types: BTreeMap<usize, String>,
+    pub types: FactMap<usize, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct WriterSet {
-    pub dcs_names: BTreeMap<String, String>,
+    pub dcs_names: FactMap<String, String>,
     pub pal_namespace: String,
-    pub form_bag_with_key7: BTreeMap<String, String>,
+    pub form_bag_with_key7: FactMap<String, String>,
     pub table_bag_20_value: String,
     pub table_bag_21_types: Vec<String>,
     pub table_bag_21_value: String,
@@ -52,13 +52,13 @@ pub struct WriterSet {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpgradeTables {
-    pub items: BTreeMap<String, Context>,
-    pub sublists: BTreeMap<String, Context>,
-    pub addition_sublists: BTreeMap<String, AdditionSub>,
-    pub created: BTreeMap<String, String>,
-    pub terms: BTreeMap<String, String>,
-    pub guids: BTreeMap<String, String>,
-    pub defaults: BTreeMap<String, String>,
+    pub items: FactMap<String, Context>,
+    pub sublists: FactMap<String, Context>,
+    pub addition_sublists: FactMap<String, AdditionSub>,
+    pub created: FactMap<String, String>,
+    pub terms: FactMap<String, String>,
+    pub guids: FactMap<String, String>,
+    pub defaults: FactMap<String, String>,
     pub writer_set: WriterSet,
 }
 
@@ -77,7 +77,7 @@ fn str_of<'a>(v: &'a Value, what: &str) -> Result<&'a str, SchemaError> {
         .ok_or_else(|| err(format!("{what}: string expected")))
 }
 
-fn str_map(v: Option<&Value>, what: &str) -> Result<BTreeMap<String, String>, SchemaError> {
+fn str_map(v: Option<&Value>, what: &str) -> Result<FactMap<String, String>, SchemaError> {
     let obj = v
         .and_then(Value::as_object)
         .ok_or_else(|| err(format!("{what}: object expected")))?;
@@ -168,7 +168,7 @@ fn context(name: &str, v: &Value) -> Result<Context, SchemaError> {
     })
 }
 
-fn contexts(v: Option<&Value>, what: &str) -> Result<BTreeMap<String, Context>, SchemaError> {
+fn contexts(v: Option<&Value>, what: &str) -> Result<FactMap<String, Context>, SchemaError> {
     v.and_then(Value::as_object)
         .ok_or_else(|| err(format!("{what}: object expected")))?
         .iter()
@@ -197,7 +197,7 @@ fn build(resource: &crate::SchemaResource) -> Result<UpgradeTables, SchemaError>
                         str_of(t, &what)?.to_string(),
                     ))
                 })
-                .collect::<Result<BTreeMap<_, _>, SchemaError>>()?;
+                .collect::<Result<FactMap<_, _>, SchemaError>>()?;
             Ok((
                 k.clone(),
                 AdditionSub {
@@ -206,7 +206,7 @@ fn build(resource: &crate::SchemaResource) -> Result<UpgradeTables, SchemaError>
                 },
             ))
         })
-        .collect::<Result<BTreeMap<_, _>, SchemaError>>()?;
+        .collect::<Result<FactMap<_, _>, SchemaError>>()?;
     let ws = get("writer_set")
         .and_then(Value::as_object)
         .ok_or_else(|| err("writer_set: object expected"))?;
@@ -244,9 +244,11 @@ pub fn upgrade_tables() -> Result<&'static UpgradeTables, SchemaError> {
 }
 impl crate::SchemaResource {
     pub fn upgrade_tables(&'static self) -> Result<&'static UpgradeTables, SchemaError> {
-        self.upgrade
-            .get_or_init(|| build(self))
-            .as_ref()
-            .map_err(Clone::clone)
+        if self.require_embedded().is_ok() {
+            return self
+                .embedded_upgrade()
+                .map_err(|e| SchemaError(e.to_string()));
+        }
+        self.upgrade.legacy_plain(|| build(self))
     }
 }

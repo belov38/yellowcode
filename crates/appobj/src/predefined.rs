@@ -242,7 +242,7 @@ impl Predefined {
         plan: &[ObjId],
         area: &AreaKey,
     ) -> Result<(), HostError> {
-        if !area.0.is_empty() {
+        if !area.0.is_empty() && app.options().read_only_scope.is_none() {
             return Err(HostError::not_implemented(
                 "Предопределенные",
                 "Разделение данных",
@@ -259,6 +259,12 @@ impl Predefined {
         drop(rd);
         if jobs.iter().all(|(_, f, _)| f.set) {
             return Ok(());
+        }
+        if app.options().read_only_scope.is_some() {
+            return Err(HostError::not_implemented(
+                "Предопределенные",
+                "P1ro initialization requires a write",
+            ));
         }
         let mut w = app
             .store()
@@ -366,7 +372,7 @@ impl<'a> Tables<'a> {
         let f = ti
             .field_by_std(StdField::PdInitialized)
             .ok_or_else(|| internal("no field PDInitialized"))?;
-        if !ti.separators.is_empty() {
+        if !ti.separators.is_empty() && self.app.options().read_only_scope.is_none() {
             return Err(HostError::not_implemented(
                 "Предопределенные",
                 "Разделение данных",
@@ -1107,14 +1113,15 @@ pub(crate) fn register(app: &Arc<Application>, reg: &mut bsl_vm::Registry) {
             let bsl_vm::Value::String(s) = &v else {
                 return Err(crate::meta::type_mismatch(1).into());
             };
-            Ok(predefined_value(&app, &s.to_string_lossy())?)
+            Ok(predefined_value(&app, ex, &s.to_string_lossy())?)
         }),
     );
     let app = app_for_init;
     reg.global_fn(
         "ИнициализироватьПредопределенныеДанные",
         "InitializePredefinedData",
-        Arc::new(move |_, _| {
+        Arc::new(move |ex, _| {
+            crate::read::admit_data_read(ex)?;
             initialize_all(&app)?;
             Ok(bsl_vm::Value::Undefined)
         }),
@@ -1135,7 +1142,11 @@ fn initialize_all(app: &Application) -> Result<(), HostError> {
     Ok(())
 }
 
-fn predefined_value(app: &Application, text: &str) -> Result<bsl_vm::Value, HostError> {
+fn predefined_value(
+    app: &Application,
+    ex: &mut bsl_vm::Execution,
+    text: &str,
+) -> Result<bsl_vm::Value, HostError> {
     let not_found = || l5(keys::PREDEFINED_VALUE_NOT_FOUND, &[text]);
     let parts: Vec<&str> = text.split('.').collect();
     let (Some(kind), Some(name)) = (parts.first(), parts.get(1)) else {
@@ -1179,6 +1190,7 @@ fn predefined_value(app: &Application, text: &str) -> Result<bsl_vm::Value, Host
     if rest.len() != 1 {
         return Err(other(keys::PREDEFINED_ITEM_NOT_EXISTS, &[]));
     }
+    crate::read::admit_data_read(ex)?;
     let r = app
         .predefined()
         .by_name_with(app, obj, &AreaKey::default(), item, other)?;

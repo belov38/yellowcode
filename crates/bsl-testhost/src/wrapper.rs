@@ -87,7 +87,6 @@ pub fn eval_wrapper(text: &str) -> Result<String, String> {
         "ВыполнитьСлучай",
         "ОписатьЗначение",
         "ОписатьОшибку",
-        "Выв__",
     ] {
         if !seen.contains(&need) {
             return Err(format!("{need}: not found"));
@@ -103,6 +102,7 @@ fn any_post(body: &[&str]) -> Result<Vec<String>, String> {
     let out: Vec<String> = body
         .iter()
         .map(|b| match b.trim() {
+            "БезСброса = Ложь;" => (*b).to_owned(),
             "Результаты = Новый Массив;" | "Результаты.Добавить(Ответ);" | "КонецЦикла;" =>
             {
                 if b.trim() == "Результаты = Новый Массив;" {
@@ -118,7 +118,9 @@ fn any_post(body: &[&str]) -> Result<Vec<String>, String> {
                 found[3] = true;
                 format!("{}Для Каждого Случай Из Запрос Цикл", indent(b))
             }
-            "Ответ = ВыполнитьСлучай(Случай.id, Случай.code);" => {
+            "Ответ = ВыполнитьСлучай(Случай.id, Случай.code);"
+            | "Ответ = ВыполнитьСлучай(Случай.id, Случай.code, БезСброса = Истина);" =>
+            {
                 found[4] = true;
                 (*b).to_owned()
             }

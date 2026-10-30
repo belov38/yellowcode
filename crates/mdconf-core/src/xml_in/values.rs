@@ -148,7 +148,7 @@ pub(crate) fn value(cx: &mut XCtx, codec: Codec, el: &XmlNode) -> Value {
 pub(crate) fn property(
     cx: &mut XCtx,
     codec: Codec,
-    enum_map: Option<&std::collections::BTreeMap<String, String>>,
+    enum_map: Option<&mdschema::FactMap<String, String>>,
     el: &XmlNode,
     depth: Option<usize>,
 ) -> Value {
@@ -158,7 +158,7 @@ pub(crate) fn property(
 pub(crate) fn property_scoped(
     cx: &mut XCtx,
     codec: Codec,
-    enum_map: Option<&std::collections::BTreeMap<String, String>>,
+    enum_map: Option<&mdschema::FactMap<String, String>>,
     el: &XmlNode,
     indent_depth: Option<usize>,
     namespaces: &dyn NamespaceScope,
@@ -177,7 +177,7 @@ pub(crate) fn property_scoped(
 pub(super) fn property_scoped_as(
     cx: &mut XCtx,
     codec: Codec,
-    enum_map: Option<&std::collections::BTreeMap<String, String>>,
+    enum_map: Option<&mdschema::FactMap<String, String>>,
     el: &XmlNode,
     indent_depth: Option<usize>,
     namespaces: &dyn NamespaceScope,

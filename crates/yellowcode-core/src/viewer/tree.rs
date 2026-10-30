@@ -1,6 +1,3 @@
-use std::collections::HashMap;
-use std::sync::OnceLock;
-
 use mdconf::{
     Child, ChildTag, Configuration, LocalString, MdKind, MdObject, Module, ModuleKind, SubObject,
     Value,
@@ -55,99 +52,81 @@ impl TreeNode {
 }
 
 struct Order {
-    top: Vec<Option<MdKind>>,
-    common: Vec<MdKind>,
-    after: HashMap<MdKind, Vec<MdKind>>,
-    children: HashMap<String, Vec<String>>,
+    top: &'static [Option<MdKind>],
+    common: &'static [MdKind],
+    after: &'static [(MdKind, &'static [MdKind])],
+    children: &'static [(&'static str, &'static [&'static str])],
 }
-
 #[doc(hidden)]
 pub static ORDER_JSON: &str = include_str!("tree_order.json");
-
-fn kinds_of(v: &serde_json::Value) -> Vec<MdKind> {
-    v.as_array()
-        .map(|a| {
-            a.iter()
-                .filter_map(|x| x.as_str().and_then(MdKind::from_name))
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
+include!("tree_order_static.rs");
 fn order() -> &'static Order {
-    static ORDER: OnceLock<Order> = OnceLock::new();
-    ORDER.get_or_init(|| {
-        let v: serde_json::Value = serde_json::from_str(ORDER_JSON).unwrap_or_default();
-        let field = |n: &str| v.get(n).cloned().unwrap_or_default();
-        let top = field("root")
-            .as_array()
-            .map(|a| {
-                a.iter()
-                    .filter_map(|x| match x.as_str()? {
-                        "Common" => Some(None),
-                        n => MdKind::from_name(n).map(Some),
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        let after = field("groups_inside")
-            .as_object()
-            .map(|m| {
-                m.iter()
-                    .filter_map(|(k, v)| Some((MdKind::from_name(k)?, kinds_of(v))))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let children = field("children")
-            .as_object()
-            .map(|m| {
-                m.iter()
-                    .map(|(k, v)| {
-                        let names = v
-                            .as_array()
-                            .map(|a| {
-                                a.iter()
-                                    .filter_map(|x| x.as_str().map(str::to_string))
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-                        (k.clone(), names)
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        Order {
-            top,
-            common: kinds_of(&field("common")),
-            after,
-            children,
-        }
-    })
+    &ORDER
+}
+pub fn prepare_order_with_memory(
+    _: &memory_budget::MemoryBudget,
+) -> Result<(), super::resources::GuiResourceError> {
+    let _ = ORDER.top;
+    Ok(())
+}
+pub fn prepare_top_with_memory(
+    _: &memory_budget::MemoryBudget,
+) -> Result<(), super::resources::GuiResourceError> {
+    Ok(())
 }
 
 fn common_kinds() -> &'static [MdKind] {
-    &order().common
+    order().common
 }
 
 fn nested_in(owner: MdKind) -> &'static [MdKind] {
-    order().after.get(&owner).map_or(&[], Vec::as_slice)
+    order()
+        .after
+        .iter()
+        .find(|(k, _)| *k == owner)
+        .map_or(&[], |(_, v)| *v)
+}
+
+#[cfg(feature = "testing")]
+#[doc(hidden)]
+pub struct DiagnosticOrder {
+    pub top: &'static [Option<MdKind>],
+    pub common: &'static [MdKind],
+    pub after: &'static [(MdKind, &'static [MdKind])],
+    pub children: &'static [(&'static str, &'static [&'static str])],
+}
+
+#[cfg(feature = "testing")]
+#[doc(hidden)]
+pub fn diagnostic_order_content() -> DiagnosticOrder {
+    let value = order();
+    DiagnosticOrder {
+        top: value.top,
+        common: value.common,
+        after: value.after,
+        children: value.children,
+    }
+}
+
+#[cfg(feature = "testing")]
+#[doc(hidden)]
+pub fn diagnostic_order() -> (usize, &'static [MdKind]) {
+    let value = order();
+    (std::ptr::from_ref(value) as usize, value.common)
+}
+
+#[cfg(feature = "testing")]
+#[doc(hidden)]
+pub fn diagnostic_top() -> &'static [MdKind] {
+    top_kinds()
 }
 
 fn is_nested(kind: MdKind) -> bool {
-    order().after.values().any(|v| v.contains(&kind))
+    order().after.iter().any(|(_, v)| v.contains(&kind))
 }
 
 fn top_kinds() -> &'static [MdKind] {
-    static TOP: OnceLock<Vec<MdKind>> = OnceLock::new();
-    TOP.get_or_init(|| {
-        let o = order();
-        let mut v = Vec::new();
-        for k in o.top.iter().flatten() {
-            v.push(*k);
-            v.extend(o.after.get(k).into_iter().flatten().copied());
-        }
-        v
-    })
+    TOP
 }
 
 pub fn kind_order() -> Vec<MdKind> {
@@ -170,8 +149,9 @@ fn group_rank(owner: MdKind, icon: &str) -> usize {
     let name = name.strip_suffix('s').unwrap_or(name);
     order()
         .children
-        .get(owner.as_str())
-        .and_then(|l| l.iter().position(|x| x == name))
+        .iter()
+        .find(|(k, _)| *k == owner.as_str())
+        .and_then(|(_, l)| l.iter().position(|x| *x == name))
         .unwrap_or(usize::MAX)
 }
 
@@ -220,21 +200,27 @@ fn synonym(s: &LocalString, lang: Lang) -> Option<String> {
 struct Builder<'a> {
     cfg: &'a Configuration,
     lang: Lang,
+    cancelled: Option<&'a std::sync::atomic::AtomicBool>,
 }
 
 impl Builder<'_> {
+    fn active(&self) -> bool {
+        self.cancelled
+            .is_none_or(|flag| !flag.load(std::sync::atomic::Ordering::Acquire))
+    }
+
     fn group(&self, key: &str) -> TreeNode {
         TreeNode::new(group_name(key, self.lang), NodeRef::Folder(key))
     }
 
     fn module_nodes(&self, mods: &[&Module], path: &str) -> Option<TreeNode> {
-        if mods.is_empty() {
+        if mods.is_empty() || !self.active() {
             return None;
         }
         let mut sorted: Vec<&&Module> = mods.iter().collect();
         sorted.sort_by_key(|m| module_rank(m.kind));
         let mut g = self.group("Modules");
-        for m in sorted {
+        for m in sorted.into_iter().take_while(|_| self.active()) {
             let en = module_name(m.kind, Lang::En);
             let mut n = TreeNode::new(module_name(m.kind, self.lang), NodeRef::Module(m.kind))
                 .with_path(path.to_string());
@@ -254,7 +240,7 @@ impl Builder<'_> {
         n.synonym = synonym(&c.synonym, self.lang);
         n.type_text = c.type_desc().map(|t| type_text(t, self.lang));
         if budget != Some(0) {
-            for c2 in &c.children {
+            for c2 in c.children.iter().take_while(|_| self.active()) {
                 n.children.push(self.child(c2, &path, Self::below(budget)));
             }
         }
@@ -303,7 +289,7 @@ impl Builder<'_> {
         items: impl FnOnce() -> Vec<TreeNode>,
     ) -> TreeNode {
         let mut g = self.group(key);
-        if budget != Some(0) {
+        if budget != Some(0) && self.active() {
             g.children = items();
         }
         g
@@ -321,23 +307,31 @@ impl Builder<'_> {
         }
         let gb = Self::below(budget);
         let ib = Self::below(gb);
-        for s in &o.subsystems {
+        for s in o.subsystems.iter().take_while(|_| self.active()) {
             let p = format!("{path}.Subsystem.{}", s.name);
             n.children.push(self.object(s, p, gb));
         }
         let mut groups: Vec<TreeNode> = Vec::new();
-        for tag in CHILD_ORDER {
+        for tag in CHILD_ORDER.into_iter().take_while(|_| self.active()) {
             let items: Vec<&Child> = o.children.iter().filter(|c| c.tag == tag).collect();
             if items.is_empty() {
                 continue;
             }
             groups.push(self.group_node(child_tag_en(tag), gb, || {
-                items.iter().map(|c| self.child(c, &path, ib)).collect()
+                items
+                    .iter()
+                    .take_while(|_| self.active())
+                    .map(|c| self.child(c, &path, ib))
+                    .collect()
             }));
         }
         if !o.forms.is_empty() {
             groups.push(self.group_node("Forms", gb, || {
-                o.forms.iter().map(|f| self.sub(&path, f)).collect()
+                o.forms
+                    .iter()
+                    .take_while(|_| self.active())
+                    .map(|f| self.sub(&path, f))
+                    .collect()
             }));
         }
         let cmds: Vec<&Child> = o
@@ -347,7 +341,10 @@ impl Builder<'_> {
             .collect();
         if !cmds.is_empty() {
             groups.push(self.group_node("Command", gb, || {
-                cmds.iter().map(|c| self.child(c, &path, ib)).collect()
+                cmds.iter()
+                    .take_while(|_| self.active())
+                    .map(|c| self.child(c, &path, ib))
+                    .collect()
             }));
         }
         let funcs: Vec<&Child> = o
@@ -357,12 +354,20 @@ impl Builder<'_> {
             .collect();
         if !funcs.is_empty() {
             groups.push(self.group_node("Function", gb, || {
-                funcs.iter().map(|c| self.child(c, &path, ib)).collect()
+                funcs
+                    .iter()
+                    .take_while(|_| self.active())
+                    .map(|c| self.child(c, &path, ib))
+                    .collect()
             }));
         }
         if !o.templates.is_empty() {
             groups.push(self.group_node("Templates", gb, || {
-                o.templates.iter().map(|f| self.sub(&path, f)).collect()
+                o.templates
+                    .iter()
+                    .take_while(|_| self.active())
+                    .map(|f| self.sub(&path, f))
+                    .collect()
             }));
         }
         if !o.recalculations.is_empty() {
@@ -393,7 +398,12 @@ impl Builder<'_> {
     ) -> Option<TreeNode> {
         let of = |k: MdKind| -> Vec<&MdObject> {
             if want(k) {
-                self.cfg.objects.iter().filter(|o| o.kind == k).collect()
+                self.cfg
+                    .objects
+                    .iter()
+                    .take_while(|_| self.active())
+                    .filter(|o| o.kind == k)
+                    .collect()
             } else {
                 Vec::new()
             }
@@ -411,13 +421,13 @@ impl Builder<'_> {
         if budget != Some(0) {
             for (k, list) in nested {
                 let mut g = TreeNode::new(section_name(k, self.lang), NodeRef::Section(k));
-                for o in list {
+                for o in list.into_iter().take_while(|_| self.active()) {
                     let p = format!("{}.{}", kind_name(k, Lang::En), o.name);
                     g.children.push(self.object(o, p, Self::below(budget)));
                 }
                 s.children.push(g);
             }
-            for o in objs {
+            for o in objs.into_iter().take_while(|_| self.active()) {
                 let p = format!("{}.{}", kind_name(kind, Lang::En), o.name);
                 s.children.push(self.object(o, p, Self::below(budget)));
             }
@@ -438,12 +448,39 @@ pub fn config_name(cfg: &Configuration) -> String {
 }
 
 pub fn tree(cfg: &Configuration, depth: Option<usize>, kinds: &[MdKind], lang: Lang) -> TreeNode {
+    tree_inner(cfg, depth, kinds, lang, None)
+}
+
+pub(crate) fn tree_cancellable(
+    cfg: &Configuration,
+    lang: Lang,
+    cancelled: &std::sync::atomic::AtomicBool,
+) -> crate::Result<TreeNode> {
+    let node = tree_inner(cfg, None, &[], lang, Some(cancelled));
+    if cancelled.load(std::sync::atomic::Ordering::Acquire) {
+        Err("opening cancelled".into())
+    } else {
+        Ok(node)
+    }
+}
+
+fn tree_inner(
+    cfg: &Configuration,
+    depth: Option<usize>,
+    kinds: &[MdKind],
+    lang: Lang,
+    cancelled: Option<&std::sync::atomic::AtomicBool>,
+) -> TreeNode {
     let mut root =
         TreeNode::new(config_name(cfg), NodeRef::Root).with_path("Configuration".to_string());
     if depth == Some(0) {
         return root;
     }
-    let b = Builder { cfg, lang };
+    let b = Builder {
+        cfg,
+        lang,
+        cancelled,
+    };
     let want = |k: MdKind| kinds.is_empty() || kinds.contains(&k);
     let sb = Builder::below(depth);
     let present = |k: &MdKind| want(*k) && cfg.objects.iter().any(|o| o.kind == *k);

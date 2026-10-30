@@ -362,6 +362,34 @@ impl<R: Read> RawReader<R> {
     }
 
     pub fn copy_folder_binary(&mut self, sink: &mut impl Write, limit: u64) -> Result<u64> {
+        self.copy_folder_binary_with_chunk_limit(sink, limit, u64::MAX)
+    }
+
+    pub fn copy_folder_binary_with_chunk_limit(
+        &mut self,
+        sink: &mut impl Write,
+        limit: u64,
+        max_chunks: u64,
+    ) -> Result<u64> {
+        self.copy_folder_binary_bounded(sink, limit, max_chunks, false)
+    }
+
+    pub fn copy_folder_binary_with_work_limit(
+        &mut self,
+        sink: &mut impl Write,
+        limit: u64,
+        base_chunks: u64,
+    ) -> Result<u64> {
+        self.copy_folder_binary_bounded(sink, limit, base_chunks, true)
+    }
+
+    fn copy_folder_binary_bounded(
+        &mut self,
+        sink: &mut impl Write,
+        limit: u64,
+        chunks: u64,
+        adaptive: bool,
+    ) -> Result<u64> {
         if let Some(e) = &self.failed {
             return Err(e.again());
         }
@@ -369,10 +397,12 @@ impl<R: Read> RawReader<R> {
             if !matches!(self.state, State::FolderData) {
                 return self.fail("folder binary field out of order");
             }
-            let len = self
-                .rd
-                .copy_binary(sink, limit)
-                .map_err(|e| bin_err(e, &self.trace))?;
+            let len = if adaptive {
+                self.rd.copy_binary_with_work_limit(sink, limit, chunks)
+            } else {
+                self.rd.copy_binary_with_chunk_limit(sink, limit, chunks)
+            }
+            .map_err(|e| bin_err(e, &self.trace))?;
             self.expect_close("folder row")?;
             self.state = State::Rows { db: false };
             Ok(len)

@@ -9,6 +9,7 @@
     )
 )]
 
+pub mod binlist;
 pub mod container;
 pub mod elements;
 pub mod error;

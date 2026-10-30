@@ -118,8 +118,10 @@ pub(super) fn call_member(
     flags: crate::host::ExecFlags,
 ) -> Result<bool, Exception> {
     let n = name(module, i)?;
-    if super::call::enter_module_value(ex, sp_base, &n, argc as usize, want, flags)? {
-        return Ok(true);
+    if let Some(entered) =
+        super::call::enter_module_value(ex, sp_base, &n, argc as usize, want, flags)?
+    {
+        return Ok(entered);
     }
     let mut args = pop_args(ex, sp_base, argc as usize)?;
     let obj = pop(ex, sp_base)?;

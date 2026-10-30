@@ -1,14 +1,15 @@
 mod json;
+mod managed;
 
+use memory_budget::{BudgetError, Category, Lock, MemoryBudget, Reservation};
 use std::path::Path;
 use std::sync::OnceLock;
 
-use brace::{Guid, Node};
-use ibschema::dbnames::{DbName, DbNames};
+use brace::Node;
+use ibschema::dbnames::DbNames;
 use ibschema::logical::LogicalSchema;
 use onecd::{BlobVal, Locking, OpenOptions, TableDescr, Value};
 use serde::Serialize;
-use serde::de::DeserializeOwned;
 
 use crate::error::{Error, Result};
 use crate::raw::RawIb;
@@ -40,55 +41,161 @@ const DBNAMES_JSON: &str = include_str!("data/dbnames.json");
 const PARAMS_JSON: &str = include_str!("data/params.json");
 const ROWS_JSON: &str = include_str!("data/rows.json");
 
-fn parse_json<T: DeserializeOwned>(name: &str, text: &str) -> Result<T> {
-    serde_json::from_str(text).map_err(|e| Error::Inconsistent(format!("seed {name}: {e}")))
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SeedFile {
+    Tables,
+    Schema,
+    DbNames,
+    Params,
+    Rows,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SeedDataErrorKind {
+    Shape,
+    String,
+    Number,
+    Depth,
+    DbNames,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SeedDataError {
+    pub file: SeedFile,
+    pub offset: usize,
+    pub kind: SeedDataErrorKind,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SeedMemoryError {
+    Budget(BudgetError),
+    DifferentRoot,
+    Embedded(SeedDataError),
+}
+impl From<BudgetError> for SeedMemoryError {
+    fn from(error: BudgetError) -> Self {
+        Self::Budget(error)
+    }
+}
+impl std::fmt::Display for SeedMemoryError {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Budget(error) => error.fmt(out),
+            Self::DifferentRoot => out.write_str("SEED belongs to a different process memory root"),
+            Self::Embedded(error) => write!(
+                out,
+                "invalid embedded seed {:?} at {}: {:?}",
+                error.file, error.offset, error.kind
+            ),
+        }
+    }
+}
+impl std::error::Error for SeedMemoryError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Budget(error) => Some(error),
+            _ => None,
+        }
+    }
 }
 
-fn load() -> Result<Seed> {
-    let tables = parse_json::<Vec<JTable>>("tables.json", TABLES_JSON)?
-        .iter()
-        .map(JTable::to_descr)
-        .collect::<Result<Vec<_>>>()?;
-    let schema = LogicalSchema {
-        tables: parse_json::<Vec<JLTable>>("dbschema.json", SCHEMA_JSON)?
-            .iter()
-            .map(JLTable::to_table)
-            .collect::<Result<Vec<_>>>()?,
-    };
-    let mut dbnames = DbNames::default();
-    for (purpose, number) in parse_json::<Vec<(String, u32)>>("dbnames.json", DBNAMES_JSON)? {
-        dbnames.push(DbName {
-            uuid: Guid::NIL,
-            purpose,
-            number,
-        })?;
+struct SeedEntry {
+    value: Seed,
+    charge: Lock<Option<Reservation>>,
+    retained_bytes: u64,
+}
+impl std::ops::Deref for SeedEntry {
+    type Target = Seed;
+    fn deref(&self) -> &Seed {
+        &self.value
     }
-    let params = parse_json::<Vec<JParams>>("params.json", PARAMS_JSON)?
-        .into_iter()
-        .map(|p| ParamsTemplate {
-            name: p.name,
-            text: p.text,
-            deflate: p.deflate,
-        })
-        .collect();
-    let rows: JRows = parse_json("rows.json", ROWS_JSON)?;
-    let mut newgen = BOM.to_vec();
-    newgen.extend_from_slice(rows.newgen.as_bytes());
-    Ok(Seed {
-        tables,
-        schema,
-        dbnames,
-        params,
-        ibversion: rows.ibversion,
-        newgen,
-        schemastorage: rows.schemastorage,
-    })
+}
+static SEED: OnceLock<SeedEntry> = OnceLock::new();
+static INITIALIZE: Lock<bool> = Lock::new(false);
+
+struct Initialize;
+impl Initialize {
+    fn claim() -> Self {
+        loop {
+            {
+                let mut active = INITIALIZE.lock();
+                if !*active {
+                    *active = true;
+                    return Self;
+                }
+            }
+            std::thread::yield_now();
+        }
+    }
+}
+impl Drop for Initialize {
+    fn drop(&mut self) {
+        *INITIALIZE.lock() = false;
+    }
+}
+
+pub fn seed_with_memory(
+    memory: &MemoryBudget,
+) -> std::result::Result<&'static Seed, SeedMemoryError> {
+    let root = memory.root_budget();
+    let _gate = Initialize::claim();
+    let entry = match SEED.get() {
+        Some(entry) => entry,
+        None => {
+            let candidate = managed::build(Some(&root))?;
+            let _ = SEED.set(candidate);
+            SEED.get()
+                .ok_or(SeedMemoryError::Budget(BudgetError::Overflow))?
+        }
+    };
+    {
+        let owner = entry.charge.lock();
+        match owner.as_ref() {
+            Some(owner) if !owner.budget().same_instance(&root) => {
+                return Err(SeedMemoryError::DifferentRoot);
+            }
+            Some(_) => return Ok(&entry.value),
+            None => {}
+        }
+    }
+    let owner = root
+        .try_reserve(Category::Metadata, entry.retained_bytes)
+        .map_err(BudgetError::from)?;
+    *entry.charge.lock() = Some(owner);
+    Ok(&entry.value)
 }
 
 #[allow(clippy::expect_used)]
 pub fn seed() -> &'static Seed {
-    static SEED: OnceLock<Seed> = OnceLock::new();
-    SEED.get_or_init(|| load().expect("embedded seed data is valid"))
+    if let Some(entry) = SEED.get() {
+        return &entry.value;
+    }
+    let _gate = Initialize::claim();
+    &SEED
+        .get_or_init(|| managed::build(None).expect("embedded seed data is valid"))
+        .value
+}
+
+#[cfg(feature = "calibration")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SeedMemoryState {
+    Empty,
+    Unmanaged,
+    Managed {
+        same_root: bool,
+        retained_bytes: u64,
+    },
+}
+#[cfg(feature = "calibration")]
+pub fn seed_memory_state(memory: &MemoryBudget) -> SeedMemoryState {
+    let Some(entry) = SEED.get() else {
+        return SeedMemoryState::Empty;
+    };
+    let owner = entry.charge.lock();
+    match owner.as_ref() {
+        None => SeedMemoryState::Unmanaged,
+        Some(owner) => SeedMemoryState::Managed {
+            same_root: owner.budget().same_instance(&memory.root_budget()),
+            retained_bytes: entry.retained_bytes,
+        },
+    }
 }
 
 fn bad(why: impl Into<String>) -> Error {
@@ -207,7 +314,18 @@ pub fn generate(c851_0create: &Path, out: &Path) -> Result<()> {
 
     let mut tables = Vec::new();
     for name in txn.table_names() {
-        tables.push(JTable::from_descr(txn.table(&name)?.descr()));
+        let table = txn.table(&name)?;
+        let encoded = JTable::from_descr(table.descr());
+        let decoded = encoded.to_descr()?;
+        let original = table.descr();
+        if decoded.name != original.name
+            || decoded.fields != original.fields
+            || decoded.indexes != original.indexes
+            || decoded.recordlock != original.recordlock
+        {
+            return Err(bad("physical seed JSON does not round-trip"));
+        }
+        tables.push(encoded);
     }
     write_json(out, "tables.json", &tables)?;
 
@@ -217,6 +335,11 @@ pub fn generate(c851_0create: &Path, out: &Path) -> Result<()> {
         return Err(bad("DBSCHEMA does not round-trip"));
     }
     let jschema: Vec<JLTable> = schema.tables.iter().map(JLTable::from_table).collect();
+    for (table, encoded) in schema.tables.iter().zip(&jschema) {
+        if &encoded.to_table()? != table {
+            return Err(bad("logical seed JSON does not round-trip"));
+        }
+    }
     write_json(out, "dbschema.json", &jschema)?;
 
     let dbnames = DbNames::parse(&ib.dbnames_text()?)?;

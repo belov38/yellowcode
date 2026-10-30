@@ -22,7 +22,7 @@ pub mod collate;
 pub mod locale;
 #[cfg(feature = "icu")]
 pub use collate::IcuCollation;
-pub use collate::{Collation, Strength};
+pub use collate::{Collation, CollationError, Strength};
 
 pub mod boost_hash;
 pub mod boostmap;

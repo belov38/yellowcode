@@ -18,6 +18,23 @@ pub(crate) struct DbLock {
 }
 
 impl DbLock {
+    #[cfg(unix)]
+    pub(crate) fn acquire_file(db_path: &Path, file: File, mode: Mode) -> Result<DbLock> {
+        use std::os::unix::fs::MetadataExt;
+        let path = database_path(db_path, mode)?;
+        let named = fs::metadata(&path)?;
+        let opened = file.metadata()?;
+        if (named.dev(), named.ino()) != (opened.dev(), opened.ino()) {
+            return Err(locked(db_path));
+        }
+        let registered = Registration::new(path.clone(), mode)?;
+        let (companion, file) = os::lock_file(&path, mode, file)?;
+        Ok(DbLock {
+            file: Some(file),
+            companion,
+            _registered: registered,
+        })
+    }
     pub(crate) fn acquire(db_path: &Path, mode: Mode) -> Result<DbLock> {
         let path = database_path(db_path, mode)?;
         let registered = Registration::new(path.clone(), mode)?;
@@ -268,6 +285,23 @@ mod os {
     use crate::error::{Error, Result};
 
     pub(super) fn lock(db: &Path, mode: Mode) -> Result<(Option<File>, File)> {
+        lock_with(db, mode, || {
+            fs::OpenOptions::new()
+                .read(true)
+                .write(mode != Mode::ReadOnly)
+                .open(db)
+        })
+    }
+
+    pub(super) fn lock_file(db: &Path, mode: Mode, file: File) -> Result<(Option<File>, File)> {
+        lock_with(db, mode, || Ok(file))
+    }
+
+    fn lock_with(
+        db: &Path,
+        mode: Mode,
+        open: impl FnOnce() -> io::Result<File>,
+    ) -> Result<(Option<File>, File)> {
         let reader = mode == Mode::ReadOnly;
         let companion = if reader {
             open_existing_companion(db)
@@ -285,7 +319,12 @@ mod os {
                     f.try_lock()
                 };
                 match taken {
-                    Ok(()) => Some(f),
+                    Ok(()) => {
+                        if !reader {
+                            native_writer_lock(&f, db)?;
+                        }
+                        Some(f)
+                    }
                     Err(TryLockError::WouldBlock) => return Err(locked(db)),
                     Err(TryLockError::Error(_)) if reader => None,
                     Err(TryLockError::Error(e)) => return Err(Error::Io(e)),
@@ -293,7 +332,7 @@ mod os {
             }
             None => None,
         };
-        let file = fs::OpenOptions::new().read(true).write(!reader).open(db)?;
+        let file = open()?;
         let taken = if reader {
             file.try_lock_shared()
         } else {
@@ -305,7 +344,36 @@ mod os {
             Err(TryLockError::Error(_)) if reader => {}
             Err(TryLockError::Error(e)) => return Err(Error::Io(e)),
         }
+        if !reader {
+            native_writer_lock(&file, db)?;
+        }
         Ok((companion, file))
+    }
+
+    #[cfg(target_os = "linux")]
+    #[allow(unsafe_code)]
+    fn native_writer_lock(file: &File, db: &Path) -> Result<()> {
+        use std::os::fd::AsRawFd;
+        let mut lock = libc::flock {
+            l_type: libc::F_WRLCK as _,
+            l_whence: libc::SEEK_SET as _,
+            l_start: 0,
+            l_len: 0,
+            l_pid: 0,
+        };
+        if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_OFD_SETLK, &mut lock) } == -1 {
+            let error = io::Error::last_os_error();
+            return Err(match error.raw_os_error() {
+                Some(libc::EAGAIN | libc::EACCES) => locked(db),
+                _ => Error::Io(error),
+            });
+        }
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn native_writer_lock(_file: &File, _db: &Path) -> Result<()> {
+        Ok(())
     }
 
     fn open_existing_companion(db: &Path) -> Option<File> {
@@ -323,10 +391,11 @@ mod os {
         {
             Ok(f) => Ok(f),
             Err(e)
-                if matches!(
-                    e.kind(),
-                    io::ErrorKind::PermissionDenied | io::ErrorKind::ReadOnlyFilesystem
-                ) =>
+                if !cfg!(target_os = "linux")
+                    && matches!(
+                        e.kind(),
+                        io::ErrorKind::PermissionDenied | io::ErrorKind::ReadOnlyFilesystem
+                    ) =>
             {
                 File::open(&path).map_err(|_| e)
             }

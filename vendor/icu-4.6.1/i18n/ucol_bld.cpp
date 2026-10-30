@@ -35,6 +35,7 @@
 #include "umutex.h"
 #include "cmemory.h"
 #include "cstring.h"
+#include "udatamem.h"
 
 static const InverseUCATableHeader* _staticInvUCA = NULL;
 static UDataMemory* invUCA_DATA_MEM = NULL;
@@ -1339,7 +1340,8 @@ ucol_initInverseUCA(UErrorCode *status)
 
     if(needsInit) {
         InverseUCATableHeader *newInvUCA = NULL;
-        UDataMemory *result = udata_openChoice(U_ICUDATA_COLL, INVC_DATA_TYPE, INVC_DATA_NAME, isAcceptableInvUCA, NULL, status);
+        UManagedOwner46 owner = { 8, 801 };
+        UDataMemory *result = managed_udata_openChoice_46(U_ICUDATA_COLL, INVC_DATA_TYPE, INVC_DATA_NAME, isAcceptableInvUCA, NULL, owner, status);
 
         if(U_FAILURE(*status)) {
             if (result) {
@@ -1353,6 +1355,10 @@ ucol_initInverseUCA(UErrorCode *status)
         if(result != NULL) { /* It looks like sometimes we can fail to find the data file */
             newInvUCA = (InverseUCATableHeader *)udata_getMemory(result);
             UCollator *UCA = ucol_initUCA(status);
+            if (UCA == NULL || U_FAILURE(*status)) {
+                udata_close(result);
+                return NULL;
+            }
             // UCA versions of UCA and inverse UCA should match
             if(uprv_memcmp(newInvUCA->UCAVersion, UCA->image->UCAVersion, sizeof(UVersionInfo)) != 0) {
                 *status = U_INVALID_FORMAT_ERROR;

@@ -249,6 +249,12 @@ impl ExecHost for TestHost<'_> {
     fn env(&self) -> ExecEnv<'_> {
         ExecEnv {
             collation: &*self.base.collation,
+            native: self.memory.and_then(|m| {
+                query_exec::NativeCollation::when_bound(
+                    self.base.collation_locale.as_cstr(),
+                    &m.memory.budget,
+                )
+            }),
             cancel: self.cancel_flag(),
             stop: None,
             mem_limit: if self.memory.is_some() {

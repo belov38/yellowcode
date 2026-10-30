@@ -1,3 +1,5 @@
+mod accounting;
+pub(super) mod session;
 use super::value_list::{arg_i64_cached, arg_value_cached, scalar_clone_bytes};
 use super::{
     creation_number, is_name, method_name, not_implemented, position, property_name,
@@ -5,6 +7,7 @@ use super::{
 };
 use crate::bind::{is_given, msg, type_mismatch, value_mismatch};
 use crate::typedesc::{TypeDescription, new_type_description};
+pub(super) use accounting::object as retained_object;
 use bsl_prim::{Str, fold_name};
 use bsl_vm::{
     Arg, CallResult, Execution, HostError, HostObject, MemberId, MemberKind, TypeId, TypeIdx, Value,
@@ -39,14 +42,89 @@ struct Schema {
     hash: i32,
     rows: RefCell<Option<Weak<dyn SchemaRows>>>,
     indexes: RefCell<Option<Weak<dyn SchemaIndexes>>>,
+    rows_allocation: Cell<u64>,
+    indexes_allocation: Cell<u64>,
 }
 
 pub(crate) struct Columns {
     schema: Rc<Schema>,
 }
-struct Column {
+pub(super) struct Column {
     schema: Rc<Schema>,
     record: Rc<ColumnRecord>,
+}
+
+impl Column {
+    pub(super) fn prepare_fill(
+        &self,
+        ex: &mut Execution,
+        member: MemberId,
+        value: Value,
+        retained: u64,
+    ) -> CallResult<(Value, [u64; 2], String)> {
+        let rows = self.schema.rows.borrow().as_ref().and_then(Weak::upgrade);
+        let stamp = [
+            self.schema.revision.get(),
+            rows.as_ref().map_or(0, |rows| rows.revision()),
+        ];
+        let mut folded = String::new();
+        let value = match property_name(self.schema.column_type, member) {
+            Some("Name") => {
+                let name = text(ex, value, retained)?;
+                folded = fold(
+                    ex,
+                    &name,
+                    retained.saturating_add((name.len() as u64).saturating_mul(2)),
+                )?;
+                if !is_name(name.units()) {
+                    return Err(HostError::key(BAD_NAME).into());
+                }
+                ex.charge(self.schema.len() as u64)?;
+                if self.schema.at_id(self.record.id).is_some()
+                    && self.schema.find(ex, &folded)?.is_some_and(|index| {
+                        !Rc::ptr_eq(&self.schema.entries.borrow()[index], &self.record)
+                    })
+                {
+                    return Err(HostError::key(BAD_NAME).into());
+                }
+                Value::String(name)
+            }
+            Some("Title") => Value::String(text(ex, value, retained)?),
+            Some("Width") => Value::from(arg_i64_cached(ex, Some(&Arg::Val(value)), retained)?),
+            Some("ValueType") => return Err(HostError::key(msg::PROP_NOT_WRITABLE).raw().into()),
+            _ => return Err(not_implemented(self.schema.column_type, member).into()),
+        };
+        self.check_fill(member, stamp)?;
+        Ok((value, stamp, folded))
+    }
+
+    pub(super) fn check_fill(&self, _member: MemberId, stamp: [u64; 2]) -> CallResult<()> {
+        self.schema.check(stamp[0])?;
+        if let Some(rows) = self.schema.rows.borrow().as_ref().and_then(Weak::upgrade) {
+            rows.check(stamp[1])?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn publish_fill(&self, member: MemberId, value: &mut Value, folded: &mut String) {
+        let mut data = self.record.data.borrow_mut();
+        match (property_name(self.schema.column_type, member), value) {
+            (Some("Name"), Value::String(name)) => {
+                std::mem::swap(&mut data.name, name);
+                std::mem::swap(&mut data.folded, folded);
+            }
+            (Some("Title"), Value::String(title)) => std::mem::swap(&mut data.title, title),
+            (Some("Width"), Value::Number(width)) => {
+                if let Some(width) = width.to_i64() {
+                    data.width = width;
+                } else {
+                    unreachable!("unprepared column width")
+                }
+            }
+            _ => unreachable!("unprepared column property"),
+        }
+        self.schema.bump();
+    }
 }
 
 pub(super) struct PreparedColumns {
@@ -160,16 +238,8 @@ impl ColumnRecord {
 
     pub(super) fn text_slack_bytes(&self) -> u64 {
         let data = self.data.borrow();
-        (data
-            .name
-            .backing_capacity_units()
-            .saturating_sub(data.name.len()) as u64)
-            .saturating_add(
-                data.title
-                    .backing_capacity_units()
-                    .saturating_sub(data.title.len()) as u64,
-            )
-            .saturating_mul(2)
+        super::retained::text_extra(&data.name)
+            .saturating_add(super::retained::text_extra(&data.title))
     }
 
     pub(super) fn owned_bytes(&self) -> u64 {
@@ -233,6 +303,27 @@ impl Schema {
     }
 }
 impl Columns {
+    pub(in crate::collections) fn property_names(
+        &self,
+        ex: &mut Execution,
+        retained: u64,
+    ) -> CallResult<Vec<Str>> {
+        let entries = self.schema.entries.borrow();
+        ex.charge(entries.len() as u64)?;
+        ex.reserve(retained.saturating_add(
+            (entries.len() as u64).saturating_mul(std::mem::size_of::<Str>() as u64),
+        ))?;
+        let mut names = super::vec_with_capacity(ex, entries.len() as u64)?;
+        ex.reserve(retained.saturating_add(
+            (names.capacity() as u64).saturating_mul(std::mem::size_of::<Str>() as u64),
+        ))?;
+        names.extend(
+            entries
+                .iter()
+                .map(|column| column.data.borrow().name.clone()),
+        );
+        Ok(names)
+    }
     pub(super) fn prepare_keep(
         &self,
         ex: &mut Execution,
@@ -299,6 +390,11 @@ impl Columns {
         self.schema.bump();
     }
     pub(super) fn attach_indexes(&self, indexes: Weak<dyn SchemaIndexes>) {
+        self.schema.indexes_allocation.set(
+            indexes
+                .upgrade()
+                .map_or(u64::MAX, |owner| super::retained::rc_bytes(owner.as_ref())),
+        );
         *self.schema.indexes.borrow_mut() = Some(indexes);
     }
     fn indexes(&self) -> Option<Rc<dyn SchemaIndexes>> {
@@ -323,6 +419,10 @@ impl Columns {
         }
     }
     pub(super) fn attach_rows(&self, rows: Weak<dyn SchemaRows>) {
+        self.schema.rows_allocation.set(
+            rows.upgrade()
+                .map_or(u64::MAX, |owner| super::retained::rc_bytes(owner.as_ref())),
+        );
         *self.schema.rows.borrow_mut() = Some(rows);
     }
     fn rows(&self) -> Option<Rc<dyn SchemaRows>> {
@@ -416,6 +516,8 @@ impl Columns {
                     hash: creation_number(),
                     rows: RefCell::new(None),
                     indexes: RefCell::new(None),
+                    rows_allocation: Cell::new(0),
+                    indexes_allocation: Cell::new(0),
                 }),
             }),
             live,
@@ -463,6 +565,8 @@ impl Columns {
                 hash: creation_number(),
                 rows: RefCell::new(None),
                 indexes: RefCell::new(None),
+                rows_allocation: Cell::new(0),
+                indexes_allocation: Cell::new(0),
             }),
         }))
     }
@@ -676,6 +780,24 @@ impl Columns {
 }
 
 impl HostObject for Columns {
+    fn session_edges(&self, visit: &mut dyn bsl_vm::SessionEdges) -> bool {
+        visit.backing(self.schema.clone())
+    }
+    fn session_transfer_supported(&self) -> bool {
+        true
+    }
+    fn session_transfer(
+        &self,
+        out: &mut dyn bsl_vm::SessionExport,
+    ) -> Result<Option<Box<dyn bsl_vm::SessionObject>>, bsl_vm::Exception> {
+        session::columns(self, out).map(Some)
+    }
+    fn retained_memory(
+        &self,
+        visit: &mut dyn bsl_vm::RetainedMemory,
+    ) -> Result<bool, bsl_vm::Exception> {
+        crate::collections::accounting::project(self, visit)
+    }
     fn type_id(&self) -> TypeId {
         TypeId::of_catalog(self.schema.collection_type)
     }
@@ -877,6 +999,24 @@ impl HostObject for Columns {
     }
 }
 impl HostObject for Column {
+    fn session_edges(&self, visit: &mut dyn bsl_vm::SessionEdges) -> bool {
+        visit.backing(self.schema.clone()) && visit.backing(self.record.clone())
+    }
+    fn session_transfer_supported(&self) -> bool {
+        true
+    }
+    fn session_transfer(
+        &self,
+        out: &mut dyn bsl_vm::SessionExport,
+    ) -> Result<Option<Box<dyn bsl_vm::SessionObject>>, bsl_vm::Exception> {
+        session::column(self, out).map(Some)
+    }
+    fn retained_memory(
+        &self,
+        visit: &mut dyn bsl_vm::RetainedMemory,
+    ) -> Result<bool, bsl_vm::Exception> {
+        crate::collections::accounting::project(self, visit)
+    }
     fn type_id(&self) -> TypeId {
         TypeId::of_catalog(self.schema.column_type)
     }

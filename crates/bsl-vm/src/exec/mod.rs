@@ -3,7 +3,9 @@ mod frame;
 mod handler;
 mod iter;
 mod member;
+mod modes;
 mod run;
+pub(crate) use call::{arg_initial, is_omitted};
 
 pub(crate) use call::{METHOD_NOT_FOUND, Reentry, call_index};
 pub(crate) use frame::{Frame, MethodRef, code_of};
@@ -59,7 +61,7 @@ impl Execution {
     ) -> Result<Vec<(String, Value)>, Exception> {
         let module = inst.module().clone();
         let floor = self.exec.frames.len();
-        let flags = self.effective_flags();
+        let flags = self.frame_flags();
         run::push_frame(
             self,
             module.clone(),
@@ -88,7 +90,7 @@ impl Execution {
                 safe_mode: false,
                 privileged: self.opts.privileged,
             },
-            |f| f.flags,
+            Frame::mode_flags,
         )
     }
 

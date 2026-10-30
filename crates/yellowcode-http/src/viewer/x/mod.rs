@@ -4,10 +4,10 @@ pub mod qb;
 pub mod query;
 
 pub use yellowcode_core::viewer::consoles::{
-    Availability, ConsoleSlot, NotBase, infobase_source, lock, slot,
+    Availability, ConsoleSlot, NotBase, infobase_source, lock, slot, slot_for,
 };
 
-use serde_json::{Value, json};
+use serde_json::json;
 
 use super::http::{Request, Response};
 use super::state::State;
@@ -92,13 +92,8 @@ pub const FILES: &[(&str, &str, &str)] = &[
     ),
 ];
 
-pub(crate) fn reply(status: u16, body: &Value) -> Response {
-    Response {
-        status,
-        content_type: "application/json; charset=utf-8",
-        body: serde_json::to_vec(body).unwrap_or_else(|_| b"null".to_vec()),
-        ..Default::default()
-    }
+pub(crate) fn reply<T: serde::Serialize + ?Sized>(status: u16, body: &T) -> Response {
+    super::memory::json(status, body)
 }
 
 pub(crate) fn error(status: u16, msg: &str) -> Response {

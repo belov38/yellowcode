@@ -2,13 +2,21 @@
     not(test),
     deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)
 )]
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
 mod codec;
+mod discovery;
+pub use discovery::{DiscoveryRoots, DiscoverySnapshot};
 mod managed;
 pub use managed::{ManagedCatalog, ManagedCatalogError, ManagedTypeNames, PropertyNames};
 mod index;
 mod installed;
+#[allow(unsafe_code)]
+mod native;
+mod owned;
+pub use owned::{
+    AdmittedCatalog, ManagedDecodeError, ManagedSelectError, OwnedDecodeError, OwnedPlatformError,
+};
 pub mod messages;
 mod model;
 mod resource;
@@ -83,4 +91,29 @@ pub fn select(build: &PlatformVersion) -> Result<(), PlatformError> {
 pub fn for_platform(build: &PlatformVersion) -> Result<&'static Catalog, PlatformError> {
     select(build)?;
     Ok(catalog())
+}
+
+pub fn select_with_memory(
+    build: &str,
+    budget: &memory_budget::MemoryBudget,
+) -> Result<(), ManagedSelectError> {
+    let root = budget.root_budget();
+    let snapshot = DiscoverySnapshot::capture(&root)?;
+    select_from_roots_with_memory(build, snapshot.roots(), &root)
+}
+pub fn select_from_roots_with_memory(
+    build: &str,
+    roots: DiscoveryRoots<'_>,
+    budget: &memory_budget::MemoryBudget,
+) -> Result<(), ManagedSelectError> {
+    resource::select_from_roots_with_memory(build, roots, &budget.root_budget())
+}
+pub fn prepare_with_memory(budget: &memory_budget::MemoryBudget) -> Result<(), ManagedSelectError> {
+    resource::prepare_with_memory(&budget.root_budget())
+}
+
+pub fn catalog_with_memory(
+    budget: &memory_budget::MemoryBudget,
+) -> Result<(&'static Catalog, memory_budget::MemoryBudget), ManagedSelectError> {
+    resource::catalog_with_memory(&budget.root_budget())
 }

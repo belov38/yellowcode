@@ -3,6 +3,8 @@ pub mod api_ext;
 pub mod form;
 pub mod front;
 pub mod managed;
+mod memory;
+pub use memory::working_bytes as request_working_bytes;
 pub mod skin;
 mod users;
 mod users_control;
@@ -396,7 +398,8 @@ fn guarded(f: impl FnOnce() -> Response) -> Response {
                 body: serde_json::to_vec(&serde_json::json!({
                     "error": format!("internal error: {msg}")
                 }))
-                .unwrap_or_default(),
+                .unwrap_or_default()
+                .into(),
                 ..Default::default()
             }
         }
@@ -418,7 +421,17 @@ pub fn dispatch(viewer: &Viewer, req: &Request) -> Response {
             return users_control::source_closed();
         }
         let snap = viewer.snapshot();
-        let Some(need) = need(req, &snap) else {
+        if memory::is_control(req) {
+            return route(&snap, req);
+        }
+        let needed = {
+            let _scope = match memory::Scope::enter(&snap, req) {
+                Ok(scope) => scope,
+                Err(response) => return response,
+            };
+            need(req, &snap)
+        };
+        let Some(need) = needed else {
             return route(&snap, req);
         };
         drop(snap);
@@ -544,12 +557,23 @@ fn unavailable(req: &Request, u: state::Unavailable) -> Response {
     Response {
         status,
         content_type: "application/json; charset=utf-8",
-        body: serde_json::to_vec(&body).unwrap_or_default(),
+        body: serde_json::to_vec(&body).unwrap_or_default().into(),
         ..Default::default()
     }
 }
 
 fn route(state: &State, req: &Request) -> Response {
+    if memory::is_control(req) {
+        return route_inner(state, req);
+    }
+    let scope = match memory::Scope::enter(state, req) {
+        Ok(scope) => scope,
+        Err(response) => return response,
+    };
+    scope.finish(route_inner(state, req))
+}
+
+fn route_inner(state: &State, req: &Request) -> Response {
     if let Some(r) = skin::handle(&state.skins, req) {
         return r;
     }
@@ -566,7 +590,7 @@ fn route(state: &State, req: &Request) -> Response {
         "/favicon.ico" => Response {
             status: 204,
             content_type: "image/x-icon",
-            body: Vec::new(),
+            body: Vec::new().into(),
             ..Default::default()
         },
         _ => text(404, "not found\n"),

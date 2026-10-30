@@ -5,6 +5,7 @@ use std::ops::Bound;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
+use memory_budget::{Category, Limits, MemoryBudget, Reservation};
 use onecd::{Collate, DateTime, Numeric, Strength};
 
 use super::{
@@ -197,6 +198,8 @@ impl Store for MemStore {
         Ok(Box::new(MemRead {
             inner: Arc::clone(&self.inner),
             state: self.snapshot(),
+            memory: None,
+            last_get: Mutex::new(None),
         }))
     }
 
@@ -205,6 +208,8 @@ impl Store for MemStore {
         Ok(Box::new(MemWrite {
             inner: Arc::clone(&self.inner),
             state: (*self.snapshot()).clone(),
+            memory: None,
+            last_get: Mutex::new(None),
             _ticket: ticket,
         }))
     }
@@ -213,11 +218,15 @@ impl Store for MemStore {
 struct MemRead {
     inner: Arc<Inner>,
     state: Arc<State>,
+    memory: Option<MemoryBudget>,
+    last_get: Mutex<Option<Reservation>>,
 }
 
 struct MemWrite {
     inner: Arc<Inner>,
     state: State,
+    memory: Option<MemoryBudget>,
+    last_get: Mutex<Option<Reservation>>,
     _ticket: WriterTicket,
 }
 
@@ -334,14 +343,82 @@ impl Inner {
     }
 }
 
-fn scan_in<'a>(inner: &Inner, st: &'a State, t: TableId) -> StoreResult<RowIter<'a>> {
-    table_of(inner, t)?;
-    let rows = rows_of(st, t)?;
-    Ok(Box::new(
-        rows.iter().map(|(h, s)| Ok((RowHandle(*h), s.row.clone()))),
-    ))
+fn row_clone_bytes(row: &[FieldValue]) -> u64 {
+    row.iter()
+        .fold((std::mem::size_of_val(row)) as u64, |n, v| {
+            n.saturating_add(match v {
+                FieldValue::String(s) => s.len() as u64,
+                FieldValue::Number(n) => n.digits().len() as u64,
+                FieldValue::Binary(b) | FieldValue::Storage(b) => b.len() as u64,
+                _ => 0,
+            })
+        })
 }
 
+fn pay(memory: Option<&MemoryBudget>, bytes: u64) -> StoreResult<Option<Reservation>> {
+    memory
+        .map(|m| {
+            m.try_reserve(Category::Execution, bytes)
+                .map_err(StoreError::Memory)
+        })
+        .transpose()
+}
+
+struct PaidRows<I> {
+    rows: I,
+    memory: Option<MemoryBudget>,
+    current: Option<Reservation>,
+    _state: Option<Reservation>,
+    _boxed: Option<Reservation>,
+}
+impl<'a, I: Iterator<Item = (RowHandle, &'a Row)>> Iterator for PaidRows<I> {
+    type Item = StoreResult<(RowHandle, Row)>;
+    fn next(&mut self) -> Option<Self::Item> {
+        self.current = None;
+        let (handle, row) = self.rows.next()?;
+        match pay(self.memory.as_ref(), row_clone_bytes(row)) {
+            Ok(paid) => {
+                self.current = paid;
+                Some(Ok((handle, row.clone())))
+            }
+            Err(error) => Some(Err(error)),
+        }
+    }
+}
+fn paid_rows<'a, I: Iterator<Item = (RowHandle, &'a Row)> + 'a>(
+    rows: I,
+    memory: Option<&MemoryBudget>,
+    state: Option<Reservation>,
+) -> StoreResult<RowIter<'a>> {
+    let boxed = pay(memory, std::mem::size_of::<PaidRows<I>>() as u64)?;
+    Ok(Box::new(PaidRows {
+        rows,
+        memory: memory.cloned(),
+        current: None,
+        _state: state,
+        _boxed: boxed,
+    }))
+}
+
+fn scan_in<'a>(
+    inner: &Inner,
+    st: &'a State,
+    t: TableId,
+    memory: Option<&MemoryBudget>,
+) -> StoreResult<RowIter<'a>> {
+    table_of(inner, t)?;
+    let rows = rows_of(st, t)?;
+    paid_rows(
+        rows.iter().map(|(h, s)| (RowHandle(*h), &s.row)),
+        memory,
+        None,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the Store range plus its admission"
+)]
 fn range_in<'a>(
     inner: &Inner,
     st: &'a State,
@@ -350,6 +427,7 @@ fn range_in<'a>(
     lo: Bound<&[FieldValue]>,
     hi: Bound<&[FieldValue]>,
     dir: Direction,
+    memory: Option<&MemoryBudget>,
 ) -> StoreResult<RowIter<'a>> {
     let ti = table_of(inner, t)?;
     let rows = rows_of(st, t)?;
@@ -367,36 +445,73 @@ fn range_in<'a>(
             Some(usize::from(k)),
         ),
     };
+    let bound_bytes = |bound: &Bound<&[FieldValue]>| match bound {
+        Bound::Unbounded => 0,
+        Bound::Included(v) | Bound::Excluded(v) => {
+            let columns = ix
+                .fields
+                .iter()
+                .take(v.len())
+                .filter_map(|f| ti.field(*f))
+                .flat_map(|f| ti.columns.get(f.columns.clone()).unwrap_or_default())
+                .fold(0u64, |n, c| {
+                    n.saturating_add(match c.ty {
+                        ColType::B(n)
+                        | ColType::VB(n)
+                        | ColType::NC(n)
+                        | ColType::NVC(n)
+                        | ColType::N(n, _) => u64::from(n).saturating_mul(8),
+                        _ => 32,
+                    })
+                    .saturating_add((4 * std::mem::size_of::<KeyPart>()) as u64)
+                });
+            columns.saturating_add(row_clone_bytes(v).saturating_mul(8))
+        }
+    };
+    let _bounds = pay(memory, bound_bytes(&lo).saturating_add(bound_bytes(&hi)))?;
     let lo = inner.bound_key(ti, ix, lo)?;
     let hi = inner.bound_key(ti, ix, hi)?;
-    let mut hits: Vec<(&[KeyPart], u64, &Arc<Stored>)> = Vec::new();
-    for (h, s) in rows.iter() {
-        let key: &[KeyPart] = match slot {
-            None => &s.id_key,
-            Some(k) => s.keys.get(k).map_or(&[][..], Vec::as_slice),
-        };
-        let above = match &lo {
-            Bound::Unbounded => true,
-            Bound::Included(b) => cmp_prefix(key, b).is_ge(),
-            Bound::Excluded(b) => cmp_prefix(key, b).is_gt(),
-        };
-        let below = match &hi {
-            Bound::Unbounded => true,
-            Bound::Included(b) => cmp_prefix(key, b).is_le(),
-            Bound::Excluded(b) => cmp_prefix(key, b).is_lt(),
-        };
-        if above && below {
-            hits.push((key, *h, s));
-        }
-    }
-    hits.sort_by(|a, b| cmp_keys(a.0, b.0).then(a.1.cmp(&b.1)));
+    let matching = || {
+        rows.iter().filter_map(|(h, s)| {
+            let key: &[KeyPart] = match slot {
+                None => &s.id_key,
+                Some(k) => s.keys.get(k).map_or(&[][..], Vec::as_slice),
+            };
+            let above = match &lo {
+                Bound::Unbounded => true,
+                Bound::Included(b) => cmp_prefix(key, b).is_ge(),
+                Bound::Excluded(b) => cmp_prefix(key, b).is_gt(),
+            };
+            let below = match &hi {
+                Bound::Unbounded => true,
+                Bound::Included(b) => cmp_prefix(key, b).is_le(),
+                Bound::Excluded(b) => cmp_prefix(key, b).is_lt(),
+            };
+            if above && below {
+                Some((key, *h, s))
+            } else {
+                None
+            }
+        })
+    };
+    let count = matching().count();
+    type Hit<'a> = (&'a [KeyPart], u64, &'a Arc<Stored>);
+    let hit_bytes = count
+        .checked_mul(std::mem::size_of::<Hit<'_>>())
+        .and_then(|n| u64::try_from(n).ok())
+        .unwrap_or(u64::MAX);
+    let paid = pay(memory, hit_bytes)?;
+    let mut hits: Vec<Hit<'_>> = Vec::with_capacity(count);
+    hits.extend(matching());
+    hits.sort_unstable_by(|a, b| cmp_keys(a.0, b.0).then(a.1.cmp(&b.1)));
     if dir == Direction::Backward {
         hits.reverse();
     }
-    Ok(Box::new(
-        hits.into_iter()
-            .map(|(_, h, s)| Ok((RowHandle(h), s.row.clone()))),
-    ))
+    paid_rows(
+        hits.into_iter().map(|(_, h, s)| (RowHandle(h), &s.row)),
+        memory,
+        paid,
+    )
 }
 
 fn open_blob_in(
@@ -405,6 +520,7 @@ fn open_blob_in(
     t: TableId,
     h: RowHandle,
     f: FieldId,
+    memory: Option<&MemoryBudget>,
 ) -> StoreResult<Box<dyn ReadSeek>> {
     let ti = table_of(inner, t)?;
     let s = stored_of(inner, st, t, h)?;
@@ -421,7 +537,42 @@ fn open_blob_in(
             )));
         }
     };
-    let bytes = match s.row.get(usize::from(f.0)) {
+    let value = s.row.get(usize::from(f.0));
+    if let Some(memory) = memory {
+        let length = match value {
+            Some(FieldValue::Null) => 0,
+            Some(FieldValue::Storage(b) | FieldValue::Binary(b)) => b.len(),
+            Some(FieldValue::String(x)) if is_nt => x
+                .encode_utf16()
+                .count()
+                .checked_mul(2)
+                .ok_or_else(|| StoreError::from_budget(memory_budget::BudgetError::Overflow))?,
+            _ => {
+                return Err(StoreError::Unsupported(format!(
+                    "{}.{}: not a blob",
+                    ti.logical, fi.name
+                )));
+            }
+        };
+        let mut bytes =
+            memory_budget::BudgetedVec::try_with_capacity(memory, Category::Execution, length)
+                .map_err(StoreError::from_budget)?;
+        match value {
+            Some(FieldValue::Storage(b) | FieldValue::Binary(b)) => bytes
+                .try_extend_from_slice(b)
+                .map_err(StoreError::from_budget)?,
+            Some(FieldValue::String(x)) if is_nt => {
+                for unit in x.encode_utf16() {
+                    bytes
+                        .try_extend_from_slice(&unit.to_le_bytes())
+                        .map_err(StoreError::from_budget)?;
+                }
+            }
+            _ => {}
+        }
+        return super::charged_blob(bytes.into_charged_vec());
+    }
+    let bytes = match value {
         Some(FieldValue::Null) => Vec::new(),
         Some(FieldValue::Storage(b) | FieldValue::Binary(b)) => b.clone(),
         Some(FieldValue::String(x)) if is_nt => {
@@ -445,8 +596,14 @@ fn count_in(inner: &Inner, st: &State, t: TableId) -> StoreResult<u64> {
 macro_rules! impl_read {
     ($ty:ty) => {
         impl ReadTxn for $ty {
+            fn read_memory(&mut self, limit: u64) -> StoreResult<MemoryBudget> {
+                let memory =
+                    MemoryBudget::try_new(Limits::new(limit)).map_err(StoreError::from_budget)?;
+                self.memory = Some(memory.clone());
+                Ok(memory)
+            }
             fn scan(&self, t: TableId) -> StoreResult<RowIter<'_>> {
-                scan_in(&self.inner, &self.state, t)
+                scan_in(&self.inner, &self.state, t, self.memory.as_ref())
             }
             fn range(
                 &self,
@@ -456,10 +613,23 @@ macro_rules! impl_read {
                 hi: Bound<&[FieldValue]>,
                 dir: Direction,
             ) -> StoreResult<RowIter<'_>> {
-                range_in(&self.inner, &self.state, t, i, lo, hi, dir)
+                range_in(
+                    &self.inner,
+                    &self.state,
+                    t,
+                    i,
+                    lo,
+                    hi,
+                    dir,
+                    self.memory.as_ref(),
+                )
             }
             fn get(&self, t: TableId, h: RowHandle) -> StoreResult<Row> {
-                Ok(stored_of(&self.inner, &self.state, t, h)?.row.clone())
+                let row = &stored_of(&self.inner, &self.state, t, h)?.row;
+                let mut held = self.last_get.lock().unwrap_or_else(PoisonError::into_inner);
+                *held = None;
+                *held = pay(self.memory.as_ref(), row_clone_bytes(row))?;
+                Ok(row.clone())
             }
             fn open_blob(
                 &self,
@@ -467,7 +637,7 @@ macro_rules! impl_read {
                 h: RowHandle,
                 f: FieldId,
             ) -> StoreResult<Box<dyn ReadSeek + '_>> {
-                open_blob_in(&self.inner, &self.state, t, h, f)
+                open_blob_in(&self.inner, &self.state, t, h, f, self.memory.as_ref())
             }
             fn row_count_estimate(&self, t: TableId) -> StoreResult<u64> {
                 count_in(&self.inner, &self.state, t)

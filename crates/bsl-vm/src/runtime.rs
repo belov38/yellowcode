@@ -1,5 +1,5 @@
 use crate::error::info::{self, CallKind, Position};
-use crate::error::{ErrorInfo, Exception, FatalError, FatalKind, HostError, catalog_text};
+use crate::error::{ErrorInfo, Exception, FatalError, FatalKind, HostError};
 use crate::host::{AppHost, ExecFlags, ReuseStore, SessionEnv};
 use crate::object::HostObject;
 use crate::registry::Registry;
@@ -72,17 +72,30 @@ impl Runtime {
 
     pub fn execution(&self, env: Arc<dyn SessionEnv>, opts: ExecOptions) -> Execution {
         crate::object::restart_creation_numbers();
-        Execution {
+        let mut execution = Execution {
             runtime: self.clone(),
             session_tz: env.time_zone().to_owned(),
+            memory_error: Rc::new(FatalError {
+                kind: FatalKind::Memory,
+                text: out_of_memory_text(env.interface_language()),
+                cause: None,
+            }),
             messages: Messages::default(),
             env,
             opts,
             host_data: None,
             reuse: None,
+            request_reuse: crate::reuse::RequestReuse::default(),
+            retained_check: None,
+            retained_dirty: false,
+            retained_workspace: crate::RetainedWorkspace::default(),
             system_enums: HashMap::new(),
             exec: crate::exec::ExecState::default(),
+        };
+        if let Ok(workspace) = crate::RetainedWorkspace::prepare(&mut execution) {
+            execution.retained_workspace = workspace;
         }
+        execution
     }
 }
 
@@ -157,19 +170,62 @@ struct Messages {
     closed: bool,
 }
 
+pub(crate) type RetainedCheck = fn(&mut Execution) -> Result<(), Exception>;
+
 pub struct Execution {
     runtime: Runtime,
     env: Arc<dyn SessionEnv>,
     pub(crate) opts: ExecOptions,
     host_data: Option<Box<dyn Any>>,
-    reuse: Option<ReuseStore>,
+    pub(crate) reuse: Option<ReuseStore>,
+    pub(crate) request_reuse: crate::reuse::RequestReuse,
+    pub(crate) retained_check: Option<RetainedCheck>,
+    pub(crate) retained_dirty: bool,
+    retained_workspace: crate::RetainedWorkspace,
     session_tz: String,
+    memory_error: Rc<FatalError>,
     messages: Messages,
     pub(crate) system_enums: HashMap<TypeIdx, Value>,
     pub(crate) exec: crate::exec::ExecState,
 }
 
 impl Execution {
+    pub fn retained_workspace_bytes(&self) -> u64 {
+        self.retained_workspace.bytes()
+    }
+
+    pub fn retained_workspace_capacity(&self) -> usize {
+        self.retained_workspace.capacity()
+    }
+
+    pub fn with_retained_workspace<T>(
+        &mut self,
+        visit: impl FnOnce(&mut Self, &mut crate::RetainedWorkspace) -> T,
+    ) -> Result<T, Exception> {
+        let mut workspace = std::mem::take(&mut self.retained_workspace);
+        let result = self
+            .charge(workspace.capacity() as u64)
+            .map(|()| visit(self, &mut workspace));
+        workspace.clear();
+        self.retained_workspace = workspace;
+        result
+    }
+
+    pub fn with_reuse_check<T>(
+        &mut self,
+        operation: impl FnOnce(&mut Self) -> crate::CallResult<T>,
+    ) -> crate::CallResult<T> {
+        let result = operation(self);
+        if let Some(check) = self.retained_check {
+            check(self)?;
+        }
+        result
+    }
+
+    pub fn mark_retained_mutation(&mut self) {
+        self.retained_dirty = self.retained_check.is_some();
+    }
+
     pub fn runtime(&self) -> &Runtime {
         &self.runtime
     }
@@ -207,15 +263,29 @@ impl Execution {
     }
 
     pub fn attach_reuse(&mut self, s: ReuseStore) {
-        self.reuse = Some(s);
+        crate::reuse::clear(self);
+        crate::reuse::attach(self, s);
     }
 
     pub fn detach_reuse(&mut self) -> ReuseStore {
-        self.reuse.take().unwrap_or_default()
+        let store = crate::reuse::detach(self);
+        crate::reuse::clear(self);
+        self.reuse = None;
+        store
+    }
+
+    pub(crate) fn clear_attached_reuse(&mut self) {
+        if let Some(store) = &mut self.reuse {
+            store.clear();
+        }
     }
 
     pub fn effective_flags(&self) -> ExecFlags {
-        self.frame_flags()
+        let flags = self.frame_flags();
+        ExecFlags {
+            privileged: flags.privileged && !flags.safe_mode,
+            ..flags
+        }
     }
 
     pub fn session_time_zone(&self) -> &str {
@@ -244,18 +314,45 @@ impl Execution {
     }
 
     pub fn reserve(&mut self, bytes: u64) -> Result<(), Exception> {
-        match self.opts.memory_limit {
-            Some(limit) if bytes > limit => Err(self.out_of_memory()),
+        if std::mem::take(&mut self.retained_dirty)
+            && let Some(check) = self.retained_check
+        {
+            check(self)?;
+        }
+        match crate::reuse::memory_limit(self) {
+            Some(limit) if crate::reuse::base_bytes(self).saturating_add(bytes) > limit => {
+                Err(self.out_of_memory())
+            }
             _ => Ok(()),
         }
     }
 
     pub fn out_of_memory(&self) -> Exception {
-        Exception::Fatal(Rc::new(FatalError {
-            kind: FatalKind::Memory,
-            text: catalog_text("1cv8:IDS_ERR_BAD_ALLOC", &[], "", self.lang()),
-            cause: None,
-        }))
+        Exception::Fatal(self.memory_error.clone())
+    }
+
+    pub fn measure_retained(
+        &mut self,
+        scratch: u64,
+        visit: impl FnOnce(&mut dyn crate::RetainedMemory) -> Result<(), Exception>,
+    ) -> Result<u64, Exception> {
+        crate::reuse::memory::transfer(self, scratch, false, visit)
+    }
+
+    pub fn collation_error(&self, error: bsl_prim::CollationError) -> Exception {
+        match error {
+            bsl_prim::CollationError::Memory => self.out_of_memory(),
+            bsl_prim::CollationError::Restart { .. } => Exception::Fatal(Rc::new(FatalError {
+                kind: FatalKind::Memory,
+                text: match self.lang() {
+                    Lang::Ru => {
+                        format!("Сбой выделения памяти ICU: перезапустите приложение ({error})")
+                    }
+                    _ => error.to_string(),
+                },
+                cause: None,
+            })),
+        }
     }
 
     pub fn call_error(&mut self, e: crate::object::CallError) -> Exception {
@@ -316,3 +413,12 @@ const _: fn() = || {
     send_sync::<Registry>();
     send::<ReuseStore>();
 };
+
+fn out_of_memory_text(lang: Lang) -> String {
+    let text = platform_catalog::messages::loaded_text_key("1cv8:IDS_ERR_BAD_ALLOC", lang)
+        .unwrap_or(match lang {
+            Lang::Ru => "Недостаточно памяти",
+            Lang::En => "Out of memory",
+        });
+    text.to_owned()
+}

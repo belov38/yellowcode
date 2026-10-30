@@ -28,6 +28,18 @@ struct Parsed {
 #[derive(Default)]
 pub struct CaseParams(HashMap<String, Parsed>);
 
+impl CaseParams {
+    pub fn insert_repr(
+        &mut self,
+        base: &TestBase,
+        name: &str,
+        repr: &str,
+    ) -> Result<(), ParamError> {
+        self.0.insert(name.to_lowercase(), parse(base, repr)?);
+        Ok(())
+    }
+}
+
 impl ParamValues for CaseParams {
     fn get(&self, name: &str) -> Option<ParamValue> {
         self.0.get(&name.to_lowercase()).map(|p| p.value.clone())

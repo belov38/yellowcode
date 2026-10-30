@@ -1,22 +1,14 @@
 use crate::{MdKind, MdObject};
 use brace::{Guid, Node};
-use std::sync::OnceLock;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Right(#[doc(hidden)] pub u16);
 
-fn table() -> &'static [(Guid, &'static str)] {
-    static T: OnceLock<Vec<(Guid, &'static str)>> = OnceLock::new();
-    T.get_or_init(|| {
-        mdschema::rights::rights_tables()
-            .map(|t| {
-                t.rights
-                    .iter()
-                    .map(|(g, n)| (Guid::parse(g).unwrap_or(Guid::NIL), n.as_str()))
-                    .collect()
-            })
-            .unwrap_or_default()
-    })
+fn table() -> impl Iterator<Item = (Guid, &'static str)> {
+    static TABLE: mdschema::StaticRightsTables = mdschema::StaticRightsTables;
+    TABLE
+        .rights()
+        .map(|(guid, name)| (Guid::parse(guid).unwrap_or(Guid::NIL), name))
 }
 
 impl Right {
@@ -49,7 +41,7 @@ impl Right {
     }
 
     pub fn all() -> impl Iterator<Item = Right> {
-        (0..u16::try_from(table().len()).unwrap_or(u16::MAX)).map(Right)
+        (0..u16::try_from(table().count()).unwrap_or(u16::MAX)).map(Right)
     }
 
     #[doc(hidden)]
@@ -58,19 +50,19 @@ impl Right {
     }
 
     pub fn from_name(name: &str) -> Option<Right> {
-        Right::at(table().iter().position(|e| e.1 == name)?)
+        Right::at(table().position(|e| e.1 == name)?)
     }
 
     pub fn from_guid(g: Guid) -> Option<Right> {
-        Right::at(table().iter().position(|e| e.0 == g)?)
+        Right::at(table().position(|e| e.0 == g)?)
     }
 
     pub fn name(self) -> &'static str {
-        table().get(usize::from(self.0)).map_or("", |e| e.1)
+        table().nth(usize::from(self.0)).map_or("", |e| e.1)
     }
 
     pub fn guid(self) -> Guid {
-        table().get(usize::from(self.0)).map_or(Guid::NIL, |e| e.0)
+        table().nth(usize::from(self.0)).map_or(Guid::NIL, |e| e.0)
     }
 
     pub fn applicable(kind: MdKind) -> Vec<Right> {

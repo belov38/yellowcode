@@ -2,8 +2,6 @@ use crate::model::Value;
 use brace::Node;
 use mdschema::Schema;
 use std::borrow::Cow;
-use std::collections::HashMap;
-use std::sync::OnceLock;
 
 pub use md_xmlout::codec::overlay::{STS, kind};
 
@@ -33,136 +31,152 @@ const RESOURCE: &[&str] = &[
     "ChoiceHistoryOnInput",
 ];
 
-fn with_tail(tail: &[&str]) -> Vec<String> {
-    RESOURCE.iter().chain(tail).map(|x| x.to_string()).collect()
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum ObservedOrder<'a> {
+    #[default]
+    Empty,
+    Native(&'a [String]),
+    Literal(&'a [&'a str]),
+    ResourceTail(&'a [&'a str]),
 }
 
-fn strs(v: &[&str]) -> Vec<String> {
-    v.iter().map(|x| x.to_string()).collect()
+impl<'a> ObservedOrder<'a> {
+    pub(crate) fn iter(self) -> impl Iterator<Item = &'a str> + Clone {
+        let (native, literal, tail): (&[String], &[&str], &[&str]) = match self {
+            Self::Empty => (&[], &[], &[]),
+            Self::Native(values) => (values, &[], &[]),
+            Self::Literal(values) => (&[], values, &[]),
+            Self::ResourceTail(tail) => (&[], RESOURCE, tail),
+        };
+        native
+            .iter()
+            .map(String::as_str)
+            .chain(literal.iter().copied())
+            .chain(tail.iter().copied())
+    }
+
+    pub(crate) fn is_empty(self) -> bool {
+        self.iter().next().is_none()
+    }
 }
 
-fn orders() -> &'static HashMap<&'static str, Vec<String>> {
-    static CACHE: OnceLock<HashMap<&'static str, Vec<String>>> = OnceLock::new();
-    CACHE.get_or_init(|| {
-        let mut m: HashMap<&'static str, Vec<String>> = HashMap::new();
-        m.insert(
-            "CalculationRegister",
-            strs(&[
-                "Name",
-                "Synonym",
-                "Comment",
-                "UseStandardCommands",
-                "DefaultListForm",
-                "AuxiliaryListForm",
-                "Periodicity",
-                "ActionPeriod",
-                "BasePeriod",
-                "Schedule",
-                "ScheduleValue",
-                "ScheduleDate",
-                "ChartOfCalculationTypes",
-                "IncludeHelpInContents",
-                "StandardAttributes",
-                "DataLockControlMode",
-                "FullTextSearch",
-                "ListPresentation",
-                "ExtendedListPresentation",
-                "Explanation",
-            ]),
-        );
-        m.insert(
-            "CalculationRegister.Resource",
-            with_tail(&["FullTextSearch"]),
-        );
-        m.insert(
-            "CalculationRegister.Attribute",
-            with_tail(&["ScheduleLink", "Indexing", "FullTextSearch"]),
-        );
-        m.insert(
-            "CalculationRegister.Dimension",
-            with_tail(&[
-                "DenyIncompleteValues",
-                "BaseDimension",
-                "ScheduleLink",
-                "Indexing",
-                "FullTextSearch",
-            ]),
-        );
-        m.insert(
-            "Sequence",
-            strs(&[
-                "Name",
-                "Synonym",
-                "Comment",
-                "MoveBoundaryOnPosting",
-                "Documents",
-                "RegisterRecords",
-                "DataLockControlMode",
-            ]),
-        );
-        m.insert(
-            "Sequence.Dimension",
-            strs(&[
-                "Name",
-                "Synonym",
-                "Comment",
-                "Type",
-                "DocumentMap",
-                "RegisterRecordsMap",
-            ]),
-        );
-        m.insert(
+const ORDERS: &[(&str, ObservedOrder<'static>)] = &[
+    (
+        "CalculationRegister",
+        ObservedOrder::Literal(&[
+            "Name",
+            "Synonym",
+            "Comment",
+            "UseStandardCommands",
+            "DefaultListForm",
+            "AuxiliaryListForm",
+            "Periodicity",
+            "ActionPeriod",
+            "BasePeriod",
+            "Schedule",
+            "ScheduleValue",
+            "ScheduleDate",
             "ChartOfCalculationTypes",
-            strs(&[
-                "Name",
-                "Synonym",
-                "Comment",
-                "UseStandardCommands",
-                "CodeLength",
-                "DescriptionLength",
-                "CodeType",
-                "CodeAllowedLength",
-                "DefaultPresentation",
-                "EditType",
-                "QuickChoice",
-                "ChoiceMode",
-                "InputByString",
-                "SearchStringModeOnInputByString",
-                "FullTextSearchOnInputByString",
-                "ChoiceDataGetModeOnInputByString",
-                "CreateOnInput",
-                "ChoiceHistoryOnInput",
-                "DefaultObjectForm",
-                "DefaultListForm",
-                "DefaultChoiceForm",
-                "AuxiliaryObjectForm",
-                "AuxiliaryListForm",
-                "AuxiliaryChoiceForm",
-                "BasedOn",
-                "DependenceOnCalculationTypes",
-                "BaseCalculationTypes",
-                "ActionPeriodUse",
-                "StandardAttributes",
-                "Characteristics",
-                "StandardTabularSections",
-                "PredefinedDataUpdate",
-                "IncludeHelpInContents",
-                "DataLockFields",
-                "DataLockControlMode",
-                "FullTextSearch",
-                "ObjectPresentation",
-                "ExtendedObjectPresentation",
-                "ListPresentation",
-                "ExtendedListPresentation",
-                "Explanation",
-                "DataHistory",
-                "UpdateDataHistoryImmediatelyAfterWrite",
-                "ExecuteAfterWriteDataHistoryVersionProcessing",
-            ]),
-        );
-        m
-    })
-}
+            "IncludeHelpInContents",
+            "StandardAttributes",
+            "DataLockControlMode",
+            "FullTextSearch",
+            "ListPresentation",
+            "ExtendedListPresentation",
+            "Explanation",
+        ]),
+    ),
+    (
+        "CalculationRegister.Resource",
+        ObservedOrder::ResourceTail(&["FullTextSearch"]),
+    ),
+    (
+        "CalculationRegister.Attribute",
+        ObservedOrder::ResourceTail(&["ScheduleLink", "Indexing", "FullTextSearch"]),
+    ),
+    (
+        "CalculationRegister.Dimension",
+        ObservedOrder::ResourceTail(&[
+            "DenyIncompleteValues",
+            "BaseDimension",
+            "ScheduleLink",
+            "Indexing",
+            "FullTextSearch",
+        ]),
+    ),
+    (
+        "Sequence",
+        ObservedOrder::Literal(&[
+            "Name",
+            "Synonym",
+            "Comment",
+            "MoveBoundaryOnPosting",
+            "Documents",
+            "RegisterRecords",
+            "DataLockControlMode",
+        ]),
+    ),
+    (
+        "Sequence.Dimension",
+        ObservedOrder::Literal(&[
+            "Name",
+            "Synonym",
+            "Comment",
+            "Type",
+            "DocumentMap",
+            "RegisterRecordsMap",
+        ]),
+    ),
+    (
+        "ChartOfCalculationTypes",
+        ObservedOrder::Literal(&[
+            "Name",
+            "Synonym",
+            "Comment",
+            "UseStandardCommands",
+            "CodeLength",
+            "DescriptionLength",
+            "CodeType",
+            "CodeAllowedLength",
+            "DefaultPresentation",
+            "EditType",
+            "QuickChoice",
+            "ChoiceMode",
+            "InputByString",
+            "SearchStringModeOnInputByString",
+            "FullTextSearchOnInputByString",
+            "ChoiceDataGetModeOnInputByString",
+            "CreateOnInput",
+            "ChoiceHistoryOnInput",
+            "DefaultObjectForm",
+            "DefaultListForm",
+            "DefaultChoiceForm",
+            "AuxiliaryObjectForm",
+            "AuxiliaryListForm",
+            "AuxiliaryChoiceForm",
+            "BasedOn",
+            "DependenceOnCalculationTypes",
+            "BaseCalculationTypes",
+            "ActionPeriodUse",
+            "StandardAttributes",
+            "Characteristics",
+            "StandardTabularSections",
+            "PredefinedDataUpdate",
+            "IncludeHelpInContents",
+            "DataLockFields",
+            "DataLockControlMode",
+            "FullTextSearch",
+            "ObjectPresentation",
+            "ExtendedObjectPresentation",
+            "ListPresentation",
+            "ExtendedListPresentation",
+            "Explanation",
+            "DataHistory",
+            "UpdateDataHistoryImmediatelyAfterWrite",
+            "ExecuteAfterWriteDataHistoryVersionProcessing",
+        ]),
+    ),
+];
 
 pub(super) const STD_ATTRS: &[(&str, &[(&str, &str)])] = &[
     (
@@ -295,14 +309,17 @@ pub(crate) fn special_prop(kind: &str, name: &str, raw: &Node) -> Option<Value> 
     }
 }
 
-pub(crate) fn observed_order(s: &'static Schema, tag: &str) -> Option<&'static [String]> {
-    match orders().get(tag) {
-        Some(v) => Some(v.as_slice()),
-        None if is_tabular_attribute(tag) => s
-            .observed_order(tag)
-            .or_else(|| s.observed_order(DOCUMENT_TABULAR_ATTRIBUTE)),
-        None => s.observed_order(tag),
+pub(crate) fn observed_order(s: &'static Schema, tag: &str) -> Option<ObservedOrder<'static>> {
+    if let Some((_, order)) = ORDERS.iter().find(|(name, _)| *name == tag) {
+        return Some(*order);
     }
+    let native = if is_tabular_attribute(tag) {
+        s.observed_order(tag)
+            .or_else(|| s.observed_order(DOCUMENT_TABULAR_ATTRIBUTE))
+    } else {
+        s.observed_order(tag)
+    };
+    native.map(ObservedOrder::Native)
 }
 
 const DOCUMENT_TABULAR_ATTRIBUTE: &str = "Document.TabularSection.Attribute";
@@ -318,7 +335,7 @@ const FULL_CONTEXTS: [&str; 3] = [
 ];
 
 pub(crate) fn order_count(s: &'static Schema, context: &str) -> u32 {
-    if orders().contains_key(context)
+    if ORDERS.iter().any(|(name, _)| *name == context)
         || FULL_CONTEXTS.contains(&context)
         || is_tabular_attribute(context)
     {

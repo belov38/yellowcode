@@ -25,6 +25,8 @@ pub enum Error {
     Schema(#[from] mdschema::SchemaError),
     #[error(transparent)]
     SchemaResource(#[from] mdschema::ResourceError),
+    #[error(transparent)]
+    ManagedSchema(#[from] mdschema::ManagedSchemaError),
     #[error("{0}")]
     Memory(memory_budget::MemoryLimit),
     #[error("not loaded by the query load profile")]

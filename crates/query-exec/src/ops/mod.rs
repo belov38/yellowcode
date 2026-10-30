@@ -311,6 +311,7 @@ pub struct Mark {
 pub struct Cx<'a> {
     pub(crate) observation: Option<crate::observe::ObservationSession>,
     pub env: &'a ExecEnv<'a>,
+    pub coll: crate::coll::ExecCollation<'a>,
     pub src: &'a dyn DataSource,
     pub outer: Vec<Row>,
     pub mem: MemBudget<'a>,
@@ -324,6 +325,7 @@ impl<'a> Cx<'a> {
     pub fn new(env: &'a ExecEnv<'a>, src: &'a dyn DataSource) -> Cx<'a> {
         Cx {
             env,
+            coll: crate::coll::ExecCollation::Legacy(env.collation),
             src,
             outer: Vec::new(),
             mem: MemBudget::of_env(env),
@@ -342,6 +344,7 @@ impl<'a> Cx<'a> {
     pub(crate) fn child(&self, outer: Vec<Row>) -> Cx<'a> {
         Cx {
             env: self.env,
+            coll: self.coll,
             src: self.src,
             outer,
             mem: self.mem.child(),

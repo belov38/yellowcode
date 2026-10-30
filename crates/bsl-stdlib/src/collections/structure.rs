@@ -1,4 +1,5 @@
 mod fill;
+pub(crate) use fill::{copy_number, copy_value};
 
 use super::{
     KeyValue, creation_number, method_name, no_field, not_implemented, release, reserve_values,
@@ -332,6 +333,87 @@ impl Drop for Structure {
 }
 
 impl HostObject for Structure {
+    fn to_shared(&self) -> Option<bsl_vm::SharedValue> {
+        bsl_vm::SharedValue::from_object(self)
+    }
+
+    fn property_names(&self, ex: &mut Execution, retained: u64) -> CallResult<Option<Vec<Str>>> {
+        self.property_names_retained(ex, retained).map(Some)
+    }
+    fn session_edges(&self, visit: &mut dyn bsl_vm::SessionEdges) -> bool {
+        self.fields
+            .borrow()
+            .entries
+            .iter()
+            .all(|field| visit.value(&field.value))
+    }
+    fn session_clear(&self) {
+        drop(self.take_values());
+    }
+    fn session_transfer_supported(&self) -> bool {
+        true
+    }
+    fn session_transfer(
+        &self,
+        out: &mut dyn bsl_vm::SessionExport,
+    ) -> Result<Option<Box<dyn bsl_vm::SessionObject>>, bsl_vm::Exception> {
+        out.reserve(std::mem::size_of::<SessionStructure>() as u64)?;
+        let fields = self.fields.borrow();
+        let mut names_bytes = 0u64;
+        for field in &fields.entries {
+            names_bytes = names_bytes.saturating_add((field.key.len() as u64).saturating_mul(12));
+            out.value(&Value::String(field.key.clone()))?;
+            out.value(&field.value)?;
+        }
+        Ok(Some(Box::new(SessionStructure {
+            fixed: self.fixed,
+            hash: self.hash,
+            names_bytes,
+        })))
+    }
+    fn retained_memory(
+        &self,
+        visit: &mut dyn bsl_vm::RetainedMemory,
+    ) -> Result<bool, bsl_vm::Exception> {
+        if !self.fixed {
+            visit.mutable();
+        }
+        let fields = self.fields.borrow();
+        visit.bytes(
+            (fields.entries.capacity() as u64)
+                .saturating_mul(std::mem::size_of::<Field>() as u64)
+                .saturating_add(
+                    (fields.by_name.capacity() as u64)
+                        .saturating_mul(2 * (std::mem::size_of::<(String, usize)>() as u64 + 1)),
+                )
+                .saturating_add(
+                    (fields.by_id.capacity() as u64)
+                        .saturating_mul(2 * (std::mem::size_of::<(u32, usize)>() as u64 + 1)),
+                )
+                .saturating_add(64),
+        )?;
+        for name in fields.by_name.keys() {
+            visit.bytes(name.capacity() as u64)?;
+        }
+        for field in &fields.entries {
+            visit.string(&field.key)?;
+            visit.value(&field.value)?;
+        }
+        Ok(true)
+    }
+    fn reuse_fields(
+        &self,
+        visit: &mut dyn FnMut(&Str, &Value) -> Result<(), bsl_vm::Exception>,
+    ) -> Result<bool, bsl_vm::Exception> {
+        if self.fixed {
+            return Ok(false);
+        }
+        for field in &self.fields.borrow().entries {
+            visit(&field.key, &field.value)?;
+        }
+        Ok(true)
+    }
+
     fn type_id(&self) -> TypeId {
         TypeId::of_catalog(self.type_idx())
     }
@@ -348,34 +430,51 @@ impl HostObject for Structure {
         }
     }
 
-    fn set(&self, _ex: &mut Execution, m: MemberId, v: Value) -> CallResult<()> {
-        if self.fixed {
-            return Err(HostError::key(msg::PROP_NOT_WRITABLE).raw().into());
+    fn get_with_retained(
+        &self,
+        ex: &mut Execution,
+        m: MemberId,
+        retained: u64,
+    ) -> CallResult<Value> {
+        let fields = self.fields.borrow();
+        match fields.by_member(m) {
+            Some(index) => fill::copy_value(ex, &fields.entries[index].value, retained),
+            None => Err(not_implemented(self.type_idx(), m).into()),
         }
-        let old = {
-            let mut f = self.fields.borrow_mut();
-            match f.by_member(m) {
-                Some(i) => std::mem::replace(&mut f.entries[i].value, v),
-                None => return Err(not_implemented(self.type_idx(), m).into()),
+    }
+
+    fn set(&self, ex: &mut Execution, m: MemberId, v: Value) -> CallResult<()> {
+        ex.with_reuse_check(|_ex| {
+            if self.fixed {
+                return Err(HostError::key(msg::PROP_NOT_WRITABLE).raw().into());
             }
-        };
-        drop(old);
-        Ok(())
+            let old = {
+                let mut f = self.fields.borrow_mut();
+                match f.by_member(m) {
+                    Some(i) => std::mem::replace(&mut f.entries[i].value, v),
+                    None => return Err(not_implemented(self.type_idx(), m).into()),
+                }
+            };
+            drop(old);
+            Ok(())
+        })
     }
 
     fn call(&self, ex: &mut Execution, m: MemberId, args: &mut [Arg]) -> CallResult<Value> {
-        let t = self.type_idx();
-        match method_name(t, m) {
-            Some("Count") => Ok(Value::from(self.len() as i64)),
-            Some("Property") => self.property(ex, args),
-            Some("Insert") if !self.fixed => self.insert(ex, args).map(|()| Value::Undefined),
-            Some("Delete") if !self.fixed => self.delete(ex, args).map(|()| Value::Undefined),
-            Some("Clear") if !self.fixed => {
-                release(self.take_values());
-                Ok(Value::Undefined)
+        ex.with_reuse_check(|ex| {
+            let t = self.type_idx();
+            match method_name(t, m) {
+                Some("Count") => Ok(Value::from(self.len() as i64)),
+                Some("Property") => self.property(ex, args),
+                Some("Insert") if !self.fixed => self.insert(ex, args).map(|()| Value::Undefined),
+                Some("Delete") if !self.fixed => self.delete(ex, args).map(|()| Value::Undefined),
+                Some("Clear") if !self.fixed => {
+                    release(self.take_values());
+                    Ok(Value::Undefined)
+                }
+                _ => Err(not_implemented(t, m).into()),
             }
-            _ => Err(not_implemented(t, m).into()),
-        }
+        })
     }
 
     fn find_member(&self, name: &str) -> Option<MemberId> {
@@ -398,25 +497,29 @@ impl HostObject for Structure {
     }
 
     fn index_set(&self, ex: &mut Execution, key: &Value, v: Value) -> CallResult<()> {
-        if self.fixed {
-            return Err(HostError::key(msg::INDEXED_READONLY).into());
-        }
-        let i = self.slot(ex, key)?;
-        let old = std::mem::replace(&mut self.fields.borrow_mut().entries[i].value, v);
-        drop(old);
-        Ok(())
+        ex.with_reuse_check(|ex| {
+            if self.fixed {
+                return Err(HostError::key(msg::INDEXED_READONLY).into());
+            }
+            let i = self.slot(ex, key)?;
+            let old = std::mem::replace(&mut self.fields.borrow_mut().entries[i].value, v);
+            drop(old);
+            Ok(())
+        })
     }
 
     fn iter_keys(&self, ex: &mut Execution) -> CallResult<Option<Vec<Value>>> {
-        reserve_values(ex, self.len() as u64)?;
-        Ok(Some(
-            self.fields
-                .borrow()
-                .entries
-                .iter()
-                .map(|f| Value::String(f.key.clone()))
-                .collect(),
-        ))
+        ex.with_reuse_check(|ex| {
+            reserve_values(ex, self.len() as u64)?;
+            Ok(Some(
+                self.fields
+                    .borrow()
+                    .entries
+                    .iter()
+                    .map(|f| Value::String(f.key.clone()))
+                    .collect(),
+            ))
+        })
     }
 
     fn iter_value(&self, _ex: &mut Execution, key: &Value) -> CallResult<Option<Value>> {
@@ -451,6 +554,69 @@ impl HostObject for Structure {
 
     fn boost_hash(&self) -> Option<i32> {
         Some(self.hash)
+    }
+}
+
+struct SessionStructure {
+    fixed: bool,
+    hash: i32,
+    names_bytes: u64,
+}
+impl bsl_vm::SessionObject for SessionStructure {
+    fn retained_memory(&self, _: &mut dyn bsl_vm::RetainedMemory) -> Result<(), bsl_vm::Exception> {
+        Ok(())
+    }
+    fn create(
+        &self,
+        _: &mut Execution,
+        _: &mut bsl_vm::SessionImports,
+    ) -> Result<Value, bsl_vm::Exception> {
+        Ok(Value::Object(Rc::new(Structure {
+            fields: RefCell::new(Fields::default()),
+            fixed: self.fixed,
+            hash: self.hash,
+        })))
+    }
+    fn fill(
+        &self,
+        ex: &mut Execution,
+        shell: &Value,
+        children: Vec<Value>,
+    ) -> Result<(), bsl_vm::Exception> {
+        if let Some(object) = Structure::of(shell) {
+            let mut fields = object.fields.borrow_mut();
+            let count = children.len() / 2;
+            fields
+                .entries
+                .try_reserve_exact(count)
+                .map_err(|_| ex.out_of_memory())?;
+            fields
+                .by_name
+                .try_reserve(count)
+                .map_err(|_| ex.out_of_memory())?;
+            fields
+                .by_id
+                .try_reserve(count)
+                .map_err(|_| ex.out_of_memory())?;
+            let mut rest = children.into_iter();
+            while let Some(Value::String(name)) = rest.next() {
+                if let Some(value) = rest.next() {
+                    drop(fields.insert(name, value));
+                }
+            }
+        }
+        Ok(())
+    }
+    fn clear(&self, shell: &Value) {
+        if let Some(object) = Structure::of(shell) {
+            drop(object.take_values());
+        }
+    }
+    fn restore_bytes(&self, children: usize) -> u64 {
+        (std::mem::size_of::<Structure>() as u64)
+            .saturating_add(128)
+            .saturating_add((children as u64).saturating_mul(256))
+            .saturating_add(self.names_bytes)
     }
 }
 
@@ -536,4 +702,44 @@ pub fn structure_fields(v: &Value) -> Option<Vec<(String, Value)>> {
             .map(|e| (e.key.to_string_lossy(), e.value.clone()))
             .collect(),
     )
+}
+
+impl Structure {
+    pub(super) fn retained(
+        &self,
+        a: &mut impl super::accounting::Charge,
+    ) -> super::accounting::Result<()> {
+        let fields = self
+            .fields
+            .try_borrow()
+            .map_err(|_| super::RetainedChargeError::Borrowed)?;
+        a.vector(&fields.entries)?;
+        for (key, capacity, bytes) in [
+            (
+                std::ptr::from_ref(&fields.by_name) as usize,
+                fields.by_name.capacity(),
+                bsl_vm::retained_hash_bytes::<(String, usize)>(fields.by_name.capacity()),
+            ),
+            (
+                std::ptr::from_ref(&fields.by_id) as usize,
+                fields.by_id.capacity(),
+                bsl_vm::retained_hash_bytes::<(u32, usize)>(fields.by_id.capacity()),
+            ),
+        ] {
+            a.work(capacity as u64)?;
+            a.block(
+                5,
+                key,
+                bytes.ok_or(super::RetainedChargeError::Unsupported)?,
+            )?;
+        }
+        for name in fields.by_name.keys() {
+            a.string(name)?;
+        }
+        for field in &fields.entries {
+            a.text(&field.key)?;
+            a.value(&field.value)?;
+        }
+        Ok(())
+    }
 }

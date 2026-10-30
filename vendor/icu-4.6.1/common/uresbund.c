@@ -32,6 +32,7 @@
 #include "uenumimp.h"
 #include "ulocimp.h"
 #include "umutex.h"
+#include "umutex_static.h"
 #include "putilimp.h"
 
 
@@ -42,7 +43,7 @@ TODO: This cache should probably be removed when the deprecated code is
 */
 static UHashtable *cache = NULL;
 
-static UMTX resbMutex = NULL;
+UMTX_STATIC(resbMutex, umtx_resourceStatic_46);
 
 /* INTERNAL: hashes an entry  */
 static int32_t U_CALLCONV hashEntry(const UHashTok parm) {
@@ -271,7 +272,7 @@ static void initCache(UErrorCode *status) {
     UBool makeCache = FALSE;
     UMTX_CHECK(&resbMutex, (cache ==  NULL), makeCache);
     if(makeCache) {
-        UHashtable *newCache = uhash_open(hashEntry, compareEntries, NULL, status);
+        UHashtable *newCache = managed_uhash_open_46(hashEntry, compareEntries, NULL, 4, 401, 402, status);
         if (U_FAILURE(*status)) {
             return;
         }
@@ -299,7 +300,7 @@ static void setEntryName(UResourceDataEntry *res, char *name, UErrorCode *status
         res->fName = res->fNameBuffer;
     }
     else {
-        res->fName = (char *)uprv_malloc(len+1);
+        res->fName = (char *)managed_malloc_46(len+1, 4, 404);
     }
     if(res->fName == NULL) {
         *status = U_MEMORY_ALLOCATION_ERROR;
@@ -349,7 +350,7 @@ static UResourceDataEntry *init_entry(const char *localeID, const char *path, UE
     r = (UResourceDataEntry *)uhash_get(cache, &find);
     if(r == NULL) {
         /* if the entry is not yet in the hash table, we'll try to construct a new one */
-        r = (UResourceDataEntry *) uprv_malloc(sizeof(UResourceDataEntry));
+        r = (UResourceDataEntry *) managed_malloc_46(sizeof(UResourceDataEntry), 4, 403);
         if(r == NULL) {
             *status = U_MEMORY_ALLOCATION_ERROR;
             return NULL;
@@ -360,22 +361,28 @@ static UResourceDataEntry *init_entry(const char *localeID, const char *path, UE
 
         setEntryName(r, name, status);
         if (U_FAILURE(*status)) {
-            uprv_free(r);
+            free_entry(r);
             return NULL;
         }
 
         if(path != NULL) {
-            r->fPath = (char *)uprv_strdup(path);
+            r->fPath = (char *)managed_malloc_46(uprv_strlen(path)+1, 4, 405);
             if(r->fPath == NULL) {
                 *status = U_MEMORY_ALLOCATION_ERROR;
-                uprv_free(r);
+                free_entry(r);
                 return NULL;
             }
+            uprv_strcpy(r->fPath, path);
         }
 
         /* this is the actual loading */
         res_load(&(r->fData), r->fPath, r->fName, status);
 
+        if (*status == U_MEMORY_ALLOCATION_ERROR || managed_failed_46()) {
+            *status = U_MEMORY_ALLOCATION_ERROR;
+            free_entry(r);
+            return NULL;
+        }
         if (U_FAILURE(*status)) { 
             /* we have no such entry in dll, so it will always use fallback */
             *status = U_USING_FALLBACK_WARNING;
@@ -409,6 +416,11 @@ static UResourceDataEntry *init_entry(const char *localeID, const char *path, UE
             }
         }
 
+        if (*status == U_MEMORY_ALLOCATION_ERROR || managed_failed_46()) {
+            *status = U_MEMORY_ALLOCATION_ERROR;
+            free_entry(r);
+            return NULL;
+        }
         {
             UResourceDataEntry *oldR = NULL;
             if((oldR = (UResourceDataEntry *)uhash_get(cache, r)) == NULL) { /* if the data is not cached */
@@ -554,6 +566,10 @@ static UResourceDataEntry *entryOpen(const char* path, const char* localeID, UEr
     { /* umtx_lock */
         /* We're going to skip all the locales that do not have any data */
         r = findFirstExisting(path, name, &isRoot, &hasChopped, &isDefault, &intStatus);
+        if (intStatus == U_MEMORY_ALLOCATION_ERROR || managed_failed_46()) {
+            *status = U_MEMORY_ALLOCATION_ERROR;
+            goto finishUnlock;
+        }
 
         if(r != NULL) { /* if there is one real locale, we can look for parents. */
             t1 = r;
@@ -615,6 +631,10 @@ static UResourceDataEntry *entryOpen(const char* path, const char* localeID, UEr
             /* insert default locale */
             uprv_strcpy(name, uloc_getDefault());
             r = findFirstExisting(path, name, &isRoot, &hasChopped, &isDefault, &intStatus);
+            if (intStatus == U_MEMORY_ALLOCATION_ERROR || managed_failed_46()) {
+                *status = U_MEMORY_ALLOCATION_ERROR;
+                goto finishUnlock;
+            }
             intStatus = U_USING_DEFAULT_WARNING;
             if(r != NULL) { /* the default locale exists */
                 t1 = r;
@@ -643,6 +663,10 @@ static UResourceDataEntry *entryOpen(const char* path, const char* localeID, UEr
         if(r == NULL) {
             uprv_strcpy(name, kRootLocaleName);
             r = findFirstExisting(path, name, &isRoot, &hasChopped, &isDefault, &intStatus);
+            if (intStatus == U_MEMORY_ALLOCATION_ERROR || managed_failed_46()) {
+                *status = U_MEMORY_ALLOCATION_ERROR;
+                goto finishUnlock;
+            }
             if(r != NULL) {
                 t1 = r;
                 intStatus = U_USING_DEFAULT_WARNING;

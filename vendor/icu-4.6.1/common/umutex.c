@@ -72,38 +72,13 @@
 #endif
 
 #include "umutex.h"
+#include "umutex_static.h"
 #include "cmemory.h"
 
-/*
- * A note on ICU Mutex Initialization and ICU startup:
- *
- *   ICU mutexes, as used through the rest of the ICU code, are self-initializing.
- *   To make this work, ICU uses the _ICU GLobal Mutex_ to synchronize the lazy init
- *   of other ICU mutexes.  For the global mutex itself, we need some other mechanism
- *   to safely initialize it on first use.  This becomes important when two or more
- *   threads are more or less simultaenously the first to use ICU in a process, and
- *   are racing into the mutex initialization code.
- *
- *
- *   The solution for the global mutex init is platform dependent.
- *   On POSIX systems, plain C-style initialization can be used on a mutex, with the 
- *   macro PTHREAD_MUTEX_INITIALIZER.  The mutex is then ready for use, without
- *   first calling pthread_mutex_init().
- *
- *   Windows has no equivalent statically initialized mutex or CRITICAL SECION.
- *   InitializeCriticalSection() must be called.  If the global mutex does not
- *   appear to be initialized, a thread will create and initialize a new
- *   CRITICAL_SECTION, then use a Windows InterlockedCompareAndExchange to
- *   swap it in as the global mutex while avoid problems with race conditions.
- */ 
-
-/* On WIN32 mutexes are reentrant.  On POSIX platforms they are not, and a deadlock
- *  will occur if a thread attempts to acquire a mutex it already has locked.
- *  ICU mutexes (in debug builds) include checking code that will cause an assertion
- *  failure if a mutex is reentered.  If you are having deadlock problems
- *  on a POSIX machine, debugging may be easier on Windows.
- */
-
+/* M0--M4 have exact, process-lifetime static cells, available before hooks.
+ * POSIX uses PTHREAD_MUTEX_INITIALIZER; Windows uses SRWLOCK_INIT. Other
+ * legacy identities retain the original heap/critical-section implementation.
+ * Static locks are nonrecursive on every product platform. */
 
 #if (ICU_USE_THREADS == 0)
 #define MUTEX_TYPE void *
@@ -156,58 +131,18 @@
 
 /*  Forward declarations */
 static void *mutexed_compare_and_swap(void **dest, void *newval, void *oldval);
-typedef struct ICUMutex ICUMutex;
 
-/*
- * ICUMutex   One of these is set up for each UMTX that is used by other ICU code.
- *            The opaque UMTX points to the corresponding ICUMutex struct.
- *            
- *            Because the total number of ICU mutexes is quite small, no effort has
- *            been made to squeeze every byte out of this struct.
- */
-struct ICUMutex {
-    UMTX        *owner;             /* Points back to the UMTX corrsponding to this   */
-                                    /*    ICUMutex object.                            */
-    
-    UBool        heapAllocated;     /* Set if this ICUMutex is heap allocated, and    */
-                                    /*   will need to be deleted.  The global mutex   */
-                                    /*   is static on POSIX platforms; all others     */
-                                    /*   will be heap allocated.                      */
+/* The private shared layout and named static declaration macro are in
+ * umutex_static.h. Only heap mutexes participate in the cleanup list. */
 
-    ICUMutex    *next;              /* All ICUMutexes are chained into a list so that  */
-                                    /*   they can be found and deleted by u_cleanup(). */
-
-    int32_t      recursionCount;    /* For debugging, detect recursive mutex locks.    */
-
-    MUTEX_TYPE   platformMutex;     /* The underlying OS mutex being wrapped.          */
-
-    UMTX         userMutex;         /* For use with u_setMutexFunctions operations,    */
-                                    /*    corresponds to platformMutex.                */
-};
-
-
-/*   The global ICU mutex.
- *   For POSIX platforms, it gets a C style initialization, and is ready to use
- *        at program startup.
- *   For Windows, it will be lazily instantiated on first use.
- */
-
-#if defined(POSIX)
-static UMTX  globalUMTX;
-static ICUMutex globalMutex = {&globalUMTX, FALSE, NULL, 0, PLATFORM_MUTEX_INITIALIZER, NULL};
-static UMTX  globalUMTX = &globalMutex;
-#else
-static UMTX  globalUMTX = NULL;
-#endif
+UMTX_STATIC(globalUMTX, umtx_globalStatic_46);
 
 /* Head of the list of all ICU mutexes.
  * Linked list is through ICUMutex::next
  * Modifications to the list are synchronized with the global mutex.
  * The list is used by u_cleanup(), which needs to dispose of all of the ICU mutexes.
  *
- * The statically initialized global mutex on POSIX platforms does not get added to this
- * mutex list, but that's not a problem - the global mutex gets special handling
- * during u_cleanup().
+ * The five static cells are never added to this list or physically destroyed.
  */
 static ICUMutex *mutexListHead;
 
@@ -246,9 +181,21 @@ umtx_lock(UMTX *mutex)
     U_ASSERT(m->owner == mutex);
 
     if (pMutexLockFn != NULL) {
+        /* Legacy callback installation is outside the managed closure. Preserve
+         * lazy callback recreation after destroy, without resetting native cells. */
+        if (!m->userInitialized) {
+            umtx_init(mutex);
+        }
         (*pMutexLockFn)(gMutexContext, &m->userMutex);
     } else {
-        PLATFORM_MUTEX_LOCK(&m->platformMutex);
+#ifdef U_WINDOWS
+        if (!m->heapAllocated) {
+            AcquireSRWLockExclusive(&m->staticPlatformMutex);
+        } else
+#endif
+        {
+            PLATFORM_MUTEX_LOCK(&m->platformMutex);
+        }
     }
 
 #if defined(U_DEBUG)
@@ -286,7 +233,14 @@ umtx_unlock(UMTX* mutex)
     if (pMutexUnlockFn) {
         (*pMutexUnlockFn)(gMutexContext, &m->userMutex);
     } else {
-        PLATFORM_MUTEX_UNLOCK(&m->platformMutex);
+#ifdef U_WINDOWS
+        if (!m->heapAllocated) {
+            ReleaseSRWLockExclusive(&m->staticPlatformMutex);
+        } else
+#endif
+        {
+            PLATFORM_MUTEX_UNLOCK(&m->platformMutex);
+        }
     }
 }
 
@@ -302,10 +256,12 @@ static ICUMutex *umtx_ct(ICUMutex *m) {
     m->next = NULL;    /* List of mutexes is maintained at a higher level.  */
     m->recursionCount = 0;
     m->userMutex = NULL;
+    m->userInitialized = FALSE;
     if (pMutexInitFn != NULL) {
         UErrorCode status = U_ZERO_ERROR;
         (*pMutexInitFn)(gMutexContext, &m->userMutex, &status);
         U_ASSERT(U_SUCCESS(status));
+        m->userInitialized = TRUE;
     } else {
         PLATFORM_MUTEX_INIT(&m->platformMutex);
     }
@@ -318,10 +274,15 @@ static ICUMutex *umtx_ct(ICUMutex *m) {
  */
 static void umtx_dt(ICUMutex *m) {
     if (pMutexDestroyFn != NULL) {
-        (*pMutexDestroyFn)(gMutexContext, &m->userMutex);
+        if (m->userInitialized) {
+            (*pMutexDestroyFn)(gMutexContext, &m->userMutex);
+        }
         m->userMutex = NULL;
+        m->userInitialized = FALSE;
     } else {
-        PLATFORM_MUTEX_DESTROY(&m->platformMutex);
+        if (m->heapAllocated) {
+            PLATFORM_MUTEX_DESTROY(&m->platformMutex);
+        }
     }
 
     if (m->heapAllocated) {
@@ -339,13 +300,12 @@ umtx_init(UMTX *mutex) {
         /* Mutex is already initialized.  
          * Multiple umtx_init()s of a UMTX by other ICU code are explicitly permitted.
          */
+        m = (ICUMutex *)*mutex;
+        if (pMutexInitFn != NULL && !m->userInitialized) {
+            umtx_ct(m);
+        }
         return;
     }
-#if defined(POSIX)
-    if (mutex == &globalUMTX) {
-        m = &globalMutex;
-    }
-#endif
 
     m = umtx_ct(m);
     originalValue = SYNC_COMPARE_AND_SWAP(mutex, NULL, m);
@@ -397,6 +357,13 @@ umtx_destroy(UMTX *mutex) {
         return;
     }
 
+    /* Static cells and their platform locks live for the process. The legacy
+     * user-callback state, if installed, can still have its own destructor. */
+    if (!m->heapAllocated) {
+        umtx_dt(m);
+        return;
+    }
+
     /* Remove this mutex from the linked list of mutexes.  */
     umtx_lock(NULL);
     if (mutexListHead == m) {
@@ -440,6 +407,10 @@ u_setMutexFunctions(const void *context, UMtxInitFn *i, UMtxFn *d, UMtxFn *l, UM
      * even before any other part of ICU is initialized.
      */
     umtx_destroy(&globalUMTX);
+    umtx_dt(&umtx_resourceStatic_46);
+    umtx_dt(&umtx_converterStatic_46);
+    umtx_dt(&umtx_incdecStatic_46);
+    umtx_dt(&umtx_initStatic_46);
 
     /* Swap in the mutex function pointers.  */
     pMutexInitFn    = i;
@@ -448,11 +419,14 @@ u_setMutexFunctions(const void *context, UMtxInitFn *i, UMtxFn *d, UMtxFn *l, UM
     pMutexUnlockFn  = u;
     gMutexContext   = context;
 
-#if defined (POSIX) 
-    /* POSIX platforms must have a pre-initialized global mutex 
-     * to allow other mutexes to initialize safely. */
-    umtx_init(&globalUMTX);
-#endif
+    /* Callback installation is a legacy, single-threaded bootstrap API, outside
+     * the managed FFI closure. Initialize its five preexisting cells explicitly;
+     * ordinary static native locking never enters this allocating path. */
+    umtx_ct(&umtx_globalStatic_46);
+    umtx_ct(&umtx_resourceStatic_46);
+    umtx_ct(&umtx_converterStatic_46);
+    umtx_ct(&umtx_incdecStatic_46);
+    umtx_ct(&umtx_initStatic_46);
 }
 
 
@@ -501,7 +475,7 @@ static UMtxAtomicFn  *pIncFn = NULL;
 static UMtxAtomicFn  *pDecFn = NULL;
 static const void *gIncDecContext  = NULL;
 
-static UMTX    gIncDecMutex = NULL;
+UMTX_STATIC(gIncDecMutex, umtx_incdecStatic_46);
 
 U_CAPI int32_t U_EXPORT2
 umtx_atomic_inc(int32_t *p)  {
@@ -612,6 +586,12 @@ U_CFUNC UBool umtx_cleanup(void) {
         }
     }
     umtx_destroy(&globalUMTX);
+    /* Also release callback state for unused static sites. These calls never
+     * destroy the actual native platform locks or null their UMTX pointers. */
+    umtx_dt(&umtx_resourceStatic_46);
+    umtx_dt(&umtx_converterStatic_46);
+    umtx_dt(&umtx_incdecStatic_46);
+    umtx_dt(&umtx_initStatic_46);
         
     pMutexInitFn    = NULL;
     pMutexDestroyFn = NULL;
@@ -621,7 +601,6 @@ U_CFUNC UBool umtx_cleanup(void) {
     pIncFn          = NULL;
     pDecFn          = NULL;
     gIncDecContext  = NULL;
-    gIncDecMutex    = NULL;
 
 #if defined (POSIX) 
     /* POSIX platforms must come out of u_cleanup() with a functioning global mutex 

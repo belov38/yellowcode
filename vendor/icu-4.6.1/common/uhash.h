@@ -14,6 +14,7 @@
 #define UHASH_H
 
 #include "unicode/utypes.h"
+#include "managed_memory.h"
 
 /**
  * UHashtable stores key-value pairs and does moderately fast lookup
@@ -154,6 +155,9 @@ struct UHashtable {
 
     UHashElement *elements;
 
+    /* Explicit receiver owner for every array replacement. */
+    UManagedOwner46 arrayOwner;
+
     /* Function pointers */
 
     UHashFunction *keyHasher;      /* Computes hash from key.
@@ -204,6 +208,15 @@ U_CDECL_END
  * @return A pointer to a UHashtable, or 0 if an error occurred.
  * @see uhash_openSize
  */
+/* Private owner-aware constructors; ordinary hashes retain Operation. */
+U_CAPI UHashtable* U_EXPORT2
+managed_uhash_openSize_46(UHashFunction *, UKeyComparator *, UValueComparator *,
+                         int32_t size, int32_t role, int32_t tableSite,
+                         int32_t arraySite, UErrorCode *);
+U_CAPI UHashtable* U_EXPORT2
+managed_uhash_open_46(UHashFunction *, UKeyComparator *, UValueComparator *,
+                     int32_t role, int32_t tableSite, int32_t arraySite, UErrorCode *);
+
 U_CAPI UHashtable* U_EXPORT2 
 uhash_open(UHashFunction *keyHash,
            UKeyComparator *keyComp,

@@ -112,11 +112,18 @@ public:
 private:
     static void *createInstance(const void *context, UErrorCode &errorCode) {
         UnicodeString pattern((const char *)context, -1, US_INV);
-        UnicodeSet *set=new UnicodeSet(pattern, errorCode);
-        if(set==NULL) {
+        UManagedOwner46 owner={10, 1002};
+        void *backing=managed_malloc_46(sizeof(UnicodeSet), 10, 1011);
+        UnicodeSet *set=backing==NULL ? NULL : new (backing) UnicodeSet(owner);
+        if (set==NULL || set->isBogus()) {
+            delete set;
             errorCode=U_MEMORY_ALLOCATION_ERROR;
+            return NULL;
         }
-        set->freeze();
+        set->applyPattern(pattern, errorCode);
+        if (U_SUCCESS(errorCode)) set->freeze();
+        if (set->isBogus() || managed_failed_46()) errorCode=U_MEMORY_ALLOCATION_ERROR;
+        if (U_FAILURE(errorCode)) { delete set; return NULL; }
         ucln_common_registerCleanup(UCLN_COMMON_USET, uset_cleanup);
         return set;
     }
@@ -179,10 +186,18 @@ Usually you don't see smaller sets than this for Unicode 5.0.
 #define DEFAULT_INCLUSION_CAPACITY 3072
 
 const UnicodeSet* UnicodeSet::getInclusions(int32_t src, UErrorCode &status) {
+    if (U_FAILURE(status)) return NULL;
     UBool needInit;
     UMTX_CHECK(NULL, (INCLUSIONS[src] == NULL), needInit);
     if (needInit) {
-        UnicodeSet* incl = new UnicodeSet();
+        UManagedOwner46 owner={10, 1002};
+        void *backing=managed_malloc_46(sizeof(UnicodeSet), 10, 1001);
+        UnicodeSet *incl=backing==NULL ? NULL : new (backing) UnicodeSet(owner);
+        if (incl==NULL || incl->isBogus()) {
+            delete incl;
+            status=U_MEMORY_ALLOCATION_ERROR;
+            return NULL;
+        }
         USetAdder sa = {
             (USet *)incl,
             _set_add,
@@ -252,9 +267,15 @@ const UnicodeSet* UnicodeSet::getInclusions(int32_t src, UErrorCode &status) {
                 status = U_INTERNAL_PROGRAM_ERROR;
                 break;
             }
+            if (incl->isBogus() || managed_failed_46()) status=U_MEMORY_ALLOCATION_ERROR;
             if (U_SUCCESS(status)) {
-                // Compact for caching
+                // Compact for caching, but never publish a refused replacement.
                 incl->compact();
+                if (managed_failed_46()) {
+                    delete incl;
+                    status=U_MEMORY_ALLOCATION_ERROR;
+                    return NULL;
+                }
                 umtx_lock(NULL);
                 if (INCLUSIONS[src] == NULL) {
                     INCLUSIONS[src] = incl;
@@ -330,7 +351,7 @@ UnicodeSet::UnicodeSet(const UnicodeString& pattern,
                        UErrorCode& status) :
     len(0), capacity(START_EXTRA), list(0), bmpSet(0), buffer(0),
     bufferCapacity(0), patLen(0), pat(NULL), strings(NULL), stringSpan(NULL),
-    fFlags(0)
+    fFlags(0), managedOwner()
 {   
     if(U_SUCCESS(status)){
         list = (UChar32*) uprv_malloc(sizeof(UChar32) * capacity);
@@ -359,7 +380,7 @@ UnicodeSet::UnicodeSet(const UnicodeString& pattern,
                        UErrorCode& status) :
     len(0), capacity(START_EXTRA), list(0), bmpSet(0), buffer(0),
     bufferCapacity(0), patLen(0), pat(NULL), strings(NULL), stringSpan(NULL),
-    fFlags(0)
+    fFlags(0), managedOwner()
 {   
     if(U_SUCCESS(status)){
         list = (UChar32*) uprv_malloc(sizeof(UChar32) * capacity);
@@ -380,7 +401,7 @@ UnicodeSet::UnicodeSet(const UnicodeString& pattern, ParsePosition& pos,
                        UErrorCode& status) :
     len(0), capacity(START_EXTRA), list(0), bmpSet(0), buffer(0),
     bufferCapacity(0), patLen(0), pat(NULL), strings(NULL), stringSpan(NULL),
-    fFlags(0)
+    fFlags(0), managedOwner()
 {
     if(U_SUCCESS(status)){
         list = (UChar32*) uprv_malloc(sizeof(UChar32) * capacity);
@@ -503,7 +524,7 @@ public:
         if (p == 0) {
             p = new UnicodeSet();
         }
-        return p != 0;
+        return p != 0 && !p->isBogus();
     }
 };
 
@@ -1409,6 +1430,11 @@ UnicodeSet& UnicodeSet::closeOver(int32_t attribute) {
         const UCaseProps *csp = ucase_getSingleton();
         {
             UnicodeSet foldSet(*this);
+            if (foldSet.isBogus()) {
+                // A refused copy cannot be closed; the result is unknown.
+                setToBogus();
+                return *this;
+            }
             UnicodeString str;
             USetAdder sa = {
                 foldSet.toUSet(),

@@ -116,7 +116,7 @@ pub fn handle(req: &Request) -> Option<Response> {
     Some(Response {
         status: 200,
         content_type,
-        body: text.as_bytes().to_vec(),
+        body: text.as_bytes().to_vec().into(),
         ..Default::default()
     })
 }

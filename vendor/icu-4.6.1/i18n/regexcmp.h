@@ -114,6 +114,9 @@ private:
 
     void        setEval(int32_t op);
     void        setPushOp(int32_t op);
+    void        pushNewSet();
+    void        checkAllocation();
+    UBool       propertySetUsable(UnicodeSet *&set);
     UChar32     scanNamedChar();
     UnicodeSet *createSetForProperty(const UnicodeString &propName, UBool negated);
 

@@ -195,6 +195,44 @@ impl Drop for Array {
 }
 
 impl HostObject for Array {
+    fn to_shared(&self) -> Option<bsl_vm::SharedValue> {
+        bsl_vm::SharedValue::from_object(self)
+    }
+
+    fn session_edges(&self, visit: &mut dyn bsl_vm::SessionEdges) -> bool {
+        self.items.borrow().iter().all(|value| visit.value(value))
+    }
+    fn session_clear(&self) {
+        drop(self.take_items());
+    }
+    fn session_transfer_supported(&self) -> bool {
+        true
+    }
+    fn session_transfer(
+        &self,
+        out: &mut dyn bsl_vm::SessionExport,
+    ) -> Result<Option<Box<dyn bsl_vm::SessionObject>>, Exception> {
+        out.reserve(std::mem::size_of::<SessionArray>() as u64)?;
+        for value in self.items.borrow().iter() {
+            out.value(value)?;
+        }
+        Ok(Some(Box::new(SessionArray {
+            fixed: self.fixed,
+            hash: self.hash,
+        })))
+    }
+    fn retained_memory(&self, visit: &mut dyn bsl_vm::RetainedMemory) -> Result<bool, Exception> {
+        if !self.fixed {
+            visit.mutable();
+        }
+        let items = self.items.borrow();
+        visit
+            .bytes((items.capacity() as u64).saturating_mul(std::mem::size_of::<Value>() as u64))?;
+        for value in items.iter() {
+            visit.value(value)?;
+        }
+        Ok(true)
+    }
     fn type_id(&self) -> TypeId {
         TypeId::of_catalog(self.type_idx())
     }
@@ -212,51 +250,53 @@ impl HostObject for Array {
     }
 
     fn call(&self, ex: &mut Execution, m: MemberId, args: &mut [Arg]) -> CallResult<Value> {
-        let t = self.type_idx();
-        match method_name(t, m) {
-            Some("UBound") => Ok(Value::from(self.len() as i64 - 1)),
-            Some("Count") => Ok(Value::from(self.len() as i64)),
-            Some("Find") => {
-                let v = arg_value(ex, args.first())?;
-                let found = self.items.borrow().iter().position(|x| same_value(x, &v));
-                Ok(found.map_or(Value::Undefined, |i| Value::from(i as i64)))
+        ex.with_reuse_check(|ex| {
+            let t = self.type_idx();
+            match method_name(t, m) {
+                Some("UBound") => Ok(Value::from(self.len() as i64 - 1)),
+                Some("Count") => Ok(Value::from(self.len() as i64)),
+                Some("Find") => {
+                    let v = arg_value(ex, args.first())?;
+                    let found = self.items.borrow().iter().position(|x| same_value(x, &v));
+                    Ok(found.map_or(Value::Undefined, |i| Value::from(i as i64)))
+                }
+                Some("Get") => {
+                    let i = self.checked(ex, args.first())?;
+                    Ok(self.items.borrow()[i].clone())
+                }
+                Some("Add") if !self.fixed => {
+                    let v = arg_value(ex, args.first())?;
+                    self.push(ex, v)?;
+                    Ok(Value::Undefined)
+                }
+                Some("Insert") if !self.fixed => {
+                    self.insert(ex, args)?;
+                    Ok(Value::Undefined)
+                }
+                Some("Set") if !self.fixed => {
+                    let i = self.checked(ex, args.first())?;
+                    let v = arg_value(ex, args.get(1))?;
+                    let old = match self.items.borrow_mut().get_mut(i) {
+                        Some(slot) => std::mem::replace(slot, v),
+                        None => return Err(HostError::key(msg::RANGE).into()),
+                    };
+                    drop(old);
+                    Ok(Value::Undefined)
+                }
+                Some("Delete") if !self.fixed => {
+                    let i = self.checked(ex, args.first())?;
+                    let removed = self.items.borrow_mut().remove(i);
+                    drop(removed);
+                    Ok(Value::Undefined)
+                }
+                Some("Clear") if !self.fixed => {
+                    let old = self.take_items();
+                    release(old);
+                    Ok(Value::Undefined)
+                }
+                _ => Err(not_implemented(t, m).into()),
             }
-            Some("Get") => {
-                let i = self.checked(ex, args.first())?;
-                Ok(self.items.borrow()[i].clone())
-            }
-            Some("Add") if !self.fixed => {
-                let v = arg_value(ex, args.first())?;
-                self.push(ex, v)?;
-                Ok(Value::Undefined)
-            }
-            Some("Insert") if !self.fixed => {
-                self.insert(ex, args)?;
-                Ok(Value::Undefined)
-            }
-            Some("Set") if !self.fixed => {
-                let i = self.checked(ex, args.first())?;
-                let v = arg_value(ex, args.get(1))?;
-                let old = match self.items.borrow_mut().get_mut(i) {
-                    Some(slot) => std::mem::replace(slot, v),
-                    None => return Err(HostError::key(msg::RANGE).into()),
-                };
-                drop(old);
-                Ok(Value::Undefined)
-            }
-            Some("Delete") if !self.fixed => {
-                let i = self.checked(ex, args.first())?;
-                let removed = self.items.borrow_mut().remove(i);
-                drop(removed);
-                Ok(Value::Undefined)
-            }
-            Some("Clear") if !self.fixed => {
-                let old = self.take_items();
-                release(old);
-                Ok(Value::Undefined)
-            }
-            _ => Err(not_implemented(t, m).into()),
-        }
+        })
     }
 
     fn index_get(&self, ex: &mut Execution, key: &Value) -> CallResult<Value> {
@@ -265,13 +305,15 @@ impl HostObject for Array {
     }
 
     fn index_set(&self, ex: &mut Execution, key: &Value, v: Value) -> CallResult<()> {
-        if self.fixed {
-            return Err(HostError::key(msg::INDEXED_READONLY).into());
-        }
-        let i = self.slot(ex, key)?;
-        let old = std::mem::replace(&mut self.items.borrow_mut()[i], v);
-        drop(old);
-        Ok(())
+        ex.with_reuse_check(|ex| {
+            if self.fixed {
+                return Err(HostError::key(msg::INDEXED_READONLY).into());
+            }
+            let i = self.slot(ex, key)?;
+            let old = std::mem::replace(&mut self.items.borrow_mut()[i], v);
+            drop(old);
+            Ok(())
+        })
     }
 
     fn iter_len(&self, _ex: &mut Execution) -> Option<usize> {
@@ -291,6 +333,48 @@ impl HostObject for Array {
 
     fn boost_hash(&self) -> Option<i32> {
         Some(self.hash)
+    }
+}
+
+struct SessionArray {
+    fixed: bool,
+    hash: i32,
+}
+impl bsl_vm::SessionObject for SessionArray {
+    fn retained_memory(&self, _: &mut dyn bsl_vm::RetainedMemory) -> Result<(), Exception> {
+        Ok(())
+    }
+    fn create(
+        &self,
+        _: &mut Execution,
+        _: &mut bsl_vm::SessionImports,
+    ) -> Result<Value, Exception> {
+        Ok(Value::Object(Rc::new(Array {
+            items: RefCell::new(Vec::new()),
+            fixed: self.fixed,
+            hash: self.hash,
+        })))
+    }
+    fn fill(
+        &self,
+        _: &mut Execution,
+        shell: &Value,
+        children: Vec<Value>,
+    ) -> Result<(), Exception> {
+        if let Some(array) = Array::of(shell) {
+            array.set_items(children);
+        }
+        Ok(())
+    }
+    fn clear(&self, shell: &Value) {
+        if let Some(array) = Array::of(shell) {
+            drop(array.take_items());
+        }
+    }
+    fn restore_bytes(&self, children: usize) -> u64 {
+        (std::mem::size_of::<Array>()
+            + 2 * std::mem::size_of::<usize>()
+            + children * std::mem::size_of::<Value>()) as u64
     }
 }
 
@@ -364,4 +448,21 @@ pub(crate) fn new_fixed_array(items: Vec<Value>) -> Value {
 
 pub fn array_items(v: &Value) -> Option<Vec<Value>> {
     Array::of(v).map(Array::items)
+}
+
+impl Array {
+    pub(super) fn retained(
+        &self,
+        a: &mut impl super::accounting::Charge,
+    ) -> super::accounting::Result<()> {
+        let values = self
+            .items
+            .try_borrow()
+            .map_err(|_| super::RetainedChargeError::Borrowed)?;
+        a.vector(&values)?;
+        for value in values.iter() {
+            a.value(value)?;
+        }
+        Ok(())
+    }
 }

@@ -22,6 +22,17 @@ pub(super) fn register(reg: &mut Registry) {
     global(reg, "НСтр", "NStr", nstr_fn);
     global(
         reg,
+        "ТекущийЯзыкСистемы",
+        "CurrentSystemLanguage",
+        |ex, _| {
+            Ok(Value::from(match ex.env().interface_language() {
+                bsl_vm::Lang::Ru => "ru",
+                bsl_vm::Lang::En => "en",
+            }))
+        },
+    );
+    global(
+        reg,
         "ТекущийКодЛокализации",
         "CurrentLocaleCode",
         |ex, _| Ok(Value::from(ex.env().locale())),
@@ -39,24 +50,6 @@ fn opt_str(ex: &mut Execution, a: Option<&Arg>) -> CallResult<Option<Vec<u16>>> 
         return Ok(None);
     }
     Ok(Some(arg_str(ex, a)?.units().to_vec()))
-}
-
-fn drop_empty_lang(fmt: Option<Vec<u16>>) -> Option<Vec<u16>> {
-    let fmt = fmt?;
-    let kept: Vec<&[u16]> = fmt
-        .split(|&u| u == u16::from(b';'))
-        .filter(|part| {
-            let Some(eq) = part.iter().position(|&u| u == u16::from(b'=')) else {
-                return true;
-            };
-            let key = String::from_utf16_lossy(&part[..eq]).trim().to_lowercase();
-            let empty = part[eq + 1..]
-                .iter()
-                .all(|&u| char::from_u32(u32::from(u)).is_some_and(char::is_whitespace));
-            !(matches!(key.as_str(), "л" | "l") && empty)
-        })
-        .collect();
-    Some(kept.join(&u16::from(b';')))
 }
 
 fn number_text_len(n: &Number, formatted: bool) -> u64 {
@@ -116,7 +109,7 @@ fn words_fn(ex: &mut Execution, a: &mut [Arg]) -> CallResult<Value> {
 fn period_fn(ex: &mut Execution, a: &mut [Arg]) -> CallResult<Value> {
     let begin = arg_date(ex, a.first())?;
     let end = arg_date(ex, a.get(1))?;
-    let fmt = drop_empty_lang(opt_str(ex, a.get(2))?);
+    let fmt = opt_str(ex, a.get(2))?;
     let loc = locale_or_err(ex)?;
     ex.reserve(4096)?;
     let text = period_presentation(begin, end, fmt.as_deref(), loc);
@@ -140,7 +133,7 @@ fn numcase_fn(ex: &mut Execution, a: &mut [Arg]) -> CallResult<Value> {
     } else {
         NumberKind::Cardinal
     };
-    let fmt = drop_empty_lang(opt_str(ex, a.get(3))?);
+    let fmt = opt_str(ex, a.get(3))?;
     let loc = locale_or_err(ex)?;
     let marks = forms
         .units()

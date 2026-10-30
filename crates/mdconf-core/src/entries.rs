@@ -10,8 +10,10 @@ use crate::{Error, LoadMeter, MeterRefusal, Result};
 
 mod cache_managed;
 mod managed;
+mod managed_cf;
 pub use cache_managed::{ManagedEntries, ManagedEntriesError, ManagedEntrySource};
 pub use managed::decode_stored_budgeted;
+pub use managed_cf::ManagedCfFile;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EntryMeta {
@@ -68,9 +70,21 @@ pub trait EntrySource {
     }
 
     fn list(&self) -> Result<Vec<EntryMeta>>;
+    fn list_checked(&self, check: &dyn Fn() -> Result<()>) -> Result<Vec<EntryMeta>> {
+        check()?;
+        let list = self.list()?;
+        check()?;
+        Ok(list)
+    }
     fn stored(&self, name: &str) -> Result<Option<Vec<u8>>>;
     fn list_owned(&self) -> Result<EntryList> {
         self.list().map(EntryBacking::Native)
+    }
+    fn list_owned_checked(&self, check: &dyn Fn() -> Result<()>) -> Result<EntryList> {
+        check()?;
+        let list = self.list_owned()?;
+        check()?;
+        Ok(list)
     }
     fn stored_owned(&self, name: &str) -> Result<Option<StoredBytes>> {
         self.stored(name)
@@ -93,6 +107,17 @@ pub trait EntrySource {
     }
     fn stored_inflated_bounded(&self, name: &str, _limit: u64) -> Result<Option<Inflated>> {
         Err(bad(name, "bounded inflated read unsupported by source"))
+    }
+    fn stored_inflated_checked(
+        &self,
+        name: &str,
+        limit: u64,
+        check: &dyn Fn() -> Result<()>,
+    ) -> Result<Option<Inflated>> {
+        check()?;
+        let value = self.stored_inflated_bounded(name, limit)?;
+        check()?;
+        Ok(value)
     }
     fn stored_len(&self, name: &str) -> Result<Option<u64>> {
         Err(bad(name, "stored size unsupported by source"))
@@ -136,6 +161,12 @@ impl EntrySource for BudgetedEntries<'_> {
     fn list_owned(&self) -> Result<EntryList> {
         self.inner.list_owned()
     }
+    fn list_checked(&self, check: &dyn Fn() -> Result<()>) -> Result<Vec<EntryMeta>> {
+        self.inner.list_checked(check)
+    }
+    fn list_owned_checked(&self, check: &dyn Fn() -> Result<()>) -> Result<EntryList> {
+        self.inner.list_owned_checked(check)
+    }
     fn stored_owned_bounded(&self, name: &str, limit: usize) -> Result<Option<StoredBytes>> {
         self.inner.stored_owned_bounded(name, limit)
     }
@@ -154,6 +185,15 @@ impl EntrySource for BudgetedEntries<'_> {
         self.inner.stored_bounded(name, limit)
     }
     fn stored_inflated_bounded(&self, name: &str, limit: u64) -> Result<Option<Inflated>> {
+        self.stored_inflated_checked(name, limit, &|| Ok(()))
+    }
+    fn stored_inflated_checked(
+        &self,
+        name: &str,
+        limit: u64,
+        check: &dyn Fn() -> Result<()>,
+    ) -> Result<Option<Inflated>> {
+        check()?;
         let limit = limit.min(zraw::DEFAULT_LIMIT);
         let Some(len) = self.inner.stored_len(name)? else {
             return Ok(None);
@@ -170,27 +210,37 @@ impl EntrySource for BudgetedEntries<'_> {
         let Some(stored) = self.inner.stored_owned_bounded(name, cap)? else {
             return Ok(None);
         };
-        let out = match zraw::inflate_budgeted(&stored, limit, &self.budget, category) {
-            Ok(bytes) => Inflated {
-                bytes,
-                was_deflated: true,
-            },
-            Err(zraw::ManagedInflateError::Memory(e)) => return Err(memory_error(name, e)),
-            Err(_) => {
-                let mut copy = memory_budget::BudgetedVec::try_with_capacity(
-                    &self.budget,
-                    category,
-                    stored.len(),
-                )
-                .map_err(|e| memory_error(name, e))?;
-                copy.try_extend_from_slice(&stored)
-                    .map_err(|e| memory_error(name, e))?;
-                Inflated {
-                    bytes: copy.into_charged_vec(),
-                    was_deflated: false,
+        check()?;
+        let out =
+            match zraw::inflate_budgeted_checked(&stored, limit, &self.budget, category, || {
+                check().is_ok()
+            }) {
+                Ok(None) => {
+                    return Err(Error::Io(std::io::Error::new(
+                        std::io::ErrorKind::Interrupted,
+                        "opening cancelled",
+                    )));
                 }
-            }
-        };
+                Ok(Some(bytes)) => Inflated {
+                    bytes,
+                    was_deflated: true,
+                },
+                Err(zraw::ManagedInflateError::Memory(e)) => return Err(memory_error(name, e)),
+                Err(_) => {
+                    let mut copy = memory_budget::BudgetedVec::try_with_capacity(
+                        &self.budget,
+                        category,
+                        stored.len(),
+                    )
+                    .map_err(|e| memory_error(name, e))?;
+                    copy.try_extend_from_slice(&stored)
+                        .map_err(|e| memory_error(name, e))?;
+                    Inflated {
+                        bytes: copy.into_charged_vec(),
+                        was_deflated: false,
+                    }
+                }
+            };
         drop(stored);
         drop(held);
         Ok(Some(out))
@@ -456,8 +506,15 @@ impl<'a> Entries<'a> {
     }
 
     pub fn with_meter(src: &'a dyn EntrySource, meter: Option<Arc<dyn LoadMeter>>) -> Result<Self> {
-        let list = src.list_owned()?;
-        let names = list.iter().map(|m| m.name.clone()).collect();
+        let check = || meter.as_ref().map_or(Ok(()), |meter| meter.checkpoint());
+        let list = src.list_owned_checked(&check)?;
+        let names = list
+            .iter()
+            .map(|m| {
+                check()?;
+                Ok(m.name.clone())
+            })
+            .collect::<Result<_>>()?;
         Ok(Entries {
             src,
             list,
@@ -535,12 +592,17 @@ impl<'a> Entries<'a> {
     ) -> Result<Option<(Inflated, u64, u64)>> {
         self.check_refused()?;
         self.sweep_orphans(meter, false);
-        let inflated = match self.src.stored_inflated_bounded(name, zraw::DEFAULT_LIMIT) {
+        meter.checkpoint()?;
+        let inflated = match self
+            .src
+            .stored_inflated_checked(name, zraw::DEFAULT_LIMIT, &|| meter.checkpoint())
+        {
             Ok(Some(inflated)) => inflated,
             Ok(None) => return Ok(None),
             Err(Error::Memory(limit)) => return Err(self.refuse(limit)),
             Err(e) => return Err(e),
         };
+        meter.checkpoint()?;
         let bytes: &[u8] = &inflated.bytes;
         let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
         #[cfg(any(test, feature = "testing"))]
@@ -578,6 +640,9 @@ impl<'a> Entries<'a> {
                 .admit_copy("root", u64::try_from(bound).unwrap_or(u64::MAX))
                 .map_err(|MeterRefusal(limit)| self.refuse(limit))?;
         }
+        if let Some(meter) = &self.meter {
+            meter.checkpoint()?;
+        }
         let stored = self
             .remember_refusal(
                 self.src
@@ -587,8 +652,14 @@ impl<'a> Entries<'a> {
         if stored.len() > crate::root::STORED_LIMIT {
             return Err(bad("root", "stored size exceeds product limit"));
         }
+        if let Some(meter) = &self.meter {
+            meter.checkpoint()?;
+        }
         let info =
             Arc::new(self.remember_refusal(crate::root::RootInfo::read_owned(meta, stored))?);
+        if let Some(meter) = &self.meter {
+            meter.checkpoint()?;
+        }
         *self.root.borrow_mut() = Some(Arc::clone(&info));
         Ok(info)
     }

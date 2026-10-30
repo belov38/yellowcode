@@ -24,10 +24,11 @@
 #include "ucln_cmn.h"
 #include "ucnv_io.h"
 #include "umutex.h"
+#include "umutex_static.h"
 #include "utracimp.h"
 
 static UBool gICUInitialized = FALSE;
-static UMTX  gICUInitMutex   = NULL;
+UMTX_STATIC(gICUInitMutex, umtx_initStatic_46);
 
 
 /************************************************

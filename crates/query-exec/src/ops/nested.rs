@@ -7,7 +7,6 @@ use query_ir::{
 };
 
 use super::Cx;
-use crate::eval::cmp;
 use crate::model::{HashModel, columns_model, row_cap_model, vec_block, vec_push_growth};
 use crate::plan::{PlanOptions, build, plan_rel, plan_rel_driven};
 use crate::source::Row;
@@ -210,7 +209,6 @@ fn read_section<'a>(
         }
     }
     drop(op);
-    let coll = cx.env.collation;
     let out_table = crate::model::hash_table_model(
         crate::model::hash_buckets_for(groups.len()),
         (std::mem::size_of::<Owner>() + std::mem::size_of::<Arc<NestedResult>>()) as u64,
@@ -218,11 +216,17 @@ fn read_section<'a>(
     cx.mem.grow(out_table)?;
     transient += out_table;
     let mut out = HashMap::with_capacity(groups.len());
-    for (owner, mut rs) in groups {
-        let scratch = vec_block(rs.len(), entry);
-        cx.mem.grow(scratch)?;
-        rs.sort_by(|a, b| cmp(&a.0, &b.0, coll));
-        cx.mem.shrink(scratch);
+    for (owner, rs) in groups {
+        let keyed_entry = std::mem::size_of::<(crate::key::Key, (QValue, Row))>();
+        let scratch = vec_block(rs.len(), keyed_entry);
+        cx.mem.grow_scratch(scratch)?;
+        let mut keyed = Vec::with_capacity(rs.len());
+        for e in rs {
+            keyed.push((super::join::key_charged(&e.0, cx)?, e));
+        }
+        keyed.sort_by(|a, b| a.0.cmp(&b.0));
+        let rs: Vec<(QValue, Row)> = keyed.into_iter().map(|(_, e)| e).collect();
+        cx.mem.release_scratch();
         let rows_vec = vec_block(rs.len(), std::mem::size_of::<Row>());
         cx.mem.grow(columns_model(columns) + 48 + rows_vec)?;
         let list = vec_block(rs.capacity(), entry);

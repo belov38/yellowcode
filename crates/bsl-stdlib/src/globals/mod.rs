@@ -9,17 +9,26 @@ pub(crate) mod data;
 pub(crate) mod dates;
 pub(crate) mod format;
 pub(crate) mod message;
+mod modes;
 pub(crate) mod numbers;
+mod regex;
+mod reuse;
 pub(crate) mod strings;
 pub(crate) mod tz;
 
 pub(crate) fn register(reg: &mut Registry) {
+    reg.global_fn(
+        "ПривилегированныйРежим",
+        "PrivilegedMode",
+        std::sync::Arc::new(|ex, _| Ok(Value::Bool(ex.effective_flags().privileged))),
+    );
     reg.global_fn(
         "БезопасныйРежим",
         "SafeMode",
         std::sync::Arc::new(|ex, _| Ok(Value::Bool(ex.effective_flags().safe_mode))),
     );
     strings::register(reg);
+    regex::register(reg);
     numbers::register(reg);
     data::register(reg);
     binary::register(reg);
@@ -27,6 +36,8 @@ pub(crate) fn register(reg: &mut Registry) {
     tz::register(reg);
     format::register(reg);
     message::register(reg);
+    reuse::register(reg);
+    modes::register(reg);
 }
 
 pub(crate) fn str_value(units: Vec<u16>) -> Value {

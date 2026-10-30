@@ -101,10 +101,17 @@ pub(super) fn eager(response: Response) -> Response<ViewerBody> {
         csp,
         cache_control,
     } = response;
+    let body = match body {
+        crate::transport::Body::Native(bytes) => ViewerBody::Eager(bytes),
+        crate::transport::Body::Charged(bytes) => match bytes.try_into_shared() {
+            Ok(shared) => ViewerBody::Shared(shared),
+            Err(_) => return memory_refusal(),
+        },
+    };
     Response {
         status,
         content_type,
-        body: ViewerBody::Eager(body),
+        body,
         csp,
         cache_control,
     }

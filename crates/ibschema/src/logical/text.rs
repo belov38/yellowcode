@@ -36,6 +36,15 @@ impl TreeBuild for Node {
 }
 
 impl LogicalSchema {
+    pub fn from_text_legacy_indexes(bytes: &[u8]) -> Result<LogicalSchema> {
+        let root = brace::parse_bytes(bytes).map_err(|e| Error::Parse {
+            what: WHAT,
+            at: "file".into(),
+            why: e.to_string(),
+        })?;
+        super::tree::decode_legacy_indexes(&root, WHAT)
+    }
+
     pub fn from_text(bytes: &[u8]) -> Result<LogicalSchema> {
         let root = brace::parse_bytes(bytes).map_err(|e| Error::Parse {
             what: WHAT,

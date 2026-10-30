@@ -66,14 +66,146 @@ pub enum Error {
     Configuration(String),
 }
 
-fn name_key(name: &str) -> Result<Vec<u8>, Error> {
+enum NameKey {
+    Legacy(Vec<u8>),
+    Paid(memory_budget::BudgetedVec<u8>),
+}
+
+impl NameKey {
+    fn bytes(&self) -> &[u8] {
+        match self {
+            NameKey::Legacy(key) => key,
+            NameKey::Paid(key) => key.as_slice(),
+        }
+    }
+}
+
+fn name_key(name: &str, request: Option<&onecd::KeyRequest>) -> Result<NameKey, Error> {
     use onecd::collate::{Collate, IcuCollate, Strength};
-    let text = name.trim_end_matches(' ').nfc().collect::<String>();
-    Ok(IcuCollate.sort_key(
+    let name = name.trim_end_matches(' ');
+    let Some(request) = request else {
+        let units = name
+            .nfc()
+            .collect::<String>()
+            .encode_utf16()
+            .collect::<Vec<_>>();
+        return Ok(NameKey::Legacy(IcuCollate.sort_key(
+            "root",
+            Strength::Secondary,
+            &units,
+        )?));
+    };
+    let text = paid_nfc_utf16(name, |bytes| {
+        request.try_reserve(u64::try_from(bytes).unwrap_or(u64::MAX))
+    })?;
+    Ok(NameKey::Paid(request.sort_key(
         "root",
         Strength::Secondary,
-        &text.encode_utf16().collect::<Vec<_>>(),
-    )?)
+        &text.units,
+    )?))
+}
+
+struct PaidUnits<R> {
+    units: Vec<u16>,
+    _paid: R,
+}
+
+fn paid_nfc_utf16<R>(
+    text: &str,
+    mut admit: impl FnMut(usize) -> onecd::Result<R>,
+) -> onecd::Result<PaidUnits<R>> {
+    use unicode_normalization::char::{canonical_combining_class, compose, decompose_canonical};
+    let (mut len, mut run, mut last, mut unsorted, mut longest) =
+        (0usize, 0usize, 0u8, false, 0usize);
+    for c in text.chars() {
+        decompose_canonical(c, |d| {
+            len += 1;
+            let class = canonical_combining_class(d);
+            if class == 0 {
+                (run, last, unsorted) = (0, 0, false);
+            } else {
+                run += 1;
+                unsorted |= class < last;
+                last = class;
+                if unsorted {
+                    longest = longest.max(run);
+                }
+            }
+        });
+    }
+    let size = std::mem::size_of::<char>();
+    let decomposition = admit(len.saturating_mul(size))?;
+    let mut chars = Vec::with_capacity(len);
+    for c in text.chars() {
+        decompose_canonical(c, |d| chars.push(d));
+    }
+    let ordering = admit(longest.saturating_mul(size))?;
+    let mut scratch: Vec<char> = Vec::with_capacity(longest);
+    let mut start = 0;
+    while start < chars.len() {
+        let Some(&c) = chars.get(start) else { break };
+        if canonical_combining_class(c) == 0 {
+            start += 1;
+            continue;
+        }
+        let end = chars
+            .get(start..)
+            .and_then(|rest| rest.iter().position(|&c| canonical_combining_class(c) == 0))
+            .map_or(chars.len(), |n| start + n);
+        if let Some(seg) = chars.get_mut(start..end)
+            && seg.windows(2).any(|w| {
+                matches!(w, [a, b] if canonical_combining_class(*b) < canonical_combining_class(*a))
+            })
+        {
+            scratch.clear();
+            for class in 1..=u8::MAX {
+                scratch.extend(seg.iter().filter(|&&c| canonical_combining_class(c) == class));
+            }
+            seg.copy_from_slice(&scratch);
+        }
+        start = end;
+    }
+    drop(scratch);
+    let mut starter: Option<usize> = None;
+    let mut blocking: Option<u8> = None;
+    let mut written = 0;
+    for read in 0..chars.len() {
+        let Some(&c) = chars.get(read) else { break };
+        let class = canonical_combining_class(c);
+        if let Some(s) = starter
+            && blocking.is_none_or(|b| b < class)
+            && let Some(composed) = chars.get(s).and_then(|&k| compose(k, c))
+        {
+            if let Some(k) = chars.get_mut(s) {
+                *k = composed;
+            }
+            continue;
+        }
+        if class == 0 {
+            starter = Some(written);
+            blocking = None;
+        } else if starter.is_some() {
+            blocking = Some(class);
+        }
+        if let Some(slot) = chars.get_mut(written) {
+            *slot = c;
+        }
+        written += 1;
+    }
+    chars.truncate(written);
+    let units = chars.iter().map(|c| c.len_utf16()).sum::<usize>();
+    let output = admit(units.saturating_mul(std::mem::size_of::<u16>()))?;
+    let mut out = Vec::with_capacity(units);
+    let mut buf = [0u16; 2];
+    for c in &chars {
+        out.extend_from_slice(c.encode_utf16(&mut buf));
+    }
+    drop(chars);
+    drop((decomposition, ordering));
+    Ok(PaidUnits {
+        units: out,
+        _paid: output,
+    })
 }
 
 pub fn valid_id(id: &str) -> bool {
@@ -87,10 +219,11 @@ pub fn find<'a>(cards: &'a [Card], identity: &str) -> Result<&'a Card, Error> {
             .find(|c| c.id == id.to_string())
             .ok_or(Error::NotFound);
     }
-    let key = name_key(identity)?;
+    let request = onecd::KeyRequest::when_bound(None);
+    let key = name_key(identity, request.as_ref())?;
     let mut found = None;
     for card in cards {
-        if name_key(&card.name)? == key {
+        if name_key(&card.name, request.as_ref())?.bytes() == key.bytes() {
             if found.is_some() {
                 return Err(Error::Ambiguous);
             }
@@ -262,9 +395,24 @@ pub fn write_card(out: &mut dyn Write, card: &Card) -> crate::Result<()> {
 mod write;
 pub use write::*;
 
+#[cfg(all(feature = "testing", unix))]
+mod du2u;
 mod metadata;
 mod mutation;
+mod qualification;
+#[cfg(all(feature = "testing", unix))]
+#[doc(hidden)]
+pub use du2u::qualify_sealed_unix_clear;
+#[cfg(all(feature = "testing", unix))]
+#[doc(hidden)]
+pub fn du2u_qualification_binding() -> serde_json::Value {
+    serde_json::json!({"head":option_env!("DU2U_QUALIFICATION_HEAD"),
+        "source_sha256":option_env!("DU2U_QUALIFICATION_SOURCE_SHA256"),
+        "source_binding":qualification::source_binding()})
+}
 mod snapshot;
+#[cfg(unix)]
+mod source;
 
 #[cfg(feature = "testing")]
 fn qualification_pin(path: &Path, maximum: u64) -> Result<(Vec<u8>, String), UserWriteError> {

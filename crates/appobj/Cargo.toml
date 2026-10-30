@@ -22,6 +22,7 @@ bsl-syntax = { path = "../bsl-syntax" }
 bsl-vm = { path = "../bsl-vm" }
 evlog = { path = "../evlog" }
 ibschema = { path = "../ibschema" }
+memory-budget = { path = "../memory-budget" }
 md-model = { path = "../md-model" }
 mdschema = { path = "../mdschema" }
 platform-catalog = { path = "../platform-catalog" }

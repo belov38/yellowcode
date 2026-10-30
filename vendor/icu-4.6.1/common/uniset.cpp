@@ -143,7 +143,7 @@ static int8_t U_CALLCONV compareUnicodeString(UHashTok t1, UHashTok t2) {
 UnicodeSet::UnicodeSet() :
     len(1), capacity(1 + START_EXTRA), list(0), bmpSet(0), buffer(0),
     bufferCapacity(0), patLen(0), pat(NULL), strings(NULL), stringSpan(NULL),
-    fFlags(0)
+    fFlags(0), managedOwner()
 {
     UErrorCode status = U_ZERO_ERROR;
     allocateStrings(status);
@@ -160,6 +160,26 @@ UnicodeSet::UnicodeSet() :
     _dbgct(this);
 }
 
+UnicodeSet::UnicodeSet(UManagedOwner46 owner) :
+    len(1), capacity(1 + START_EXTRA), list(0), bmpSet(0), buffer(0),
+    bufferCapacity(0), patLen(0), pat(NULL), strings(NULL), stringSpan(NULL),
+    fFlags(0), managedOwner(owner)
+{
+    UErrorCode status = U_ZERO_ERROR;
+    if (!allocateStrings(status)) {
+        setToBogus();
+        return;
+    }
+    list = (UChar32*)managed_malloc_46(sizeof(UChar32) * capacity,
+                                     managedOwner.role, managedOwner.site);
+    if (list == NULL) {
+        setToBogus();
+        return;
+    }
+    list[0] = UNICODESET_HIGH;
+    _dbgct(this);
+}
+
 /**
  * Constructs a set containing the given range. If <code>end >
  * start</code> then an empty set is created.
@@ -170,7 +190,7 @@ UnicodeSet::UnicodeSet() :
 UnicodeSet::UnicodeSet(UChar32 start, UChar32 end) :
     len(1), capacity(1 + START_EXTRA), list(0), bmpSet(0), buffer(0),
     bufferCapacity(0), patLen(0), pat(NULL), strings(NULL), stringSpan(NULL),
-    fFlags(0)
+    fFlags(0), managedOwner()
 {
     UErrorCode status = U_ZERO_ERROR;
     allocateStrings(status);
@@ -197,7 +217,7 @@ UnicodeSet::UnicodeSet(const UnicodeSet& o) :
     bmpSet(0),
     buffer(0), bufferCapacity(0),
     patLen(0), pat(NULL), strings(NULL), stringSpan(NULL),
-    fFlags(0)
+    fFlags(0), managedOwner()
 {
     UErrorCode status = U_ZERO_ERROR;
     allocateStrings(status);
@@ -221,7 +241,7 @@ UnicodeSet::UnicodeSet(const UnicodeSet& o, UBool /* asThawed */) :
     bmpSet(0),
     buffer(0), bufferCapacity(0),
     patLen(0), pat(NULL), strings(NULL), stringSpan(NULL),
-    fFlags(0)
+    fFlags(0), managedOwner()
 {
     UErrorCode status = U_ZERO_ERROR;
     allocateStrings(status);
@@ -440,6 +460,9 @@ int32_t UnicodeSet::findCodePoint(UChar32 c) const {
 
     // Return the smallest i such that c < list[i].  Assume
     // list[len - 1] == HIGH and that c is legal (0..HIGH-1).
+    // A bogus set whose list allocation was refused is empty.
+    if (list == NULL)
+        return 0;
     if (c < list[0])
         return 0;
     // High runner test.  c is often after the last range, so an
@@ -1106,7 +1129,10 @@ UnicodeSet& UnicodeSet::removeAll(const UnicodeString& s) {
 }
 
 UnicodeSet& UnicodeSet::removeAllStrings() {
-    strings->removeAllElements();
+    // A bogus set may have no strings vector.
+    if (strings != NULL) {
+        strings->removeAllElements();
+    }
     return *this;
 }
 
@@ -1302,6 +1328,14 @@ UnicodeSet& UnicodeSet::complement(const UnicodeString& s) {
  * @see #add(char, char)
  */
 UnicodeSet& UnicodeSet::addAll(const UnicodeSet& c) {
+    if (isFrozen() || isBogus()) {
+        return *this;
+    }
+    if (c.isBogus()) {
+        // The operand's contents are unknown; so is the result.
+        setToBogus();
+        return *this;
+    }
     if ( c.len>0 && c.list!=NULL ) {
         add(c.list, c.len, 0);
     }
@@ -1331,6 +1365,11 @@ UnicodeSet& UnicodeSet::retainAll(const UnicodeSet& c) {
     if (isFrozen() || isBogus()) {
         return *this;
     }
+    if (c.isBogus()) {
+        // The operand's contents are unknown; so is the result.
+        setToBogus();
+        return *this;
+    }
     retain(c.list, c.len, 0);
     strings->retainAll(*c.strings);
     return *this;
@@ -1349,6 +1388,11 @@ UnicodeSet& UnicodeSet::removeAll(const UnicodeSet& c) {
     if (isFrozen() || isBogus()) {
         return *this;
     }
+    if (c.isBogus()) {
+        // The operand's contents are unknown; so is the result.
+        setToBogus();
+        return *this;
+    }
     retain(c.list, c.len, 2);
     strings->removeAll(*c.strings);
     return *this;
@@ -1364,6 +1408,11 @@ UnicodeSet& UnicodeSet::removeAll(const UnicodeSet& c) {
  */
 UnicodeSet& UnicodeSet::complementAll(const UnicodeSet& c) {
     if (isFrozen() || isBogus()) {
+        return *this;
+    }
+    if (c.isBogus()) {
+        // The operand's contents are unknown; so is the result.
+        setToBogus();
         return *this;
     }
     exclusiveOr(c.list, c.len, 0);
@@ -1556,17 +1605,24 @@ int32_t UnicodeSet::serialize(uint16_t *dest, int32_t destCapacity, UErrorCode& 
  */
 UBool UnicodeSet::allocateStrings(UErrorCode &status) {
     if (U_FAILURE(status)) {
+        setToBogus();
         return FALSE;
     }
-    strings = new UVector(uhash_deleteUnicodeString,
-                          uhash_compareUnicodeString, 1, status);
+    UManagedOwner46 arrayOwner = { managedOwner.role,
+                                  managedOwner.role == 0 ? 0 : managedOwner.site + 2 };
+    void *backing = managed_malloc_46(sizeof(UVector), managedOwner.role,
+                                     managedOwner.role == 0 ? 0 : managedOwner.site + 1);
+    strings = backing == NULL ? NULL : new (backing) UVector(uhash_deleteUnicodeString,
+                          uhash_compareUnicodeString, 1, status, arrayOwner);
     if (strings == NULL) { // Check for memory allocation error.
         status = U_MEMORY_ALLOCATION_ERROR;
+        setToBogus();
         return FALSE;
     }
     if (U_FAILURE(status)) {
         delete strings;
         strings = NULL;
+        setToBogus();
         return FALSE;
     } 
     return TRUE;
@@ -1589,7 +1645,10 @@ void UnicodeSet::ensureCapacity(int32_t newLen, UErrorCode& ec) {
 void UnicodeSet::ensureBufferCapacity(int32_t newLen, UErrorCode& ec) {
     if (buffer != NULL && newLen <= bufferCapacity)
         return;
-    UChar32* temp = (UChar32*) uprv_realloc(buffer, sizeof(UChar32) * (newLen + GROW_EXTRA));
+    UChar32* temp = buffer == NULL ?
+        (UChar32*)managed_malloc_46(sizeof(UChar32) * (newLen + GROW_EXTRA),
+                                  managedOwner.role, managedOwner.site) :
+        (UChar32*)uprv_realloc(buffer, sizeof(UChar32) * (newLen + GROW_EXTRA));
     if (temp == NULL) {
         ec = U_MEMORY_ALLOCATION_ERROR;
         setToBogus();
@@ -2072,7 +2131,8 @@ void UnicodeSet::releasePattern() {
 void UnicodeSet::setPattern(const UnicodeString& newPat) {
     releasePattern();
     int32_t newPatLen = newPat.length();
-    pat = (UChar *)uprv_malloc((newPatLen + 1) * sizeof(UChar));
+    pat = (UChar *)managed_malloc_46((newPatLen + 1) * sizeof(UChar),
+                        managedOwner.role, managedOwner.role == 0 ? 0 : managedOwner.site + 3);
     if (pat) {
         patLen = newPatLen;
         newPat.extractBetween(0, patLen, pat);
@@ -2096,12 +2156,14 @@ UnicodeFunctor *UnicodeSet::freeze() {
         if (capacity > (len + GROW_EXTRA)) {
             // Make the capacity equal to len or 1.
             // We don't want to realloc of 0 size.
-            capacity = len + (len == 0);
-            list = (UChar32*) uprv_realloc(list, sizeof(UChar32) * capacity);
-            if (list == NULL) { // Check for memory allocation error.
+            int32_t newCapacity = len + (len == 0);
+            UChar32 *replacement=(UChar32*)uprv_realloc(list, sizeof(UChar32) * newCapacity);
+            if (replacement == NULL) {
                 setToBogus();
                 return this;
             }
+            list=replacement;
+            capacity=newCapacity;
         }
 
         // Optimize contains() and span() and similar functions.
@@ -2119,7 +2181,9 @@ UnicodeFunctor *UnicodeSet::freeze() {
         }
         if (stringSpan == NULL) {
             // No span-relevant strings: Optimize for code point spans.
-            bmpSet=new BMPSet(list, len);
+            void *backing=managed_malloc_46(sizeof(BMPSet), managedOwner.role,
+                                      managedOwner.role == 0 ? 0 : managedOwner.site + 4);
+            bmpSet=backing==NULL ? NULL : new (backing) BMPSet(list, len);
             if (bmpSet == NULL) { // Check for memory allocation error.
                 setToBogus();
             }

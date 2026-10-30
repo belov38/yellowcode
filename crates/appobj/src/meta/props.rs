@@ -462,14 +462,14 @@ pub(crate) fn convert(
                 .collect();
             Ok(coll::new_coll(cx, CollTy::Values, items))
         }
-        Mv::Typed(t) => typed(cx, t, ru),
+        Mv::Typed(t) => typed(cx, ex, t, ru),
         Mv::Type(_) | Mv::FieldList(_) | Mv::StandardAttributes(_) | Mv::Xml(_) => {
             Err(not_implemented(ru).into())
         }
     }
 }
 
-fn typed(cx: &MdCtx, t: &TypedValue, ru: &str) -> CallResult<Value> {
+fn typed(cx: &MdCtx, ex: &mut Execution, t: &TypedValue, ru: &str) -> CallResult<Value> {
     Ok(match t {
         TypedValue::Nil => Value::Undefined,
         TypedValue::Str(s) => Value::from(s.as_str()),
@@ -477,7 +477,7 @@ fn typed(cx: &MdCtx, t: &TypedValue, ru: &str) -> CallResult<Value> {
         TypedValue::Bool(b) => Value::Bool(*b),
         TypedValue::Date(s) => parse_date(s).ok_or_else(|| not_implemented(ru))?,
         TypedValue::DesignTimeRef(s) => {
-            design_time_ref(cx, s)?.ok_or_else(|| not_implemented(ru))?
+            design_time_ref(cx, ex, s)?.ok_or_else(|| not_implemented(ru))?
         }
         TypedValue::EmptyTypeDescription | TypedValue::FixedArray(_) => {
             return Err(not_implemented(ru).into());
@@ -485,7 +485,7 @@ fn typed(cx: &MdCtx, t: &TypedValue, ru: &str) -> CallResult<Value> {
     })
 }
 
-fn design_time_ref(cx: &MdCtx, text: &str) -> CallResult<Option<Value>> {
+fn design_time_ref(cx: &MdCtx, ex: &mut Execution, text: &str) -> CallResult<Option<Value>> {
     let seg: Vec<&str> = text.split('.').collect();
     let (Some(head), Some(rest)) = (seg.get(..2), seg.get(2..)) else {
         return Ok(None);
@@ -510,6 +510,7 @@ fn design_time_ref(cx: &MdCtx, text: &str) -> CallResult<Option<Value>> {
             {
                 return Ok(None);
             }
+            crate::read::admit_data_read(ex)?;
             let r =
                 app.predefined()
                     .by_name(app, obj, &crate::predefined::AreaKey::default(), item)?;

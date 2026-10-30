@@ -7,6 +7,8 @@ use bsl_vm::{
 use std::sync::Arc;
 
 pub mod msg {
+    pub const BAD_LOCALE_NAME: &str = "core85:IDS_BADLOCALENAME";
+    pub const SET_IB_LOCALE: &str = "backend:IDS_IBERROR_CANTSETLOCALE";
     pub const CONVERT_2NUMERIC: &str = "bsl:IDS_RTE_CONVERT_2NUMERIC";
     pub const CONVERT_2DATE: &str = "bsl:IDS_RTE_CONVERT_2DATE";
     pub const CONVERT_2BOOL: &str = "bsl:IDS_RTE_CONVERT_2BOOL";
@@ -123,6 +125,8 @@ pub mod msg {
 }
 
 pub const MESSAGE_KEYS: &[&str] = &[
+    msg::BAD_LOCALE_NAME,
+    msg::SET_IB_LOCALE,
     msg::CONVERT_2NUMERIC,
     msg::CONVERT_2DATE,
     msg::CONVERT_2BOOL,

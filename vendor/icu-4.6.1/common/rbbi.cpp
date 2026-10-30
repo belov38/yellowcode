@@ -1601,6 +1601,7 @@ int32_t RuleBasedBreakIterator::checkDictionary(int32_t startPos,
     int32_t     current;
     UErrorCode  status = U_ZERO_ERROR;
     UStack      breaks(status);
+    if (U_FAILURE(status) || managed_failed_46()) return BreakIterator::DONE;
     int32_t     foundBreakCount = 0;
     UChar32     c = utext_current32(fText);
 
@@ -1672,11 +1673,14 @@ int32_t RuleBasedBreakIterator::checkDictionary(int32_t startPos,
         // We now have a dictionary character. Get the appropriate language object
         // to deal with it.
         const LanguageBreakEngine *lbe = getLanguageBreakEngine(c);
-        
+        // A null engine cannot advance the text; retrying it would spin forever.
+        if (lbe==NULL || managed_failed_46()) return BreakIterator::DONE;
+
         // Ask the language object if there are any breaks. It will leave the text
         // pointer on the other side of its range, ready to search for the next one.
         if (lbe != NULL) {
             foundBreakCount += lbe->findBreaks(fText, rangeStart, rangeEnd, FALSE, fBreakType, breaks);
+            if (managed_failed_46()) return BreakIterator::DONE;
         }
         
         // Reload the loop variables for the next go-round
@@ -1760,10 +1764,23 @@ getLanguageBreakEngineFromFactory(UChar32 c, int32_t breakType)
     UMTX_CHECK(NULL, (UBool)(gLanguageBreakFactories == NULL), needsInit);
     
     if (needsInit) {
-        UStack  *factories = new UStack(_deleteFactory, NULL, status);
-        if (factories != NULL && U_SUCCESS(status)) {
-            ICULanguageBreakFactory *builtIn = new ICULanguageBreakFactory(status);
+        UManagedOwner46 owner={11, 1102};
+        void *backing=managed_malloc_46(sizeof(UStack), 11, 1101);
+        UStack *factories=backing==NULL ? NULL : new (backing) UStack(_deleteFactory, NULL, 8, status, owner);
+        if (factories==NULL || U_FAILURE(status) || managed_failed_46()) {
+            delete factories;
+            return NULL;
+        }
+        {
+            backing=managed_malloc_46(sizeof(ICULanguageBreakFactory), 11, 1103);
+            ICULanguageBreakFactory *builtIn=backing==NULL ? NULL : new (backing) ICULanguageBreakFactory(status, 11);
+            if (builtIn==NULL || U_FAILURE(status)) {
+                delete builtIn;
+                delete factories;
+                return NULL;
+            }
             factories->push(builtIn, status);
+            if (U_FAILURE(status)) { delete builtIn; delete factories; return NULL; }
 #ifdef U_LOCAL_SERVICE_HOOK
             LanguageBreakFactory *extra = (LanguageBreakFactory *)uprv_svc_hook("languageBreakFactory", &status);
             if (extra != NULL) {
@@ -1830,11 +1847,13 @@ RuleBasedBreakIterator::getLanguageBreakEngine(UChar32 c) {
     // give us a new LanguageBreakEngine for this character.
     lbe = getLanguageBreakEngineFromFactory(c, fBreakType);
     
+    // A failed factory lookup must never populate a reject cache.
+    if (managed_failed_46()) return NULL;
+
     // If we got one, use it and push it on our stack.
     if (lbe != NULL) {
         fLanguageBreakEngines->push((void *)lbe, status);
-        // Even if we can't remember it, we can keep looking it up, so
-        // return it even if the push fails.
+        if (U_FAILURE(status) || managed_failed_46()) return NULL;
         return lbe;
     }
     
@@ -1859,7 +1878,8 @@ RuleBasedBreakIterator::getLanguageBreakEngine(UChar32 c) {
     // Tell the reject engine about the character; at its discretion, it may
     // add more than just the one character.
     fUnhandledBreakEngine->handleCharacter(c, fBreakType);
-        
+    if (managed_failed_46() || !fUnhandledBreakEngine->handles(c, fBreakType)) return NULL;
+
     return fUnhandledBreakEngine;
 }
 

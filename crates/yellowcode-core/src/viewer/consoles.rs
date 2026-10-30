@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock, RwLock};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, RwLock, Weak};
 
 use super::state::State;
 
@@ -30,9 +30,15 @@ pub fn infobase_source(state: &State) -> Result<(), NotBase> {
 pub struct ConsoleSlot {
     pub admission: Arc<RwLock<()>>,
     pub jobs: query_console::Jobs,
-    open: Mutex<Opened>,
+    open: Arc<Mutex<Opened>>,
+    session_readers: Mutex<SessionReaders>,
     sessions: Mutex<usize>,
     opens: AtomicUsize,
+    closed: AtomicBool,
+    memory: Option<(memory_budget::MemoryBudget, usize)>,
+    source: Mutex<Option<PathBuf>>,
+    #[cfg(test)]
+    handoff: Mutex<Option<Arc<TestHandoff>>>,
 }
 
 #[derive(Default)]
@@ -40,6 +46,12 @@ struct Opened {
     console: Option<Arc<query_console::Console>>,
     error: Option<String>,
     retired: Vec<RetiredFile>,
+}
+
+#[derive(Default)]
+struct SessionReaders {
+    slots: Vec<Weak<Mutex<Opened>>>,
+    files: Vec<RetiredFile>,
 }
 
 pub(super) struct RetiredFile(Option<onecd::FileCloseObserver>);
@@ -64,10 +76,98 @@ impl ConsoleSlot {
         ConsoleSlot {
             admission: Arc::new(RwLock::new(())),
             jobs: query_console::Jobs::new(),
-            open: Mutex::new(Opened::default()),
+            open: Arc::new(Mutex::new(Opened::default())),
+            session_readers: Mutex::new(SessionReaders::default()),
             sessions: Mutex::new(0),
             opens: AtomicUsize::new(0),
+            closed: AtomicBool::new(false),
+            memory: None,
+            source: Mutex::new(None),
+            #[cfg(test)]
+            handoff: Mutex::new(None),
         }
+    }
+
+    pub(crate) fn with_memory(budget: memory_budget::MemoryBudget, cache: usize) -> Self {
+        Self {
+            memory: Some((budget, cache)),
+            ..Self::new()
+        }
+    }
+
+    pub fn memory_budget(&self) -> Option<&memory_budget::MemoryBudget> {
+        self.memory.as_ref().map(|(budget, _)| budget)
+    }
+
+    pub fn close(&self) {
+        self.closed.store(true, Ordering::Release);
+        self.jobs.close();
+        let detached = match self.open.try_lock() {
+            Ok(mut opened) => Self::detach(&mut opened),
+            Err(std::sync::TryLockError::Poisoned(error)) => Self::detach(&mut error.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => (None, Vec::new()),
+        };
+        self.hand_over(detached);
+    }
+
+    fn detach(opened: &mut Opened) -> (Option<Arc<query_console::Console>>, Vec<RetiredFile>) {
+        opened.error = None;
+        (opened.console.take(), std::mem::take(&mut opened.retired))
+    }
+
+    fn hand_over(
+        &self,
+        (console, mut retired): (Option<Arc<query_console::Console>>, Vec<RetiredFile>),
+    ) {
+        if let Some(console) = &console {
+            retired.push(RetiredFile::new(console.file_close_observer()));
+            console.close();
+        }
+        retired.retain(RetiredFile::is_open);
+        if retired.is_empty() || self.memory.is_none() {
+            return;
+        }
+        if let Some(source) = lock(&self.source).clone() {
+            let destination = slot(&source);
+            let mut opened = lock(&destination.open);
+            opened.retired.retain(RetiredFile::is_open);
+            opened.retired.append(&mut retired);
+        }
+    }
+
+    fn track_session_reader(&self, source: &Path, console: &query_console::Console) {
+        let destination = slot(source);
+        let mut readers = lock(&destination.session_readers);
+        readers.slots.retain(|slot| slot.strong_count() != 0);
+        let slot = Arc::downgrade(&self.open);
+        if !readers
+            .slots
+            .iter()
+            .any(|registered| registered.ptr_eq(&slot))
+        {
+            readers.slots.push(slot);
+        }
+        readers.files.retain(RetiredFile::is_open);
+        readers
+            .files
+            .push(RetiredFile::new(console.file_close_observer()));
+    }
+
+    fn release_session_readers(&self) -> bool {
+        let slots: Vec<_> = lock(&self.session_readers)
+            .slots
+            .iter()
+            .filter_map(Weak::upgrade)
+            .collect();
+        for slot in slots {
+            if !Self::release_opened(&mut lock(&slot)) {
+                return false;
+            }
+        }
+        let mut readers = lock(&self.session_readers);
+        readers.slots.retain(|slot| slot.strong_count() != 0);
+        readers.files.retain(RetiredFile::is_open);
+        readers.files.is_empty()
     }
 
     #[doc(hidden)]
@@ -92,21 +192,45 @@ impl ConsoleSlot {
     }
 
     pub fn get(&self, path: &Path) -> Availability {
-        let mut o = lock(&self.open);
-        o.retired.retain(RetiredFile::is_open);
-        if let Some(c) = &o.console {
-            return Availability::Ready(Arc::clone(c));
+        let result = {
+            let mut o = lock(&self.open);
+            o.retired.retain(RetiredFile::is_open);
+            if let Some(c) = &o.console {
+                let ready = Availability::Ready(Arc::clone(c));
+                #[cfg(test)]
+                self.pause_handoff("ready-locked");
+                ready
+            } else if let Some(e) = &o.error {
+                Availability::Failed(e.clone())
+            } else {
+                self.open_into(&mut o, path)
+            }
+        };
+        self.after_open(result)
+    }
+
+    fn after_open(&self, result: Availability) -> Availability {
+        #[cfg(test)]
+        self.pause_handoff("after-lock");
+        if self.closed.load(Ordering::Acquire) {
+            let detached = Self::detach(&mut lock(&self.open));
+            self.hand_over(detached);
+            if let Availability::Ready(console) = result {
+                self.hand_over((Some(console), Vec::new()));
+            }
+            Availability::Failed("opening cancelled".into())
+        } else {
+            result
         }
-        if let Some(e) = &o.error {
-            return Availability::Failed(e.clone());
-        }
-        self.open_into(&mut o, path)
     }
 
     pub fn reopen(&self, path: &Path) -> Availability {
-        let mut o = lock(&self.open);
-        Self::retire_open(&mut o);
-        self.open_into(&mut o, path)
+        let result = {
+            let mut o = lock(&self.open);
+            Self::retire_open(&mut o);
+            self.open_into(&mut o, path)
+        };
+        self.after_open(result)
     }
 
     fn active(o: &Opened) -> bool {
@@ -130,29 +254,56 @@ impl ConsoleSlot {
     }
 
     pub fn release_idle(&self) -> bool {
-        let mut o = lock(&self.open);
-        if Self::active(&o) {
+        Self::release_opened(&mut lock(&self.open))
+    }
+
+    fn release_opened(o: &mut Opened) -> bool {
+        if Self::active(o) {
             return false;
         }
-        Self::retire_open(&mut o);
+        Self::retire_open(o);
         o.retired.retain(RetiredFile::is_open);
         o.retired.is_empty()
     }
 
     fn open_into(&self, o: &mut Opened, path: &Path) -> Availability {
+        if self.closed.load(Ordering::Acquire) {
+            return Availability::Failed("opening cancelled".into());
+        }
         self.opens.fetch_add(1, Ordering::Relaxed);
-        let opened = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            query_console::Console::open_profile(path, query_console::LoadProfile::Query)
-        }))
-        .unwrap_or_else(|_| Err("internal error while opening the base".to_string()));
+        if self.memory.is_some() {
+            *lock(&self.source) = Some(path.to_path_buf());
+        }
+        let opened =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match &self.memory {
+                Some((budget, cache)) => {
+                    query_console::Console::open_with_memory(path, budget.clone(), *cache)
+                        .map_err(|e| e.to_string())
+                }
+                None => {
+                    query_console::Console::open_profile(path, query_console::LoadProfile::Query)
+                }
+            }))
+            .unwrap_or_else(|_| Err("internal error while opening the base".to_string()));
         match opened {
             Ok(c) => {
+                if self.memory.is_some() {
+                    self.track_session_reader(path, &c);
+                }
+                if self.closed.load(Ordering::Acquire) {
+                    c.close();
+                    return Availability::Failed("opening cancelled".into());
+                }
                 let c = Arc::new(c);
                 o.console = Some(Arc::clone(&c));
+                #[cfg(test)]
+                self.pause_handoff("installed-locked");
                 Availability::Ready(c)
             }
             Err(e) => {
-                o.error = Some(e.clone());
+                if self.memory.is_none() {
+                    o.error = Some(e.clone());
+                }
                 Availability::Failed(e)
             }
         }
@@ -178,4 +329,24 @@ pub(super) fn source_key(source: &Path) -> PathBuf {
         source.to_path_buf()
     };
     std::fs::canonicalize(&path).unwrap_or(path)
+}
+
+pub fn slot_for(state: &State) -> Arc<ConsoleSlot> {
+    state
+        .session
+        .as_ref()
+        .map_or_else(|| slot(&state.source), |session| session.console())
+}
+
+pub fn release_idle_readers(state: &State) -> bool {
+    let session = state.session.as_ref().map(|session| session.console());
+    release_idle(&state.source, session.as_deref())
+}
+
+fn release_idle(source: &Path, session: Option<&ConsoleSlot>) -> bool {
+    let source_slot = slot(source);
+    session.is_none_or(ConsoleSlot::release_idle)
+        && source_slot.release_session_readers()
+        && source_slot.release_idle()
+        && super::code_consoles::code_slot(source).release_idle()
 }

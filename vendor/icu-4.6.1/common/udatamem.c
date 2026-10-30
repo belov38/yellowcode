@@ -37,12 +37,17 @@ U_CFUNC void UDatamemory_assign(UDataMemory *dest, UDataMemory *source) {
 }
 
 U_CFUNC UDataMemory *UDataMemory_createNewInstance(UErrorCode *pErr) {
+    UManagedOwner46 owner = { 0, 0 };
+    return managed_data_create_46(owner, pErr);
+}
+
+U_CFUNC UDataMemory *managed_data_create_46(UManagedOwner46 owner, UErrorCode *pErr) {
     UDataMemory *This;
 
     if (U_FAILURE(*pErr)) {
         return NULL;
     }
-    This = uprv_malloc(sizeof(UDataMemory));
+    This = managed_malloc_46(sizeof(UDataMemory), owner.role, owner.site);
     if (This == NULL) {
         *pErr = U_MEMORY_ALLOCATION_ERROR; }
     else {

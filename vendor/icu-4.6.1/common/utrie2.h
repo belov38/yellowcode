@@ -18,6 +18,7 @@
 #define __UTRIE2_H__
 
 #include "unicode/utypes.h"
+#include "managed_memory.h"
 #include "udataswp.h"
 
 U_CDECL_BEGIN
@@ -98,6 +99,12 @@ U_CAPI UTrie2 * U_EXPORT2
 utrie2_openFromSerialized(UTrie2ValueBits valueBits,
                           const void *data, int32_t length, int32_t *pActualLength,
                           UErrorCode *pErrorCode);
+
+/* Private explicit receiver owner; serialized index/data bytes remain borrowed. */
+U_CAPI UTrie2 * U_EXPORT2
+managed_utrie2_openFromSerialized_46(UTrie2ValueBits valueBits,
+    const void *data, int32_t length, int32_t *pActualLength,
+    UManagedOwner46 owner, UErrorCode *pErrorCode);
 
 /**
  * Open a frozen, empty "dummy" trie.
@@ -204,6 +211,11 @@ utrie2_enum(const UTrie2 *trie,
  */
 U_CAPI UTrie2 * U_EXPORT2
 utrie2_open(uint32_t initialValue, uint32_t errorValue, UErrorCode *pErrorCode);
+
+/* Private receiver owners; mutable builder/data/growth remain Operation. */
+U_CAPI UTrie2 * U_EXPORT2
+managed_utrie2_open_46(uint32_t initialValue, uint32_t errorValue,
+    UManagedOwner46 wrapperOwner, UManagedOwner46 frozenOwner, UErrorCode *pErrorCode);
 
 /**
  * Clone a trie.
@@ -715,6 +727,7 @@ struct UTrie2 {
     UBool padding1;
     int16_t padding2;
     UNewTrie2 *newTrie;     /* builder object; NULL when frozen */
+    UManagedOwner46 frozenOwner; /* target receiver selected before construction */
 };
 
 /**

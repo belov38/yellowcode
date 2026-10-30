@@ -27,6 +27,19 @@ pub enum Error {
     Constraint(Constraint),
     #[error("not found: {0}")]
     NotFound(NotFound),
+    #[error("{}", native_restart_text(*memory))]
+    NativeRestart {
+        memory: Option<memory_budget::MemoryLimit>,
+    },
+    #[error("cancelled")]
+    Cancelled,
+}
+
+const fn native_restart_text(memory: Option<memory_budget::MemoryLimit>) -> &'static str {
+    match memory {
+        Some(_) => "MEMORY_LIMIT: native: restart the application",
+        None => "native ICU allocation failed: restart the application",
+    }
 }
 
 impl Error {
@@ -40,7 +53,11 @@ impl Error {
     pub(crate) fn is_fatal(&self) -> bool {
         matches!(
             self,
-            Error::Io(_) | Error::SnapshotTooOld | Error::Memory(_)
+            Error::Io(_)
+                | Error::SnapshotTooOld
+                | Error::Memory(_)
+                | Error::NativeRestart { .. }
+                | Error::Cancelled
         )
     }
 
@@ -62,6 +79,8 @@ impl Error {
             Error::SnapshotTooOld => Error::SnapshotTooOld,
             Error::Constraint(c) => Error::Constraint(c.clone()),
             Error::NotFound(n) => Error::NotFound(n.clone()),
+            Error::NativeRestart { memory } => Error::NativeRestart { memory: *memory },
+            Error::Cancelled => Error::Cancelled,
         }
     }
 }
@@ -243,4 +262,14 @@ impl fmt::Display for NotFound {
             NotFound::Row { table, row } => write!(f, "row {table}#{row}"),
         }
     }
+}
+
+pub(crate) const NAME_BYTES: usize = 256;
+
+pub(crate) fn brief(name: &str) -> &str {
+    let mut end = name.len().min(NAME_BYTES);
+    while !name.is_char_boundary(end) {
+        end -= 1;
+    }
+    name.get(..end).unwrap_or_default()
 }

@@ -2,9 +2,7 @@ use super::*;
 
 fn text_slack(value: &Value) -> u64 {
     match value {
-        Value::String(text) => {
-            (text.backing_capacity_units().saturating_sub(text.len()) as u64).saturating_mul(2)
-        }
+        Value::String(text) => super::super::retained::text_extra(text),
         _ => 0,
     }
 }
@@ -114,23 +112,22 @@ fn diagnostic(
     ex.reserve(live.saturating_add(2048))?;
     Err(error(1).into())
 }
-#[allow(dead_code, reason = "internal producer contract for Task14 API")]
 impl ValueTree {
     fn producer_live(&self, ex: &mut Execution) -> CallResult<u64> {
         Ok(state_live(&self.state, ex)?.saturating_add(
             (std::mem::size_of::<Self>() + 2 * std::mem::size_of::<usize>()) as u64,
         ))
     }
-    pub(crate) fn columns(&self, ex: &mut Execution) -> CallResult<Value> {
+    pub fn columns(&self, ex: &mut Execution) -> CallResult<Value> {
         let live = self.producer_live(ex)?;
         ex.reserve(live)?;
         Ok(Value::Object(self.state.columns.clone()))
     }
-    pub(crate) fn roots(&self, ex: &mut Execution) -> CallResult<Vec<Value>> {
+    pub fn roots(&self, ex: &mut Execution) -> CallResult<Vec<Value>> {
         let live = self.producer_live(ex)?;
         self.produce(ex, &self.state.roots.borrow(), None, live)
     }
-    pub(crate) fn children(&self, ex: &mut Execution, value: &Value) -> CallResult<Vec<Value>> {
+    pub fn children(&self, ex: &mut Execution, value: &Value) -> CallResult<Vec<Value>> {
         let live = self
             .producer_live(ex)?
             .saturating_add(original_live(&self.state, ex, value)?);

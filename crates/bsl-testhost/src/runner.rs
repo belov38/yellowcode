@@ -75,6 +75,14 @@ pub struct VmRunner {
 
 impl VmRunner {
     pub fn new(rt: Runtime, eval_module: &str) -> Result<VmRunner, CompileError> {
+        Self::new_with_compat(rt, eval_module, CompatMode::DontUse)
+    }
+
+    pub fn new_with_compat(
+        rt: Runtime,
+        eval_module: &str,
+        compat: CompatMode,
+    ) -> Result<VmRunner, CompileError> {
         let text = eval_module.strip_prefix('\u{FEFF}').unwrap_or(eval_module);
         let wrapped = eval_wrapper(text).map_err(|e| CompileError {
             msg: MsgId("EVAL_WRAPPER"),
@@ -87,7 +95,7 @@ impl VmRunner {
             module_name: &name,
             kind: ModuleKind::HttpService,
             context: ExecContext::Server,
-            compat: CompatMode::DontUse,
+            compat,
             catalog: platform_catalog::catalog(),
             app: rt.app().names(),
             extension: None,

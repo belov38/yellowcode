@@ -8,9 +8,12 @@ use bsl_prim::{Collation, Number, Strength};
 use ibschema::storage::FieldId;
 use query_ir::{ExecError, QValue};
 
-use crate::eval::{cmp, compare};
-use crate::key::{Key, key_of_totals};
-use crate::model::{VALUE_SIZE, key_model, row_model, value_model, vec_block};
+use crate::coll::{ExecCollation, Keys};
+use crate::eval::try_compare;
+use crate::key::{Key, try_key_of_totals};
+use crate::model::{
+    VALUE_SIZE, key_model, row_model, try_charge_totals_key, value_model, vec_block,
+};
 use crate::ops::MemBudget;
 use crate::source::{DataSource, ExecEnv, Row};
 
@@ -86,22 +89,29 @@ impl TotalsTree {
 }
 
 pub fn compare_totals(a: &QValue, b: &QValue, coll: &dyn Collation) -> Ordering {
+    crate::coll::infallible(compare_totals_with(a, b, coll))
+}
+
+pub fn try_compare_totals(
+    a: &QValue,
+    b: &QValue,
+    coll: ExecCollation<'_>,
+) -> Result<Ordering, ExecError> {
+    compare_totals_with(a, b, coll)
+}
+
+fn compare_totals_with<C: Keys>(a: &QValue, b: &QValue, coll: C) -> Result<Ordering, C::Error> {
     match (a, b) {
-        (QValue::String(x), QValue::String(y)) => coll
-            .sort_key(Strength::Secondary, &x.0)
-            .cmp(&coll.sort_key(Strength::Secondary, &y.0)),
-        _ => cmp(a, b, coll),
+        (QValue::String(x), QValue::String(y)) => Ok(coll
+            .key(Strength::Secondary, &x.0)?
+            .cmp(&coll.key(Strength::Secondary, &y.0)?)),
+        _ => crate::eval::compare_cmp_with(a, b, coll),
     }
 }
 
-pub(crate) fn compare_keys(
-    a: &[QValue],
-    b: &[QValue],
-    order: &[OrderKey],
-    coll: &dyn Collation,
-) -> Ordering {
+pub(crate) fn compare_keys(a: &[Key], b: &[Key], order: &[OrderKey]) -> Ordering {
     for (k, (x, y)) in a.iter().zip(b).enumerate() {
-        let o = compare_totals(x, y, coll);
+        let o = x.cmp(y);
         let o = if order.get(k).is_some_and(|k| k.desc) {
             o.reverse()
         } else {
@@ -150,12 +160,13 @@ pub fn build(
     rows: &[Row],
     src: &dyn DataSource,
     env: &ExecEnv<'_>,
+    coll: ExecCollation<'_>,
     mem: &MemBudget<'_>,
 ) -> Result<TotalsTree, ExecError> {
     let n = u32::try_from(rows.len()).map_err(|_| fatal("too many rows"))?;
     let all: Vec<u32> = (0..n).collect();
     mem.grow(vec_block(all.len(), 4))?;
-    let r = run(&spec, rows, Some(src), env, mem, &all, &[], 0);
+    let r = run(&spec, rows, Some(src), env, coll, mem, &all, &[], 0);
     mem.shrink(vec_block(all.len(), 4));
     r
 }
@@ -166,12 +177,13 @@ pub(crate) fn build_sub(
     subset: &[u32],
     ctx: &[(usize, QValue)],
     level: u32,
-    coll: &dyn Collation,
+    coll: ExecCollation<'_>,
     limbs: u64,
 ) -> Result<TotalsTree, ExecError> {
     let cancel = AtomicBool::new(false);
     let env = ExecEnv {
-        collation: coll,
+        collation: &crate::coll::NotConsulted,
+        native: None,
         cancel: &cancel,
         stop: None,
         mem_limit: u64::MAX,
@@ -181,7 +193,7 @@ pub(crate) fn build_sub(
         evictor: None,
     };
     let mem = MemBudget::new(u64::MAX);
-    run(spec, rows, None, &env, &mem, subset, ctx, level)
+    run(spec, rows, None, &env, coll, &mem, subset, ctx, level)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -190,6 +202,7 @@ fn run(
     rows: &[Row],
     src: Option<&dyn DataSource>,
     env: &ExecEnv<'_>,
+    coll: ExecCollation<'_>,
     mem: &MemBudget<'_>,
     subset: &[u32],
     ctx: &[(usize, QValue)],
@@ -201,7 +214,7 @@ fn run(
         src,
         env,
         mem,
-        coll: env.collation,
+        coll,
         records: Vec::new(),
         links: Vec::new(),
         totals: Vec::new(),
@@ -262,7 +275,7 @@ struct Builder<'b, 'e> {
     src: Option<&'b dyn DataSource>,
     env: &'b ExecEnv<'e>,
     mem: &'b MemBudget<'e>,
-    coll: &'b dyn Collation,
+    coll: ExecCollation<'b>,
     records: Vec<Record>,
     links: Vec<u32>,
     totals: Vec<Row>,
@@ -300,6 +313,41 @@ impl Builder<'_, '_> {
         self.mem.grow(n)?;
         self.temp += n;
         Ok(())
+    }
+
+    fn order_keys(&mut self, tuples: &[Vec<QValue>]) -> Result<Vec<Vec<Key>>, ExecError> {
+        self.temp(vec_block(tuples.len(), std::mem::size_of::<Vec<Key>>()))?;
+        let mut out = Vec::with_capacity(tuples.len());
+        for t in tuples {
+            self.temp(vec_block(t.len(), std::mem::size_of::<Key>()))?;
+            let mut keys = Vec::with_capacity(t.len());
+            for v in t {
+                keys.push(self.order_key(v)?);
+            }
+            out.push(keys);
+        }
+        Ok(out)
+    }
+
+    fn order_key(&mut self, v: &QValue) -> Result<Key, ExecError> {
+        let mem = self.mem;
+        let mut paid = 0;
+        let charged = try_charge_totals_key(v, self.coll, &mut |n| {
+            mem.grow(n)?;
+            paid += n;
+            Ok(())
+        });
+        self.temp += paid;
+        charged?;
+        let key = try_key_of_totals(v, self.coll)?;
+        let kept = key_model(&key);
+        if kept > paid {
+            self.temp(kept - paid)?;
+        } else {
+            mem.shrink(paid - kept);
+            self.temp -= paid - kept;
+        }
+        Ok(key)
     }
 
     fn push_links(&mut self, ids: &[u32]) -> Result<Range<u32>, ExecError> {
@@ -404,9 +452,10 @@ impl Builder<'_, '_> {
                         .iter()
                         .map(|(g, row)| record_keys(&spec.order, i, row, self.first_row(&g.rows)))
                         .collect();
+                    let ordered = self.order_keys(&keyed)?;
                     let mut idx: Vec<usize> = (0..made.len()).collect();
-                    idx.sort_by(|a, b| match (keyed.get(*a), keyed.get(*b)) {
-                        (Some(x), Some(y)) => compare_keys(x, y, &spec.order, self.coll),
+                    idx.sort_by(|a, b| match (ordered.get(*a), ordered.get(*b)) {
+                        (Some(x), Some(y)) => compare_keys(x, y, &spec.order),
                         _ => Ordering::Equal,
                     });
                     let mut slots: Vec<Option<(Group, Row)>> = made.into_iter().map(Some).collect();
@@ -450,7 +499,7 @@ impl Builder<'_, '_> {
         for &r in rows {
             self.tick()?;
             let v = value(self, r)?;
-            let k = key_of_totals(&v, self.coll);
+            let k = try_key_of_totals(&v, self.coll)?;
             match index.get(&k) {
                 Some(&g) => {
                     self.temp(4)?;
@@ -566,14 +615,14 @@ impl Builder<'_, '_> {
         for &r in rows {
             self.tick()?;
             let v = self.cell(r, col);
-            let k = key_of_totals(&v, self.coll);
+            let k = try_key_of_totals(&v, self.coll)?;
             if seen.contains(&k) {
                 continue;
             }
             self.temp(key_model(&k) + 48)?;
             seen.insert(k);
             if let Some(p) = self.info(i, &v)?.and_then(|n| n.parent) {
-                let pk = key_of_totals(&p, self.coll);
+                let pk = try_key_of_totals(&p, self.coll)?;
                 if !out.contains(&pk) {
                     self.temp(key_model(&pk) + 48)?;
                     out.insert(pk);
@@ -600,7 +649,7 @@ impl Builder<'_, '_> {
         };
         let parent_itself = match t.folder {
             Some(_) => info.folder,
-            None => parents.contains(&key_of_totals(&v, self.coll)),
+            None => parents.contains(&try_key_of_totals(&v, self.coll)?),
         };
         if parent_itself {
             return Ok(v);
@@ -771,13 +820,14 @@ impl Builder<'_, '_> {
                 group_keys.push(ks);
             }
         }
+        let node_keys = self.order_keys(&node_keys)?;
+        let group_keys = self.order_keys(&group_keys)?;
         let spec_order = &self.spec.order;
-        let coll = self.coll;
         let kid_first = |k: Kid, nodes: &[Node]| match k {
             Kid::Node(n) => nodes.get(n).map_or(usize::MAX, |x| x.first),
             Kid::Own(g) => g,
         };
-        let kid_keys = |k: Kid| -> Option<&Vec<QValue>> {
+        let kid_keys = |k: Kid| -> Option<&Vec<Key>> {
             match k {
                 Kid::Node(n) => node_keys.get(n),
                 Kid::Own(g) => group_keys.get(g),
@@ -787,7 +837,7 @@ impl Builder<'_, '_> {
             kids.sort_by_key(|k| (only && matches!(k, Kid::Own(_)), kid_first(*k, nodes)));
             if sorted {
                 kids.sort_by(|a, b| match (kid_keys(*a), kid_keys(*b)) {
-                    (Some(x), Some(y)) => compare_keys(x, y, spec_order, coll),
+                    (Some(x), Some(y)) => compare_keys(x, y, spec_order),
                     _ => Ordering::Equal,
                 });
             }
@@ -871,7 +921,7 @@ impl Builder<'_, '_> {
         let mut index: HashMap<Key, usize> = HashMap::new();
         let node_bytes = |k: &Key| key_model(k) + 48 + vec_block(1, std::mem::size_of::<Node>());
         for (gi, g) in groups.iter().enumerate() {
-            let k = key_of_totals(&g.value, self.coll);
+            let k = try_key_of_totals(&g.value, self.coll)?;
             let at = match index.get(&k) {
                 Some(&n) => n,
                 None => {
@@ -900,7 +950,7 @@ impl Builder<'_, '_> {
                 };
                 let Some(info) = self.info(i, &v)? else { break };
                 let Some(parent) = info.parent else { break };
-                let pk = key_of_totals(&parent, self.coll);
+                let pk = try_key_of_totals(&parent, self.coll)?;
                 match index.get(&pk) {
                     Some(&p) => {
                         if !is_ancestor_or_self(&nodes, cur, p)
@@ -1012,7 +1062,7 @@ pub(crate) fn total_values(
     spec: &TotalsSpec,
     aggs: &[QValue],
     ctx: &[(usize, QValue)],
-    coll: &dyn Collation,
+    coll: ExecCollation<'_>,
     limbs: u64,
     div_zero: &Cell<bool>,
 ) -> Result<Row, ExecError> {
@@ -1042,7 +1092,7 @@ pub(crate) fn aggregate<'v>(
     aggs: &'v [AggSpec],
     rows: &[u32],
     cell: impl Fn(u32, usize) -> Option<&'v QValue>,
-    coll: &dyn Collation,
+    coll: ExecCollation<'_>,
     limbs: u64,
 ) -> Result<Vec<QValue>, ExecError> {
     let mut out = Vec::with_capacity(aggs.len());
@@ -1061,7 +1111,7 @@ pub(crate) fn aggregate<'v>(
                 let mut seen: HashSet<Key> = HashSet::new();
                 for &r in rows {
                     if let Some(v) = get(r) {
-                        seen.insert(key_of_totals(v, coll));
+                        seen.insert(try_key_of_totals(v, coll)?);
                     }
                 }
                 QValue::Number(Number::from_u64(seen.len() as u64))
@@ -1078,7 +1128,7 @@ pub(crate) fn aggregate<'v>(
                     let QValue::Number(n) = v else {
                         return Err(later("ИТОГИ: СУММА/СРЕДНЕЕ не числа"));
                     };
-                    if a.distinct && !seen.insert(key_of_totals(v, coll)) {
+                    if a.distinct && !seen.insert(try_key_of_totals(v, coll)?) {
                         continue;
                     }
                     count += 1;
@@ -1107,7 +1157,7 @@ pub(crate) fn aggregate<'v>(
                     best = match best {
                         None => Some(v),
                         Some(b) => {
-                            let o = compare_totals(v, b, coll);
+                            let o = try_compare_totals(v, b, coll)?;
                             let better = if a.f == AggFunc::Min {
                                 o == Ordering::Less
                             } else {
@@ -1129,7 +1179,7 @@ pub(crate) fn eval(
     e: &TotalsExpr,
     aggs: &[QValue],
     ctx: &[(usize, QValue)],
-    coll: &dyn Collation,
+    coll: ExecCollation<'_>,
     limbs: u64,
     div_zero: &Cell<bool>,
 ) -> Result<QValue, ExecError> {
@@ -1187,7 +1237,7 @@ pub(crate) fn eval(
                 None => QValue::Null,
             }
         }
-        TotalsExpr::Cmp(op, l, r) => match compare(*op, &ev(l)?, &ev(r)?, coll) {
+        TotalsExpr::Cmp(op, l, r) => match try_compare(*op, &ev(l)?, &ev(r)?, coll)? {
             Some(b) => QValue::Bool(b),
             None => QValue::Null,
         },

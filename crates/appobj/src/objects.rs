@@ -3,7 +3,7 @@ use crate::errors::{self, keys};
 use crate::meta::member_name;
 use crate::model::{ObjId, ObjKind};
 use crate::read::{ReadRow, field_index, is_std_name, read_fresh, tabular_index};
-use crate::readtab::tabular_value;
+use crate::readtab::{retained_bytes, tabular_value_with_live};
 use crate::types::Category;
 use crate::values::refs::{RefValue, empty_ref, ref_value};
 use bsl_prim::fold_name;
@@ -37,6 +37,7 @@ struct State {
     #[allow(dead_code)]
     extra: Value,
     module: Option<ModuleInstanceRef>,
+    attributes: Vec<Option<Value>>,
 }
 
 pub struct ObjectInstance {
@@ -68,17 +69,49 @@ pub fn get_object(ex: &mut Execution, app: &Application, r: RefValue) -> CallRes
     if r.is_empty() {
         return Err(not_selected().into());
     }
-    let arc = app
-        .arc()
-        .ok_or_else(|| internal("the application is gone"))?;
-    let row = read_fresh(app, r)?;
+    let row = read_fresh(ex, app, r)?;
     if !row.found {
         return Ok(Value::Undefined);
     }
+    instance(ex, app, r, row, false)
+}
+
+pub(crate) fn create_item(ex: &mut Execution, app: &Application, obj: ObjId) -> CallResult<Value> {
+    let r = RefValue {
+        obj,
+        id: ibschema::values::RefId::NIL,
+    };
+    let row = read_fresh(ex, app, r)?;
+    instance(ex, app, r, row, true)
+}
+
+fn instance(
+    ex: &mut Execution,
+    app: &Application,
+    r: RefValue,
+    row: ReadRow,
+    is_new: bool,
+) -> CallResult<Value> {
+    let arc = app
+        .arc()
+        .ok_or_else(|| internal("the application is gone"))?;
     let def = app.model().obj(r.obj);
+    let mut live = row
+        .bytes()
+        .saturating_add(crate::read_budget::rc_size::<ObjectInstance>())
+        .saturating_add(crate::read_budget::slots::<Option<Value>>(
+            def.tabular
+                .len()
+                .saturating_add(if is_new { def.fields.len() } else { 0 }),
+        ))
+        .saturating_add(row.version.len() as u64);
+    crate::read_budget::reserve(ex, live)?;
     let mut tabular = Vec::with_capacity(def.tabular.len());
     for i in 0..def.tabular.len() {
-        tabular.push(Some(tabular_value(ex, &arc, r, i)?));
+        let value = tabular_value_with_live(ex, &arc, r, i, live)?;
+        live = live.saturating_add(retained_bytes(&value));
+        crate::read_budget::reserve(ex, live)?;
+        tabular.push(Some(value));
     }
     let ty = app
         .types()
@@ -91,14 +124,19 @@ pub fn get_object(ex: &mut Execution, app: &Application, r: RefValue) -> CallRes
         ty,
         me: me.clone(),
         state: RefCell::new(State {
-            r: Some(r),
+            r: (!is_new).then_some(r),
             row: Rc::new(row),
             tabular,
-            is_new: false,
+            is_new,
             modified: false,
             data_version,
             extra: Value::Undefined,
             module: None,
+            attributes: if is_new {
+                vec![None; def.fields.len()]
+            } else {
+                Vec::new()
+            },
         }),
     });
     if let Some(m) = app
@@ -147,9 +185,25 @@ impl ObjectInstance {
         member_name(platform_catalog::catalog(), t, m).map(|(method, ru, _)| (method, ru))
     }
 
-    fn attr(&self, i: usize) -> CallResult<Value> {
+    fn attr(&self, ex: &mut Execution, i: usize) -> CallResult<Value> {
+        {
+            let state = self.state.borrow();
+            if let Some(Some(value)) = state.attributes.get(i) {
+                crate::read_budget::reserve(
+                    ex,
+                    state
+                        .row
+                        .bytes()
+                        .saturating_add(crate::read_budget::slots::<Option<Value>>(
+                            state.attributes.capacity(),
+                        ))
+                        .saturating_add(crate::read_budget::value_heap(value)),
+                )?;
+                return Ok(value.clone());
+            }
+        }
         let row = self.state.borrow().row.clone();
-        Ok(row.value(&self.app, self.obj, i)?)
+        row.value(ex, &self.app, self.obj, i)
     }
 
     fn section(&self, i: usize) -> CallResult<Value> {
@@ -208,7 +262,7 @@ impl HostObject for ObjectInstance {
 
     fn get(&self, ex: &mut Execution, m: MemberId) -> CallResult<Value> {
         if (ATTR_BASE..TAB_BASE).contains(&m.0) {
-            return self.attr((m.0 - ATTR_BASE) as usize);
+            return self.attr(ex, (m.0 - ATTR_BASE) as usize);
         }
         if (TAB_BASE..VAR_BASE).contains(&m.0) {
             return self.section((m.0 - TAB_BASE) as usize);
@@ -238,7 +292,7 @@ impl HostObject for ObjectInstance {
                     return self.section(i);
                 }
                 match field_index(def, ru) {
-                    Some(i) => self.attr(i),
+                    Some(i) => self.attr(ex, i),
                     None if bsl_prim::fold_name(ru) == "этогруппа" && def.behavior.hierarchical => {
                         Ok(Value::Bool(false))
                     }
@@ -255,6 +309,41 @@ impl HostObject for ObjectInstance {
         if (VAR_BASE..METHOD_BASE).contains(&m.0) {
             let place = self.var_place(m.0)?;
             return place.set(ex, v).map_err(CallError::Exc);
+        }
+        if (ATTR_BASE..TAB_BASE).contains(&m.0) && self.state.borrow().is_new {
+            let index = (m.0 - ATTR_BASE) as usize;
+            let field = self
+                .app
+                .model()
+                .obj(self.obj)
+                .fields
+                .get(index)
+                .ok_or_else(|| internal("no such object field"))?;
+            if field.md.is_some() && crate::session::accepts(&field.types, &v) {
+                let bytes = {
+                    let state = self.state.borrow();
+                    state
+                        .attributes
+                        .iter()
+                        .flatten()
+                        .fold(state.row.bytes(), |sum, value| {
+                            sum.saturating_add(crate::read_budget::value_heap(value))
+                        })
+                        .saturating_add(crate::read_budget::value_heap(&v))
+                        .saturating_add(crate::read_budget::slots::<Option<Value>>(
+                            state.attributes.capacity(),
+                        ))
+                };
+                crate::read_budget::reserve(ex, bytes)?;
+                let mut state = self.state.borrow_mut();
+                let slot = state
+                    .attributes
+                    .get_mut(index)
+                    .ok_or_else(|| internal("no such object attribute"))?;
+                *slot = Some(v);
+                state.modified = true;
+                return Ok(());
+            }
         }
         let name = if (ATTR_BASE..TAB_BASE).contains(&m.0) {
             self.app
@@ -292,6 +381,28 @@ impl HostObject for ObjectInstance {
                 .map_err(CallError::Exc);
         }
         match self.member(ex, m) {
+            Some((true, "Заполнить")) if self.state.borrow().is_new => {
+                let data = crate::meta::arg_value(ex, args, 0)?;
+                if !matches!(data, Value::Undefined) {
+                    return Err(self.not_implemented("Заполнить: данные заполнения").into());
+                }
+                if let Some(module) = self.module()
+                    && module.module().method("ОбработкаЗаполнения").is_some()
+                {
+                    ex.call_weighted(
+                        &module,
+                        "ОбработкаЗаполнения",
+                        &mut [
+                            Arg::Val(data),
+                            Arg::Place(bsl_vm::Place::temp(Value::from(""))),
+                            Arg::Place(bsl_vm::Place::temp(Value::Bool(true))),
+                        ],
+                        EXPORT_CALL_WEIGHT,
+                    )
+                    .map_err(CallError::Exc)?;
+                }
+                Ok(Value::Undefined)
+            }
             Some((true, "ЭтоНовый")) => Ok(Value::Bool(self.state.borrow().is_new)),
             Some((true, "Модифицированность")) => {
                 Ok(Value::Bool(self.state.borrow().modified))

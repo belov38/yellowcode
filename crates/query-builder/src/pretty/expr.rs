@@ -14,6 +14,20 @@ impl L {
         }
     }
 
+    fn predicate_left(&mut self, e: &Expr, bare_cast: bool) {
+        let e = match &e.kind {
+            ExprKind::Paren(inner)
+                if self.ordinary_query
+                    && bare_cast
+                    && matches!(&inner.kind, ExprKind::Cast { deref, .. } if deref.is_empty()) =>
+            {
+                inner
+            }
+            _ => e,
+        };
+        self.operand(e, Prec::Cmp);
+    }
+
     fn string(&mut self, s: &str) {
         let mut q = String::with_capacity(s.len() + 2);
         q.push('"');
@@ -41,6 +55,8 @@ impl L {
     }
 
     pub(crate) fn expr(&mut self, e: &Expr) {
+        let expression_base = self.expression_base;
+        self.expression_base = Some(expression_base.unwrap_or(self.ei));
         let tight = std::mem::take(&mut self.tight);
         match &e.kind {
             ExprKind::Lit(l) => match l {
@@ -61,8 +77,17 @@ impl L {
                 let (ei, sep) = (self.ei, self.sep());
                 if logical {
                     self.ei = ei + 1;
+                    if self.ordinary_query
+                        && level == Prec::And
+                        && matches!(&first.kind, ExprKind::Paren(e) if prec(e) == Prec::Or)
+                    {
+                        self.ei = ei;
+                    }
                 }
                 self.operand(first, min);
+                if logical {
+                    self.ei = ei + 1;
+                }
                 for op in rest {
                     if logical {
                         self.brk(sep);
@@ -75,12 +100,37 @@ impl L {
                         BinOp::And => self.kw(Kw::And),
                         BinOp::Or => self.kw(Kw::Or),
                     }
-                    self.operand(&op.expr, min);
+                    if self.ordinary_query
+                        && op.op == BinOp::And
+                        && matches!(op.expr.kind, ExprKind::Between { not: false, .. })
+                    {
+                        self.tok("(");
+                        self.expr(&op.expr);
+                        self.raw(")");
+                    } else {
+                        self.operand(&op.expr, min);
+                    }
                 }
                 self.ei = ei;
             }
             ExprKind::Unary { op, expr, .. } => match op {
                 UnOp::Not => {
+                    let expr: &Expr = match &expr.kind {
+                        ExprKind::Paren(inner)
+                            if self.ordinary_query
+                                && matches!(
+                                    inner.kind,
+                                    ExprKind::Compare { .. }
+                                        | ExprKind::In { .. }
+                                        | ExprKind::IsNull { .. }
+                                        | ExprKind::Refs { .. }
+                                        | ExprKind::Like { .. }
+                                ) =>
+                        {
+                            inner
+                        }
+                        _ => expr,
+                    };
                     self.kw(Kw::Not);
                     self.glue = matches!(expr.kind, ExprKind::Paren(_));
                     self.ei += 1;
@@ -112,7 +162,7 @@ impl L {
                 rhs,
                 ..
             } => {
-                self.operand(l, Prec::Cmp);
+                self.predicate_left(l, !*not && !*hierarchy);
                 if *not {
                     self.kw(Kw::Not);
                 }
@@ -154,7 +204,7 @@ impl L {
                 }
             }
             ExprKind::Between { l, not, lo, hi, .. } => {
-                self.operand(l, Prec::Cmp);
+                self.predicate_left(l, !*not);
                 if *not {
                     self.kw(Kw::Not);
                 }
@@ -164,7 +214,7 @@ impl L {
                 self.operand(hi, Prec::Add);
             }
             ExprKind::IsNull { l, not, .. } => {
-                self.operand(l, Prec::Cmp);
+                self.predicate_left(l, !*not);
                 self.kw(Kw::Is);
                 if *not {
                     self.kw(Kw::Not);
@@ -184,7 +234,7 @@ impl L {
                 escape,
                 ..
             } => {
-                self.operand(l, Prec::Cmp);
+                self.predicate_left(l, !*not);
                 if *not {
                     self.kw(Kw::Not);
                 }
@@ -275,6 +325,7 @@ impl L {
             }
             ExprKind::Dcs(l) => self.dcs_group(l, true),
         }
+        self.expression_base = expression_base;
     }
 
     fn list(&mut self, es: &[Expr]) {

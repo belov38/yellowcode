@@ -23,6 +23,7 @@ enum Mutation {
         name: String,
     },
     Origin(PathBuf, Origin),
+    Memory(PathBuf, MemorySetting),
     Remove(PathBuf),
 }
 
@@ -34,6 +35,7 @@ impl Mutation {
                 recent.set_inner(old.as_deref(), path, name)?;
             }
             Self::Origin(path, origin) => recent.set_origin_inner(path, *origin)?,
+            Self::Memory(path, memory) => recent.set_memory_inner(path, *memory)?,
             Self::Remove(path) => recent.remove_inner(path),
         }
         Ok(())
@@ -47,6 +49,7 @@ pub struct RecentItem {
     pub name: String,
     pub kind: Kind,
     pub origin: Origin,
+    pub memory: MemorySetting,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -79,6 +82,47 @@ fn kind(path: &Path) -> Option<Kind> {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+pub enum MemorySetting {
+    #[default]
+    Auto,
+    Limited {
+        mib: u64,
+    },
+}
+
+impl<'de> Deserialize<'de> for MemorySetting {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+        enum Input {
+            Auto {},
+            Limited { mib: u64 },
+        }
+        Ok(match Input::deserialize(deserializer)? {
+            Input::Auto {} => Self::Auto,
+            Input::Limited { mib } => Self::Limited { mib },
+        })
+    }
+}
+
+impl MemorySetting {
+    pub fn selection(self) -> memory_budget::desktop::Selection {
+        match self {
+            Self::Auto => memory_budget::desktop::Selection::Unlimited,
+            Self::Limited { mib } => memory_budget::desktop::Selection::MiB(mib),
+        }
+    }
+
+    pub fn resolve(
+        self,
+        facts: memory_budget::desktop::Facts,
+    ) -> Result<memory_budget::desktop::Policy, String> {
+        memory_budget::desktop::resolve(self.selection(), facts).map_err(|e| e.to_string())
+    }
+}
+
 #[derive(Serialize, Deserialize, Default)]
 struct FileForm {
     #[serde(default)]
@@ -97,19 +141,28 @@ enum SavedItem {
         kind: Kind,
         #[serde(default)]
         origin: Origin,
+        #[serde(default)]
+        memory: MemorySetting,
     },
 }
 
 impl SavedItem {
     fn into_item(self) -> RecentItem {
-        let (path, name, kind, origin) = match self {
-            Self::Legacy(path) => (path, String::new(), Kind::Unknown, Origin::OneC),
+        let (path, name, kind, origin, memory) = match self {
+            Self::Legacy(path) => (
+                path,
+                String::new(),
+                Kind::Unknown,
+                Origin::OneC,
+                MemorySetting::Auto,
+            ),
             Self::Named {
                 path,
                 name,
                 kind,
                 origin,
-            } => (path, name, kind, origin),
+                memory,
+            } => (path, name, kind, origin, memory),
         };
         let path = dunce::simplified(Path::new(&path)).to_path_buf();
         let name = if name.is_empty() {
@@ -123,6 +176,7 @@ impl SavedItem {
             name,
             kind,
             origin,
+            memory,
         }
     }
 
@@ -132,6 +186,7 @@ impl SavedItem {
             name: item.name.clone(),
             kind: item.kind,
             origin: item.origin,
+            memory: item.memory,
         })
     }
 }
@@ -290,6 +345,7 @@ impl Recent {
                 exists: path.exists(),
                 kind: Kind::Unknown,
                 origin: Origin::OneC,
+                memory: MemorySetting::Auto,
                 path: path.clone(),
             });
         item.exists = path.exists();
@@ -344,11 +400,13 @@ impl Recent {
             .find(|i| i.path == old || i.path == listed || i.path == path);
         let origin = previous.map_or(Origin::OneC, |i| i.origin);
         let previous_kind = previous.map_or(Kind::Unknown, |i| i.kind);
+        let memory = previous.map_or(MemorySetting::Auto, |i| i.memory);
         let item = RecentItem {
             name: name.to_string(),
             exists: path.exists(),
             kind: kind(&path).unwrap_or(previous_kind),
             origin,
+            memory,
             path: path.clone(),
         };
         let history = self
@@ -363,6 +421,67 @@ impl Recent {
             self.items.insert(index.min(self.items.len()), item);
         }
         Ok(path)
+    }
+
+    pub fn set_memory(
+        &mut self,
+        old: Option<&Path>,
+        path: &Path,
+        name: &str,
+        memory: MemorySetting,
+        facts: memory_budget::desktop::Facts,
+    ) -> Result<PathBuf, String> {
+        memory.resolve(facts)?;
+        let saved = self.set(old, path, name)?;
+        self.set_memory_inner(&saved, memory)?;
+        self.pending.push(Mutation::Memory(saved.clone(), memory));
+        Ok(saved)
+    }
+
+    fn set_memory_inner(&mut self, path: &Path, memory: MemorySetting) -> Result<(), String> {
+        let canonical = key(path);
+        let matches = |item: &RecentItem| {
+            item.path == path || item.path == canonical || key(&item.path) == canonical
+        };
+        if !self.sources.iter().any(matches) {
+            return Err("source registration no longer exists".into());
+        }
+        for item in self
+            .sources
+            .iter_mut()
+            .chain(self.items.iter_mut())
+            .filter(|item| matches(item))
+        {
+            item.memory = memory;
+        }
+        Ok(())
+    }
+
+    pub fn validated_memory_selection(
+        &self,
+        path: &Path,
+        facts: memory_budget::desktop::Facts,
+    ) -> Result<memory_budget::desktop::Selection, String> {
+        let canonical = key(path);
+        let setting = self
+            .sources
+            .iter()
+            .find(|item| {
+                item.path == path || item.path == canonical || key(&item.path) == canonical
+            })
+            .map(|item| item.memory)
+            .unwrap_or_default();
+        setting.resolve(facts)?;
+        Ok(setting.selection())
+    }
+
+    pub fn memory_policy(
+        &self,
+        path: &Path,
+        facts: memory_budget::desktop::Facts,
+    ) -> Result<memory_budget::desktop::Policy, String> {
+        memory_budget::desktop::resolve(self.validated_memory_selection(path, facts)?, facts)
+            .map_err(|e| e.to_string())
     }
 
     pub fn set_origin(&mut self, path: &Path, origin: Origin) -> Result<(), String> {
@@ -418,6 +537,7 @@ impl Recent {
                     name: i.name.clone(),
                     kind: detected.unwrap_or(i.kind),
                     origin: i.origin,
+                    memory: i.memory,
                 }
             })
             .collect()
