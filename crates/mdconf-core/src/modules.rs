@@ -1,8 +1,9 @@
 use crate::entries::EntryData;
 use crate::load::LoadCtx;
 use crate::model::{Child, Diagnostics, MdObject, Module, ModuleKind};
-use crate::{Configuration, Result};
+use crate::{Configuration, Error, Result};
 use brace::{Guid, Node};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 const BOM: &[u8] = b"\xef\xbb\xbf";
@@ -185,6 +186,35 @@ pub(crate) fn slot_kinds(schema: &'static mdschema::Schema, kind: &str) -> Vec<M
         .iter()
         .filter_map(|(_, file)| kind_of_file(file))
         .collect()
+}
+
+pub(crate) fn validate_unique_kinds(cfg: &Configuration) -> Result<()> {
+    fn check(modules: &[Module], owner: impl FnOnce() -> String) -> Result<()> {
+        let mut seen = HashSet::new();
+        for module in modules {
+            if !seen.insert(module.kind) {
+                return Err(Error::Build {
+                    object: owner(),
+                    path: "modules".into(),
+                    what: format!("duplicate module kind {:?}", module.kind),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    check(&cfg.modules, || {
+        format!("Configuration ({})", cfg.header_id)
+    })?;
+    let mut stack: Vec<&MdObject> = cfg.objects.iter().rev().collect();
+    while let Some(object) = stack.pop() {
+        check(&object.modules, || {
+            cfg.full_name(object.id)
+                .map_or_else(|| format!("{} {}", object.id, object.name), str::to_string)
+        })?;
+        stack.extend(object.subsystems.iter().rev());
+    }
+    Ok(())
 }
 
 pub(crate) fn entry_slots<'c>(

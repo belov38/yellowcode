@@ -41,6 +41,10 @@ impl Reader<'_> {
                 self.charge(ex, a.len().max(b.len()) as u64 / 64)?;
                 a == b
             }
+            (Value::Object(object), Some(Atom::Reference(ty, id))) => {
+                crate::HostObject::type_id(object.as_ref()) == *ty
+                    && object.reuse_reference_key() == Some(*id)
+            }
             (Value::Object(object), Some(Atom::Structure(expected))) => {
                 let expected = *expected;
                 let mut count = 0;

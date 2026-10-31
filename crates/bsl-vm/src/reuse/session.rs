@@ -4,6 +4,7 @@ use std::time::Duration;
 
 enum Tag {
     Value(usize),
+    Reference(crate::TypeId, [u8; 16]),
     Structure(usize),
     Field(String),
 }
@@ -94,6 +95,10 @@ fn save(ex: &mut Execution) -> Result<ReuseStore, Exception> {
             .map_err(|_| ex.out_of_memory())?;
         for atom in &key.atoms {
             let value = match atom {
+                Atom::Reference(ty, id) => {
+                    atoms.push(Tag::Reference(*ty, *id));
+                    continue;
+                }
                 Atom::Structure(n) => {
                     atoms.push(Tag::Structure(*n));
                     continue;
@@ -204,6 +209,7 @@ fn load(ex: &mut Execution, store: &ReuseStore) -> Result<(), Exception> {
             .map_err(|_| ex.out_of_memory())?;
         for atom in &entry.atoms {
             atoms.push(match atom {
+                Tag::Reference(ty, id) => Atom::Reference(*ty, *id),
                 Tag::Structure(n) => Atom::Structure(*n),
                 Tag::Field(name) => {
                     let mut copy = String::new();

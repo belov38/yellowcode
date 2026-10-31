@@ -154,6 +154,10 @@ impl SharedObject for SharedRef {
 }
 
 impl HostObject for RefObject {
+    fn reuse_reference_key(&self) -> Option<[u8; 16]> {
+        (!self.is_enum()).then_some(self.r.id.0)
+    }
+
     fn point_in_time_key(&self, ex: &Execution) -> Option<([u8; 16], [u8; 16])> {
         let ty = ex.runtime().types().app_type(self.ty)?;
         Some((ty.guid, *self.r.id.to_uuid().as_bytes()))

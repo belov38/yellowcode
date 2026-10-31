@@ -24,6 +24,7 @@ enum Atom {
     Number(Number),
     String(Str),
     Date(BslDate),
+    Reference(crate::TypeId, [u8; 16]),
     Structure(usize),
     Field(String),
 }
@@ -241,6 +242,13 @@ impl Builder {
                     }
                     Value::Type(_) => return Err(self.invalid(ex, method, param)),
                     Value::Object(object) => {
+                        if let Some(id) = object.reuse_reference_key() {
+                            self.atom(
+                                ex,
+                                Atom::Reference(crate::HostObject::type_id(object.as_ref()), id),
+                            )?;
+                            continue;
+                        }
                         let identity = Rc::as_ptr(&object).cast::<()>();
                         if self.active.contains(&identity) {
                             return Err(self.invalid(ex, method, param));

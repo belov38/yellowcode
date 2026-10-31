@@ -1,6 +1,6 @@
 [package]
 name = "onec-desktop"
-version = "0.1.0-alpha.14"
+version = "0.1.0-alpha.15"
 edition = "2024"
 rust-version = "1.99.1"
 license = "MIT OR Apache-2.0"
@@ -31,7 +31,7 @@ tauri-build = { version = "2.7", features = [] }
 [dev-dependencies]
 tempfile = "3"
 yellowcode-testkit = { path = "../crates/yellowcode-testkit" }
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 cf-fixtures = { path = "../crates/cf-fixtures" }
 
 [target."cfg(windows)".dependencies]

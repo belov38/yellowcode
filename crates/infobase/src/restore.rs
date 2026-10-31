@@ -1156,10 +1156,16 @@ fn stream<R: Read>(
     let mut users_dropped = 0u64;
     let mut key_bytes = 0usize;
     let collate = onecd::IcuCollate;
+    let mut next = reader.next_event()?;
     for folder_name in FOLDERS {
         let head = TableHead::system(&Source::Folder(folder_name.into()))
             .ok_or_else(|| bad("system head"))?;
-        expect(reader.next_event()?, Event::TableStart(head.clone()))?;
+        let expected = Event::TableStart(head.clone());
+        if folder_name == "DepotFiles" && next.as_ref() != Some(&expected) {
+            counts.push(0);
+            continue;
+        }
+        expect(next.take(), expected)?;
         run.table = head.phys_name.clone();
         run.progress(notes, Phase::Read);
         let filename = system_descriptors()?
@@ -1314,11 +1320,13 @@ fn stream<R: Read>(
         }
         reader.set_read_limits(row_limits);
         counts.push(count);
+        drop(keys);
+        next = reader.next_event()?;
     }
     if !locale_seen {
         return Err(bad("missing locale.inf"));
     }
-    let users = match reader.next_event()? {
+    let users = match next {
         Some(Event::TableStart(h)) if h.source == Source::Users || h.source == Source::UsersSpr => {
             h
         }

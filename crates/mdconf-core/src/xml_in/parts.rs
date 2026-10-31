@@ -87,6 +87,11 @@ pub fn load_parts(dir: &Path, o: &PartsOptions) -> Result<PartsDump> {
     }
     cfg.diagnostics.unsupported.extend(diagnostics.unsupported);
     cfg.diagnostics.unsupported.retain(|s|s!="XML objects: parts and configuration settings are not loaded; unsuitable for full dumping");
+    if let Some(file) = origin.get(Path::new("ConfigDumpInfo.xml")) {
+        let info = super::read_named_versions(&cfg, file.bytes(), o)?;
+        origin.set_named_versions(info.versions.clone());
+        cfg.parts.dump_info = Some(info);
+    }
     cfg.xml_origin = Some(origin);
     cfg.profile = LoadProfile::Query;
     Ok(PartsDump {

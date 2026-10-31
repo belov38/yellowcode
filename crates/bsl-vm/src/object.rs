@@ -162,6 +162,10 @@ pub trait HostObject: Any {
         None
     }
 
+    fn reuse_reference_key(&self) -> Option<[u8; 16]> {
+        None
+    }
+
     fn reuse_fields(
         &self,
         _visit: &mut dyn FnMut(&Str, &Value) -> Result<(), Exception>,

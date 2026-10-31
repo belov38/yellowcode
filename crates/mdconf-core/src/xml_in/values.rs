@@ -200,6 +200,9 @@ pub(super) fn property_scoped_as(
     {
         return raw_value(cx, codec, el);
     }
+    if codec == Codec::Purposes && known_purposes(el, &context) {
+        return Value::Xml(xml_elem(el));
+    }
     let mut diagnostics = Diagnostics::default();
     let mut attempt = XCtx {
         schema: cx.schema,
@@ -226,6 +229,7 @@ pub(super) fn property_scoped_as(
         Codec::FoContent => ref_list(&mut attempt, el, "xr:Object", false),
         Codec::FieldList => field_list(el),
         Codec::StdAttrs => std_attrs(&mut attempt, el, depth, &context),
+        Codec::XdtoPackages => xdto_packages(&mut attempt, el, &context),
         _ => None,
     };
     match typed {
@@ -241,6 +245,30 @@ pub(super) fn property_scoped_as(
         }
         _ => raw_value(cx, codec, el),
     }
+}
+
+fn known_purposes(el: &XmlNode, scope: &dyn NamespaceScope) -> bool {
+    const CORE: &str = "http://v8.1c.ru/8.1/data/core";
+    const APP: &str = "http://v8.1c.ru/8.2/managed-application/core";
+    const XSI: &str = "http://www.w3.org/2001/XMLSchema-instance";
+    el.attrs.is_empty()
+        && el.text.as_deref().is_none_or(|text| {
+            text.bytes()
+                .all(|byte| matches!(byte, b' ' | b'\t' | b'\r' | b'\n'))
+        })
+        && el.children.iter().all(|child| {
+            let context = NamespaceContext::extend(child, scope);
+            expanded(&context, &qname(child)) == Some((CORE, "Value"))
+                && child.children.is_empty()
+                && matches!(
+                    child.text.as_deref(),
+                    Some("PlatformApplication" | "MobilePlatformApplication")
+                )
+                && matches!(child.attrs.as_slice(), [attr]
+                    if attr.prefix.is_some()
+                        && expanded(&context, &attr_qname(attr)) == Some((XSI, "type"))
+                        && expanded(&context, &attr.value) == Some((APP, "ApplicationUsePurpose")))
+        })
 }
 
 fn raw_value(cx: &mut XCtx, codec: Codec, el: &XmlNode) -> Value {
@@ -352,6 +380,65 @@ fn field_list(el: &XmlNode) -> Option<Value> {
         .map(|c| (qname(c) == "xr:Field" && is_leaf(c)).then(|| text_of(c)))
         .collect::<Option<Vec<_>>>()
         .map(Value::FieldList)
+}
+
+fn xdto_packages(cx: &mut XCtx, el: &XmlNode, context: &dyn NamespaceScope) -> Option<Value> {
+    const READABLE: &str = "http://v8.1c.ru/8.3/xcf/readable";
+    if !el.attrs.is_empty() || !el.ns_decls.is_empty() || el.text.is_some() {
+        return None;
+    }
+    let tag = qname(el);
+    let mut root = XmlElem::new(&tag);
+    let mut namespace_phase = false;
+    for item in &el.children {
+        if qname(item) != "xr:Item"
+            || !item.attrs.is_empty()
+            || !item.ns_decls.is_empty()
+            || item.text.is_some()
+        {
+            return None;
+        }
+        let [presentation, state, value] = item.children.as_slice() else {
+            return None;
+        };
+        if qname(presentation) != "xr:Presentation"
+            || !is_leaf(presentation)
+            || presentation.text.as_deref().is_some_and(|t| !t.is_empty())
+            || qname(state) != "xr:CheckState"
+            || !is_leaf(state)
+            || state.text.as_deref() != Some("0")
+            || qname(value) != "xr:Value"
+            || !value.ns_decls.is_empty()
+            || !value.children.is_empty()
+        {
+            return None;
+        }
+        let [attribute] = value.attrs.as_slice() else {
+            return None;
+        };
+        if attr_qname(attribute) != "xsi:type" {
+            return None;
+        }
+        let text = text_of(value);
+        let ty = match expanded(context, &attribute.value)? {
+            (READABLE, "MDObjectRef") if !namespace_phase => {
+                md_ref(cx, &text, &tag);
+                "xr:MDObjectRef"
+            }
+            (uri, "string") if uri == mdschema::FixedNamespace::Xs.uri() => {
+                namespace_phase = true;
+                "xs:string"
+            }
+            _ => return None,
+        };
+        root = root.child(
+            XmlElem::new("xr:Item")
+                .child(XmlElem::new("xr:Presentation"))
+                .child(XmlElem::leaf("xr:CheckState", "0"))
+                .child(XmlElem::leaf("xr:Value", &text).with_attr("xsi:type", ty)),
+        );
+    }
+    Some(Value::Xml(root))
 }
 
 fn lstr(el: &XmlNode) -> Option<LocalString> {

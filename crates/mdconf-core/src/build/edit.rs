@@ -105,6 +105,7 @@ pub fn build_edit_with(
     runner: &dyn crate::codec::StageRunner,
 ) -> Result<BuildReport> {
     model.require_full()?;
+    crate::modules::validate_unique_kinds(model)?;
     trace_rss("start");
     let list = base.list()?;
     let mut publication = HashSet::new();
@@ -121,11 +122,32 @@ pub fn build_edit_with(
     if root != model.id {
         return Err(foreign(model.id, root));
     }
-    let (edited_props, base_versions, form_changes) = {
+    let (edited_props, base_versions, form_changes, pinned_root) = {
         let base_model = crate::codec::load_with(base, &LoadOptions::default(), runner)?;
         trace_rss("base loaded");
         if base_model.header_id != model.header_id {
             return Err(foreign(model.header_id, base_model.header_id));
+        }
+        let root_error = |what: &str| Error::Build {
+            object: "Configuration".into(),
+            path: "root".into(),
+            what: what.into(),
+        };
+        let model_root = model
+            .root_info()
+            .ok_or_else(|| root_error("model root source is not retained"))?;
+        let base_root = base_model
+            .root_info()
+            .ok_or_else(|| root_error("base root source is not retained"))?;
+        if model_root != base_root {
+            return Err(root_error(
+                "retained root source or metadata differs from base",
+            ));
+        }
+        if !list.iter().any(|meta| meta == base_root.meta()) {
+            return Err(root_error(
+                "captured publication root metadata differs from retained source",
+            ));
         }
         structure::load_options(model, &base_model)?;
         let prepared = super::form_modules::Prepared::prepare(model, &base_model, base)?;
@@ -137,7 +159,7 @@ pub fn build_edit_with(
             .dump_info
             .as_ref()
             .map(|d| d.versions.clone());
-        (edited, versions, prepared.into_changes())
+        (edited, versions, prepared.into_changes(), model_root)
     };
     trace_rss("base dropped");
     let schema = mdschema::schema()?;
@@ -357,6 +379,9 @@ pub fn build_edit_with(
         };
         match bytes {
             Some(bytes) => sink.put(meta, &bytes)?,
+            None if name == pinned_root.meta().name => {
+                sink.put(pinned_root.meta(), pinned_root.stored())?;
+            }
             None => {
                 let stored = base
                     .stored(name)?
@@ -370,6 +395,7 @@ pub fn build_edit_with(
 }
 
 pub fn set_module(model: &mut Configuration, element: &str, source: Vec<u8>) -> Result<()> {
+    crate::modules::validate_unique_kinds(model)?;
     let refuse = |what: String| Error::Build {
         object: element.to_string(),
         path: "module".into(),

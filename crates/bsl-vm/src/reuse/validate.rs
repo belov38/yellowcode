@@ -20,6 +20,9 @@ fn object(ex: &mut Execution, root: ObjRef, method: &str, param: usize) -> Resul
     let mut next = Some((root, None));
     loop {
         if let Some((object, name)) = next.take() {
+            if object.reuse_reference_key().is_some() {
+                continue;
+            }
             ex.charge(stack.len() as u64)?;
             if stack.iter().any(|frame| Rc::ptr_eq(&frame.object, &object)) {
                 return Err(invalid(

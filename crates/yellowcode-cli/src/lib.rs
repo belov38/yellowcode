@@ -124,7 +124,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    #[command(subcommand, about = "Исследовать резервную копию MS SQL Server")]
+    #[command(
+        subcommand,
+        about = "Исследовать резервную копию MS SQL Server (экспериментально)",
+        after_help = bak::EXPERIMENTAL
+    )]
     Bak(bak::Command),
     #[command(
         about = "Преобразовать конфигурацию или выгрузить информационную базу; исходный файл не меняется"

@@ -17,7 +17,6 @@ rand = "0.9"
 serde_json = "1"
 self_cell = "1"
 base64 = "0.22"
-md-5 = "0.10"
 sha2 = "0.10"
 tempfile = "3"
 memory-budget = { path = "../memory-budget" }
@@ -31,6 +30,7 @@ mdschema = { path = "../mdschema" }
 v8cont = { path = "../v8cont" }
 serde = { version = "1", features = ["derive"] }
 v8users = { path = "../v8users" }
+md5 = { package = "md-5", version = "0.10" }
 
 [lints.clippy]
 dbg_macro = "warn"

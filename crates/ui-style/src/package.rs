@@ -87,7 +87,8 @@ pub fn read_package(bytes: &[u8]) -> Result<Package, String> {
     let mut total = 0usize;
     for i in 0..archive.len() {
         let file = archive.by_index(i).map_err(|e| e.to_string())?;
-        if names.get(i).copied() != Some(file.name()) || !valid_path(file.name()) || file.is_dir() {
+        let name = file.name().map_err(|e| e.to_string())?;
+        if names.get(i).copied() != Some(name.as_ref()) || !valid_path(&name) || file.is_dir() {
             return Err("picture package: invalid member path".into());
         }
         let size = usize::try_from(file.size()).map_err(|_| "picture package: size overflow")?;
@@ -96,14 +97,14 @@ pub fn read_package(bytes: &[u8]) -> Result<Package, String> {
         }
         total = total
             .checked_add(size)
-            .and_then(|n| n.checked_add(file.name().len()))
+            .and_then(|n| n.checked_add(name.len()))
             .filter(|n| *n <= MAX_PACKAGE)
             .ok_or("picture package: total size limit")?;
     }
     let mut files = BTreeMap::new();
     for i in 0..archive.len() {
         let file = archive.by_index(i).map_err(|e| e.to_string())?;
-        let name = file.name().to_owned();
+        let name = file.name().map_err(|e| e.to_string())?.into_owned();
         if files.contains_key(&name) {
             return Err("picture package: duplicate member".into());
         }
@@ -189,7 +190,7 @@ fn variants(xml: &str) -> Result<Vec<Variant>, String> {
             }
             Event::CData(_) => return Err("picture manifest: CDATA unsupported".into()),
             Event::DocType(_) => return Err("picture manifest: DTD unsupported".into()),
-            Event::Text(e) if !e.as_ref().iter().all(u8::is_ascii_whitespace) => {
+            Event::Text(e) if !e.iter().all(u8::is_ascii_whitespace) => {
                 return Err("picture manifest: unexpected text".into());
             }
             Event::Eof => break,

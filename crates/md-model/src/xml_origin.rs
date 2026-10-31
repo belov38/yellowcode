@@ -42,16 +42,24 @@ impl XmlFile {
 pub struct XmlOrigin {
     format: XmlFormat,
     files: BTreeMap<PathBuf, XmlFile>,
+    named_versions: Option<Arc<[(String, brace::Guid)]>>,
 }
 impl XmlOrigin {
     pub fn new(format: XmlFormat) -> Self {
         Self {
             format,
             files: BTreeMap::new(),
+            named_versions: None,
         }
     }
     pub fn format(&self) -> XmlFormat {
         self.format
+    }
+    pub fn set_named_versions(&mut self, versions: Vec<(String, brace::Guid)>) {
+        self.named_versions = Some(versions.into());
+    }
+    pub fn named_versions(&self) -> Option<&[(String, brace::Guid)]> {
+        self.named_versions.as_deref()
     }
     pub fn files(&self) -> impl Iterator<Item = (&Path, &XmlFile)> {
         self.files.iter().map(|(p, f)| (p.as_path(), f))

@@ -1,5 +1,15 @@
 use std::{io::Write, path::PathBuf};
 
+macro_rules! experimental {
+    () => {
+        "Экспериментально: на копиях реальных баз convert пока не работает — CF получить не удаётся, DT и 1CD \
+получаются только для небольших учебных баз без пользователей, типовые конфигурации отклоняются. \
+Сжатые, зашифрованные и многотомные копии не поддерживаются."
+    };
+}
+
+pub(crate) const EXPERIMENTAL: &str = experimental!();
+
 fn parse_backup_set(value: &str) -> Result<u32, String> {
     let position = value
         .parse::<u32>()
@@ -27,7 +37,7 @@ pub(crate) enum Command {
     },
     #[command(
         about = "Восстановить копию через MS SQL Server и сохранить CF, DT или 1CD",
-        after_help = "\
+        after_help = concat!(experimental!(), "\n\n\
 Путь SOURCE должен быть доступен службе SQL Server на машине сервера.\n\
 Если BAK содержит несколько наборов, выберите позицию через --backup-set; по умолчанию используется первая.\n\
 CF содержит основную конфигурацию, но не прикладные данные или расширения.\n\
@@ -41,7 +51,7 @@ DT требует проверенный служебный профиль и ц
 При аварийном прерывании SQL может оставить временную базу и её файлы; имя базы выводится в stderr.\n\
 Для SQL-аутентификации задайте --user и переменную SQLCMDPASSWORD; без --user используется доверенное подключение.\n\
 Нужен Microsoft sqlcmd (ODBC) и права на создание временной базы.\n\
-Пример: yellowcode bak convert 'C:\\Backup\\base.bak' --server localhost --to cf --output base.cf"
+Пример: yellowcode bak convert 'C:\\Backup\\base.bak' --server localhost --to cf --output base.cf")
     )]
     Convert {
         #[arg(help = "Путь к BAK на машине SQL Server")]
