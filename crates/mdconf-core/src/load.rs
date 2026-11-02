@@ -125,6 +125,7 @@ fn shell(kind: MdKind, id: Guid, name: &str) -> MdObject {
         forms: Vec::new(),
         templates: Vec::new(),
         recalculations: Vec::new(),
+        external: Vec::new(),
         subsystems: Vec::new(),
         modules: Vec::new(),
         parts: Default::default(),

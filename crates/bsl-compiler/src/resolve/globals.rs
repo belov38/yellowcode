@@ -9,6 +9,8 @@ use bsl_syntax::ExecContext;
 use bsl_syntax::ast::Ident;
 use platform_catalog::{Avail, Catalog, Context, GlobalMethod, TypeIdx, TypeKind};
 
+const OBSERVED_8327_BUILD: &str = "8.3.27.1859";
+
 pub(crate) fn platform_context(ctx: ExecContext) -> Context {
     match ctx {
         ExecContext::Server => Context::Server,
@@ -43,6 +45,12 @@ impl<'a> Platform<'a> {
         self.ctx == ExecContext::Server
     }
 
+    pub(crate) fn observed_server(self) -> bool {
+        self.on_server()
+            && (self.catalog.platform() != OBSERVED_8327_BUILD
+                || self.compat == CompatMode::DontUse)
+    }
+
     fn available(self, a: Avail) -> bool {
         a.has(platform_context(self.ctx))
     }
@@ -56,11 +64,13 @@ impl<'a> Platform<'a> {
     pub(crate) fn system_enum(self, name: &str) -> Option<TypeIdx> {
         self.catalog.find_types(name).iter().copied().find(|&t| {
             let info = self.catalog.type_info(t);
-            if self.on_server() {
+            if self.observed_server() {
                 match info.server_compile {
                     Some(s) => s.global_value,
                     None => info.kind == TypeKind::Enum && info.enum_global,
                 }
+            } else if self.on_server() {
+                info.kind == TypeKind::Enum && info.enum_global
             } else {
                 info.kind == TypeKind::Enum && (info.enum_global || self.available(info.avail))
             }
@@ -70,8 +80,10 @@ impl<'a> Platform<'a> {
     pub(crate) fn method(self, name: &str) -> Option<(u16, &'a GlobalMethod)> {
         let i = self.catalog.find_global_method_idx(name)?;
         let g = self.catalog.global_methods().get(usize::from(i))?;
-        let known = if self.on_server() {
+        let known = if self.observed_server() {
             g.server_known
+        } else if self.on_server() {
+            self.available(g.info.avail)
         } else {
             (g.builtin && g.server_known) || self.available(g.info.avail)
         };
@@ -81,9 +93,11 @@ impl<'a> Platform<'a> {
     pub(crate) fn new_type(self, name: &str) -> Option<TypeIdx> {
         self.catalog.find_types(name).iter().copied().find(|&t| {
             let info = self.catalog.type_info(t);
-            if self.on_server() {
+            if self.observed_server() {
                 info.server_compile
                     .map_or(info.presentation_ru.is_some(), |s| s.type_known)
+            } else if self.on_server() {
+                info.presentation_ru.is_some()
             } else {
                 self.available(info.avail)
             }

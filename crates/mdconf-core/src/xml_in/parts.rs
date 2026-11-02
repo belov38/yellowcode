@@ -316,6 +316,7 @@ fn object_parts(object: &mut crate::MdObject, parent: &Path, cx: &mut Context<'_
         "Predefined.xml",
         "Content.xml",
         "Schedule.xml",
+        "Aggregates.xml",
     ] {
         let path = ext.join(stem);
         if let Some(file) = cx.origin.get(&path) {
@@ -327,6 +328,10 @@ fn object_parts(object: &mut crate::MdObject, parent: &Path, cx: &mut Context<'_
                 }
                 "Schedule.xml" => {
                     object.kind == crate::MdKind::ScheduledJob && file.part() == XmlPart::Misc
+                }
+                "Aggregates.xml" => {
+                    object.kind == crate::MdKind::AccumulationRegister
+                        && file.part() == XmlPart::Misc
                 }
                 _ => false,
             };
@@ -362,6 +367,14 @@ fn object_parts(object: &mut crate::MdObject, parent: &Path, cx: &mut Context<'_
                         arena.root().ok_or_else(|| err(&path, "missing XML root"))?,
                         &path,
                     )?)
+                }
+                "Aggregates.xml" => {
+                    let root = arena.root().ok_or_else(|| err(&path, "missing XML root"))?;
+                    if root.local() != "AccumulationRegisterAggregates"
+                        || root.ns() != Some("http://v8.1c.ru/8.3/xcf/extrnprops")
+                    {
+                        return Err(err(&path, "wrong aggregates root"));
+                    }
                 }
                 _ => {}
             }

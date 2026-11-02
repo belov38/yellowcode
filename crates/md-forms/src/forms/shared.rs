@@ -439,6 +439,27 @@ impl Walk {
     }
 }
 
+fn external_shared(w: &mut Walk, cx: &LoadCtx, o: &md_model::ExternalObject) {
+    w.name(o.id);
+    let entry = o.id.to_string();
+    let data = cx.entries.doc(&entry);
+    if !cx.opts.keep_source {
+        cx.entries.forget(&entry);
+    }
+    if let Ok(Some(data)) = data
+        && let Some(t) = doc_tree(&data)
+        && let Some(spec) = cx.schema.kind(o.kind.as_str())
+    {
+        w.children(t, &spec.children);
+    }
+    for sub in o.forms.iter().chain(&o.templates) {
+        w.name(sub.id);
+    }
+    for n in &o.nested {
+        external_shared(w, cx, n);
+    }
+}
+
 pub fn form_compat(compatibility_mode: u32, v85: bool) -> FormCompat {
     match (compatibility_mode, v85) {
         (80312, false) => FormCompat::V8_3_12,
@@ -484,6 +505,11 @@ pub fn build(cx: &LoadCtx, cfg: &Configuration) -> Result<Shared> {
         let Some(t) = doc_tree(&data) else { continue };
         w.children(t, &spec.children);
         w.subobjects(cx, spec, kind.as_str(), u, t);
+    }
+    for o in &cfg.objects {
+        for e in &o.external {
+            external_shared(&mut w, cx, e);
+        }
     }
     let names = &cfg.index.names;
     let names_order: Vec<Guid> = w

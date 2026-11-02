@@ -45,7 +45,7 @@ fn typed_schedule(p: &Parsed, source: &Node) -> Schedule {
     }
 }
 
-fn parse_content(cfg: &Configuration, t: &Node) -> R<Vec<ContentItem>> {
+pub(crate) fn parse_content(cfg: &Configuration, t: &Node) -> R<Vec<ContentItem>> {
     let l = t.as_list().ok_or("shape")?;
     if atext(l, 0)? != "2" {
         return Err("version");

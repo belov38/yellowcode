@@ -50,6 +50,47 @@ fn dump_form(
     Ok(())
 }
 
+fn dump_external(
+    cfg: &Configuration,
+    source: &MdObject,
+    o: &md_model::ExternalObject,
+    parent: Option<&md_model::ExternalObject>,
+    sink: &mut DumpSink,
+) -> Result<()> {
+    let dir = paths::external_dir(cfg, source, o, parent);
+    for m in &o.modules {
+        if let Some(file) = file_of_kind(m.kind) {
+            put(sink, format!("{dir}/Ext/{file}"), m)?;
+        }
+    }
+    for c in o
+        .children
+        .iter()
+        .filter(|c| c.tag == md_model::ChildTag::Command)
+    {
+        if let Some(m) = &c.module {
+            put(
+                sink,
+                format!("{dir}/Commands/{}/Ext/CommandModule.bsl", c.name),
+                m,
+            )?;
+        }
+    }
+    for f in &o.forms {
+        if let Some(m) = &f.module {
+            put(
+                sink,
+                format!("{dir}/Forms/{}/Ext/Form/Module.bsl", f.name),
+                m,
+            )?;
+        }
+    }
+    for n in &o.nested {
+        dump_external(cfg, source, n, Some(o), sink)?;
+    }
+    Ok(())
+}
+
 pub fn dump(cfg: &Configuration, sink: &mut DumpSink) -> Result<PartStatus> {
     let mut stack: Vec<&MdObject> = cfg.objects.iter().rev().collect();
     while let Some(o) = stack.pop() {
@@ -81,6 +122,9 @@ pub fn dump(cfg: &Configuration, sink: &mut DumpSink) -> Result<PartStatus> {
             if let Some(f) = file_of_kind(m.kind) {
                 put(sink, format!("{}/Ext/{f}", paths::recalc_dir(cfg, o, r)), m)?;
             }
+        }
+        for external in &o.external {
+            dump_external(cfg, o, external, None, sink)?;
         }
         stack.extend(o.subsystems.iter().rev());
     }

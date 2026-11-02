@@ -99,6 +99,7 @@ impl Paths {
             }
             "Content.xml" if object(MdKind::ExchangePlan) && !nested => XmlPart::Misc,
             "Schedule.xml" if object(MdKind::ScheduledJob) && !nested => XmlPart::Misc,
+            "Aggregates.xml" if object(MdKind::AccumulationRegister) && !nested => XmlPart::Misc,
             "Style.xml" if object(MdKind::Style) && !nested => XmlPart::Misc,
             "Form.xml" | "Form"
                 if (!nested || stem == "Form")

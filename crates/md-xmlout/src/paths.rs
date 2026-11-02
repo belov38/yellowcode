@@ -51,3 +51,21 @@ pub fn recalc_dir(cfg: &Configuration, register: &MdObject, r: &Recalculation) -
 pub fn recalc_path(cfg: &Configuration, register: &MdObject, r: &Recalculation) -> String {
     format!("{}.xml", recalc_dir(cfg, register, r))
 }
+
+pub fn external_dir(
+    cfg: &Configuration,
+    source: &MdObject,
+    o: &md_model::ExternalObject,
+    parent: Option<&md_model::ExternalObject>,
+) -> String {
+    let base = match parent {
+        Some(parent) => format!(
+            "{}/{}/{}",
+            object_dir(cfg, source),
+            parent.kind.folder(),
+            parent.name
+        ),
+        None => object_dir(cfg, source),
+    };
+    format!("{base}/{}/{}", o.kind.folder(), o.name)
+}

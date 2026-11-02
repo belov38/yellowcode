@@ -78,6 +78,7 @@ pub(crate) fn tag_name(t: ChildTag) -> &'static str {
         ChildTag::Parameter => "Parameter",
         ChildTag::IntegrationServiceChannel => "IntegrationServiceChannel",
         ChildTag::Function => "Function",
+        ChildTag::Field => "Field",
     }
 }
 

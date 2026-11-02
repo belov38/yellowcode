@@ -60,6 +60,7 @@ pub struct ManagedTypeOwner {
     pub child: Option<Guid>,
     pub category: &'static str,
     pub recalc: Option<Guid>,
+    pub external: Option<Guid>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -86,6 +87,7 @@ pub struct ManagedIndex {
     pub sub_hdr: GuidMap<Charged<Vec<usize>>>,
     pub subs: GuidMap<BudgetedVec<(SubKind, Guid)>>,
     pub recalcs: GuidMap<BudgetedVec<Guid>>,
+    pub external: GuidMap<BudgetedVec<(crate::ExternalKind, Guid)>>,
     pub nested: BudgetedVec<(Guid, Guid)>,
     pub missing: BudgetedVec<Guid>,
     pub too_deep: BudgetedVec<Guid>,
@@ -105,6 +107,11 @@ impl ManagedIndex {
             && self.sub_hdr.owns_scope(budget)
             && self.subs.owns_scope(budget)
             && self.recalcs.owns_scope(budget)
+            && self.external.owns_scope(budget)
+            && self
+                .external
+                .iter()
+                .all(|(_, v)| v.reservation().budget().same_scope(budget))
             && self.nested.reservation().budget().same_scope(budget)
             && self.missing.reservation().budget().same_scope(budget)
             && self.too_deep.reservation().budget().same_scope(budget)
@@ -155,6 +162,7 @@ impl ManagedIndex {
             sub_hdr: GuidMap::new(budget)?,
             subs: GuidMap::new(budget)?,
             recalcs: GuidMap::new(budget)?,
+            external: GuidMap::new(budget)?,
             nested: BudgetedVec::new(budget, CATEGORY)?,
             missing: BudgetedVec::new(budget, CATEGORY)?,
             too_deep: BudgetedVec::new(budget, CATEGORY)?,
@@ -272,6 +280,7 @@ impl ManagedIndex {
                     child: None,
                     category,
                     recalc: None,
+                    external: None,
                 },
             )?;
         }
@@ -283,6 +292,9 @@ impl ManagedIndex {
             budget,
         )?;
         self.index_subobjects(entries, spec.raw(), kind, uuid, raw, name)?;
+        if kind == MdKind::ExternalDataSource {
+            self.index_external(entries, tree, spec.raw(), uuid, uuid, full.as_str(), name)?;
+        }
         if kind == MdKind::CalculationRegister {
             self.index_recalcs(entries, tree, uuid, full.as_str(), name)?;
         }
@@ -343,6 +355,7 @@ impl ManagedIndex {
                             child,
                             category,
                             recalc: None,
+                            external: None,
                         },
                     )?;
                 }
@@ -353,6 +366,195 @@ impl ManagedIndex {
                     (kind, name, owner),
                     budget,
                 )?;
+            }
+        }
+        Ok(())
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn index_external<S: ManagedEntrySource + ?Sized>(
+        &mut self,
+        entries: &ManagedEntries<'_, S>,
+        tree: Tree<'_>,
+        spec: &'static StaticValue,
+        owner: Guid,
+        source: Guid,
+        full: &str,
+        qualified: &str,
+    ) -> Result<(), S::Error> {
+        let budget = entries.memory_budget();
+        let owner_tag = if owner == source {
+            "ExternalDataSource"
+        } else {
+            "Cube"
+        };
+        let co = text(budget, &[owner_tag, "ChildObjects"])?;
+        for prop in static_schema()
+            .table("xdto_md.json")
+            .and_then(|v| v.get(co.as_str()))
+            .and_then(StaticValue::as_array)
+            .unwrap_or_default()
+        {
+            let tag = prop
+                .as_array()
+                .and_then(|v| v.first())
+                .and_then(StaticValue::as_str)
+                .unwrap_or("");
+            let Some(kind) = crate::ExternalKind::from_name(tag) else {
+                continue;
+            };
+            let Some(class) = spec
+                .get("subobjects")
+                .and_then(|v| v.get(tag))
+                .and_then(StaticValue::as_str)
+            else {
+                continue;
+            };
+            let Some(spec) = kind_spec(tag) else { continue };
+            let Some(items) = tree.find_collection(class) else {
+                continue;
+            };
+            for item in items.iter() {
+                let Some(id) = item.as_guid() else { continue };
+                if self.names.get(&id).is_some() {
+                    let source_text = GuidText::new(source);
+                    let id_text = GuidText::new(id);
+                    self.skipped.try_push(text(
+                        budget,
+                        &[
+                            "ExternalDataSource ",
+                            source_text.as_str()?,
+                            ": ",
+                            tag,
+                            " ",
+                            id_text.as_str()?,
+                            " invalid nested ownership",
+                        ],
+                    )?)?;
+                    continue;
+                }
+                let entry = GuidText::new(id);
+                let data = recoverable_doc(entries, entry.as_str()?)?;
+                let raw = data.as_deref().and_then(doc_tree);
+                let tree = raw.map(|r| Tree::new(tag, r));
+                let valid = tree.filter(|t| {
+                    at(*t, spec.field("header")).is_some_and(|v| v.is_list())
+                        && at(*t, spec.field("uuid")).and_then(Tree::as_guid) == Some(id)
+                });
+                let Some(tree) = valid else {
+                    let source_text = GuidText::new(source);
+                    self.skipped.try_push(text(
+                        budget,
+                        &[
+                            "ExternalDataSource ",
+                            source_text.as_str()?,
+                            ": ",
+                            tag,
+                            " ",
+                            entry.as_str()?,
+                            " missing or malformed entry",
+                        ],
+                    )?)?;
+                    continue;
+                };
+                let name = name_at(tree, spec.field("header"));
+                let fullname = text(budget, &[full, ".", tag, ".", name])?;
+                let typename = text(budget, &[qualified, ".", name])?;
+                self.names.insert(id, text(budget, &[fullname.as_str()])?)?;
+                append(&mut self.external, owner, (kind, id), budget)?;
+                for info in array(spec.field("internal_info")) {
+                    let Some(tid) = at(tree, info.get("type_id")).and_then(Tree::as_guid) else {
+                        continue;
+                    };
+                    let category = info
+                        .get("category")
+                        .and_then(StaticValue::as_str)
+                        .unwrap_or("");
+                    let prefix = static_schema()
+                        .table("gen.json")
+                        .and_then(|v| v.get("nested_gt"))
+                        .and_then(|v| v.get(tag))
+                        .and_then(|v| v.get(category))
+                        .and_then(StaticValue::as_str)
+                        .unwrap_or("");
+                    let value = text(budget, &[prefix, ".", typename.as_str()])?;
+                    self.types.insert(tid, value)?;
+                    self.type_owners.insert(
+                        tid,
+                        ManagedTypeOwner {
+                            object: source,
+                            child: None,
+                            category,
+                            recalc: None,
+                            external: Some(id),
+                        },
+                    )?;
+                }
+                self.index_children(
+                    tree,
+                    pairs(spec.field("children")),
+                    fullname.as_str(),
+                    (MdKind::ExternalDataSource, typename.as_str(), source),
+                    budget,
+                )?;
+                for (tag, class) in pairs(spec.field("subobjects")) {
+                    let sk = match *tag {
+                        "Form" => SubKind::Form,
+                        "Template" => SubKind::Template,
+                        _ => continue,
+                    };
+                    let Some(items) = class.as_str().and_then(|c| tree.find_collection(c)) else {
+                        continue;
+                    };
+                    for item in items.iter() {
+                        let Some(su) = item.as_guid() else { continue };
+                        let entry = GuidText::new(su);
+                        let data = recoverable_doc(entries, entry.as_str()?)?;
+                        let st = data
+                            .as_deref()
+                            .and_then(doc_tree)
+                            .map(|raw| Tree::new("", raw));
+                        let header = match st {
+                            Some(st) => st.header_path(entry.as_str()?, budget, CATEGORY)?,
+                            None => None,
+                        };
+                        let (Some(st), Some(header)) = (st, header) else {
+                            let source_text = GuidText::new(source);
+                            self.skipped.try_push(text(
+                                budget,
+                                &[
+                                    "ExternalDataSource ",
+                                    source_text.as_str()?,
+                                    ": ",
+                                    tag,
+                                    " ",
+                                    entry.as_str()?,
+                                    " missing or malformed entry",
+                                ],
+                            )?)?;
+                            continue;
+                        };
+                        let sn = st
+                            .get(&header)
+                            .and_then(|v| v.get(&[2]))
+                            .and_then(Tree::text)
+                            .unwrap_or("");
+                        self.names
+                            .insert(su, text(budget, &[fullname.as_str(), ".", tag, ".", sn])?)?;
+                        self.sub_hdr.insert(su, header)?;
+                        append(&mut self.subs, id, (sk, su), budget)?;
+                    }
+                }
+                if kind == crate::ExternalKind::Cube {
+                    self.index_external(
+                        entries,
+                        tree,
+                        spec.raw(),
+                        id,
+                        source,
+                        fullname.as_str(),
+                        typename.as_str(),
+                    )?;
+                }
             }
         }
         Ok(())
@@ -411,6 +613,7 @@ impl ManagedIndex {
                         child: None,
                         category,
                         recalc: Some(uuid),
+                        external: None,
                     },
                 )?;
             }
@@ -438,7 +641,11 @@ impl ManagedIndex {
         let budget = entries.memory_budget();
         let tree = Tree::new("", raw);
         for (tag, class) in pairs(spec.get("subobjects")) {
-            if matches!(*tag, "Form" | "Template") || *tag == kind.as_str() {
+            if matches!(*tag, "Form" | "Template")
+                || *tag == kind.as_str()
+                || (kind == MdKind::ExternalDataSource
+                    && crate::ExternalKind::from_name(tag).is_some())
+            {
                 continue;
             }
             if class

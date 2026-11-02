@@ -205,6 +205,15 @@ pub fn run(args: Request, out: &mut dyn Write, err: &mut dyn Write) -> Result<i3
         map.insert("usersDropped".into(), r.users_dropped.into());
         map.insert("sourceSha256".into(), r.source_sha256.clone().into());
         map.insert("seconds".into(), (*seconds).into());
+        map.insert(
+            "indexConstraints".into(),
+            serde_json::json!({
+                "duplicateEntries": r.index_constraints.duplicate_entries,
+                "duplicateGroups": r.index_constraints.duplicate_groups,
+                "indexesWithDuplicates": r.index_constraints.indexes_with_duplicates,
+                "omittedIndexes": r.index_constraints.omitted_indexes,
+            }),
+        );
         map.insert("warningCount".into(), r.warnings.len().into());
         map.insert(
             "warnings".into(),

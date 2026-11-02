@@ -90,12 +90,36 @@ fn indexed_ids(cfg: &Configuration) -> HashSet<brace::Guid> {
     ids.extend(ix.subs.values().flatten().map(|(_, id)| *id));
     ids.extend(ix.recalcs.values().flatten().copied());
     ids.extend(ix.nested.iter().flat_map(|(a, b)| [*a, *b]));
+    ids.extend(external_ids(cfg));
+    ids
+}
+
+fn external_ids(cfg: &Configuration) -> impl Iterator<Item = brace::Guid> + '_ {
+    cfg.index.external.values().flatten().map(|(_, id)| *id)
+}
+
+fn nested_external(cfg: &Configuration) -> HashSet<brace::Guid> {
+    let mut ids: HashSet<brace::Guid> = external_ids(cfg).collect();
+    let mut stack: Vec<&crate::model::ExternalObject> =
+        cfg.objects.iter().flat_map(|o| &o.external).collect();
+    while let Some(o) = stack.pop() {
+        ids.insert(o.id);
+        ids.extend(o.forms.iter().chain(&o.templates).map(|s| s.id));
+        ids.extend(
+            o.children
+                .iter()
+                .filter(|c| c.tag == crate::model::ChildTag::Command)
+                .map(|c| c.id),
+        );
+        stack.extend(&o.nested);
+    }
     ids
 }
 
 fn unvisited_object(
     cfg: &Configuration,
     indexed: &HashSet<brace::Guid>,
+    external: &HashSet<brace::Guid>,
     src: &dyn EntrySource,
     name: &str,
 ) -> Result<&'static str> {
@@ -109,6 +133,9 @@ fn unvisited_object(
         .is_some_and(|(_, spec)| spec.is_none())
     {
         return Ok("no_header_spec");
+    }
+    if external.contains(&id) {
+        return Ok("nested_external");
     }
     let stored = src
         .stored(name)?
@@ -167,6 +194,7 @@ pub(crate) fn check_model(cfg: &Configuration, src: &dyn EntrySource) -> Result<
         let _ = outcome;
     }
     let indexed = indexed_ids(cfg);
+    let external = nested_external(cfg);
     let module_of: BTreeMap<&str, Option<&crate::Module>> =
         slots.iter().map(|(n, m)| (n.as_str(), *m)).collect();
     for name in &names {
@@ -189,7 +217,7 @@ pub(crate) fn check_model(cfg: &Configuration, src: &dyn EntrySource) -> Result<
                         report.note(line);
                     }
                     None => {
-                        let why = unvisited_object(cfg, &indexed, src, name)?;
+                        let why = unvisited_object(cfg, &indexed, &external, src, name)?;
                         unchecked(count, why);
                     }
                 }
@@ -230,7 +258,16 @@ pub(crate) fn check_model(cfg: &Configuration, src: &dyn EntrySource) -> Result<
                         }
                     }
                 }
-                None => unchecked(count, "not_a_slot"),
+                None => {
+                    let owner = name
+                        .split_once('.')
+                        .and_then(|(id, _)| brace::Guid::parse(id));
+                    if owner.is_some_and(|id| external.contains(&id)) {
+                        unchecked(count, "nested_external");
+                    } else {
+                        unchecked(count, "not_a_slot");
+                    }
+                }
             },
             EntryCategory::Other => {
                 unchecked(count, "passthrough");

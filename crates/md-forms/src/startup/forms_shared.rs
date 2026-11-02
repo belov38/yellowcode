@@ -389,6 +389,50 @@ fn named_nodes(
         values,
     })
 }
+fn external_shared<S: ManagedEntrySource + ?Sized>(
+    walk: &mut Walk,
+    entries: &ManagedEntries<'_, S>,
+    index: &ManagedIndex,
+    owner: Guid,
+    keep: bool,
+    remaining: usize,
+) -> Result<(), S::Error> {
+    if remaining == 0 {
+        return Ok(());
+    }
+    let budget = entries.memory_budget();
+    for &(kind, id) in index
+        .external
+        .get(&owner)
+        .map(|v| v.as_slice())
+        .unwrap_or_default()
+    {
+        walk.name(id)?;
+        let entry = GuidText::new(id);
+        let data = recoverable_doc(entries, entry.as_str()?, keep)?;
+        if let Some(data) = data
+            && let EntryData::Brace(doc) = &*data
+            && let Some(spec) = kind_spec(kind.as_str())
+        {
+            walk.children(
+                Tree::new("", &doc.root),
+                pairs(spec.field("children")),
+                budget,
+            )?;
+        }
+        for &(_, id) in index
+            .subs
+            .get(&id)
+            .map(|v| v.as_slice())
+            .unwrap_or_default()
+        {
+            walk.name(id)?;
+        }
+        external_shared(walk, entries, index, id, keep, remaining - 1)?;
+    }
+    Ok(())
+}
+
 #[doc(hidden)]
 pub fn build<S: ManagedEntrySource + ?Sized>(
     entries: &ManagedEntries<'_, S>,
@@ -443,6 +487,16 @@ pub fn build_with_retention<S: ManagedEntrySource + ?Sized>(
         let tree = Tree::new("", &doc.root);
         walk.children(tree, pairs(spec.field("children")), budget)?;
         walk.subobjects(entries, spec.raw(), kind.as_str(), *id, tree, keep)?;
+    }
+    for id in index.order.iter() {
+        external_shared(
+            &mut walk,
+            entries,
+            index,
+            *id,
+            keep,
+            crate::index::MAX_EXTERNAL_DEPTH,
+        )?;
     }
     let mut names_order = BudgetedVec::new(budget, CATEGORY)?;
     let mut names = BudgetedVec::new(budget, CATEGORY)?;

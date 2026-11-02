@@ -17,14 +17,10 @@ pub fn guid_key(s: &str) -> Option<Guid> {
     Guid::parse(s).filter(|g| g.to_string() == s)
 }
 
-fn head(full: &str, segs: usize) -> Option<&str> {
-    let (i, _) = full.match_indices('.').nth(segs.checked_sub(1)?)?;
-    full.get(..i)
-}
-
 fn child_index(cfg: &Configuration) -> HashMap<Guid, Vec<(Guid, &str)>> {
     let ix = &cfg.index;
     let named = |u: &Guid| Some((ix.names.get(u)?.as_str(), *u));
+    let external_ids: HashSet<Guid> = ix.external.values().flatten().map(|(_, id)| *id).collect();
     let owners: HashMap<&str, Guid> = ix.order.iter().filter_map(named).collect();
     let recalc_ids: HashSet<Guid> = ix.recalcs.values().flatten().copied().collect();
     let sub_ids: HashSet<Guid> = ix.subs.values().flatten().map(|(_, id)| *id).collect();
@@ -35,18 +31,37 @@ fn child_index(cfg: &Configuration) -> HashMap<Guid, Vec<(Guid, &str)>> {
             .and_modify(|owner| *owner = (*owner).max(id))
             .or_insert(id);
     }
+    let mut externals: HashMap<&str, Guid> = HashMap::new();
+    for (name, id) in external_ids.iter().filter_map(named) {
+        externals
+            .entry(name)
+            .and_modify(|owner| *owner = (*owner).max(id))
+            .or_insert(id);
+    }
     let mut kids: HashMap<Guid, Vec<(Guid, &str)>> = HashMap::new();
     for (u, full) in &ix.names {
         if ix.objs.contains_key(u)
             || ix.sub_hdr.contains_key(u)
             || sub_ids.contains(u)
             || recalc_ids.contains(u)
+            || external_ids.contains(u)
         {
             continue;
         }
-        let owner = head(full, 4)
-            .and_then(|r| recalcs.get(r))
-            .or_else(|| head(full, 2).and_then(|o| owners.get(o)));
+        let mut parent = full.as_str();
+        let owner = loop {
+            let Some((prefix, _)) = parent.rsplit_once('.') else {
+                break None;
+            };
+            if let Some(owner) = recalcs
+                .get(prefix)
+                .or_else(|| externals.get(prefix))
+                .or_else(|| owners.get(prefix))
+            {
+                break Some(owner);
+            }
+            parent = prefix;
+        };
         if let Some(o) = owner {
             kids.entry(*o).or_default().push((*u, full.as_str()));
         }
@@ -67,7 +82,7 @@ fn generic_subnames(
         .get("subnames")
         .and_then(|s| s.as_object());
     for (kp, d) in table.into_iter().flatten() {
-        let Some((_, child)) = kp.split_once('.') else {
+        let Some((_, child)) = kp.rsplit_once('.') else {
             continue;
         };
         for (suf, nm) in d.as_object().into_iter().flatten() {
@@ -153,7 +168,7 @@ impl<'a> Names<'a> {
             sub = self.sub("Subsystem", suf);
         }
         if sub.is_none()
-            && let Some((_, child)) = kp.split_once('.')
+            && let Some((_, child)) = kp.rsplit_once('.')
         {
             sub = self
                 .generic

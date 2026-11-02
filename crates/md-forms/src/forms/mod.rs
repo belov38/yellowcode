@@ -17,6 +17,7 @@ mod sections;
 pub mod shared;
 pub(crate) mod upgrade;
 pub(crate) mod variant;
+mod visible;
 pub mod wire;
 mod write;
 mod xmlconv;
@@ -35,6 +36,7 @@ pub(crate) use md_model::forms::{FormShared, FormSource};
 pub(crate) use model::{attribute_types, form_from_decoded};
 use shared::Shared;
 pub use variant::Serialization;
+pub use visible::{encode_input_field_visible, set_input_field_visible};
 
 pub use md_graphics::graph::FormSettingsLookup;
 
@@ -121,6 +123,18 @@ fn find_form(cfg: &Configuration, id: Guid) -> Option<&Form> {
             .and_then(|s| s.form.as_ref())
         {
             return Some(f);
+        }
+        let mut external: Vec<_> = o.external.iter().collect();
+        while let Some(e) = external.pop() {
+            if let Some(f) = e
+                .forms
+                .iter()
+                .find(|s| s.id == id)
+                .and_then(|s| s.form.as_ref())
+            {
+                return Some(f);
+            }
+            external.extend(&e.nested);
         }
         stack.extend(&o.subsystems);
     }
@@ -229,6 +243,39 @@ fn put_files(sink: &mut DumpSink, dir: &str, (text, pictures, deferred): FormXml
     Ok(())
 }
 
+fn dump_external(
+    cfg: &Configuration,
+    sink: &mut DumpSink,
+    source: &MdObject,
+    o: &md_model::ExternalObject,
+    parent: Option<&md_model::ExternalObject>,
+) -> Result<()> {
+    let dir = paths::external_dir(cfg, source, o, parent);
+    for s in &o.forms {
+        if let Some(x) = s.form.as_ref().and_then(|f| write_form(cfg, s.id, f)) {
+            put_files(sink, &format!("{dir}/Forms/{}", s.name), x)?;
+        }
+    }
+    for n in &o.nested {
+        dump_external(cfg, sink, source, n, Some(o))?;
+    }
+    Ok(())
+}
+
+fn load_external(
+    cx: &LoadCtx,
+    o: &mut md_model::ExternalObject,
+    shared: &Arc<Shared>,
+    misses: &mut FormMisses,
+) {
+    for f in &mut o.forms {
+        f.form = load_form(cx, f.id, shared, misses);
+    }
+    for n in &mut o.nested {
+        load_external(cx, n, shared, misses);
+    }
+}
+
 #[doc(hidden)]
 pub fn dump(cfg: &Configuration, sink: &mut DumpSink) -> Result<PartStatus> {
     let mut stack: Vec<&MdObject> = cfg.objects.iter().rev().collect();
@@ -242,6 +289,9 @@ pub fn dump(cfg: &Configuration, sink: &mut DumpSink) -> Result<PartStatus> {
             if let Some(x) = s.form.as_ref().and_then(|f| write_form(cfg, s.id, f)) {
                 put_files(sink, &paths::sub_dir(cfg, o, s), x)?;
             }
+        }
+        for e in &o.external {
+            dump_external(cfg, sink, o, e, None)?;
         }
         stack.extend(o.subsystems.iter().rev());
     }
@@ -356,6 +406,9 @@ pub fn load(cx: &LoadCtx, cfg: &mut Configuration) -> Result<()> {
             if f.kind == SubKind::Form {
                 f.form = load_form(cx, f.id, &shared, &mut misses);
             }
+        }
+        for e in &mut o.external {
+            load_external(cx, e, &shared, &mut misses);
         }
         stack.extend(o.subsystems.iter_mut());
     }

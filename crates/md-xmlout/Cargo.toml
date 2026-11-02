@@ -11,8 +11,10 @@ autobenches = false
 
 [dependencies]
 regex = "1"
+tempfile = "3"
 quick-xml = "0.37"
 thiserror = "2"
+unicode-normalization = "0.1"
 md-model = { path = "../md-model" }
 mdschema = { path = "../mdschema" }
 brace = { path = "../brace" }

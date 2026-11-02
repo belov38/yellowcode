@@ -1,4 +1,6 @@
 pub mod generated;
+mod invariants;
+pub use invariants::invariants;
 
 use std::collections::{BTreeMap, HashMap};
 

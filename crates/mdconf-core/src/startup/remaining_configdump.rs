@@ -81,7 +81,7 @@ fn validate(
         if has_suffix(path, suffix)
             || (path.starts_with("Subsystem") && has_suffix("Subsystem", suffix))
             || path
-                .split_once('.')
+                .rsplit_once('.')
                 .is_some_and(|(_, child)| generic(child, suffix))
         {
             continue;

@@ -180,6 +180,7 @@ fn codec(name: Option<&str>) -> Codec {
         Some("tvalue") => Codec::TValue,
         Some("mdlist") => Codec::MdList,
         Some("fieldlist") => Codec::FieldList,
+        Some("fieldlist0") => Codec::FieldList0,
         Some("cplinks") => Codec::CpLinks,
         Some("linkbytype") => Codec::LinkByType,
         Some("cparams") => Codec::CParams,

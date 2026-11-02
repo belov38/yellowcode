@@ -135,6 +135,7 @@ pub fn object(
         children,
         forms: vec![],
         templates: vec![],
+        external: Vec::new(),
         subsystems: vec![],
         recalculations: vec![],
         modules: vec![],

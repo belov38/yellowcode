@@ -212,7 +212,16 @@ impl ManagedValueContext<'_> {
         raw: &Node,
         sets: Option<&dyn DefinedTypeLookup>,
     ) -> Result<ManagedDecodedProperties, BudgetError> {
-        let Some(spec) = super::kind_spec(kind.as_str()) else {
+        self.named_properties_with_sets(kind.as_str(), name, raw, sets)
+    }
+    pub(super) fn named_properties_with_sets(
+        &self,
+        kind: &str,
+        name: &str,
+        raw: &Node,
+        sets: Option<&dyn DefinedTypeLookup>,
+    ) -> Result<ManagedDecodedProperties, BudgetError> {
+        let Some(spec) = super::kind_spec(kind) else {
             return self.no_properties();
         };
         let Some(header) = spec.header() else {
@@ -223,17 +232,17 @@ impl ManagedValueContext<'_> {
         for index in header.iter() {
             path.try_push(index)?
         }
-        let props_type = text(self.memory_budget(), &[kind.as_str(), "Properties"])?;
+        let props_type = text(self.memory_budget(), &[kind, "Properties"])?;
         self.properties(
             PropertyInput {
-                tree: Tree::new(kind.as_str(), raw),
+                tree: Tree::new(kind, raw),
                 header: &path,
                 props_type: props_type.as_str(),
-                tag: kind.as_str(),
+                tag: kind,
                 context: None,
                 specs: spec.field("props").unwrap_or(&NO_PROPS),
-                owner: Some((kind.as_str(), name)),
-                special: Some((kind.as_str(), raw)),
+                owner: Some((kind, name)),
+                special: Some((kind, raw)),
             },
             sets,
         )
@@ -548,6 +557,7 @@ impl ManagedValueContext<'_> {
         match spec.codec() {
             Codec::MdList
             | Codec::FoContent
+            | Codec::FieldList0
             | Codec::FieldList
             | Codec::Picture
             | Codec::Purposes

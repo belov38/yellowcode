@@ -122,7 +122,7 @@ pub fn build_edit_with(
     if root != model.id {
         return Err(foreign(model.id, root));
     }
-    let (edited_props, base_versions, form_changes, pinned_root) = {
+    let (edited_props, base_versions, form_changes, content_changes, pinned_root) = {
         let base_model = crate::codec::load_with(base, &LoadOptions::default(), runner)?;
         trace_rss("base loaded");
         if base_model.header_id != model.header_id {
@@ -150,16 +150,24 @@ pub fn build_edit_with(
             ));
         }
         structure::load_options(model, &base_model)?;
-        let prepared = super::form_modules::Prepared::prepare(model, &base_model, base)?;
+        let prepared = super::form_modules::Prepared::prepare(model, &base_model, base, runner)?;
         prepared.validate_publication(&publication)?;
-        let edited = structure::compare(model, &base_model, &prepared)?;
+        let content = super::exchange_content::Prepared::prepare(model, &base_model, base)?;
+        content.validate_publication(&publication)?;
+        let edited = structure::compare(model, &base_model, &prepared, &content)?;
         trace_rss("compared");
         let versions = base_model
             .parts
             .dump_info
             .as_ref()
             .map(|d| d.versions.clone());
-        (edited, versions, prepared.into_changes(), model_root)
+        (
+            edited,
+            versions,
+            prepared.into_changes(),
+            content.into_changes(),
+            model_root,
+        )
     };
     trace_rss("base dropped");
     let schema = mdschema::schema()?;
@@ -296,13 +304,32 @@ pub fn build_edit_with(
         if puts
             .insert(
                 change.entry.clone(),
-                Put::Changed("form module text".into(), Some(change.stored)),
+                Put::Changed(change.what.into(), Some(change.stored)),
             )
             .is_some()
         {
             return Err(Error::Build {
                 object: change.entry,
-                path: "form module".into(),
+                path: change.path.into(),
+                what: "duplicate prepared put".into(),
+            });
+        }
+    }
+
+    for change in content_changes {
+        if puts
+            .insert(
+                change.entry.clone(),
+                Put::Changed(
+                    "exchange plan content AutoRecord".into(),
+                    Some(change.stored),
+                ),
+            )
+            .is_some()
+        {
+            return Err(Error::Build {
+                object: change.entry,
+                path: "exchange plan content".into(),
                 what: "duplicate prepared put".into(),
             });
         }

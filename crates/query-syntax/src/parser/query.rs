@@ -231,9 +231,13 @@ impl<'t> Parser<'t> {
         let unit = self.word_ident()?;
         let (mut begin, mut end) = (None, None);
         if self.eat_punct(Punct::Comma)?.is_some() {
-            begin = Some(self.expr()?);
             if self.eat_punct(Punct::Comma)?.is_some() {
                 end = Some(self.expr()?);
+            } else {
+                begin = Some(self.expr()?);
+                if self.eat_punct(Punct::Comma)?.is_some() {
+                    end = Some(self.expr()?);
+                }
             }
         }
         self.close_paren()?;

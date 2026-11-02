@@ -10,6 +10,7 @@ pub trait ManagedDumpNames {
     fn names(&self) -> impl Iterator<Item = (Guid, &str)>;
     fn owners(&self) -> &[Guid];
     fn recalculations(&self) -> impl Iterator<Item = Guid>;
+    fn externals(&self) -> impl Iterator<Item = Guid>;
     fn is_object(&self, id: Guid) -> bool;
     fn is_subobject(&self, id: Guid) -> bool;
 }
@@ -44,10 +45,6 @@ fn canonical(raw: &str) -> Option<Guid> {
     }
     Guid::parse(raw)
 }
-fn head(name: &str, count: usize) -> Option<&str> {
-    let (at, _) = name.match_indices('.').nth(count.checked_sub(1)?)?;
-    name.get(..at)
-}
 fn table() -> Option<&'static mdschema::StaticValue> {
     mdschema::static_schema()
         .table("rights/configdump.json")?
@@ -66,7 +63,7 @@ fn subname(path: &str, suffix: &str) -> Option<&'static str> {
 fn generic(child: &str, suffix: &str) -> Option<&'static str> {
     let mut agreed = None;
     for (path, fields) in table()?.as_object()? {
-        if path.split_once('.').map(|(_, tail)| tail) != Some(child) {
+        if path.rsplit_once('.').map(|(_, tail)| tail) != Some(child) {
             continue;
         }
         if let Some(name) = fields.get(suffix).and_then(|v| v.as_str()) {
@@ -114,7 +111,7 @@ fn element(
                 .flatten()
         })
         .or_else(|| {
-            let (_, child) = path.split_once('.')?;
+            let (_, child) = path.rsplit_once('.')?;
             generic(child, suffix)
         })
         .ok_or(Failure::Bad)?;
@@ -162,14 +159,38 @@ fn children<'a>(
     }
     recalc_ids.sort_unstable();
     recalcs.sort_unstable_by(|a, b| a.name.cmp(b.name).then(a.id.cmp(&b.id)));
+    let mut external_ids = BudgetedVec::new(budget, Category::Metadata)?;
+    let mut externals = BudgetedVec::new(budget, Category::Metadata)?;
+    for (ordinal, id) in names.externals().enumerate() {
+        external_ids.try_push(id)?;
+        if let Some(name) = names.name(id) {
+            externals.try_push(Owner { name, id, ordinal })?;
+        }
+    }
+    external_ids.sort_unstable();
+    externals.sort_unstable_by(|a, b| a.name.cmp(b.name).then(a.id.cmp(&b.id)));
     let mut out = BudgetedVec::new(budget, Category::Metadata)?;
     for (id, name) in names.names() {
-        if names.is_object(id) || names.is_subobject(id) || recalc_ids.binary_search(&id).is_ok() {
+        if names.is_object(id)
+            || names.is_subobject(id)
+            || recalc_ids.binary_search(&id).is_ok()
+            || external_ids.binary_search(&id).is_ok()
+        {
             continue;
         }
-        let owner = head(name, 4)
-            .and_then(|prefix| last_owner(&recalcs, prefix))
-            .or_else(|| head(name, 2).and_then(|prefix| last_owner(&owners, prefix)));
+        let mut parent = name;
+        let owner = loop {
+            let Some((prefix, _)) = parent.rsplit_once('.') else {
+                break None;
+            };
+            if let Some(owner) = last_owner(&recalcs, prefix)
+                .or_else(|| last_owner(&externals, prefix))
+                .or_else(|| last_owner(&owners, prefix))
+            {
+                break Some(owner);
+            }
+            parent = prefix;
+        };
         if let Some(owner) = owner {
             out.try_push(Child { owner, id, name })?;
         }

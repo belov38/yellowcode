@@ -1,3 +1,4 @@
+use super::defined_types::DefinedTypeLookup;
 use super::index::{GuidText, text};
 use super::{GuidMap, ManagedDiagnostics, ManagedIndex, ManagedPredefined, ManagedValueContext};
 use crate::{
@@ -243,6 +244,26 @@ impl ManagedObjects {
                 entries.forget(entry.as_str()?);
             }
         }
+        if context.index.external.get(&id).is_some() {
+            let external = external_metadata(
+                entries,
+                context,
+                Some(&self),
+                id,
+                keep_source,
+                diagnostics,
+                crate::index::MAX_EXTERNAL_DEPTH,
+            )?;
+            self = self.install(
+                at,
+                external,
+                |o| o.external.capacity() == 0,
+                |o, external| {
+                    o.external = external;
+                    None
+                },
+            )?;
+        }
         Ok(self.install(
             at,
             recalculations,
@@ -253,6 +274,25 @@ impl ManagedObjects {
             },
         )?)
     }
+    fn install_external<T>(
+        self,
+        at: usize,
+        id: Guid,
+        value: Charged<T>,
+        check: impl FnOnce(&crate::ExternalObject) -> bool,
+        apply: impl FnOnce(&mut crate::ExternalObject, T) -> Option<T>,
+    ) -> Result<Self, BudgetError> {
+        self.install(
+            at,
+            value,
+            |o| find_external(o, id).is_some_and(check),
+            |o, value| match find_external_mut(o, id) {
+                Some(external) => apply(external, value),
+                None => Some(value),
+            },
+        )
+    }
+
     fn install<T>(
         self,
         at: usize,
@@ -397,6 +437,179 @@ fn resolve_mut<'a>(
         objects = &mut object.subsystems;
     }
     None
+}
+
+pub(super) fn external_metadata<S: ManagedEntrySource + ?Sized>(
+    entries: &ManagedEntries<'_, S>,
+    context: &ManagedValueContext<'_>,
+    sets: Option<&dyn DefinedTypeLookup>,
+    owner: Guid,
+    keep: bool,
+    diagnostics: &mut ManagedDiagnostics,
+    remaining: usize,
+) -> Result<Charged<Vec<crate::ExternalObject>>, ManagedObjectsError<S::Error>> {
+    let budget = context.memory_budget();
+    if remaining == 0 {
+        return Ok(vector(budget, 0)?);
+    }
+    let ids = context
+        .index
+        .external
+        .get(&owner)
+        .map(|v| v.as_slice())
+        .unwrap_or_default();
+    let mut output = vector(budget, ids.len())?;
+    for &(kind, id) in ids {
+        let entry = GuidText::new(id);
+        if let Some(data) = entries.doc(entry.as_str()?)?
+            && let EntryData::Brace(doc) = &*data
+        {
+            let full = context
+                .index
+                .names
+                .get(&id)
+                .map(|s| s.as_str())
+                .unwrap_or("");
+            let mut parts = BudgetedVec::new(budget, Category::Metadata)?;
+            for name in full.split('.').skip(1).step_by(2) {
+                if !parts.is_empty() {
+                    parts.try_push(".")?;
+                }
+                parts.try_push(name)?;
+            }
+            let qualified = text(budget, &parts)?;
+            let content = context.named_content_with_sets(
+                kind.as_str(),
+                qualified.as_str(),
+                &doc.root,
+                sets,
+            )?;
+            diagnostics.merge(content.diagnostics)?;
+            let name = text(budget, &[full.rsplit('.').next().unwrap_or("")])?.into_string()?;
+            let listed = context
+                .index
+                .subs
+                .get(&id)
+                .map(|v| v.as_slice())
+                .unwrap_or_default();
+            let mut forms = vector(
+                budget,
+                listed.iter().filter(|(k, _)| *k == SubKind::Form).count(),
+            )?;
+            let mut templates = vector(
+                budget,
+                listed
+                    .iter()
+                    .filter(|(k, _)| *k == SubKind::Template)
+                    .count(),
+            )?;
+            for &(sk, su) in listed {
+                let entry = GuidText::new(su);
+                let name = context
+                    .index
+                    .names
+                    .get(&su)
+                    .map(|s| s.as_str())
+                    .unwrap_or("")
+                    .rsplit('.')
+                    .next()
+                    .unwrap_or("");
+                let name = text(budget, &[name])?.into_string()?;
+                let mut sub = name.map(|name| SubObject {
+                    kind: sk,
+                    id: su,
+                    name,
+                    props: Vec::new(),
+                    module: None,
+                    form: None,
+                    template: None,
+                });
+                if let Some(data) = entries.doc(entry.as_str()?)?
+                    && let EntryData::Brace(doc) = &*data
+                {
+                    let props = context.subobject_properties(sk, su, &doc.root)?;
+                    diagnostics.merge(props.diagnostics)?;
+                    sub = sub.try_zip(props.values)?.map(|(mut sub, props)| {
+                        sub.props = props.props;
+                        sub
+                    });
+                }
+                if !keep {
+                    entries.forget(entry.as_str()?);
+                }
+                match sk {
+                    SubKind::Form => forms = push(forms, sub)?,
+                    SubKind::Template => templates = push(templates, sub)?,
+                }
+            }
+            let nested =
+                external_metadata(entries, context, sets, id, keep, diagnostics, remaining - 1)?;
+            let external = content
+                .values
+                .try_zip(name)?
+                .try_zip(forms)?
+                .try_zip(templates)?
+                .try_zip(nested)?
+                .map(
+                    |((((c, name), forms), templates), nested)| crate::ExternalObject {
+                        kind,
+                        id,
+                        name,
+                        synonym: c.synonym,
+                        comment: c.comment,
+                        props: c.props,
+                        children: c.children,
+                        generated_types: c.generated_types,
+                        nested,
+                        forms,
+                        templates,
+                        modules: Vec::new(),
+                    },
+                );
+            output = push(output, external)?;
+        }
+        if !keep {
+            entries.forget(entry.as_str()?);
+        }
+    }
+    Ok(output)
+}
+
+fn external_order(
+    object: &MdObject,
+    budget: &MemoryBudget,
+) -> Result<BudgetedVec<Guid>, BudgetError> {
+    fn visit(
+        items: &[crate::ExternalObject],
+        ids: &mut BudgetedVec<Guid>,
+    ) -> Result<(), BudgetError> {
+        for object in items {
+            ids.try_push(object.id)?;
+            visit(&object.nested, ids)?;
+        }
+        Ok(())
+    }
+    let mut ids = BudgetedVec::new(budget, Category::Metadata)?;
+    visit(&object.external, &mut ids)?;
+    Ok(ids)
+}
+
+fn find_external(object: &MdObject, id: Guid) -> Option<&crate::ExternalObject> {
+    object.external.iter().find_map(|o| o.find(id))
+}
+fn find_external_mut(object: &mut MdObject, id: Guid) -> Option<&mut crate::ExternalObject> {
+    fn find(items: &mut [crate::ExternalObject], id: Guid) -> Option<&mut crate::ExternalObject> {
+        for o in items {
+            if o.id == id {
+                return Some(o);
+            }
+            if let Some(n) = find(&mut o.nested, id) {
+                return Some(n);
+            }
+        }
+        None
+    }
+    find(&mut object.external, id)
 }
 
 pub struct ManagedObjectIter<'a> {
@@ -563,6 +776,7 @@ fn shell_with_capacity(
             forms,
             templates,
             recalculations: Vec::new(),
+            external: Vec::new(),
             subsystems,
             modules: Vec::new(),
             parts: Default::default(),

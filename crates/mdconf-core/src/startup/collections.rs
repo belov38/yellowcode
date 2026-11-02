@@ -48,6 +48,19 @@ impl ManagedValueContext<'_> {
                 }
                 refs.map(Value::RefList)
             }
+            Codec::FieldList0 => {
+                let list = present!(node.as_list());
+                let n = present!(list.get(1).and_then(count));
+                let items = slice(list, 2, n);
+                let mut fields =
+                    BudgetedVec::try_with_capacity(self.memory_budget(), CATEGORY, items.len())?
+                        .into_charged_vec();
+                for item in items {
+                    let value = present!(self.object_ref(item)?);
+                    fields = append(fields, value.map(|r| r.name))?;
+                }
+                fields.map(Value::FieldList)
+            }
             Codec::FieldList => {
                 let list = present!(node.at(1).and_then(Node::as_list));
                 let n = present!(list.get(1).and_then(count));

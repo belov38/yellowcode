@@ -4,8 +4,8 @@ use crate::paths::{object_dir, recalc_path, sub_dir};
 use crate::{DumpSink, Part, PartStatus, Result, XmlWriter, document};
 use brace::Guid;
 use md_model::{
-    Child, ChildTag, Configuration, GeneratedType, MdObject, Prop, Recalculation, SubKind,
-    SubObject,
+    Child, ChildTag, Configuration, ExternalObject, GeneratedType, MdObject, Prop, Recalculation,
+    SubKind, SubObject,
 };
 use mdschema::{ChildSpec, Schema};
 
@@ -27,6 +27,7 @@ pub fn child_tag_name(tag: ChildTag) -> &'static str {
         ChildTag::Parameter => "Parameter",
         ChildTag::IntegrationServiceChannel => "IntegrationServiceChannel",
         ChildTag::Function => "Function",
+        ChildTag::Field => "Field",
     }
 }
 
@@ -80,6 +81,7 @@ fn object_xml_unscoped(cfg: &Configuration, obj: &MdObject) -> String {
             templates: &obj.templates,
             nested: &obj.subsystems,
             recalculations: &obj.recalculations,
+            external: &obj.external,
         };
         let at = At {
             s,
@@ -235,11 +237,132 @@ fn object_with_subs(
             f(format!("{}.xml", sub_dir(cfg, o, sub)), t)?;
         }
     }
+    for external in &o.external {
+        external_files(cfg, o, external, None, f)?;
+    }
     for r in &o.recalculations {
         let t = try_recalculation_xml(cfg, o, r)?;
         if !t.is_empty() {
             f(recalc_path(cfg, o, r), t)?;
         }
+    }
+    Ok(())
+}
+
+pub fn external_xml(cfg: &Configuration, source: &MdObject, o: &ExternalObject) -> String {
+    try_external_xml(cfg, source, o).unwrap_or_default()
+}
+
+pub fn try_external_xml(
+    cfg: &Configuration,
+    source: &MdObject,
+    o: &ExternalObject,
+) -> Result<String> {
+    let has_envelope = cfg.xml_namespace_envelopes.contains_key(&o.id);
+    crate::namespace_scope::validate_properties(&o.props, has_envelope)?;
+    fn children(items: &[Child], has_envelope: bool) -> Result<()> {
+        for child in items {
+            crate::namespace_scope::validate_properties(&child.props, has_envelope)?;
+            children(&child.children, has_envelope)?;
+        }
+        Ok(())
+    }
+    children(&o.children, has_envelope)?;
+    let text = external_xml_unscoped(cfg, source, o);
+    if text.is_empty() {
+        return Ok(text);
+    }
+    crate::namespace_scope::restore(&text, cfg.xml_namespace_envelopes.get(&o.id))
+}
+
+fn external_xml_unscoped(cfg: &Configuration, source: &MdObject, o: &ExternalObject) -> String {
+    let Ok(s) = mdschema::schema() else {
+        return String::new();
+    };
+    let tag = o.kind.as_str();
+    let Some(spec) = s.kind(tag) else {
+        return String::new();
+    };
+    let mut w = XmlWriter::new(1);
+    w.open(tag, &[("uuid", &o.id.to_string())]);
+    if !o.generated_types.is_empty() {
+        w.open("InternalInfo", &[]);
+        let fullname = cfg
+            .full_name(o.id)
+            .map(|n| {
+                n.split('.')
+                    .skip(1)
+                    .step_by(2)
+                    .collect::<Vec<_>>()
+                    .join(".")
+            })
+            .unwrap_or_else(|| format!("{}.{}", source.name, o.name));
+        for gt in &o.generated_types {
+            let name = format!(
+                "{}.{fullname}",
+                s.nested_gt_prefix(tag, &gt.category).unwrap_or_default()
+            );
+            w.open(
+                "xr:GeneratedType",
+                &[("name", &name), ("category", &gt.category)],
+            );
+            w.leaf("xr:TypeId", Some(&gt.type_id.to_string()), &[]);
+            w.leaf("xr:ValueId", Some(&gt.value_id.to_string()), &[]);
+            w.close("xr:GeneratedType");
+        }
+        w.close("InternalInfo");
+    }
+    write_props(&mut w, &o.props);
+    let listed = Listed {
+        subobjects: &spec.subobjects,
+        forms: &o.forms,
+        templates: &o.templates,
+        nested: &[],
+        recalculations: &[],
+        external: &o.nested,
+    };
+    let at = At {
+        s,
+        kind: tag,
+        objname: &o.name,
+    };
+    write_children(
+        &mut w,
+        &at,
+        &spec.children,
+        &format!("{tag}ChildObjects"),
+        &o.children,
+        &listed,
+    );
+    w.close(tag);
+    document(&w)
+}
+
+fn external_files(
+    cfg: &Configuration,
+    source: &MdObject,
+    o: &ExternalObject,
+    parent: Option<&ExternalObject>,
+    f: &mut dyn FnMut(String, String) -> Result<()>,
+) -> Result<()> {
+    let text = try_external_xml(cfg, source, o)?;
+    if text.is_empty() {
+        return Ok(());
+    }
+    let dir = crate::paths::external_dir(cfg, source, o, parent);
+    f(format!("{dir}.xml"), text)?;
+    for sub in o.forms.iter().chain(&o.templates) {
+        let folder = match sub.kind {
+            SubKind::Form => "Forms",
+            SubKind::Template => "Templates",
+        };
+        let t = try_subobject_xml(cfg, sub)?;
+        if !t.is_empty() {
+            f(format!("{dir}/{folder}/{}.xml", sub.name), t)?;
+        }
+    }
+    for n in &o.nested {
+        external_files(cfg, source, n, Some(o), f)?;
     }
     Ok(())
 }
@@ -258,6 +381,7 @@ struct Listed<'m> {
     templates: &'m [SubObject],
     nested: &'m [MdObject],
     recalculations: &'m [Recalculation],
+    external: &'m [ExternalObject],
 }
 
 impl Listed<'_> {
@@ -267,6 +391,7 @@ impl Listed<'_> {
         templates: &[],
         nested: &[],
         recalculations: &[],
+        external: &[],
     };
 }
 
@@ -376,7 +501,12 @@ fn write_children(
             } else if tag == "Template" {
                 listed.templates.iter().map(|f| f.name.as_str()).collect()
             } else {
-                Vec::new()
+                listed
+                    .external
+                    .iter()
+                    .filter(|o| o.kind.as_str() == tag)
+                    .map(|o| o.name.as_str())
+                    .collect()
             };
             parts.push((tag, Items::Names(names)));
         }

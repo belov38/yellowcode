@@ -25,6 +25,10 @@ pub struct ValueChange {
 #[derive(Debug, Deserialize)]
 pub struct Rules {
     pub headers: Header,
+    pub rights: Header,
+    pub schedule: Header,
+    pub exchange_content: Header,
+    pub forms_nonvisual: Header,
     pub defaults: Vec<DefaultProperty>,
     pub changes: Vec<ValueChange>,
 }

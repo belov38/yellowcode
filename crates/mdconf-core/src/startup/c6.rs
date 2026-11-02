@@ -71,6 +71,61 @@ impl ManagedConfigurationGraph {
                 }
             }
         }
+        for at in 0..self.graph.objects.locations.len() {
+            let external_ids = super::external_order(
+                self.graph
+                    .objects
+                    .resolve(at)
+                    .ok_or(BudgetError::Overflow)?,
+                budget,
+            )?;
+            for &id in external_ids.iter() {
+                let Some(o) = self
+                    .graph
+                    .objects
+                    .resolve(at)
+                    .and_then(|o| super::find_external(o, id))
+                else {
+                    continue;
+                };
+                let count = o.templates.len();
+                for sub_at in 0..count {
+                    let template = self
+                        .graph
+                        .objects
+                        .resolve(at)
+                        .and_then(|o| super::find_external(o, id))
+                        .and_then(|o| o.templates.get(sub_at))
+                        .ok_or(BudgetError::Overflow)?;
+                    if let Some(value) = codecs.template(
+                        entries,
+                        index,
+                        template.id,
+                        false,
+                        keep,
+                        &mut self.graph.diagnostics,
+                    )? {
+                        self.graph.objects = self.graph.objects.install_external(
+                            at,
+                            id,
+                            value,
+                            |o| {
+                                o.templates
+                                    .get(sub_at)
+                                    .is_some_and(|s| s.template.is_none())
+                            },
+                            |o, value| match o.templates.get_mut(sub_at) {
+                                Some(s) => {
+                                    s.template = Some(value);
+                                    None
+                                }
+                                None => Some(value),
+                            },
+                        )?;
+                    }
+                }
+            }
+        }
         pending.reverse();
         while let Some((at, sub, value)) = pending.pop() {
             self.graph.objects = self.graph.objects.install_template(at, sub, value)?;

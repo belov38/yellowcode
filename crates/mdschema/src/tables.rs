@@ -31,6 +31,7 @@ pub struct Schema {
     pub(crate) kind_order: Vec<String>,
     pub(crate) gentypes: FactMap<String, Vec<String>>,
     pub(crate) gt_name: FactMap<String, String>,
+    pub(crate) nested_gt: FactMap<String, FactMap<String, String>>,
     pub(crate) cfg_classes: Vec<String>,
     pub(crate) ui_tables: UiTables,
     pub(crate) std_pictures: FactMap<String, String>,
@@ -73,6 +74,7 @@ struct GenFile {
     folders: Vec<(String, String)>,
     gentypes: FactMap<String, Vec<String>>,
     gt_name: FactMap<String, String>,
+    nested_gt: FactMap<String, FactMap<String, String>>,
     cfg_classes: Vec<String>,
 }
 
@@ -215,6 +217,7 @@ impl Schema {
             kind_order,
             gentypes: gen_file.gentypes,
             gt_name: gen_file.gt_name,
+            nested_gt: gen_file.nested_gt,
             cfg_classes: gen_file.cfg_classes,
             ui_tables,
             std_pictures: pics.std_pictures,
@@ -321,6 +324,10 @@ impl Schema {
 
     pub fn gt_name(&self, category: &str) -> Option<&str> {
         self.gt_name.get(category).map(String::as_str)
+    }
+
+    pub fn nested_gt_prefix(&self, kind: &str, category: &str) -> Option<&str> {
+        self.nested_gt.get(kind)?.get(category).map(String::as_str)
     }
 
     pub fn cfg_classes(&self) -> &[String] {

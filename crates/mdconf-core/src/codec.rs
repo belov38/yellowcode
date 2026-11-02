@@ -21,6 +21,10 @@ pub trait StageRunner {
     fn forms(&self, cx: &LoadCtx<'_>, cfg: &mut Configuration) -> Result<()>;
     fn templates(&self, cx: &LoadCtx<'_>, cfg: &mut Configuration) -> Result<()>;
     fn flowcharts(&self, cx: &LoadCtx<'_>, cfg: &mut Configuration) -> Result<()>;
+    fn edit_form_body(&self, entry: &str, raw: &[u8], wanted: &brace::Doc) -> Result<Vec<u8>> {
+        let _ = (raw, wanted);
+        Err(crate::build::form_body_refusal(entry))
+    }
 }
 
 pub struct NoCodecs;

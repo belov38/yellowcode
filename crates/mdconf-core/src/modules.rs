@@ -174,8 +174,36 @@ fn load_object(cx: &LoadCtx, o: &mut MdObject, diag: &mut Diagnostics) -> Result
     for f in &mut o.forms {
         f.module = form_module(cx, f.id, diag)?;
     }
+    for external in &mut o.external {
+        load_external(cx, external, diag)?;
+    }
     for s in &mut o.subsystems {
         load_object(cx, s, diag)?;
+    }
+    Ok(())
+}
+
+fn load_external(
+    cx: &LoadCtx,
+    o: &mut crate::model::ExternalObject,
+    diag: &mut Diagnostics,
+) -> Result<()> {
+    for (suf, file) in cx.schema.modules(o.kind.as_str()) {
+        let Some(kind) = kind_of_file(file) else {
+            continue;
+        };
+        if let Some(source) = module_text(cx, &format!("{}.{suf}", o.id))? {
+            o.modules.push(Module { kind, source });
+        }
+    }
+    for c in &mut o.children {
+        load_child(cx, c)?;
+    }
+    for f in &mut o.forms {
+        f.module = form_module(cx, f.id, diag)?;
+    }
+    for n in &mut o.nested {
+        load_external(cx, n, diag)?;
     }
     Ok(())
 }

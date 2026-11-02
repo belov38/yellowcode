@@ -7,8 +7,8 @@ use super::types::type_desc;
 use crate::entries::{Entries, EntryData};
 use crate::load::LoadCtx;
 use crate::model::{
-    Child, ChildTag, Diagnostics, GeneratedType, LocalString, MdObject, Prop, Recalculation,
-    SubKind, TypeDescription, TypeRef, TypedValue, Value,
+    Child, ChildTag, Diagnostics, ExternalObject, GeneratedType, LocalString, MdObject, Prop,
+    Recalculation, SubKind, TypeDescription, TypeRef, TypedValue, Value,
 };
 use crate::{Configuration, Result};
 use brace::{Guid, Node};
@@ -34,6 +34,7 @@ pub(crate) fn child_tag(name: &str) -> Option<ChildTag> {
         "Parameter" => ChildTag::Parameter,
         "IntegrationServiceChannel" => ChildTag::IntegrationServiceChannel,
         "Function" => ChildTag::Function,
+        "Field" => ChildTag::Field,
         _ => return None,
     })
 }
@@ -947,11 +948,153 @@ impl<'c, 'a, 'v> Decoder<'c, 'a, 'v> {
             }
             let recalcs = self.recalculations(e, o, diag, forget)?;
             o.recalculations = recalcs;
+            if o.kind == MdKind::ExternalDataSource {
+                let visitor = self.visitor.take();
+                let external =
+                    self.external_objects(e, o.id, diag, forget, crate::index::MAX_EXTERNAL_DEPTH);
+                self.visitor = visitor;
+                o.external = external?;
+            }
         }
         for n in &mut o.subsystems {
             self.object(e, n, diag, forget)?;
         }
         Ok(())
+    }
+
+    fn external_objects(
+        &mut self,
+        e: &Entries,
+        owner: Guid,
+        diag: &mut Diagnostics,
+        forget: bool,
+        remaining: usize,
+    ) -> Result<Vec<ExternalObject>> {
+        if remaining == 0 {
+            return Ok(Vec::new());
+        }
+        let ids = self
+            .ctx
+            .index
+            .external
+            .get(&owner)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let mut out = Vec::with_capacity(ids.len());
+        let s = self.ctx.schema;
+        for &(kind, id) in ids {
+            let tag = kind.as_str();
+            let Some(spec) = s.kind(tag) else { continue };
+            let Some(hdr) = spec.header.as_deref() else {
+                continue;
+            };
+            let entry = id.to_string();
+            if let Some(data) = e.doc(&entry)?
+                && let EntryData::Brace(doc) = &*data
+            {
+                self.identity = PropertyIdentity {
+                    id,
+                    entry: id,
+                    domain: TreeDomain::Original,
+                };
+                let full = self
+                    .ctx
+                    .index
+                    .names
+                    .get(&id)
+                    .map(String::as_str)
+                    .unwrap_or_default();
+                let qualified = full
+                    .split('.')
+                    .skip(1)
+                    .step_by(2)
+                    .collect::<Vec<_>>()
+                    .join(".");
+                let object = Owner {
+                    kind: tag.into(),
+                    name: qualified,
+                };
+                let props_type = format!("{tag}Properties");
+                let d = self.props(
+                    &doc.root,
+                    &PropsOf {
+                        identity: self.identity,
+                        special: None,
+                        spec_props: &spec.props,
+                        hdr,
+                        props_type: &props_type,
+                        tag,
+                        context: None,
+                        owner: Some(&object),
+                    },
+                    diag,
+                );
+                let children = self.children(
+                    &doc.root,
+                    &spec.children,
+                    &spec.subobjects,
+                    &object,
+                    &format!("{tag}ChildObjects"),
+                    None,
+                    diag,
+                );
+                let mut external = ExternalObject {
+                    kind,
+                    id,
+                    name: d.name,
+                    synonym: d.synonym,
+                    comment: d.comment,
+                    props: d.props,
+                    generated_types: generated_types(
+                        &doc.root,
+                        &spec.internal_info,
+                        s.gen_types(tag),
+                    ),
+                    children,
+                    nested: Vec::new(),
+                    modules: Vec::new(),
+                    forms: Vec::new(),
+                    templates: Vec::new(),
+                };
+                for &(sk, su) in self
+                    .ctx
+                    .index
+                    .subs
+                    .get(&id)
+                    .map(Vec::as_slice)
+                    .unwrap_or_default()
+                {
+                    let name = self
+                        .ctx
+                        .index
+                        .names
+                        .get(&su)
+                        .and_then(|n| n.rsplit('.').next())
+                        .unwrap_or_default()
+                        .into();
+                    let mut sub = crate::model::SubObject {
+                        kind: sk,
+                        id: su,
+                        name,
+                        props: Vec::new(),
+                        module: None,
+                        form: None,
+                        template: None,
+                    };
+                    self.subobject(e, &mut sub, diag, forget)?;
+                    match sk {
+                        SubKind::Form => external.forms.push(sub),
+                        SubKind::Template => external.templates.push(sub),
+                    }
+                }
+                external.nested = self.external_objects(e, id, diag, forget, remaining - 1)?;
+                out.push(external);
+            }
+            if forget {
+                e.forget(&entry);
+            }
+        }
+        Ok(out)
     }
 
     fn recalculations(

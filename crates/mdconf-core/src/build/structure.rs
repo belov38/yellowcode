@@ -9,6 +9,14 @@ const LISTED: usize = 20;
 const FORM: &str = "edit of the form body: not written before C7 Task 6 (a model loaded with private_forms \
                     also differs here: build_edit needs LoadOptions::default())";
 
+pub(crate) fn form_body_refusal(object: &str) -> Error {
+    Error::Build {
+        object: object.into(),
+        path: "form".into(),
+        what: FORM.into(),
+    }
+}
+
 pub(crate) type EditedProps = HashSet<(Guid, String)>;
 
 pub(crate) fn load_options(model: &Configuration, base: &Configuration) -> Result<()> {
@@ -33,10 +41,12 @@ pub(crate) fn compare(
     model: &Configuration,
     base: &Configuration,
     prepared: &super::form_modules::Prepared<'_>,
+    content: &super::exchange_content::Prepared<'_>,
 ) -> Result<EditedProps> {
     let mut d = Diffs {
         cfg: model,
         prepared,
+        content,
         schema: mdschema::schema()?,
         first: None,
         lines: Vec::new(),
@@ -59,6 +69,7 @@ pub(crate) fn compare(
 
 struct Diffs<'c, 'p> {
     prepared: &'p super::form_modules::Prepared<'c>,
+    content: &'p super::exchange_content::Prepared<'c>,
     cfg: &'c Configuration,
     schema: &'static mdschema::Schema,
     first: Option<(String, String, String)>,
@@ -257,9 +268,10 @@ impl Diffs<'_, '_> {
             forms,
             templates,
             recalculations,
+            external,
             subsystems,
             modules,
-            parts,
+            parts: _,
             form,
             template,
             flowchart,
@@ -310,6 +322,13 @@ impl Diffs<'_, '_> {
                 self.recalc(r, q);
             }
         }
+        if external != &b.external {
+            self.note(
+                &full,
+                "external",
+                "editing nested external objects is unsupported (C9)".into(),
+            );
+        }
         self.objects(&full, "subsystems", subsystems, &b.subsystems);
         self.module_kinds(&full, modules, &b.modules);
         let slots = crate::modules::slot_kinds(self.schema, kind.as_str());
@@ -325,8 +344,8 @@ impl Diffs<'_, '_> {
                 );
             }
         }
-        self.object_parts(&full, parts, &b.parts);
-        if *form != b.form {
+        self.object_parts(&full, o, b);
+        if *form != b.form && !self.prepared.permits_common_body(o, b) {
             self.note(&full, "form", FORM.into());
         }
         if *template != b.template {
@@ -354,7 +373,8 @@ impl Diffs<'_, '_> {
         }
     }
 
-    fn object_parts(&mut self, full: &str, m: &ObjectParts, b: &ObjectParts) {
+    fn object_parts(&mut self, full: &str, object: &MdObject, original: &MdObject) {
+        let (m, b) = (&object.parts, &original.parts);
         let ObjectParts {
             rights,
             predefined,
@@ -380,10 +400,6 @@ impl Diffs<'_, '_> {
             ("parts.form_help", *form_help != b.form_help),
             ("parts.picture", *picture != b.picture),
             ("parts.schedule", *schedule != b.schedule),
-            (
-                "parts.exchange_content",
-                *exchange_content != b.exchange_content,
-            ),
             ("parts.style", *style != b.style),
             ("parts.binary_modules", *binary_modules != b.binary_modules),
             ("parts.ws_definition", *ws_definition != b.ws_definition),
@@ -393,6 +409,13 @@ impl Diffs<'_, '_> {
             if differ {
                 self.note(full, path, task7(path));
             }
+        }
+        if *exchange_content != b.exchange_content && !self.content.permits(object, original) {
+            self.note(
+                full,
+                "parts.exchange_content",
+                super::exchange_content::UNSUPPORTED.into(),
+            );
         }
     }
 
@@ -474,7 +497,7 @@ impl Diffs<'_, '_> {
             };
             self.note(&full, "module", what);
         }
-        if *form != b.form {
+        if *form != b.form && !self.prepared.permits_sub_body(owner, original_owner, s, b) {
             self.note(&full, "form", FORM.into());
         }
         if *template != b.template {

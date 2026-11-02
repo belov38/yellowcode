@@ -51,6 +51,7 @@ pub struct MdObject {
     pub forms: Vec<SubObject>,
     pub templates: Vec<SubObject>,
     pub recalculations: Vec<Recalculation>,
+    pub external: Vec<ExternalObject>,
     pub subsystems: Vec<MdObject>,
     pub modules: Vec<Module>,
     pub parts: crate::parts::ObjectParts,
@@ -185,6 +186,102 @@ pub enum ChildTag {
     Parameter,
     IntegrationServiceChannel,
     Function,
+    Field,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ExternalKind {
+    Table,
+    Cube,
+    DimensionTable,
+}
+
+impl ExternalKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Table => "Table",
+            Self::Cube => "Cube",
+            Self::DimensionTable => "DimensionTable",
+        }
+    }
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "Table" => Some(Self::Table),
+            "Cube" => Some(Self::Cube),
+            "DimensionTable" => Some(Self::DimensionTable),
+            _ => None,
+        }
+    }
+    pub fn folder(self) -> &'static str {
+        match self {
+            Self::Table => "Tables",
+            Self::Cube => "Cubes",
+            Self::DimensionTable => "DimensionTables",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExternalObject {
+    pub kind: ExternalKind,
+    pub id: Guid,
+    pub name: String,
+    pub synonym: LocalString,
+    pub comment: String,
+    pub generated_types: Vec<GeneratedType>,
+    pub props: Vec<Prop>,
+    pub children: Vec<Child>,
+    pub nested: Vec<ExternalObject>,
+    pub modules: Vec<Module>,
+    pub forms: Vec<SubObject>,
+    pub templates: Vec<SubObject>,
+}
+
+impl ExternalObject {
+    pub fn prop(&self, name: &str) -> Option<&Value> {
+        find_prop(&self.props, name)
+    }
+    pub fn fields(&self) -> impl Iterator<Item = &Child> {
+        self.children.iter().filter(|c| c.tag == ChildTag::Field)
+    }
+    pub fn dimensions(&self) -> impl Iterator<Item = &Child> {
+        self.children
+            .iter()
+            .filter(|c| c.tag == ChildTag::Dimension)
+    }
+    pub fn resources(&self) -> impl Iterator<Item = &Child> {
+        self.children.iter().filter(|c| c.tag == ChildTag::Resource)
+    }
+    pub fn module(&self, kind: ModuleKind) -> Option<&Module> {
+        self.modules.iter().find(|m| m.kind == kind)
+    }
+    pub fn find(&self, id: Guid) -> Option<&Self> {
+        if self.id == id {
+            return Some(self);
+        }
+        self.nested.iter().find_map(|o| o.find(id))
+    }
+}
+
+impl MdObject {
+    pub fn tables(&self) -> impl Iterator<Item = &ExternalObject> {
+        self.external
+            .iter()
+            .filter(|o| o.kind == ExternalKind::Table)
+    }
+    pub fn cubes(&self) -> impl Iterator<Item = &ExternalObject> {
+        self.external
+            .iter()
+            .filter(|o| o.kind == ExternalKind::Cube)
+    }
+    pub fn functions(&self) -> impl Iterator<Item = &Child> {
+        self.with_tag(ChildTag::Function)
+    }
+    pub fn external(&self, kind: ExternalKind, name: &str) -> Option<&ExternalObject> {
+        self.external
+            .iter()
+            .find(|o| o.kind == kind && o.name == name)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -240,6 +337,7 @@ pub struct GeneratedTypeRef<'a> {
     pub child: Option<&'a Child>,
     pub category: &'a str,
     pub recalculation: Option<&'a Recalculation>,
+    pub external: Option<&'a ExternalObject>,
     pub name: String,
 }
 

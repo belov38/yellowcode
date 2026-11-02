@@ -1,6 +1,6 @@
 use crate::entries::{Entries, EntryData, root_uuid};
 use crate::error::{Error, Result};
-use crate::model::SubKind;
+use crate::model::{ExternalKind, SubKind};
 use crate::objects::overlay;
 use crate::objects::path::{find_collection, find_header};
 use crate::objects::recalc::{
@@ -12,6 +12,8 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 pub const MAX_NESTING: usize = 64;
+
+pub const MAX_EXTERNAL_DEPTH: usize = 2;
 
 pub(crate) use md_model::index::{Index, TypeOwner};
 
@@ -79,14 +81,135 @@ fn index_kind(ix: &mut Index, e: &Entries, s: &'static Schema, kind: MdKind, uui
                         child: None,
                         category: ii.category.clone(),
                         recalc: None,
+                        external: None,
                     },
                 );
             }
         }
         index_children(ix, t, &spec.children, &full, (kind, &name, u));
         index_subobjects(ix, e, spec, kind, u, &data, &name);
+        if kind == MdKind::ExternalDataSource {
+            index_external(ix, e, s, t, spec, u, u, &full, &name);
+        }
         if kind == MdKind::CalculationRegister {
             index_recalcs(ix, e, t, u, &full, &name);
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn index_external(
+    ix: &mut Index,
+    e: &Entries,
+    s: &'static Schema,
+    tree: &Node,
+    spec: &KindSpec,
+    owner: Guid,
+    source: Guid,
+    full: &str,
+    qualified: &str,
+) {
+    for prop in s.xdto_props(&format!("{}ChildObjects", spec.kind)) {
+        let tag = prop.name.as_str();
+        let Some(kind) = ExternalKind::from_name(tag) else {
+            continue;
+        };
+        let Some((_, class)) = spec.subobjects.iter().find(|(t, _)| t == tag) else {
+            continue;
+        };
+        let Some(nested_spec) = s.kind(tag) else {
+            continue;
+        };
+        for item in find_collection(tree, class).unwrap_or_default() {
+            let Some(id) = item.as_guid() else { continue };
+            if ix.names.contains_key(&id) {
+                ix.skipped.push(format!(
+                    "ExternalDataSource {source}: {tag} {id} invalid nested ownership"
+                ));
+                continue;
+            }
+            let entry = id.to_string();
+            let data = e.doc(&entry).ok().flatten();
+            let raw = data.as_deref().and_then(doc_tree);
+            let valid = raw.zip(nested_spec.header.as_deref()).filter(|(t, h)| {
+                t.get(h).is_some_and(|n| n.as_list().is_some())
+                    && nested_spec
+                        .uuid
+                        .as_deref()
+                        .and_then(|p| t.get(p))
+                        .and_then(Node::as_guid)
+                        == Some(id)
+            });
+            let Some((raw, hdr)) = valid else {
+                ix.skipped.push(format!(
+                    "ExternalDataSource {source}: {tag} {id} missing or malformed entry"
+                ));
+                continue;
+            };
+            let name = name_at(raw, hdr);
+            let fullname = format!("{full}.{tag}.{name}");
+            let typename = format!("{qualified}.{name}");
+            ix.names.insert(id, fullname.clone());
+            ix.external.entry(owner).or_default().push((kind, id));
+            for ii in &nested_spec.internal_info {
+                if let Some(tid) = raw.get(&ii.type_id).and_then(Node::as_guid) {
+                    ix.types.insert(
+                        tid,
+                        format!(
+                            "{}.{typename}",
+                            s.nested_gt_prefix(tag, &ii.category).unwrap_or_default()
+                        ),
+                    );
+                    ix.type_owners.insert(
+                        tid,
+                        TypeOwner {
+                            object: source,
+                            child: None,
+                            category: ii.category.clone(),
+                            recalc: None,
+                            external: Some(id),
+                        },
+                    );
+                }
+            }
+            index_children(
+                ix,
+                raw,
+                &nested_spec.children,
+                &fullname,
+                (MdKind::ExternalDataSource, &typename, source),
+            );
+            for (subtag, subclass) in &nested_spec.subobjects {
+                let sk = match subtag.as_str() {
+                    "Form" => SubKind::Form,
+                    "Template" => SubKind::Template,
+                    _ => continue,
+                };
+                for su in find_collection(raw, subclass)
+                    .unwrap_or_default()
+                    .iter()
+                    .filter_map(Node::as_guid)
+                {
+                    let sd = e.doc(&su.to_string()).ok().flatten();
+                    let found = sd
+                        .as_deref()
+                        .and_then(doc_tree)
+                        .and_then(|st| Some((st, find_header(st, &su.to_string())?)));
+                    let Some((st, h)) = found else {
+                        ix.skipped.push(format!(
+                            "ExternalDataSource {source}: {subtag} {su} missing or malformed entry"
+                        ));
+                        continue;
+                    };
+                    ix.names
+                        .insert(su, format!("{fullname}.{subtag}.{}", name_at(st, &h)));
+                    ix.sub_hdr.insert(su, h);
+                    ix.subs.entry(id).or_default().push((sk, su));
+                }
+            }
+            if kind == ExternalKind::Cube {
+                index_external(ix, e, s, raw, nested_spec, id, source, &fullname, &typename);
+            }
         }
     }
 }
@@ -120,6 +243,7 @@ fn index_recalcs(ix: &mut Index, e: &Entries, reg: &Node, owner: Guid, full: &st
                         child: None,
                         category: (*cat).into(),
                         recalc: Some(r),
+                        external: None,
                     },
                 );
             }
@@ -166,6 +290,7 @@ fn index_children(
                             child,
                             category: ii.category.clone(),
                             recalc: None,
+                            external: None,
                         },
                     );
                 }
@@ -214,7 +339,10 @@ fn index_subobjects(
     };
     if let Some(t) = doc_tree(root_data) {
         for (tag, class) in &spec.subobjects {
-            if matches!(tag.as_str(), "Form" | "Template") || tag == kind.as_str() {
+            if matches!(tag.as_str(), "Form" | "Template")
+                || tag == kind.as_str()
+                || (kind == MdKind::ExternalDataSource && ExternalKind::from_name(tag).is_some())
+            {
                 continue;
             }
             if find_collection(t, class).is_some_and(|c| !c.is_empty()) {

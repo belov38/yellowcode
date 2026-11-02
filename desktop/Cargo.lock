@@ -2328,7 +2328,9 @@ dependencies = [
  "memory-budget",
  "quick-xml 0.37.5",
  "regex",
+ "tempfile",
  "thiserror 2.0.21",
+ "unicode-normalization",
 ]
 
 [[package]]
@@ -2779,7 +2781,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "onec-desktop"
-version = "0.1.0-alpha.15"
+version = "0.1.0-alpha.16"
 dependencies = [
  "cf-fixtures",
  "dunce",

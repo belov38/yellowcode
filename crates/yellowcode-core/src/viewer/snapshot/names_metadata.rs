@@ -1,13 +1,17 @@
 use super::ManagedSnapshot;
+use brace::Guid;
 use mdconf::{
-    EntryData, ManagedEntrySource, ModuleKind, SubKind,
-    startup::{ManagedConfigurationError, ManagedSelectionError, ModuleLocation, kind_spec},
+    ChildTag, EntryData, ExternalObject, ManagedEntrySource, ModuleKind, SubKind,
+    startup::{
+        ManagedConfigurationError, ManagedSelectionError, ModuleLocation, ModuleSlot, kind_spec,
+        module_kind, modules,
+    },
     xml_out::{
         managed_client_interface_xml, managed_command_interface_xml, managed_configdump_xml,
-        managed_configuration_xml, managed_content_xml, managed_help_page, managed_help_xml,
-        managed_home_page_xml, managed_object_xml, managed_picture_xml, managed_predefined_xml,
-        managed_recalculation_xml, managed_rights_xml, managed_schedule_xml, managed_style_xml,
-        managed_subobject_xml,
+        managed_configuration_xml, managed_content_xml, managed_external_xml, managed_help_page,
+        managed_help_xml, managed_home_page_xml, managed_object_xml, managed_picture_xml,
+        managed_predefined_xml, managed_recalculation_xml, managed_rights_xml,
+        managed_schedule_xml, managed_style_xml, managed_subobject_xml,
     },
 };
 use memory_budget::{
@@ -182,6 +186,25 @@ impl<S: ManagedEntrySource> ManagedSnapshot<S> {
                         check(canceled)?;
                         visit(key.as_str(), bytes)?;
                         check(canceled)?;
+                    }
+                }
+            }
+            for (owner, directory) in self.names_external_dirs(ordinal, canceled)?.iter() {
+                for (child, name) in self.names_external_subs(*owner, SubKind::Template)? {
+                    check(canceled)?;
+                    if let Some(selected) =
+                        mdconf::startup::read_selected_template(context, *owner, Some(child))?
+                        && let Some(template) = &selected.value
+                    {
+                        for (file, bytes) in &template.files {
+                            let key = path(
+                                budget,
+                                &[directory.as_str(), "/Templates/", name, "/Ext/", file],
+                            )?;
+                            check(canceled)?;
+                            visit(key.as_str(), bytes)?;
+                            check(canceled)?;
+                        }
                     }
                 }
             }
@@ -717,7 +740,167 @@ impl<S: ManagedEntrySource> ManagedSnapshot<S> {
             visit(rel.as_str(), &module.source)?;
             check(canceled)?;
         }
+        for (ordinal, row) in self.open.objects().iter().enumerate() {
+            check(canceled)?;
+            if !self.has_external(row.object.id) {
+                continue;
+            }
+            let key = self
+                .open
+                .object_key(ordinal)
+                .ok_or(ManagedNamesMetadataError::Inventory)?;
+            let selected = self.open.read_selected_object(key)?;
+            let dir = self.names_object_dir(ordinal, canceled)?;
+            for value in &selected.object.external {
+                self.visit_external_modules(value, dir.as_str(), canceled, visit)?;
+            }
+        }
         check(canceled)
+    }
+    fn has_external(&self, owner: Guid) -> bool {
+        self.open
+            .context()
+            .index()
+            .external
+            .get(&owner)
+            .is_some_and(|ids| !ids.is_empty())
+    }
+    fn visit_external_modules(
+        &self,
+        value: &ExternalObject,
+        base: &str,
+        canceled: &dyn NamesCancellation,
+        visit: &mut impl FnMut(&str, &[u8]) -> io::Result<()>,
+    ) -> Result<(), S::Error> {
+        let budget = self.catalog.memory_budget();
+        let dir = path(budget, &[base, "/", value.kind.folder(), "/", &value.name])?;
+        let entries = self.open.context().entries()?;
+        let mut emit_slot = |slot: ModuleSlot, rel: &[&str]| -> Result<(), S::Error> {
+            check(canceled)?;
+            let read = slot
+                .read(&entries)
+                .map_err(ManagedConfigurationError::from)?;
+            if let Some(module) = &read.module {
+                let rel = path(budget, rel)?;
+                check(canceled)?;
+                visit(rel.as_str(), &module.source)?;
+            }
+            check(canceled)
+        };
+        for (suffix, file) in modules(value.kind.as_str()) {
+            if let Some(kind) = module_kind(file) {
+                emit_slot(
+                    ModuleSlot::separate(value.id, suffix, kind),
+                    &[dir.as_str(), "/Ext/", file],
+                )?;
+            }
+        }
+        for child in value.children.iter().filter(|c| c.tag == ChildTag::Command) {
+            emit_slot(
+                ModuleSlot::separate(child.id, "2", ModuleKind::CommandModule),
+                &[
+                    dir.as_str(),
+                    "/Commands/",
+                    &child.name,
+                    "/Ext/CommandModule.bsl",
+                ],
+            )?;
+        }
+        for form in &value.forms {
+            emit_slot(
+                ModuleSlot::form(form.id),
+                &[dir.as_str(), "/Forms/", &form.name, "/Ext/Form/Module.bsl"],
+            )?;
+        }
+        drop(emit_slot);
+        drop(entries);
+        for nested in &value.nested {
+            self.visit_external_modules(nested, dir.as_str(), canceled, visit)?;
+        }
+        Ok(())
+    }
+    pub(super) fn names_external_dirs(
+        &self,
+        ordinal: usize,
+        canceled: &dyn NamesCancellation,
+    ) -> Result<BudgetedVec<(Guid, BudgetedText)>, S::Error> {
+        let budget = self.catalog.memory_budget();
+        let index = self.open.context().index();
+        let mut out = BudgetedVec::new(budget, Category::Metadata)?;
+        let owner = self
+            .open
+            .objects()
+            .get(ordinal)
+            .ok_or(ManagedNamesMetadataError::Inventory)?
+            .object
+            .id;
+        if !self.has_external(owner) {
+            return Ok(out);
+        }
+        let base = self.names_object_dir(ordinal, canceled)?;
+        let name = |id: &Guid| -> Result<&str, S::Error> {
+            index
+                .names
+                .get(id)
+                .and_then(|full| full.as_str().rsplit('.').next())
+                .ok_or(ManagedNamesMetadataError::Inventory)
+        };
+        for (kind, id) in index
+            .external
+            .get(&owner)
+            .map(|ids| ids.as_slice())
+            .unwrap_or_default()
+        {
+            check(canceled)?;
+            let dir = path(budget, &[base.as_str(), "/", kind.folder(), "/", name(id)?])?;
+            out.try_push((*id, dir))?;
+            let at = out.len() - 1;
+            for (nested_kind, nested) in index
+                .external
+                .get(id)
+                .map(|ids| ids.as_slice())
+                .unwrap_or_default()
+            {
+                check(canceled)?;
+                let parent = &out.get(at).ok_or(ManagedNamesMetadataError::Inventory)?.1;
+                let dir = path(
+                    budget,
+                    &[
+                        parent.as_str(),
+                        "/",
+                        nested_kind.folder(),
+                        "/",
+                        name(nested)?,
+                    ],
+                )?;
+                out.try_push((*nested, dir))?;
+            }
+        }
+        Ok(out)
+    }
+    pub(super) fn names_external_subs(
+        &self,
+        owner: Guid,
+        kind: SubKind,
+    ) -> Result<impl Iterator<Item = (Guid, &str)>, S::Error> {
+        let index = self.open.context().index();
+        let subs = index
+            .subs
+            .get(&owner)
+            .map(|subs| subs.as_slice())
+            .unwrap_or_default();
+        for (_, id) in subs {
+            if index.names.get(id).is_none() {
+                return Err(ManagedNamesMetadataError::Inventory);
+            }
+        }
+        Ok(subs
+            .iter()
+            .filter(move |(sub, _)| *sub == kind)
+            .filter_map(move |(_, id)| {
+                let name = index.names.get(id)?.as_str().rsplit('.').next()?;
+                Some((*id, name))
+            }))
     }
     pub fn visit_names_metadata(
         &self,
@@ -801,6 +984,9 @@ impl<S: ManagedEntrySource> ManagedSnapshot<S> {
                 emit(canceled, visit, rel.as_str(), &body)?;
             }
         }
+        for value in &object.external {
+            self.visit_names_external(value, dir.as_str(), canceled, limit, visit)?;
+        }
         for recalc in &object.recalculations {
             check(canceled)?;
             let body = managed_recalculation_xml(budget, &object.name, recalc, limit)?;
@@ -811,6 +997,46 @@ impl<S: ManagedEntrySource> ManagedSnapshot<S> {
             emit(canceled, visit, rel.as_str(), &body)?;
         }
         check(canceled)
+    }
+    fn visit_names_external(
+        &self,
+        value: &ExternalObject,
+        base: &str,
+        canceled: &dyn NamesCancellation,
+        limit: u64,
+        visit: &mut impl FnMut(&str, &[u8]) -> io::Result<()>,
+    ) -> Result<(), S::Error> {
+        check(canceled)?;
+        let budget = self.catalog.memory_budget();
+        let full = self
+            .open
+            .context()
+            .index()
+            .names
+            .get(&value.id)
+            .ok_or(ManagedNamesMetadataError::Inventory)?;
+        let Some(body) = managed_external_xml(budget, value, full.as_str(), limit)? else {
+            return Ok(());
+        };
+        let dir = path(budget, &[base, "/", value.kind.folder(), "/", &value.name])?;
+        let rel = path(budget, &[dir.as_str(), ".xml"])?;
+        emit(canceled, visit, rel.as_str(), &body)?;
+        drop(body);
+        for sub in value.forms.iter().chain(&value.templates) {
+            check(canceled)?;
+            if let Some(body) = managed_subobject_xml(budget, sub, limit)? {
+                let folder = match sub.kind {
+                    SubKind::Form => "/Forms/",
+                    SubKind::Template => "/Templates/",
+                };
+                let rel = path(budget, &[dir.as_str(), folder, &sub.name, ".xml"])?;
+                emit(canceled, visit, rel.as_str(), &body)?;
+            }
+        }
+        for nested in &value.nested {
+            self.visit_names_external(nested, dir.as_str(), canceled, limit, visit)?;
+        }
+        Ok(())
     }
     fn eager_names_ordinal(
         &self,

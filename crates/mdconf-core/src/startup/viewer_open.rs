@@ -285,7 +285,7 @@ impl<S: ManagedEntrySource> ManagedViewerOpen<S> {
         self.unsupported.iter().map(BudgetedText::as_str)
     }
 }
-fn module_kind(file: &str) -> Option<ModuleKind> {
+pub fn module_kind(file: &str) -> Option<ModuleKind> {
     Some(match file {
         "Module.bsl" => ModuleKind::Module,
         "ObjectModule.bsl" => ModuleKind::ObjectModule,

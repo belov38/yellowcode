@@ -95,6 +95,15 @@ pub(crate) fn decode(
                 .collect::<Option<Vec<_>>>()?;
             Some(Value::RefList(refs))
         }
+        Codec::FieldList0 => {
+            let l = v.as_list()?;
+            let n = count(l.get(1)?)?;
+            let mut names = Vec::new();
+            for item in slice(l, 2, n) {
+                names.push(md_object_ref(ctx, item)?.name);
+            }
+            Some(Value::FieldList(names))
+        }
         Codec::FieldList => {
             let inner = v.as_list()?.get(1)?.as_list()?;
             let n = count(inner.get(1)?)?;

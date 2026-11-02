@@ -333,11 +333,15 @@ fn xdto_type(tag: &str, v: &Node) -> Option<XmlElem> {
         return None;
     }
     let (ns, name) = (l.get(1)?.text()?, l.get(2)?.text()?);
+    Some(xdto_type_elem(tag, ns, name))
+}
+
+pub(crate) fn xdto_type_elem(tag: &str, ns: &str, name: &str) -> XmlElem {
     if ns.is_empty() {
-        return Some(XmlElem::leaf(tag, name));
+        return XmlElem::leaf(tag, name);
     }
     if let Some(p) = ns_prefix(ns) {
-        return Some(XmlElem::leaf(tag, &format!("{p}:{name}")));
+        return XmlElem::leaf(tag, &format!("{p}:{name}"));
     }
     let depth = if tag == "XDTOReturningValueType" {
         6
@@ -345,7 +349,7 @@ fn xdto_type(tag: &str, v: &Node) -> Option<XmlElem> {
         8
     };
     let p = format!("d{depth}p1");
-    Some(XmlElem::leaf(tag, &format!("{p}:{name}")).with_attr(&format!("xmlns:{p}"), ns))
+    XmlElem::leaf(tag, &format!("{p}:{name}")).with_attr(&format!("xmlns:{p}"), ns)
 }
 
 fn xdto_packages(ctx: &Ctx, tag: &str, v: &Node) -> Option<XmlElem> {

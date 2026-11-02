@@ -1,4 +1,4 @@
-use crate::{DumpOptions, DumpReport, DumpSink, Part, Result};
+use crate::{DumpOptions, DumpSink, Part, Result};
 use md_model::{Configuration, xml_origin::XmlPart};
 impl From<XmlPart> for Part {
     fn from(part: XmlPart) -> Self {
@@ -18,13 +18,9 @@ impl From<XmlPart> for Part {
         }
     }
 }
-pub fn dump(
-    cfg: &Configuration,
-    out: &std::path::Path,
-    opts: &DumpOptions,
-) -> Result<Option<DumpReport>> {
+pub fn dump(cfg: &Configuration, sink: &mut DumpSink, opts: &DumpOptions) -> Result<bool> {
     let Some(origin) = &cfg.xml_origin else {
-        return Ok(None);
+        return Ok(false);
     };
     let versions_changed =
         origin.named_versions() != cfg.parts.dump_info.as_ref().map(|d| d.versions.as_slice());
@@ -44,7 +40,6 @@ pub fn dump(
     } else {
         None
     };
-    let mut sink = DumpSink::new(out);
     for (path, file) in origin.files() {
         if versions_changed && path == std::path::Path::new("ConfigDumpInfo.xml") {
             continue;
@@ -62,7 +57,5 @@ pub fn dump(
     if let Some(xml) = configdump {
         sink.put(Part::Configuration, "ConfigDumpInfo.xml", xml.as_bytes())?;
     }
-    Ok(Some(
-        sink.into_report(cfg.diagnostics.misses.clone(), Vec::new()),
-    ))
+    Ok(true)
 }

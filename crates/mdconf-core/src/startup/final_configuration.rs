@@ -45,6 +45,7 @@ pub struct GeneratedTypeView<'a> {
     pub child: Option<&'a crate::Child>,
     pub category: &'static str,
     pub recalculation: Option<&'a crate::Recalculation>,
+    pub external: Option<&'a crate::ExternalObject>,
     pub name: &'a str,
 }
 
@@ -195,9 +196,15 @@ impl ManagedConfiguration {
     pub fn generated_type(&self, id: Guid) -> Option<GeneratedTypeView<'_>> {
         let owner = self.index.type_owners.get(&id)?;
         let object = self.object(owner.object)?;
+        let external = owner
+            .external
+            .and_then(|id| object.external.iter().find_map(|o| o.find(id)));
         Some(GeneratedTypeView {
             object,
-            child: owner.child.and_then(|id| find_child(&object.children, id)),
+            child: owner
+                .child
+                .and_then(|id| find_child(external.map_or(&object.children, |o| &o.children), id)),
+            external,
             category: owner.category,
             recalculation: owner
                 .recalc

@@ -1667,11 +1667,14 @@ impl<'t> Target<'t> {
         tx: &mut TxnPages,
         steps: &[IndexStep],
         row: Option<RowId>,
+        policy: IndexConstraintPolicy,
     ) -> Result<()> {
         for s in steps {
             let (table, idx) = (self.name(), self.descr().indexes.get(s.i));
             let key_len = s.new.as_ref().or(s.old.as_ref()).map_or(0, Vec::len);
-            let unique = s.new.as_ref().zip(idx.filter(|ix| ix.unique));
+            let unique = s.new.as_ref().zip(
+                idx.filter(|ix| ix.unique && policy == IndexConstraintPolicy::EnforceDeclared),
+            );
             let found = self.with_writer(tx, s.i, key_len, |ix| match unique {
                 Some((key, _)) => ix.contains_key(key),
                 None => Ok(None),
@@ -1774,6 +1777,28 @@ pub struct TableWrite<'t> {
     t: Target<'t>,
 }
 
+#[derive(Debug)]
+pub struct RestoreTableWrite<'t> {
+    inner: TableWrite<'t>,
+}
+
+impl<'t> RestoreTableWrite<'t> {
+    pub(crate) fn new(inner: TableWrite<'t>) -> Self {
+        Self { inner }
+    }
+
+    pub fn insert(&mut self, row: &Row) -> Result<RowId> {
+        self.inner
+            .insert_with_policy(row, IndexConstraintPolicy::PreserveEntries)
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum IndexConstraintPolicy {
+    EnforceDeclared,
+    PreserveEntries,
+}
+
 impl fmt::Debug for TableWrite<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TableWrite")
@@ -1805,6 +1830,10 @@ impl<'t> TableWrite<'t> {
     }
 
     pub fn insert(&mut self, row: &Row) -> Result<RowId> {
+        self.insert_with_policy(row, IndexConstraintPolicy::EnforceDeclared)
+    }
+
+    fn insert_with_policy(&mut self, row: &Row, policy: IndexConstraintPolicy) -> Result<RowId> {
         let _unwind = self.tx.abort_on_panic();
         self.settle()?;
         let p = self.t.prepare(row, true)?;
@@ -1814,7 +1843,7 @@ impl<'t> TableWrite<'t> {
         data.check_len(self.t.fi, data.length.saturating_add(grow))?;
         self.t.check_room(&p)?;
         let steps = self.t.plan_insert(self.tx, &p)?;
-        self.t.check_steps(self.tx, &steps, None)?;
+        self.t.check_steps(self.tx, &steps, None, policy)?;
         let t = &mut self.t;
         self.tx.run(|tx| {
             let id = t.apply_insert(tx, p)?;
@@ -1831,7 +1860,12 @@ impl<'t> TableWrite<'t> {
         self.t.check_kept(&p, &cur)?;
         self.t.check_room(&p)?;
         let steps = self.t.plan_update(self.tx, row, &cur, &p)?;
-        self.t.check_steps(self.tx, &steps, Some(row))?;
+        self.t.check_steps(
+            self.tx,
+            &steps,
+            Some(row),
+            IndexConstraintPolicy::EnforceDeclared,
+        )?;
         let t = &mut self.t;
         t.remove_pairs(self.tx, &steps, row)?;
         self.tx.run(|tx| {
@@ -1845,7 +1879,12 @@ impl<'t> TableWrite<'t> {
         self.settle()?;
         let cur = self.live(row)?;
         let steps = self.t.plan_delete(row, &cur)?;
-        self.t.check_steps(self.tx, &steps, Some(row))?;
+        self.t.check_steps(
+            self.tx,
+            &steps,
+            Some(row),
+            IndexConstraintPolicy::EnforceDeclared,
+        )?;
         let t = &mut self.t;
         t.remove_pairs(self.tx, &steps, row)?;
         self.tx.run(|tx| t.apply_delete(tx, row, &cur))

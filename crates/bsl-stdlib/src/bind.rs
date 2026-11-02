@@ -4,7 +4,10 @@ use bsl_vm::{
     Arg, CallResult, Category, CategorySet, Execution, HostError, MsgKey, MsgRef, Registry, Value,
     ops,
 };
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 
 pub mod msg {
     pub const BAD_LOCALE_NAME: &str = "core85:IDS_BADLOCALENAME";
@@ -380,11 +383,31 @@ pub fn intl_error(e: bsl_intl::LibError) -> HostError {
     key_error(e.key, e.args, e.suffix)
 }
 
+static UNAVAILABLE_GLOBAL_REGISTRATIONS: AtomicUsize = AtomicUsize::new(0);
+
+pub fn unavailable_global_registrations() -> usize {
+    UNAVAILABLE_GLOBAL_REGISTRATIONS.load(Ordering::Relaxed)
+}
+
 pub fn global(
     reg: &mut Registry,
     ru: &str,
     en: &str,
     f: impl Fn(&mut Execution, &mut [Arg]) -> CallResult<Value> + Send + Sync + 'static,
 ) {
-    reg.global_fn(ru, en, Arc::new(f));
+    let Some(method) = reg.catalog().find_global_method(ru) else {
+        debug_assert!(
+            reg.catalog().find_global_method(en).is_none(),
+            "global `{ru}` is absent from the catalog but `{en}` is present: name mismatch"
+        );
+        UNAVAILABLE_GLOBAL_REGISTRATIONS.fetch_add(1, Ordering::Relaxed);
+        return;
+    };
+    debug_assert!(
+        reg.catalog()
+            .find_global_method(en)
+            .is_none_or(|by_en| std::ptr::eq(by_en, method)),
+        "global `{ru}` and `{en}` name different catalog methods"
+    );
+    reg.global_fn(&method.info.name_ru, &method.info.name_en, Arc::new(f));
 }

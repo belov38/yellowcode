@@ -54,5 +54,10 @@ pub use pager::FailingStorage;
 pub use pager::{
     FileCloseObserver, FileStorage, MemStorage, PageBuf, PageKind, PageRead, ReaderStats, Storage,
 };
-pub use table::{BlobReader, BlobWriter, RowRead, RowScratch, TableRead, TableWrite};
-pub use verify::{VerifyReport, Violation};
+pub use table::{
+    BlobReader, BlobWriter, RestoreTableWrite, RowRead, RowScratch, TableRead, TableWrite,
+};
+pub use verify::{
+    IndexConstraintCount, IndexConstraintSummary, VerifyConstraints, VerifyOptions, VerifyReport,
+    Violation,
+};

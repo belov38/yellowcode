@@ -318,6 +318,7 @@ impl Loader<'_> {
             forms: vec![],
             templates: vec![],
             recalculations: vec![],
+            external: Vec::new(),
             subsystems: vec![],
             modules: vec![],
             parts: Default::default(),
@@ -509,6 +510,7 @@ fn owner(object: Guid, child: Option<Guid>, recalc: Option<Guid>) -> TypeOwner {
         object,
         child,
         recalc,
+        external: None,
         category: String::new(),
     }
 }

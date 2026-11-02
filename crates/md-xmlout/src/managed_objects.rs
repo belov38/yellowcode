@@ -3,7 +3,9 @@ use crate::{
     codec::objects::{child_generated_kind, child_tag_name},
 };
 use brace::Guid;
-use md_model::{Child, GeneratedType, MdObject, Prop, Recalculation, SubKind, SubObject};
+use md_model::{
+    Child, ExternalObject, GeneratedType, MdObject, Prop, Recalculation, SubKind, SubObject,
+};
 use mdschema::{StaticKindSpec, StaticValue, static_schema};
 use memory_budget::{BudgetError, BudgetedText, Category, Charged, MemoryBudget};
 use std::fmt::Write;
@@ -121,6 +123,7 @@ struct Named<'a, I> {
     templates: &'a [SubObject],
     recalculations: &'a [Recalculation],
     nested: I,
+    external: &'a [ExternalObject],
 }
 fn child_spec(
     specs: &'static [(&'static str, StaticValue)],
@@ -173,6 +176,7 @@ fn child(
                 templates: &[],
                 recalculations: &[],
                 nested: std::iter::empty(),
+                external: &[],
             },
         )?;
     }
@@ -212,7 +216,10 @@ fn children<'a>(
             } else if tag == "Template" {
                 !named.templates.is_empty()
             } else {
-                false
+                named
+                    .external
+                    .iter()
+                    .any(|value| value.kind.as_str() == tag)
             }
         } else {
             false
@@ -251,6 +258,12 @@ fn children<'a>(
             } else if tag == "Template" {
                 for value in named.templates {
                     writer.leaf(tag, Some(&value.name), &[])?;
+                }
+            } else {
+                for value in named.external {
+                    if value.kind.as_str() == tag {
+                        writer.leaf(tag, Some(&value.name), &[])?;
+                    }
                 }
             }
         }
@@ -298,10 +311,81 @@ pub fn managed_object_xml<'a>(
                 templates: &value.templates,
                 recalculations: &value.recalculations,
                 nested,
+                external: &value.external,
             },
         )?;
     }
     writer.close(kind)?;
+    writer.finish().map(Some)
+}
+pub fn managed_external_xml(
+    budget: &MemoryBudget,
+    value: &ExternalObject,
+    full: &str,
+    limit: u64,
+) -> Result<Option<Charged<String>>> {
+    let tag = value.kind.as_str();
+    let Some(spec) = static_schema().kind(tag) else {
+        return Ok(None);
+    };
+    let mut writer = ManagedXmlWriter::document(budget, limit)?;
+    writer.open(tag, &[("uuid", guid(budget, value.id)?.as_str())])?;
+    if !value.generated_types.is_empty() {
+        let mut qualified = text(budget, &[])?;
+        for (at, part) in full.split('.').skip(1).step_by(2).enumerate() {
+            if at != 0 {
+                qualified.try_push_str(".")?;
+            }
+            qualified.try_push_str(part)?;
+        }
+        writer.open("InternalInfo", &[])?;
+        for generated in &value.generated_types {
+            let prefix = static_schema()
+                .table("gen.json")
+                .and_then(|table| table.get("nested_gt"))
+                .and_then(|table| table.get(tag))
+                .and_then(|table| table.get(&generated.category))
+                .and_then(StaticValue::as_str)
+                .unwrap_or("");
+            let name = text(budget, &[prefix, ".", qualified.as_str()])?;
+            writer.open(
+                "xr:GeneratedType",
+                &[("name", name.as_str()), ("category", &generated.category)],
+            )?;
+            writer.leaf(
+                "xr:TypeId",
+                Some(guid(budget, generated.type_id)?.as_str()),
+                &[],
+            )?;
+            writer.leaf(
+                "xr:ValueId",
+                Some(guid(budget, generated.value_id)?.as_str()),
+                &[],
+            )?;
+            writer.close("xr:GeneratedType")?;
+        }
+        writer.close("InternalInfo")?;
+    }
+    props(&mut writer, &value.props)?;
+    let co = text(budget, &[tag, "ChildObjects"])?;
+    children(
+        &mut writer,
+        budget,
+        tag,
+        &value.name,
+        co.as_str(),
+        object(spec.field("children")),
+        &value.children,
+        object(spec.field("subobjects")),
+        &Named {
+            forms: &value.forms,
+            templates: &value.templates,
+            recalculations: &[],
+            nested: std::iter::empty(),
+            external: &value.nested,
+        },
+    )?;
+    writer.close(tag)?;
     writer.finish().map(Some)
 }
 pub fn managed_subobject_xml(

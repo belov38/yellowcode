@@ -11,10 +11,10 @@ fn required(s: &Signature) -> usize {
         .map_or(0, |i| i + 1)
 }
 
-fn constructible(info: &TypeInfo, argc: usize, on_server: bool) -> bool {
+fn constructible(info: &TypeInfo, argc: usize, observed: bool) -> bool {
     if argc == 0 {
         info.server_compile
-            .filter(|_| on_server)
+            .filter(|_| observed)
             .map(|s| s.new_no_args_compiles)
             .or(info.new_no_args)
             .unwrap_or_else(|| info.constructors.iter().any(|s| required(s) == 0))
@@ -55,7 +55,7 @@ impl Resolver<'_> {
         if info.kind == TypeKind::Primitive {
             self.check_bare(NEW_NOTOBJECT, name.span.start);
             None
-        } else if constructible(info, argc, self.platform.on_server()) {
+        } else if constructible(info, argc, self.platform.observed_server()) {
             Some(t)
         } else {
             self.check_bare(CTOR_NOTFOUND, name.span.start);

@@ -1,4 +1,6 @@
-use super::{ManagedDecodedObjects, ManagedObjects, ManagedObjectsError, push, vector};
+use super::{
+    ManagedDecodedObjects, ManagedObjects, ManagedObjectsError, find_external, push, vector,
+};
 use crate::startup::{
     ManagedDiagnostics, ManagedIndex,
     index::{GuidText, text},
@@ -202,6 +204,105 @@ impl ManagedDecodedObjects {
                     && let Some(module) = container(entries, id, suffix, kind, keep)?
                 {
                     output = push(output, module)?;
+                }
+            }
+            let external_ids = super::external_order(
+                self.objects.resolve(at).ok_or(BudgetError::Overflow)?,
+                budget,
+            )?;
+            for &external_id in external_ids.iter() {
+                let Some(external) = self
+                    .objects
+                    .resolve(at)
+                    .and_then(|o| find_external(o, external_id))
+                else {
+                    continue;
+                };
+                let kind = external.kind;
+                let mut output = vector(budget, modules(kind.as_str()).count())?;
+                for (suffix, file) in modules(kind.as_str()) {
+                    if let Some(kind) = module_kind(file)
+                        && let Some(module) = container(entries, external_id, suffix, kind, keep)?
+                    {
+                        output = push(output, module)?;
+                    }
+                }
+                self.objects = self.objects.install_external(
+                    at,
+                    external_id,
+                    output,
+                    |o| o.modules.capacity() == 0,
+                    |o, v| {
+                        o.modules = v;
+                        None
+                    },
+                )?;
+                let count = self
+                    .objects
+                    .resolve(at)
+                    .and_then(|o| find_external(o, external_id))
+                    .ok_or(BudgetError::Overflow)?
+                    .children
+                    .len();
+                for child_at in 0..count {
+                    let child = self
+                        .objects
+                        .resolve(at)
+                        .and_then(|o| find_external(o, external_id))
+                        .and_then(|o| o.children.get(child_at))
+                        .ok_or(BudgetError::Overflow)?;
+                    if child.tag != ChildTag::Command {
+                        continue;
+                    }
+                    let child_id = child.id;
+                    if let Some(module) =
+                        container(entries, child_id, "2", ModuleKind::CommandModule, keep)?
+                    {
+                        self.objects = self.objects.install_external(
+                            at,
+                            external_id,
+                            module,
+                            |o| o.children.get(child_at).is_some_and(|c| c.module.is_none()),
+                            |o, v| match o.children.get_mut(child_at) {
+                                Some(c) => {
+                                    c.module = Some(v);
+                                    None
+                                }
+                                None => Some(v),
+                            },
+                        )?;
+                    }
+                }
+                let count = self
+                    .objects
+                    .resolve(at)
+                    .and_then(|o| find_external(o, external_id))
+                    .ok_or(BudgetError::Overflow)?
+                    .forms
+                    .len();
+                for sub_at in 0..count {
+                    let id = self
+                        .objects
+                        .resolve(at)
+                        .and_then(|o| find_external(o, external_id))
+                        .and_then(|o| o.forms.get(sub_at))
+                        .ok_or(BudgetError::Overflow)?
+                        .id;
+                    if let Some(module) = form(entries, id, keep, &mut self.diagnostics)? {
+                        self.objects = self.objects.install_external(
+                            at,
+                            external_id,
+                            module,
+                            |o| o.forms.get(sub_at).is_some_and(|f| f.module.is_none()),
+                            |o, v| match o.forms.get_mut(sub_at) {
+                                Some(f) => {
+                                    f.module = Some(v);
+                                    None
+                                }
+                                None => Some(v),
+                            },
+                        )?;
+                    }
                 }
             }
             let count = self

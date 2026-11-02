@@ -22,6 +22,7 @@ pub use md_model::parts::{
     Schedule, Style,
 };
 use md_xmlout::codec::parts::{R, count, int, uint};
+pub(crate) use misc::parse_content;
 pub(crate) use pictures::ext_of as picture_extension;
 
 pub(crate) fn load(cx: &LoadCtx, cfg: &mut Configuration, stages: crate::Stages) -> Result<()> {

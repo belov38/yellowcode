@@ -648,13 +648,8 @@ fn jump_tree(
     coll: ExecCollation<'_>,
 ) -> Result<TotalsTree, WalkError> {
     let n = tree.spec.points.len();
-    let after: Vec<usize> = (t + 1..n).collect();
-    let rest: Vec<usize> = if after.is_empty() {
-        (scope_g.map_or(0, |g| g + 1)..t).collect()
-    } else {
-        after
-    };
-    let order: Vec<usize> = std::iter::once(t).chain(rest).collect();
+    let skipped = scope_g.map_or(0, |g| g + 1)..t;
+    let order: Vec<usize> = std::iter::once(t).chain(t + 1..n).chain(skipped).collect();
     let mut spec = tree.spec.clone();
     spec.points = order
         .iter()

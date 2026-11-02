@@ -86,10 +86,43 @@ pub(super) struct Meas {
     pub max: f32,
     pub left_col: f32,
     pub fixed: f32,
+    pub legacy_fixed: f32,
+    pub legacy_layout: bool,
     pub stretch: bool,
     pub greedy: bool,
     pub bar: bool,
     pub wrap: bool,
+}
+
+impl Meas {
+    fn row_minimum(&self, greedy_row: bool) -> f32 {
+        if self.bar {
+            0.0
+        } else if greedy_row && !self.greedy {
+            self.nat
+        } else if self.stretch {
+            self.fixed
+        } else if self.wrap {
+            self.tight
+        } else {
+            self.nat
+        }
+    }
+
+    fn vertical_minimum(&self, it: &Item) -> f32 {
+        if self.bar {
+            0.0
+        } else if self.stretch
+            || matches!(it.kind, ItemKind::UsualGroup | ItemKind::LabelField)
+            || (it.kind == ItemKind::LabelDecoration && it.props.width.unwrap_or(0) == 0)
+        {
+            self.fixed
+        } else if self.wrap {
+            self.tight
+        } else {
+            self.nat
+        }
+    }
 }
 
 impl Ctx<'_> {
@@ -169,6 +202,8 @@ impl Ctx<'_> {
                 max: nat + if stretch { r.max_extra } else { 0.0 },
                 left_col,
                 fixed,
+                legacy_fixed: fixed,
+                legacy_layout: false,
                 stretch,
                 greedy,
                 bar: false,
@@ -213,6 +248,15 @@ impl Ctx<'_> {
                 nat: w,
                 tight: w,
                 max: w,
+                fixed: if matches!(it.kind, ItemKind::LabelDecoration | ItemKind::Button)
+                    && it.props.width.is_some_and(|w| w > 0)
+                    || it.kind == ItemKind::Button
+                        && it.props.button_type.as_deref() == Some("Hyperlink")
+                {
+                    w
+                } else {
+                    0.0
+                },
                 stretch,
                 ..Meas::default()
             };
@@ -222,6 +266,7 @@ impl Ctx<'_> {
             tight: oa,
             max: oa,
             stretch: true,
+            legacy_layout: matches!(it.kind, ItemKind::Pages | ItemKind::Page),
             ..Meas::default()
         }
     }
@@ -234,13 +279,15 @@ impl Ctx<'_> {
         let any_stretch = metas.iter().any(|m| m.stretch);
         let any_greedy = metas.iter().any(|m| m.greedy);
         let (mut nat, mut max, mut tight) = (0.0f32, 0.0f32, 0.0f32);
-        let fixed;
+        let mut fixed = 0.0f32;
+        let legacy_fixed;
         if horiz {
             let gaps = hgap * kids.len().saturating_sub(1) as f32;
             nat = metas.iter().map(|m| m.nat).sum::<f32>() + gaps;
             max = metas.iter().map(|m| m.max).sum::<f32>() + gaps;
             tight = metas.iter().map(|m| m.tight).sum::<f32>() + gaps;
-            fixed = metas.iter().map(|m| m.fixed).sum::<f32>();
+            fixed = metas.iter().map(|m| m.row_minimum(any_greedy)).sum::<f32>() + gaps;
+            legacy_fixed = metas.iter().map(|m| m.legacy_fixed).sum();
         } else {
             let own =
                 ChildrenAlign::parse(it.props.children_align.as_deref()) == ChildrenAlign::None;
@@ -262,7 +309,8 @@ impl Ctx<'_> {
                     .map(|(m, _)| m.left_col)
                     .fold(0.0, f32::max)
             };
-            for (m, sh) in metas.iter().zip(&shared) {
+            legacy_fixed = col;
+            for ((m, sh), k) in metas.iter().zip(&shared).zip(&kids) {
                 let c = if own || !sh || m.left_col <= 0.0 {
                     m.left_col
                 } else {
@@ -271,15 +319,29 @@ impl Ctx<'_> {
                 nat = nat.max(c + m.nat - m.left_col);
                 max = max.max(c + m.max - m.left_col);
                 tight = tight.max(c + m.tight - m.left_col);
+                let minimum = if self.float.is_none()
+                    && k.kind == ItemKind::InputField
+                    && !m.stretch
+                    && m.left_col > 0.0
+                    && c + m.nat - m.left_col > self.r.title_top_share * self.input.content.w
+                {
+                    m.nat - m.left_col
+                } else {
+                    c + m.vertical_minimum(k) - m.left_col
+                };
+                fixed = fixed.max(minimum);
             }
-            fixed = col;
         }
         Meas {
             nat: nat + indent,
             tight: tight + indent,
             max: max + indent,
             left_col: 0.0,
-            fixed,
+            fixed: fixed + indent,
+            legacy_fixed,
+            legacy_layout: matches!(it.props.group, None | Some(GroupKind::HorizontalIfPossible))
+                || it.props.united == Some(false)
+                || metas.iter().any(|m| m.legacy_layout),
             stretch: any_stretch,
             greedy: any_greedy,
             bar: false,
@@ -360,6 +422,11 @@ impl Ctx<'_> {
         let oa = self.open_avail(avail_w);
         let (horiz, kids, metas) = self.orient(it, oa, depth + 1, !titles);
         let props = &it.props;
+        let legacy_layout = !titles
+            || first_col.is_some()
+            || matches!(props.group, None | Some(GroupKind::HorizontalIfPossible))
+            || props.united == Some(false)
+            || metas.iter().any(|m| m.legacy_layout);
         let title = props.title.as_ref().and_then(|t| t.any()).unwrap_or("");
         let show = titles && props.show_title != Some(false) && !title.is_empty();
         let repr = props.representation.as_deref();
@@ -422,6 +489,7 @@ impl Ctx<'_> {
                 m.tight += delta;
                 m.max += delta;
                 m.fixed += delta;
+                m.legacy_fixed += delta;
                 title_col = c0;
             }
             self.horizontal(
@@ -434,6 +502,7 @@ impl Ctx<'_> {
                 depth + 1,
                 title_col,
                 d + 1,
+                legacy_layout,
             )
         } else {
             let gap = props.vertical_spacing.unwrap_or(Spacing::Single);
@@ -471,17 +540,26 @@ impl Ctx<'_> {
         depth: usize,
         title_col: f32,
         d: u16,
+        legacy_layout: bool,
     ) -> f32 {
         let n = kids.len();
         let gaps = hgap * n.saturating_sub(1) as f32;
         let mut alloc: Vec<f32> = metas.iter().map(|m| m.nat).collect();
         let total = alloc.iter().sum::<f32>() + gaps;
         let greedy = metas.iter().filter(|m| m.greedy).count();
+        let minimum: f32 = metas.iter().map(|m| m.row_minimum(greedy > 0)).sum::<f32>() + gaps;
+        let floor = |m: &Meas| {
+            if !legacy_layout && minimum <= avail_w + 0.01 {
+                m.fixed
+            } else {
+                m.legacy_fixed
+            }
+        };
         if greedy > 0 {
             let need: f32 = metas
                 .iter()
                 .zip(&alloc)
-                .map(|(m, a)| if m.greedy { m.tight.max(m.fixed) } else { *a })
+                .map(|(m, a)| if m.greedy { m.tight.max(floor(m)) } else { *a })
                 .sum::<f32>()
                 + gaps;
             if need > avail_w {
@@ -491,13 +569,13 @@ impl Ctx<'_> {
             let others: f32 = metas
                 .iter()
                 .zip(&alloc)
-                .map(|(m, a)| if m.greedy { m.fixed } else { *a })
+                .map(|(m, a)| if m.greedy { floor(m) } else { *a })
                 .sum();
             let mut left = (avail_w - others - gaps).max(0.0);
             let mut rest = greedy;
             for (a, m) in alloc.iter_mut().zip(metas).filter(|(_, m)| m.greedy) {
                 let share = (left / rest as f32).round();
-                *a = m.fixed + share;
+                *a = floor(m) + share;
                 left -= share;
                 rest -= 1;
             }
@@ -508,7 +586,7 @@ impl Ctx<'_> {
                 left = shrink(&mut alloc, metas, left, |m| m.bar, |_| 0.0);
             }
             if left > 0.01 {
-                shrink(&mut alloc, metas, left, |m| m.stretch, |m| m.fixed);
+                shrink(&mut alloc, metas, left, |m| m.stretch, floor);
             }
         }
         let mut x = x0;

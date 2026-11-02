@@ -82,7 +82,12 @@ impl Configuration {
         let owner = self.index.type_owners.get(&type_id)?;
         let name = self.index.types.get(&type_id)?;
         let object = self.object(owner.object)?;
-        let child = owner.child.and_then(|c| find_child(&object.children, c));
+        let external = owner
+            .external
+            .and_then(|id| object.external.iter().find_map(|o| o.find(id)));
+        let child = owner
+            .child
+            .and_then(|c| find_child(external.map_or(&object.children, |o| &o.children), c));
         let recalculation = owner
             .recalc
             .and_then(|r| object.recalculations.iter().find(|x| x.id == r));
@@ -91,6 +96,7 @@ impl Configuration {
             child,
             category: &owner.category,
             recalculation,
+            external,
             name: name.clone(),
         })
     }

@@ -20,6 +20,7 @@ pub use viewer_facts::{ConfigurationIdentity, ViewerCounters};
 mod viewer_open;
 pub use viewer_open::{
     ManagedViewerOpen, ModuleDescriptor, ModuleLocation, ValidationKind, ValidationReceipt,
+    module_kind,
 };
 mod viewer_selection;
 pub use viewer_selection::{

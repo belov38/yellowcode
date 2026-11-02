@@ -14,7 +14,8 @@ pub mod codec;
 mod error;
 mod managed_objects;
 pub use managed_objects::{
-    managed_configuration_xml, managed_object_xml, managed_recalculation_xml, managed_subobject_xml,
+    managed_configuration_xml, managed_external_xml, managed_object_xml, managed_recalculation_xml,
+    managed_subobject_xml,
 };
 mod managed_writer;
 pub use managed_writer::ManagedXmlWriter;
@@ -31,16 +32,19 @@ pub use managed_predefined::managed_predefined_xml;
 mod managed_rights;
 pub use managed_rights::managed_rights_xml;
 pub mod paths;
+mod rel_path;
 mod sink;
+mod sync;
 mod writer;
 
 pub use codec::objects::{
-    object_files, object_xml, recalculation_xml, subobject_xml, try_object_xml,
-    try_recalculation_xml, try_subobject_xml,
+    external_xml, object_files, object_xml, recalculation_xml, subobject_xml, try_external_xml,
+    try_object_xml, try_recalculation_xml, try_subobject_xml,
 };
 pub use error::{Error, Result};
 pub use md_model::XmlElem;
-pub use sink::{DumpOptions, DumpReport, DumpSink, Part, PartStatus};
+pub use sink::{DEFAULT_MEMORY_DUMP_BYTES, DumpOptions, DumpReport, DumpSink, Part, PartStatus};
+pub use sync::{SyncOptions, SyncReport, sync_dir};
 pub use writer::*;
 
 #[doc(hidden)]

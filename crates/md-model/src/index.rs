@@ -10,6 +10,7 @@ pub struct TypeOwner {
     pub child: Option<Guid>,
     pub category: String,
     pub recalc: Option<Guid>,
+    pub external: Option<Guid>,
 }
 
 #[doc(hidden)]
@@ -25,6 +26,7 @@ pub struct Index {
     pub sub_hdr: HashMap<Guid, Vec<usize>>,
     pub subs: HashMap<Guid, Vec<(SubKind, Guid)>>,
     pub recalcs: HashMap<Guid, Vec<Guid>>,
+    pub external: HashMap<Guid, Vec<(crate::ExternalKind, Guid)>>,
     pub nested: Vec<(Guid, Guid)>,
     pub missing: Vec<Guid>,
     pub too_deep: Vec<Guid>,

@@ -157,12 +157,98 @@ fn collect(
     Ok(())
 }
 
+fn collect_external(
+    cfg: &Configuration,
+    cx: &LoadCtx,
+    o: &md_model::ExternalObject,
+    found: &mut Vec<(brace::Guid, Template)>,
+    misses: &mut Vec<String>,
+) -> Result<()> {
+    for sub in &o.templates {
+        let Some(kind) = kind::template_type(cfg, cx.entries, sub.id, false) else {
+            continue;
+        };
+        let name = format!("{}.0", sub.id);
+        let files = match (cx.entries.get(&name)?, cx.entries.raw(&name)?) {
+            (Some(data), Some(raw)) => match convert(cfg, &data, &raw, kind) {
+                Ok(files) => files,
+                Err(why) => {
+                    misses.push(format!("templates:{}:{why}", kind.name()));
+                    Vec::new()
+                }
+            },
+            _ => Vec::new(),
+        };
+        if !cx.opts.keep_source {
+            cx.entries.forget(&name);
+        }
+        found.push((
+            sub.id,
+            Template {
+                kind: Some(kind),
+                files,
+            },
+        ));
+    }
+    for n in &o.nested {
+        collect_external(cfg, cx, n, found, misses)?;
+    }
+    Ok(())
+}
+
+fn install_external(o: &mut md_model::ExternalObject, found: &mut Vec<(brace::Guid, Template)>) {
+    for s in &mut o.templates {
+        if let Some(at) = found.iter().position(|(id, _)| *id == s.id) {
+            s.template = Some(found.swap_remove(at).1);
+        }
+    }
+    for n in &mut o.nested {
+        install_external(n, found);
+    }
+}
+
+fn dump_external(
+    cfg: &Configuration,
+    sink: &mut DumpSink,
+    source: &MdObject,
+    o: &md_model::ExternalObject,
+    parent: Option<&md_model::ExternalObject>,
+) -> Result<()> {
+    let dir = paths::external_dir(cfg, source, o, parent);
+    for sub in &o.templates {
+        if let Some(t) = &sub.template {
+            for (path, data) in &t.files {
+                sink.put(
+                    Part::Templates,
+                    &format!("{dir}/Templates/{}/Ext/{path}", sub.name),
+                    data,
+                )?;
+            }
+        }
+    }
+    for n in &o.nested {
+        dump_external(cfg, sink, source, n, Some(o))?;
+    }
+    Ok(())
+}
+
 #[doc(hidden)]
 pub fn load(cx: &LoadCtx, cfg: &mut Configuration) -> Result<()> {
     let mut found = Vec::new();
     let mut misses = Vec::new();
     for (i, o) in cfg.objects.iter().enumerate() {
         collect(cfg, cx, o, &mut vec![i], &mut found, &mut misses)?;
+    }
+    let mut external = Vec::new();
+    for o in &cfg.objects {
+        for e in &o.external {
+            collect_external(cfg, cx, e, &mut external, &mut misses)?;
+        }
+    }
+    for o in &mut cfg.objects {
+        for e in &mut o.external {
+            install_external(e, &mut external);
+        }
     }
     for key in misses {
         *cfg.diagnostics.misses.entry(key).or_insert(0) += 1;
@@ -197,6 +283,9 @@ fn dump_object(cfg: &Configuration, sink: &mut DumpSink, o: &MdObject) -> Result
         if let Some(t) = &s.template {
             write(&paths::sub_dir(cfg, o, s), t)?;
         }
+    }
+    for external in &o.external {
+        dump_external(cfg, sink, o, external, None)?;
     }
     for s in &o.subsystems {
         dump_object(cfg, sink, s)?;

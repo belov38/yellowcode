@@ -1,7 +1,7 @@
 use super::names_metadata::{NamesCancellation, check, path};
 use super::{ManagedNamesMetadataError, ManagedSnapshot, SelectedFormError};
 use crate::viewer::analysis_parent::FormXmlLease;
-use mdconf::{ManagedEntrySource, MdKind};
+use mdconf::{ManagedEntrySource, MdKind, SubKind};
 use std::{
     io,
     path::Path,
@@ -57,6 +57,26 @@ impl<S: ManagedEntrySource> ManagedSnapshot<S> {
                         &[directory.as_str(), "/Forms/", &child.name],
                     )?;
                     self.visit_form_files(&lease, directory.as_str(), canceled, deadline, visit)?;
+                }
+            }
+            for (owner, directory) in self.names_external_dirs(ordinal, canceled)?.iter() {
+                for (child, name) in self.names_external_subs(*owner, SubKind::Form)? {
+                    form_check(canceled, deadline)?;
+                    if let Some(lease) =
+                        analysis.form_xml_at(ordinal, *owner, Some(child), deadline)?
+                    {
+                        let directory = path(
+                            self.catalog.memory_budget(),
+                            &[directory.as_str(), "/Forms/", name],
+                        )?;
+                        self.visit_form_files(
+                            &lease,
+                            directory.as_str(),
+                            canceled,
+                            deadline,
+                            visit,
+                        )?;
+                    }
                 }
             }
         }

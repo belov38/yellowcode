@@ -17,6 +17,7 @@ pub enum Codec {
     TValue,
     MdList,
     FieldList,
+    FieldList0,
     CpLinks,
     LinkByType,
     CParams,

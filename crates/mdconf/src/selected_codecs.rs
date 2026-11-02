@@ -11,17 +11,26 @@ use mdconf_core::{
 
 type Result<T, E> = std::result::Result<T, ManagedConfigurationError<E>>;
 
+fn nested_external(index: &crate::startup::ManagedIndex, owner: Guid) -> bool {
+    index
+        .external
+        .iter()
+        .any(|(_, ids)| ids.iter().any(|(_, id)| *id == owner))
+}
+
 pub fn read_selected_form<S: ManagedEntrySource>(
     context: &ManagedViewerContext<S>,
     owner: Guid,
     child: Option<Guid>,
 ) -> Result<Option<SelectedPart<crate::forms::Form>>, S::Error> {
     let index = context.index();
-    let Some((kind, Some(_))) = index.objs.get(&owner) else {
-        return Ok(None);
+    let kind = match index.objs.get(&owner) {
+        Some((kind, Some(_))) => Some(*kind),
+        _ if nested_external(index, owner) => None,
+        _ => return Ok(None),
     };
     let id = match child {
-        None if *kind == MdKind::CommonForm => owner,
+        None if kind == Some(MdKind::CommonForm) => owner,
         Some(id)
             if index.subs.get(&owner).is_some_and(|subs| {
                 subs.iter()
@@ -45,11 +54,13 @@ pub fn read_selected_template<S: ManagedEntrySource>(
     child: Option<Guid>,
 ) -> Result<Option<SelectedPart<crate::templates::Template>>, S::Error> {
     let index = context.index();
-    let Some((kind, Some(_))) = index.objs.get(&owner) else {
-        return Ok(None);
+    let kind = match index.objs.get(&owner) {
+        Some((kind, Some(_))) => Some(*kind),
+        _ if nested_external(index, owner) => None,
+        _ => return Ok(None),
     };
     let id = match child {
-        None if *kind == MdKind::CommonTemplate => owner,
+        None if kind == Some(MdKind::CommonTemplate) => owner,
         Some(id)
             if index.subs.get(&owner).is_some_and(|subs| {
                 subs.iter()

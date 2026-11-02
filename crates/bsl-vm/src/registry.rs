@@ -68,6 +68,10 @@ impl Registry {
         }
     }
 
+    pub fn catalog(&self) -> &'static Catalog {
+        self.catalog
+    }
+
     pub fn global_fn(&mut self, name_ru: &str, name_en: &str, f: GlobalFn) {
         debug_assert!(
             self.catalog.find_global_method(name_ru).is_some(),

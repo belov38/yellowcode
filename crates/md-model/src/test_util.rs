@@ -21,6 +21,7 @@ pub fn obj(kind: MdKind, name: &str) -> MdObject {
         forms: vec![],
         templates: vec![],
         recalculations: vec![],
+        external: Vec::new(),
         subsystems: vec![],
         modules: vec![],
         parts: Default::default(),

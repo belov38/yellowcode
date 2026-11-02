@@ -93,6 +93,46 @@ impl ManagedModuleGraph {
                     )?;
                 }
             }
+            let external_ids = super::external_order(
+                self.objects.resolve(at).ok_or(BudgetError::Overflow)?,
+                budget,
+            )?;
+            for &id in external_ids.iter() {
+                let Some(o) = self
+                    .objects
+                    .resolve(at)
+                    .and_then(|o| super::find_external(o, id))
+                else {
+                    continue;
+                };
+                let count = o.forms.len();
+                for sub_at in 0..count {
+                    let form_id = self
+                        .objects
+                        .resolve(at)
+                        .and_then(|o| super::find_external(o, id))
+                        .and_then(|o| o.forms.get(sub_at))
+                        .ok_or(BudgetError::Overflow)?
+                        .id;
+                    if let Some(form) =
+                        codecs.form(entries, form_id, &shared, keep, &mut self.diagnostics)?
+                    {
+                        self.objects = self.objects.install_external(
+                            at,
+                            id,
+                            form,
+                            |o| o.forms.get(sub_at).is_some_and(|s| s.form.is_none()),
+                            |o, value| match o.forms.get_mut(sub_at) {
+                                Some(s) => {
+                                    s.form = Some(value);
+                                    None
+                                }
+                                None => Some(value),
+                            },
+                        )?;
+                    }
+                }
+            }
             for (child_at, location) in self.objects.locations.iter().enumerate() {
                 if location.parent == Some(at) {
                     todo.try_push(child_at)?;

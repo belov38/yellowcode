@@ -51,6 +51,7 @@ pub fn child_tag_en(tag: ChildTag) -> &'static str {
         ChildTag::Parameter => "Parameter",
         ChildTag::IntegrationServiceChannel => "IntegrationServiceChannel",
         ChildTag::Function => "Function",
+        ChildTag::Field => "Field",
     }
 }
 

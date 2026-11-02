@@ -5,7 +5,7 @@ use std::sync::{Mutex, PoisonError};
 use crate::blobstore::BlobStore;
 use crate::catalog::{Catalog, CatalogEntry, ROOT_CONTENT_BLOCK};
 use crate::collate::{Collate, Strength};
-use crate::error::{Error, Location, Result, Unsupported, brief};
+use crate::error::{Constraint, Error, Location, NotFound, Result, Unsupported, brief};
 use crate::format::bytes::u32le;
 use crate::format::descr::{IndexDescr, TableDescr};
 use crate::format::index_page::{
@@ -35,9 +35,54 @@ impl fmt::Display for Violation {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub enum VerifyConstraints<'a> {
+    #[default]
+    EnforceDeclared,
+    PreserveImportedTables(&'a HashSet<String>),
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct VerifyOptions<'a> {
+    pub constraints: VerifyConstraints<'a>,
+}
+
+impl<'a> VerifyOptions<'a> {
+    pub fn for_imported_tables(tables: &'a HashSet<String>) -> Self {
+        Self {
+            constraints: VerifyConstraints::PreserveImportedTables(tables),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexConstraintCount {
+    pub table: String,
+    pub index: String,
+    pub duplicate_entries: u64,
+    pub duplicate_groups: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IndexConstraintSummary {
+    pub duplicate_entries: u64,
+    pub duplicate_groups: u64,
+    pub indexes_with_duplicates: u64,
+    pub omitted_indexes: u64,
+    pub indexes: Vec<IndexConstraintCount>,
+}
+
+fn add_count(value: &mut u64, amount: u64, at: &impl Fn() -> Location) -> Result<()> {
+    *value = value
+        .checked_add(amount)
+        .ok_or_else(|| Error::corrupt(at(), "index constraint count overflow"))?;
+    Ok(())
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct VerifyReport {
     pub violations: Vec<Violation>,
+    pub index_constraints: IndexConstraintSummary,
     pub tables: u32,
     pub live_rows: u64,
     pub index_entries: u64,
@@ -57,8 +102,35 @@ pub(crate) fn run(
     catalog: &Catalog,
     keys: KeyCtx,
     trailing_pages: u64,
+    options: VerifyOptions<'_>,
 ) -> Result<VerifyReport> {
-    let mut c = Checker::new(pr, fi);
+    if let VerifyConstraints::PreserveImportedTables(scope) = options.constraints {
+        let mut seen = HashSet::with_capacity(scope.len().min(catalog.entries.len()));
+        let mut aliases: HashMap<String, usize> = scope
+            .iter()
+            .map(|name| (name.to_ascii_uppercase(), 0))
+            .collect();
+        for entry in &catalog.entries {
+            let name = &entry.descr.name;
+            if scope.contains(name) {
+                seen.insert(name);
+            }
+            if let Some(count) = aliases.get_mut(&name.to_ascii_uppercase()) {
+                *count += 1;
+            }
+        }
+        for name in scope {
+            if !seen.contains(name) {
+                return Err(Error::NotFound(NotFound::Table(name.clone())));
+            }
+            if aliases.get(&name.to_ascii_uppercase()) != Some(&1) {
+                return Err(Error::Constraint(Constraint::BadDescr(format!(
+                    "ambiguous imported verification table {name}"
+                ))));
+            }
+        }
+    }
+    let mut c = Checker::new(pr, fi, options);
     if trailing_pages > 0 {
         c.out.push(Violation {
             location: Location::File,
@@ -523,6 +595,9 @@ struct Entries {
     seen: Vec<bool>,
     prev: Option<(Vec<u8>, u32)>,
     strings_failed: bool,
+    previous_key_was_duplicate: bool,
+    duplicate_entries: u64,
+    duplicate_groups: u64,
 }
 
 struct Separator<'a> {
@@ -534,6 +609,9 @@ struct Separator<'a> {
 struct Checker<'a> {
     pr: &'a dyn PageRead,
     fi: FormatInfo,
+    options: VerifyOptions<'a>,
+    index_constraints: IndexConstraintSummary,
+    retained_name_bytes: usize,
     owners: Vec<u32>,
     names: Vec<String>,
     twice: Listed,
@@ -547,10 +625,13 @@ struct Checker<'a> {
 }
 
 impl<'a> Checker<'a> {
-    fn new(pr: &'a dyn PageRead, fi: FormatInfo) -> Checker<'a> {
+    fn new(pr: &'a dyn PageRead, fi: FormatInfo, options: VerifyOptions<'a>) -> Checker<'a> {
         Checker {
             pr,
             fi,
+            options,
+            index_constraints: IndexConstraintSummary::default(),
+            retained_name_bytes: 0,
             owners: vec![NO_OWNER; pr.num_pages() as usize],
             names: vec![String::new(), "the free list".into()],
             twice: Listed::default(),
@@ -567,6 +648,7 @@ impl<'a> Checker<'a> {
     fn finish(self) -> VerifyReport {
         VerifyReport {
             violations: self.out,
+            index_constraints: self.index_constraints,
             tables: self.tables,
             live_rows: self.live_rows,
             index_entries: self.index_entries,
@@ -1342,6 +1424,9 @@ impl<'a> Checker<'a> {
             seen: vec![false; cx.live.len()],
             prev: None,
             strings_failed: false,
+            previous_key_was_duplicate: false,
+            duplicate_entries: 0,
+            duplicate_groups: 0,
         };
         let mut separators: HashMap<u32, Separator> = HashMap::new();
         for (no, node) in levels.iter().flatten() {
@@ -1462,10 +1547,39 @@ impl<'a> Checker<'a> {
             }
         }
 
+        if st.duplicate_entries != 0 {
+            self.record_constraints(cx, st.duplicate_entries, st.duplicate_groups)?;
+        }
         for (row, (&l, &s)) in cx.live.iter().zip(&st.seen).enumerate() {
             if l && !s {
                 listed.add_kind(Kind::Rows, cx.at(None), format!("row {row} not indexed"));
             }
+        }
+        Ok(())
+    }
+
+    fn record_constraints(&mut self, cx: &IndexCx, entries: u64, groups: u64) -> Result<()> {
+        let at = || cx.at(None);
+        let summary = &mut self.index_constraints;
+        add_count(&mut summary.duplicate_entries, entries, &at)?;
+        add_count(&mut summary.duplicate_groups, groups, &at)?;
+        add_count(&mut summary.indexes_with_duplicates, 1, &at)?;
+        let table = &cx.t.descr().name;
+        let index = &cx.idx.name;
+        let bytes = table
+            .len()
+            .checked_add(index.len())
+            .and_then(|n| self.retained_name_bytes.checked_add(n));
+        if summary.indexes.len() < 100 && bytes.is_some_and(|n| n <= 64 * 1024) {
+            self.retained_name_bytes = bytes.unwrap_or(self.retained_name_bytes);
+            summary.indexes.push(IndexConstraintCount {
+                table: table.clone(),
+                index: index.clone(),
+                duplicate_entries: entries,
+                duplicate_groups: groups,
+            });
+        } else {
+            add_count(&mut summary.omitted_indexes, 1, &at)?;
         }
         Ok(())
     }
@@ -1492,13 +1606,27 @@ impl<'a> Checker<'a> {
                         format!("entry of row {row} is out of (key, row) order after row {pr}"),
                     );
                 }
-                if cx.idx.unique && key.as_slice() == pk {
-                    listed.add_kind(
-                        Kind::Order,
-                        cx.at(Some(no)),
-                        format!("rows {pr} and {row} have the same key in a unique index"),
-                    );
+                let equal = cx.idx.unique && key.as_slice() == pk;
+                let ordered = *row > pr;
+                if equal {
+                    if ordered {
+                        add_count(&mut st.duplicate_entries, 1, &|| cx.at(Some(no)))?;
+                        if !st.previous_key_was_duplicate {
+                            add_count(&mut st.duplicate_groups, 1, &|| cx.at(Some(no)))?;
+                        }
+                    }
+                    let imported = matches!(self.options.constraints,
+                        VerifyConstraints::PreserveImportedTables(scope)
+                            if scope.contains(&cx.t.descr().name));
+                    if !imported {
+                        listed.add_kind(
+                            Kind::Order,
+                            cx.at(Some(no)),
+                            format!("rows {pr} and {row} have the same key in a unique index"),
+                        );
+                    }
                 }
+                st.previous_key_was_duplicate = equal && ordered;
             }
             let r = *row as usize;
             if !cx.live.get(r).copied().unwrap_or(false) {

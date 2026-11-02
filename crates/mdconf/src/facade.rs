@@ -26,6 +26,9 @@ impl StageRunner for FullRunner {
     fn flowcharts(&self, cx: &LoadCtx<'_>, cfg: &mut Configuration) -> Result<()> {
         md_graphics::graph::load(cx, cfg)
     }
+    fn edit_form_body(&self, entry: &str, raw: &[u8], wanted: &brace::Doc) -> Result<Vec<u8>> {
+        md_forms::forms::encode_input_field_visible(entry, raw, wanted)
+    }
 }
 
 pub(crate) struct FullCodecs;

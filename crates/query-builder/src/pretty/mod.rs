@@ -500,9 +500,13 @@ impl L {
                     t.kw(Kw::Periods);
                     t.raw("(");
                     t.tok(&p.unit.text);
-                    for bound in [&p.begin, &p.end].into_iter().flatten() {
+                    if let Some(b) = &p.begin {
                         t.raw(",");
-                        t.expr(bound);
+                        t.expr(b);
+                    }
+                    if let Some(e) = &p.end {
+                        t.raw(if p.begin.is_some() { "," } else { ", ," });
+                        t.expr(e);
                     }
                     t.raw(")");
                 }

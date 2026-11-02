@@ -2,12 +2,28 @@ use crate::ConfigurationExt;
 use crate::{Configuration, Result};
 use md_xmlout::codec;
 use md_xmlout::{DumpOptions, DumpReport, DumpSink, Part, PartStatus};
+use std::collections::BTreeMap;
 use std::path::Path;
 
 pub fn dump(cfg: &Configuration, out: &Path, opts: &DumpOptions) -> Result<DumpReport> {
+    Ok(dump_into(cfg, DumpSink::new(out), opts)?.0)
+}
+
+pub fn dump_to_memory(
+    cfg: &Configuration,
+    opts: &DumpOptions,
+) -> Result<(DumpReport, BTreeMap<String, Vec<u8>>)> {
+    dump_into(cfg, DumpSink::memory(), opts)
+}
+
+fn dump_into(
+    cfg: &Configuration,
+    mut sink: DumpSink,
+    opts: &DumpOptions,
+) -> Result<(DumpReport, BTreeMap<String, Vec<u8>>)> {
     cfg.require_full()?;
-    if let Some(report) = md_xmlout::xml_origin::dump(cfg, out, opts)? {
-        return Ok(report);
+    if md_xmlout::xml_origin::dump(cfg, &mut sink, opts)? {
+        return Ok(sink.finish(cfg.diagnostics.misses.clone(), Vec::new()));
     }
     if opts.parts.contains(&Part::Configuration) {
         let _ = codec::parts::configuration::try_configuration_xml(cfg)?;
@@ -15,7 +31,6 @@ pub fn dump(cfg: &Configuration, out: &Path, opts: &DumpOptions) -> Result<DumpR
     if opts.parts.contains(&Part::Predefined) {
         codec::parts::predefined::preflight(cfg)?;
     }
-    let mut sink = DumpSink::new(out);
     let mut not_written = Vec::new();
     for &part in &opts.parts {
         let status = match part {
@@ -36,5 +51,5 @@ pub fn dump(cfg: &Configuration, out: &Path, opts: &DumpOptions) -> Result<DumpR
             not_written.push(part);
         }
     }
-    Ok(sink.into_report(cfg.diagnostics.misses.clone(), not_written))
+    Ok(sink.finish(cfg.diagnostics.misses.clone(), not_written))
 }

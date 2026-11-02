@@ -189,6 +189,15 @@ pub(super) fn property_scoped_as(
         return raw_value(cx, codec, el);
     }
     if codec == Codec::Unknown
+        && cx.scope == "ConfigurationProperties"
+        && let Some(known) = known_mobile_property(cx.schema, el, tag, &context)
+    {
+        if !known {
+            cx.miss("raw", tag);
+        }
+        return Value::Xml(xml_elem(el));
+    }
+    if codec == Codec::Unknown
         || !canonical_names(el)
         || (codec == Codec::Enum
             && enum_map.is_some_and(|map| {
@@ -227,9 +236,11 @@ pub(super) fn property_scoped_as(
         Codec::TValue => typed_value(el, None).map(Value::Typed),
         Codec::MdList => ref_list(&mut attempt, el, "xr:Item", true),
         Codec::FoContent => ref_list(&mut attempt, el, "xr:Object", false),
-        Codec::FieldList => field_list(el),
+        Codec::FieldList | Codec::FieldList0 => field_list(el),
         Codec::StdAttrs => std_attrs(&mut attempt, el, depth, &context),
         Codec::XdtoPackages => xdto_packages(&mut attempt, el, &context),
+        Codec::XdtoType => xdto_type(el, &context, tag),
+        Codec::CaContent => ca_content(&mut attempt, el),
         _ => None,
     };
     match typed {
@@ -248,17 +259,11 @@ pub(super) fn property_scoped_as(
 }
 
 fn known_purposes(el: &XmlNode, scope: &dyn NamespaceScope) -> bool {
-    const CORE: &str = "http://v8.1c.ru/8.1/data/core";
-    const APP: &str = "http://v8.1c.ru/8.2/managed-application/core";
-    const XSI: &str = "http://www.w3.org/2001/XMLSchema-instance";
     el.attrs.is_empty()
-        && el.text.as_deref().is_none_or(|text| {
-            text.bytes()
-                .all(|byte| matches!(byte, b' ' | b'\t' | b'\r' | b'\n'))
-        })
+        && is_blank(el.text.as_deref())
         && el.children.iter().all(|child| {
             let context = NamespaceContext::extend(child, scope);
-            expanded(&context, &qname(child)) == Some((CORE, "Value"))
+            expanded(&context, &qname(child)) == Some((CORE_NS, "Value"))
                 && child.children.is_empty()
                 && matches!(
                     child.text.as_deref(),
@@ -266,8 +271,81 @@ fn known_purposes(el: &XmlNode, scope: &dyn NamespaceScope) -> bool {
                 )
                 && matches!(child.attrs.as_slice(), [attr]
                     if attr.prefix.is_some()
-                        && expanded(&context, &attr_qname(attr)) == Some((XSI, "type"))
-                        && expanded(&context, &attr.value) == Some((APP, "ApplicationUsePurpose")))
+                        && expanded(&context, &attr_qname(attr)) == Some((XSI_NS, "type"))
+                        && expanded(&context, &attr.value) == Some((APP_NS, "ApplicationUsePurpose")))
+        })
+}
+
+const APP_NS: &str = "http://v8.1c.ru/8.2/managed-application/core";
+const CORE_NS: &str = "http://v8.1c.ru/8.1/data/core";
+const XSI_NS: &str = "http://www.w3.org/2001/XMLSchema-instance";
+const XS_NS: &str = "http://www.w3.org/2001/XMLSchema";
+
+fn is_blank(text: Option<&str>) -> bool {
+    text.is_none_or(|t| t.bytes().all(|b| matches!(b, b' ' | b'\t' | b'\r' | b'\n')))
+}
+
+fn known_mobile_property(
+    schema: &Schema,
+    el: &XmlNode,
+    tag: &str,
+    scope: &dyn NamespaceScope,
+) -> Option<bool> {
+    let spec = schema.config_prop(tag)?;
+    Some(match spec.codec.as_str() {
+        "functionalities" => {
+            let names: Vec<&str> = spec
+                .extra
+                .get("map")
+                .and_then(|m| m.object())
+                .map(|m| m.iter().filter_map(|(_, v)| v.as_str()).collect())
+                .unwrap_or_default();
+            known_functionalities(el, scope, &names)
+        }
+        "strlist" => known_strlist(el, scope),
+        "empty" => el.attrs.is_empty() && el.children.is_empty() && is_blank(el.text.as_deref()),
+        _ => return None,
+    })
+}
+
+fn known_functionalities(el: &XmlNode, scope: &dyn NamespaceScope, names: &[&str]) -> bool {
+    el.attrs.is_empty()
+        && is_blank(el.text.as_deref())
+        && el.children.iter().all(|item| {
+            let context = NamespaceContext::extend(item, scope);
+            expanded(&context, &qname(item)) == Some((APP_NS, "functionality"))
+                && item.attrs.is_empty()
+                && is_blank(item.text.as_deref())
+                && item.children.len() == 2
+                && item
+                    .children
+                    .iter()
+                    .zip(["functionality", "use"])
+                    .all(|(leaf, local)| {
+                        let context = NamespaceContext::extend(leaf, &context);
+                        expanded(&context, &qname(leaf)) == Some((APP_NS, local))
+                            && leaf.attrs.is_empty()
+                            && leaf.children.is_empty()
+                            && match (local, leaf.text.as_deref()) {
+                                ("use", text) => matches!(text, Some("true" | "false")),
+                                (_, Some(text)) => names.contains(&text),
+                                _ => false,
+                            }
+                    })
+        })
+}
+
+fn known_strlist(el: &XmlNode, scope: &dyn NamespaceScope) -> bool {
+    el.attrs.is_empty()
+        && is_blank(el.text.as_deref())
+        && el.children.iter().all(|child| {
+            let context = NamespaceContext::extend(child, scope);
+            expanded(&context, &qname(child)) == Some((CORE_NS, "Value"))
+                && child.children.is_empty()
+                && matches!(child.attrs.as_slice(), [attr]
+                    if attr.prefix.is_some()
+                        && expanded(&context, &attr_qname(attr)) == Some((XSI_NS, "type"))
+                        && expanded(&context, &attr.value) == Some((XS_NS, "string")))
         })
 }
 
@@ -382,6 +460,20 @@ fn field_list(el: &XmlNode) -> Option<Value> {
         .map(Value::FieldList)
 }
 
+fn xdto_type(el: &XmlNode, context: &dyn NamespaceScope, tag: &str) -> Option<Value> {
+    if !el.attrs.is_empty() || !el.children.is_empty() {
+        return None;
+    }
+    let text = el.text.as_deref()?;
+    if !text.contains(':') {
+        return None;
+    }
+    let (uri, local) = expanded(context, text)?;
+    Some(Value::Xml(crate::objects::bags::xdto_type_elem(
+        tag, uri, local,
+    )))
+}
+
 fn xdto_packages(cx: &mut XCtx, el: &XmlNode, context: &dyn NamespaceScope) -> Option<Value> {
     const READABLE: &str = "http://v8.1c.ru/8.3/xcf/readable";
     if !el.attrs.is_empty() || !el.ns_decls.is_empty() || el.text.is_some() {
@@ -436,6 +528,54 @@ fn xdto_packages(cx: &mut XCtx, el: &XmlNode, context: &dyn NamespaceScope) -> O
                 .child(XmlElem::new("xr:Presentation"))
                 .child(XmlElem::leaf("xr:CheckState", "0"))
                 .child(XmlElem::leaf("xr:Value", &text).with_attr("xsi:type", ty)),
+        );
+    }
+    Some(Value::Xml(root))
+}
+
+fn ca_content(cx: &mut XCtx, el: &XmlNode) -> Option<Value> {
+    if !el.attrs.is_empty() || !el.ns_decls.is_empty() || el.text.is_some() {
+        return None;
+    }
+    let tag = qname(el);
+    let mut root = XmlElem::new(&tag);
+    for item in &el.children {
+        if qname(item) != "xr:Item"
+            || !item.attrs.is_empty()
+            || !item.ns_decls.is_empty()
+            || item.text.is_some()
+        {
+            return None;
+        }
+        let [metadata, use_, separation] = item.children.as_slice() else {
+            return None;
+        };
+        if qname(metadata) != "xr:Metadata"
+            || !is_leaf(metadata)
+            || qname(use_) != "xr:Use"
+            || !is_leaf(use_)
+            || qname(separation) != "xr:ConditionalSeparation"
+            || !is_leaf(separation)
+        {
+            return None;
+        }
+        let metadata = metadata.text.as_deref().filter(|t| !t.is_empty())?;
+        let use_ = use_
+            .text
+            .as_deref()
+            .filter(|t| matches!(*t, "Auto" | "Use" | "DontUse"))?;
+        let separation = separation.text.as_deref().filter(|t| !t.is_empty());
+        md_ref(cx, metadata, &tag);
+        if let Some(name) = separation {
+            md_ref(cx, name, &tag);
+        }
+        let mut separation_elem = XmlElem::new("xr:ConditionalSeparation");
+        separation_elem.text = separation.map(str::to_string);
+        root = root.child(
+            XmlElem::new("xr:Item")
+                .child(XmlElem::leaf("xr:Metadata", metadata))
+                .child(XmlElem::leaf("xr:Use", use_))
+                .child(separation_elem),
         );
     }
     Some(Value::Xml(root))

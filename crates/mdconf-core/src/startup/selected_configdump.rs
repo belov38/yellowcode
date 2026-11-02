@@ -58,6 +58,12 @@ impl<S: ManagedEntrySource> md_xmlout::ManagedDumpNames for ManagedViewerContext
             .iter()
             .flat_map(|(_, ids)| ids.iter().copied())
     }
+    fn externals(&self) -> impl Iterator<Item = Guid> {
+        self.index()
+            .external
+            .iter()
+            .flat_map(|(_, ids)| ids.iter().map(|(_, id)| *id))
+    }
     fn is_object(&self, id: Guid) -> bool {
         self.index().objs.get(&id).is_some()
     }

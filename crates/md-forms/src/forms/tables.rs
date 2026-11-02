@@ -162,6 +162,42 @@ impl<'a> TableEntriesRef<'a> {
             }),
         }
     }
+    pub fn iter(self) -> impl Iterator<Item = (&'a str, TableValueRef<'a>)> {
+        let native = match self {
+            Self::Native(v) => Some(v),
+            _ => None,
+        };
+        let embedded = match self {
+            Self::Embedded(v) => Some(v),
+            _ => None,
+        };
+        native
+            .into_iter()
+            .flat_map(|v| v.iter())
+            .map(|(key, value)| {
+                (
+                    key.as_str(),
+                    TableValueRef {
+                        raw: JsonRef::Native(&value.raw),
+                        parsed: value.parsed.as_ref().map(JsonRef::Native),
+                    },
+                )
+            })
+            .chain(
+                embedded
+                    .into_iter()
+                    .flat_map(|v| v.table())
+                    .map(|(key, value)| {
+                        (
+                            key,
+                            TableValueRef {
+                                raw: JsonRef::Embedded(value.raw()),
+                                parsed: value.parsed().map(JsonRef::Embedded),
+                            },
+                        )
+                    }),
+            )
+    }
 }
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct PropRef<'a> {

@@ -3,7 +3,7 @@ use super::{
     ManagedSettings, ManagedValueContext,
     defined_types::{DefinedType, Prefix},
     index::GuidText,
-    objects::selected_shell,
+    objects::{external_metadata, selected_shell},
     values::append,
 };
 use crate::{
@@ -274,6 +274,19 @@ impl<S: ManagedEntrySource> ManagedViewerContext<S> {
                 object.recalculations = recalculations;
                 object
             });
+        let external = external_metadata(
+            &entries,
+            &context,
+            Some(&sets),
+            id,
+            true,
+            &mut diagnostics,
+            crate::index::MAX_EXTERNAL_DEPTH,
+        )?;
+        object = object.try_zip(external)?.map(|(mut object, external)| {
+            object.external = external;
+            object
+        });
         Ok(Some(SelectedObject {
             object,
             diagnostics,

@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -138,6 +138,7 @@ pub struct RestoreReport {
     pub batches: u64,
     pub peak_pending_bytes: usize,
     pub source_sha256: String,
+    pub index_constraints: onecd::IndexConstraintSummary,
     pub warnings: Vec<OpenWarning>,
 }
 
@@ -215,6 +216,43 @@ fn system_descriptors() -> Result<Vec<TableDescr>> {
                 .ok_or_else(|| bad("seed system descriptor"))
         })
         .collect()
+}
+
+fn protected_names() -> Result<HashSet<String>> {
+    let mut names: HashSet<String> = SYSTEM.into_iter().map(str::to_owned).collect();
+    for d in ibcmd::extra_tables()? {
+        names.insert(d.name.to_ascii_uppercase());
+    }
+    Ok(names)
+}
+
+fn application_import_scope(heads: &[TableHead], catalog: &[String]) -> Result<HashSet<String>> {
+    let protected = protected_names()?;
+    let mut actual = HashMap::with_capacity(catalog.len());
+    for name in catalog {
+        if actual.insert(name.to_ascii_uppercase(), name).is_some() {
+            return Err(bad(
+                "ambiguous physical catalog name in application import scope",
+            ));
+        }
+    }
+    let mut scope = HashSet::with_capacity(heads.len());
+    for head in heads {
+        let name = &head.phys_name;
+        let canonical = name.to_ascii_uppercase();
+        if head.source != Source::DataBase || protected.contains(&canonical) {
+            return Err(bad(format!("excluded application import table {name}")));
+        }
+        if actual.get(&canonical).copied() != Some(&canonical) {
+            return Err(bad(format!(
+                "missing or nonexact application import table {name}"
+            )));
+        }
+        if !scope.insert(canonical) {
+            return Err(bad(format!("ambiguous application import table {name}")));
+        }
+    }
+    Ok(scope)
 }
 
 fn descriptors(
@@ -1065,7 +1103,7 @@ fn run(
     state.progress(notes, Phase::Verify);
     #[cfg(test)]
     inject("verify")?;
-    let warnings = final_checks(&database, &expected, opts)?;
+    let checked = final_checks(&database, &expected, opts)?;
     before_publish()?;
     state.progress(notes, Phase::Publish);
     #[cfg(test)]
@@ -1073,6 +1111,15 @@ fn run(
     persist(&database, target)?;
     sync_dir(parent);
     drop(lock);
+    let constraints = &checked.index_constraints;
+    if constraints.indexes_with_duplicates != 0 {
+        notes.send(RestoreEvent::Note(format!(
+            "snapshot import preserved {} duplicate entries in {} group(s) across {} declared-unique index(es); strict uniqueness audit reports them",
+            constraints.duplicate_entries,
+            constraints.duplicate_groups,
+            constraints.indexes_with_duplicates,
+        )));
+    }
     Ok(RestoreReport {
         source_bytes: before.len(),
         files: expected.files,
@@ -1082,7 +1129,8 @@ fn run(
         batches: commits,
         peak_pending_bytes: peak,
         source_sha256,
-        warnings,
+        index_constraints: checked.index_constraints,
+        warnings: checked.warnings,
     })
 }
 
@@ -1432,6 +1480,14 @@ fn stream<R: Read>(
     }
     let heads = TableHead::database(&schema)?;
     let mut logical = descrs(&schema, NameCase::Upper)?;
+    {
+        let catalog: Vec<String> = logical
+            .iter()
+            .map(|d| d.name.clone())
+            .chain(protected_names()?)
+            .collect();
+        application_import_scope(&heads, &catalog)?;
+    }
     let mut names: HashSet<String> = SYSTEM.into_iter().map(str::to_owned).collect();
     for d in &logical {
         if d.name.to_ascii_uppercase().contains("BINARYDATA")
@@ -1512,6 +1568,7 @@ fn stream<R: Read>(
     check_metadata(&run.database, &partial, run.opts)?;
 
     let db = Database::open(&run.database, database_options(&limits))?;
+    let scope = application_import_scope(&heads, &db.info().tables)?;
     let mut batches = Batches::new(&db, &limits);
     let mut counts = partial.counts;
     for head in heads {
@@ -1521,7 +1578,11 @@ fn stream<R: Read>(
         let plan = {
             let tx = batches.unit(0, "table")?;
             let descriptor = tx.read_table(&head.phys_name)?.descr().clone();
-            Plan::new(&descriptor, &head)?
+            let plan = Plan::new(&descriptor, &head)?;
+            if !scope.contains(&plan.table) {
+                return Err(bad("application row outside import scope"));
+            }
+            plan
         };
         let mut count = 0u64;
         loop {
@@ -1532,7 +1593,7 @@ fn stream<R: Read>(
                     let tx =
                         batches.unit(plan.estimate(&row), &format!("a row of {}", plan.table))?;
                     let row = plan.row(row)?;
-                    tx.table(&plan.table)?.insert(&row)?;
+                    tx.table_for_restore(&plan.table)?.insert(&row)?;
                     count += 1;
                     run.rows += 1;
                     run.tick(notes);
@@ -1639,12 +1700,13 @@ fn check_metadata(
     Ok((ib.configuration().is_some(), open_warnings(&ib)))
 }
 
-fn final_checks(
-    path: &Path,
-    expected: &Expected,
-    opts: &RestoreOptions<'_>,
-) -> Result<Vec<OpenWarning>> {
-    let (configured, warnings) = check_metadata(path, expected, opts)?;
+struct FinalCheck {
+    warnings: Vec<OpenWarning>,
+    index_constraints: onecd::IndexConstraintSummary,
+}
+
+fn final_checks(path: &Path, expected: &Expected, opts: &RestoreOptions<'_>) -> Result<FinalCheck> {
+    let (configured, mut warnings) = check_metadata(path, expected, opts)?;
     if !configured && expected.rows != 0 {
         return Err(bad("unqualified no-config schema/data"));
     }
@@ -1656,7 +1718,9 @@ fn final_checks(
             ..onecd::OpenOptions::read_only()
         },
     )?;
-    let report = db.verify()?;
+    let heads = TableHead::database(&expected.schema)?;
+    let scope = application_import_scope(&heads, &db.info().tables)?;
+    let report = db.verify_with(onecd::VerifyOptions::for_imported_tables(&scope))?;
     if !report.violations.is_empty() {
         return Err(bad("engine verification"));
     }
@@ -1705,7 +1769,7 @@ fn final_checks(
     for name in ["V8USERS", "V8USERPWDPLCS", "V8CMSDPWDS"] {
         actual_counts.push(rows_of(name)?);
     }
-    for head in TableHead::database(&expected.schema)? {
+    for head in &heads {
         actual_counts.push(rows_of(&head.phys_name)?);
     }
     if actual_counts != expected.counts {
@@ -1770,5 +1834,15 @@ fn final_checks(
     if rows_of("V8USERSMATKEYS")? != expected.matching_keys {
         return Err(bad("V8USERSMATKEYS row count"));
     }
-    Ok(warnings)
+    if report.index_constraints.indexes_with_duplicates != 0 {
+        warnings.push(OpenWarning {
+            kind: "ImportedUniqueIndexDuplicates",
+            items: usize::try_from(report.index_constraints.indexes_with_duplicates)
+                .map_err(|_| bad("imported index count does not fit warning items"))?,
+        });
+    }
+    Ok(FinalCheck {
+        warnings,
+        index_constraints: report.index_constraints,
+    })
 }

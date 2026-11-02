@@ -33,8 +33,11 @@ use crate::index::write::create_index_file;
 use crate::pager::txn::TxnPages;
 use crate::pager::versioned::{POISONED, Pager, Snapshot};
 use crate::pager::{FileStorage, PageRead, Storage};
-use crate::table::{RowSource, TableFiles, TableRead, TableWrite, check_writable, has_string_keys};
-use crate::verify::{self, VerifyReport};
+use crate::table::{
+    RestoreTableWrite, RowSource, TableFiles, TableRead, TableWrite, check_writable,
+    has_string_keys,
+};
+use crate::verify::{self, VerifyOptions, VerifyReport};
 
 pub type RowId = u32;
 
@@ -480,7 +483,11 @@ impl Database {
     }
 
     pub fn verify(&self) -> Result<VerifyReport> {
-        self.read().verify()
+        self.verify_with(VerifyOptions::default())
+    }
+
+    pub fn verify_with(&self, options: VerifyOptions<'_>) -> Result<VerifyReport> {
+        self.read().verify_with(options)
     }
 }
 
@@ -511,6 +518,10 @@ impl WriteTxn<'_> {
 
     pub fn pending_bytes(&self) -> usize {
         self.pages.pending_bytes()
+    }
+
+    pub fn table_for_restore(&mut self, name: &str) -> Result<RestoreTableWrite<'_>> {
+        self.table(name).map(RestoreTableWrite::new)
     }
 
     pub fn table(&mut self, name: &str) -> Result<TableWrite<'_>> {
@@ -956,6 +967,10 @@ impl ReadTxn {
     }
 
     pub fn verify(&self) -> Result<VerifyReport> {
+        self.verify_with(VerifyOptions::default())
+    }
+
+    pub fn verify_with(&self, options: VerifyOptions<'_>) -> Result<VerifyReport> {
         let s = &self.snap;
         #[cfg_attr(
             not(feature = "icu"),
@@ -972,6 +987,7 @@ impl ReadTxn {
                 locale: &s.catalog.locale,
             },
             s.trailing_pages,
+            options,
         )
     }
 

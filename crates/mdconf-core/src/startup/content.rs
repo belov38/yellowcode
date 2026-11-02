@@ -52,22 +52,31 @@ impl ManagedValueContext<'_> {
         raw: &Node,
         sets: Option<&dyn DefinedTypeLookup>,
     ) -> Result<ManagedDecodedContent, BudgetError> {
+        self.named_content_with_sets(kind.as_str(), name, raw, sets)
+    }
+    pub(super) fn named_content_with_sets(
+        &self,
+        kind: &str,
+        name: &str,
+        raw: &Node,
+        sets: Option<&dyn DefinedTypeLookup>,
+    ) -> Result<ManagedDecodedContent, BudgetError> {
         let budget = self.memory_budget();
-        let props = self.object_properties_with_sets(kind, name, raw, sets)?;
+        let props = self.named_properties_with_sets(kind, name, raw, sets)?;
         let mut diagnostics = props.diagnostics;
-        let tree = Tree::new(kind.as_str(), raw);
-        let spec = super::kind_spec(kind.as_str()).filter(|spec| spec.header().is_some());
+        let tree = Tree::new(kind, raw);
+        let spec = super::kind_spec(kind).filter(|spec| spec.header().is_some());
         let generated = self.generated(
             tree,
             spec.and_then(|s| s.field("internal_info")),
-            kind.as_str(),
+            kind,
             false,
         )?;
         let this_node = spec
             .and_then(|s| s.field("this_node"))
             .and_then(|path| follow(tree, path))
             .and_then(Tree::as_guid);
-        let co_type = text(budget, &[kind.as_str(), "ChildObjects"])?;
+        let co_type = text(budget, &[kind, "ChildObjects"])?;
         let tasks = if spec.is_some() {
             self.child_tasks(
                 tree,
@@ -80,7 +89,7 @@ impl ManagedValueContext<'_> {
         } else {
             BudgetedVec::new(budget, CATEGORY)?
         };
-        let children = self.child_graph(tasks, (kind.as_str(), name), sets, &mut diagnostics)?;
+        let children = self.child_graph(tasks, (kind, name), sets, &mut diagnostics)?;
         Ok(ManagedDecodedContent {
             values: props.values.try_zip(generated)?.try_zip(children)?.map(
                 |((p, generated_types), children)| ManagedObjectContents {
