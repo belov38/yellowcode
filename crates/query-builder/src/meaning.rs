@@ -345,7 +345,22 @@ fn source(s: &mut tir::Source) {
     s.all_fields = false;
     s.alias.clear();
     match &mut s.from {
-        tir::From::Table { args, .. } => {
+        tir::From::Table {
+            args,
+            accounting_dependencies,
+            drcr,
+            ..
+        } => {
+            for supplied in accounting_dependencies
+                .as_mut()
+                .map(|d| &mut d.supplied)
+                .into_iter()
+                .chain(drcr.as_mut().map(|d| &mut d.supplied))
+            {
+                while supplied.last() == Some(&0) {
+                    supplied.pop();
+                }
+            }
             while args.last().is_some_and(|a| a.is_none()) {
                 args.pop();
             }

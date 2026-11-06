@@ -3,6 +3,7 @@ use crate::managed::{Index, NameKey, NativeOwned, ScratchVec};
 use crate::{QuerySchema, ir, tir};
 use query_syntax::ast::JoinKind;
 mod autoorder;
+mod hierarchy_union;
 mod nested;
 mod presentation;
 
@@ -26,6 +27,9 @@ struct Builder<'c, 'a, 'r, 'w, 't> {
     tables: ScratchVec<NativeOwned<'a, crate::QTableId>>,
     seen_tables: Index<crate::QTableId, ()>,
     nested: ScratchVec<NativeOwned<'a, ir::NestedS>>,
+    nested_from: Option<&'t tir::Select>,
+    nested_outputs: &'t [tir::Item],
+    nested_source: Option<(ir::SrcId, ScratchVec<NativeOwned<'a, ir::NestedS>>)>,
     present: ScratchVec<NativeOwned<'a, u16>>,
     aggs: ScratchVec<NativeOwned<'a, ir::AggCall>>,
     agg_index: Index<u64, ScratchVec<u16>>,
@@ -33,6 +37,7 @@ struct Builder<'c, 'a, 'r, 'w, 't> {
     query_depth: u32,
     temp_out: bool,
     single_part: bool,
+    union_present: Option<(u16, u16)>,
 }
 struct Declared<'a, 't> {
     rel: NativeOwned<'a, ir::Rel>,
@@ -41,10 +46,28 @@ struct Declared<'a, 't> {
 impl<'c, 'a, 'r, 'w, 't> Builder<'c, 'a, 'r, 'w, 't> {
     fn new(
         ctx: &'c BuildCtx<'a, 'r, 'w>,
-        statement: &crate::managed::statement::Statement,
+        statement: &'t crate::managed::statement::Statement,
         schema: &'t QuerySchema,
     ) -> BuildResult<Self> {
         ctx.checkpoint()?;
+        let nested_from = match &statement.typed.kind {
+            tir::StmtKind::Query(query) if statement.temp_out.is_none() => {
+                tir::nested_from_select(query).filter(|select| {
+                    select.sources.iter().all(|source| {
+                        matches!(&source.from, tir::From::Table { id, .. }
+                            if !matches!(schema.table(*id).kind, crate::TableKind::Virtual(_)))
+                    })
+                })
+            }
+            _ => None,
+        };
+        let nested_outputs: &[tir::Item] = match &statement.typed.kind {
+            tir::StmtKind::Query(query) if nested_from.is_some() => query
+                .parts
+                .first()
+                .map_or(&[][..], |select| select.items.as_slice()),
+            _ => &[],
+        };
         let mut value = Self {
             ctx,
             schema,
@@ -56,6 +79,9 @@ impl<'c, 'a, 'r, 'w, 't> Builder<'c, 'a, 'r, 'w, 't> {
             tables: ctx.scratch(0)?,
             seen_tables: Index::new(),
             nested: ctx.scratch(0)?,
+            nested_from,
+            nested_outputs,
+            nested_source: None,
             present: ctx.scratch(0)?,
             aggs: ctx.scratch(0)?,
             agg_index: Index::new(),
@@ -63,6 +89,7 @@ impl<'c, 'a, 'r, 'w, 't> Builder<'c, 'a, 'r, 'w, 't> {
             query_depth: 0,
             temp_out: statement.temp_out.is_some(),
             single_part: matches!(&statement.typed.kind, tir::StmtKind::Query(query) if query.parts.len() == 1),
+            union_present: None,
         };
         for param in &statement.params {
             value.param(&param.name)?;
@@ -210,17 +237,31 @@ impl<'c, 'a, 'r, 'w, 't> Builder<'c, 'a, 'r, 'w, 't> {
         query: &'t tir::Query,
     ) -> BuildResult<(NativeOwned<'a, ir::Rel>, NativeOwned<'a, Vec<crate::QType>>)> {
         let ctx = self.ctx;
-        if query.autoorder && query.parts.len() > 1 {
-            return Err(BuildProblem::Later {
-                what: "АВТОУПОРЯДОЧИВАНИЕ объединения",
-                stage: "Q3",
-            });
-        }
+        let union_auto = if query.autoorder && query.parts.len() > 1 {
+            match ir::uniform_union_autoorder(query, self.schema) {
+                Some(desc) if self.query_depth == 1 && !self.temp_out => Some(desc),
+                _ => {
+                    return Err(BuildProblem::Later {
+                        what: "АВТОУПОРЯДОЧИВАНИЕ объединения",
+                        stage: "Q3",
+                    });
+                }
+            }
+        } else {
+            None
+        };
         if query.totals.is_some() {
             return Err(BuildProblem::Later {
                 what: "ИТОГИ",
                 stage: "Q4",
             });
+        }
+        if self.query_depth == 1 {
+            self.union_present = if self.temp_out {
+                None
+            } else {
+                ir::uniform_movement_union_presentation(query)
+            };
         }
         let Some(first) = query.parts.first() else {
             return Err(BuildProblem::Internal("a query without parts"));
@@ -240,15 +281,29 @@ impl<'c, 'a, 'r, 'w, 't> Builder<'c, 'a, 'r, 'w, 't> {
             .iter()
             .any(|part| part.items.iter().any(|item| item.nested.is_some()))
         {
-            return Err(BuildProblem::Later {
-                what: "вложенная таблица в объединении",
-                stage: "Q3",
-            });
+            if self.query_depth != 1
+                || self.temp_out
+                || !ir::nested_union::supported(self.schema, query)
+            {
+                return Err(BuildProblem::Later {
+                    what: "вложенная таблица в объединении",
+                    stage: "Q3",
+                });
+            }
+            ir::nested_union::validate_order(query)
+                .map_err(|what| BuildProblem::Later { what, stage: "Q3" })?;
         }
         let mut types = types.finish();
         let mut parts = ctx.vector(query.parts.len())?;
+        let mut auto_sort = match union_auto {
+            Some(_) => Some(ctx.vector(0)?),
+            None => None,
+        };
         for (index, part) in query.parts.iter().enumerate() {
-            let rel = self.select(part, None, false)?;
+            let mut rel = self.select(part, None, false)?;
+            if let (Some(desc), Some(keys)) = (union_auto, auto_sort.as_mut()) {
+                rel = self.union_autoorder_part(rel, keys, desc)?;
+            }
             ctx.parent_depth(std::iter::once(rel.depth()))?;
             ctx.push(&mut parts, rel)?;
             if index > 0 {
@@ -259,8 +314,11 @@ impl<'c, 'a, 'r, 'w, 't> Builder<'c, 'a, 'r, 'w, 't> {
                 types = merged.finish();
             }
         }
-        let mut root = ctx.union(parts.finish(), ctx.copy(&query.unions)?)?;
-        if !query.order.is_empty() {
+        let root = ctx.union(parts.finish(), ctx.copy(&query.unions)?)?;
+        let (mut root, hierarchy) = self.hierarchy_union(query, root, types.trusted_borrow())?;
+        if let Some(keys) = auto_sort {
+            root = ctx.sort(root, keys.finish(), None)?;
+        } else if !hierarchy && !query.order.is_empty() {
             let mut keys = ctx.vector(query.order.len())?;
             for key in &query.order {
                 let desc = match key.dir {
@@ -288,6 +346,61 @@ impl<'c, 'a, 'r, 'w, 't> Builder<'c, 'a, 'r, 'w, 't> {
         }
         Ok((root, types))
     }
+
+    fn union_autoorder_part(
+        &mut self,
+        part: NativeOwned<'a, ir::Rel>,
+        sort: &mut crate::managed::NativeVec<'a, ir::SortKey>,
+        desc: bool,
+    ) -> BuildResult<NativeOwned<'a, ir::Rel>> {
+        let ctx = self.ctx;
+        let ir::Rel::Project { exprs, .. } = part.trusted_borrow() else {
+            return Err(BuildProblem::Internal(
+                "an autoordered union arm without a projection",
+            ));
+        };
+        let [base] = exprs.as_slice() else {
+            return Err(BuildProblem::Internal(
+                "an autoordered union arm without one raw reference",
+            ));
+        };
+        let mut automatic = self.auto_keys(base)?;
+        let first = sort.items().is_empty();
+        if !first && sort.items().len() != automatic.len() {
+            return Err(BuildProblem::Internal(
+                "nonuniform automatic union key layout",
+            ));
+        }
+        let capacity = automatic
+            .len()
+            .checked_add(1)
+            .ok_or_else(|| ctx.refuse(memory_budget::BudgetError::Overflow))?;
+        let mut output = ctx.vector(capacity)?;
+        ctx.push(&mut output, self.copy_expr(base)?)?;
+        automatic.reverse();
+        while let Some(key) = automatic.pop() {
+            if first {
+                let ty = ctx.copy(&key.trusted_borrow().ty)?;
+                let expr = self.out(output.items().len(), ty)?;
+                ctx.parent_depth(std::iter::once(expr.depth()))?;
+                ctx.push(sort, expr.map(|expr| ir::SortKey { expr, desc }))?;
+            }
+            ctx.push(&mut output, key)?;
+        }
+        let output = output.finish();
+        let input_depth = part.depth().checked_sub(1).ok_or(BuildProblem::Internal(
+            "an autoordered union arm without project depth",
+        ))?;
+        let depth = ctx.parent_depth([input_depth, output.depth()].into_iter())?;
+        let replacement = ctx.allocated(part.zip(output))?;
+        Ok(ctx
+            .allocated(replacement.try_map(|(part, exprs)| match part {
+                ir::Rel::Project { input, .. } => Ok(ir::Rel::Project { input, exprs }),
+                _ => Err(memory_budget::BudgetError::Overflow),
+            }))?
+            .set_depth(depth))
+    }
+
     fn out(
         &self,
         column: usize,
@@ -307,7 +420,12 @@ impl<'c, 'a, 'r, 'w, 't> Builder<'c, 'a, 'r, 'w, 't> {
         let ctx = self.ctx;
         self.allowed |= select.allowed;
         if select.items.iter().any(|item| item.nested.is_some()) {
-            if self.query_depth != 1 {
+            if self.query_depth != 1
+                && !(self.query_depth == 2
+                    && self
+                        .nested_from
+                        .is_some_and(|inner| std::ptr::eq(inner, select)))
+            {
                 return Err(BuildProblem::Later {
                     what: "вложенная таблица в подзапросе",
                     stage: "Q3",
@@ -374,11 +492,27 @@ impl<'c, 'a, 'r, 'w, 't> Builder<'c, 'a, 'r, 'w, 't> {
             let pred = self.expr(input)?;
             root = ctx.filter(root, pred)?;
         }
+        let forwarding = self.query_depth == 2
+            && self
+                .nested_from
+                .is_some_and(|inner| std::ptr::eq(inner, select));
         let mut exprs = ctx.vector(select.items.len())?;
         for (col, item) in select.items.iter().enumerate() {
             let expr = if item.nested.is_some() {
-                self.nested_item(item, col)?
-            } else if let Some(expr) = self.presentation_item(select, item, col)? {
+                let retain = !forwarding
+                    || self.nested_outputs.iter().any(|output| {
+                        tir::forwarded_nested_column(output)
+                            .is_some_and(|column| usize::from(column) == col)
+                    });
+                self.nested_item(item, col, retain)?
+            } else if let Some(expr) = self.forward_nested(item, col)? {
+                expr
+            } else if let Some(expr) = self.presentation_item(
+                select,
+                item,
+                col,
+                !auto && order.is_none_or(<[_]>::is_empty),
+            )? {
                 expr
             } else {
                 self.expr(&item.expr)?
@@ -404,7 +538,37 @@ impl<'c, 'a, 'r, 'w, 't> Builder<'c, 'a, 'r, 'w, 't> {
                         | query_syntax::ast::OrderDir::HierarchyDesc
                 )
             });
-            if hierarchy && (order.len() != 1 || aggregated || select.distinct) {
+            let paired_hierarchy = matches!(order, [leading, suffix]
+                if self.query_depth == 1
+                && !self.temp_out
+                && self.single_part
+                && !auto
+                && matches!(
+                    leading.dir,
+                    query_syntax::ast::OrderDir::Hierarchy
+                        | query_syntax::ast::OrderDir::HierarchyDesc
+                )
+                && matches!(
+                    suffix.dir,
+                    query_syntax::ast::OrderDir::Asc | query_syntax::ast::OrderDir::Desc
+                )
+                && suffix.expr.ty.refs.is_empty()
+                && suffix.expr.ty.others.is_empty()
+                && order.iter().all(|key| {
+                    matches!(
+                        &key.expr.kind,
+                        tir::TKind::Field { level: 0, source: 0, derefs, .. } if derefs.is_empty()
+                    )
+                })
+                && matches!(select.sources.as_slice(), [source]
+                    if source.joins.is_empty()
+                        && matches!(&source.from, tir::From::Table { id, .. }
+                            if matches!(self.schema.table(*id).kind, crate::schema::TableKind::Object(_))
+                                && self.role_field(*id, crate::schema::StdRole::Ref).is_some()
+                                && self.role_field(*id, crate::schema::StdRole::Parent).is_some())));
+            if hierarchy
+                && (aggregated || select.distinct || (order.len() != 1 && !paired_hierarchy))
+            {
                 return Err(BuildProblem::Later {
                     what: "ИЕРАРХИЯ с несколькими ключами или группировкой",
                     stage: "Q3",
@@ -464,7 +628,11 @@ impl<'c, 'a, 'r, 'w, 't> Builder<'c, 'a, 'r, 'w, 't> {
                         (e, same)
                     }
                 };
-                if hierarchy {
+                if matches!(
+                    key.dir,
+                    query_syntax::ast::OrderDir::Hierarchy
+                        | query_syntax::ast::OrderDir::HierarchyDesc
+                ) {
                     if autoorder::last_deref_targets(base.trusted_borrow())
                         .iter()
                         .any(|(table, _)| {
@@ -598,6 +766,7 @@ impl<'c, 'a, 'r, 'w, 't> Builder<'c, 'a, 'r, 'w, 't> {
                 anchor: own.first().copied(),
                 in_sub: false,
                 replace: true,
+                allow_prefix: select.group.as_ref().is_some_and(|group| group.len() == 1),
             };
             exprs = rekey.exprs(exprs.trusted_borrow())?;
             if let Some(old) = &having {
@@ -796,7 +965,20 @@ impl<'c, 'a, 'r, 'w, 't> Builder<'c, 'a, 'r, 'w, 't> {
                 (kind, rel)
             }
             tir::From::Subquery(query) => {
-                let (input, columns) = self.query(query)?;
+                let forwarding = self.query_depth == 1
+                    && query.parts.first().is_some_and(|select| {
+                        self.nested_from
+                            .is_some_and(|inner| std::ptr::eq(inner, select))
+                    });
+                let (input, columns) = if forwarding {
+                    let outer = std::mem::replace(&mut self.nested, ctx.scratch(0)?);
+                    let built = self.query(query);
+                    let recipes = std::mem::replace(&mut self.nested, outer);
+                    self.nested_source = Some((id, recipes));
+                    built?
+                } else {
+                    self.query(query)?
+                };
                 let kind = columns.map(|columns| ir::SrcKind::Subquery { columns });
                 (kind, ctx.subquery(id, input)?)
             }

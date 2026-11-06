@@ -275,25 +275,70 @@ impl Printer<'_> {
             }
             RelL::RegisterRows(r) => {
                 let name = |t: TableId| self.map.try_table(t).map_or("?", |x| x.logical.as_str());
-                let _ = write!(
-                    self.out,
-                    "(register-rows {:?} {}",
-                    r.kind,
-                    name(r.movements)
-                );
-                if let Some(t) = &r.totals {
-                    let _ = write!(self.out, " totals={}", name(t.table));
-                }
-                if let Some(t) = &r.turnovers {
-                    let _ = write!(self.out, " turnovers={}", name(t.table));
-                }
-                for (i, b) in r.bounds.iter().enumerate() {
-                    if let Some(b) = b {
-                        let _ = write!(self.out, " bound{i}={b:?}");
+                match &r.rows {
+                    super::RegisterRowsKindL::Accumulation(a) => {
+                        let _ = write!(
+                            self.out,
+                            "(register-rows {:?} {}",
+                            r.kind,
+                            name(a.movements)
+                        );
+                        if let Some(t) = &a.totals {
+                            let _ = write!(self.out, " totals={}", name(t.table));
+                        }
+                        if let Some(t) = &a.turnovers {
+                            let _ = write!(self.out, " turnovers={}", name(t.table));
+                        }
+                        for (i, b) in a.bounds.iter().enumerate() {
+                            if let Some(b) = b {
+                                let _ = write!(self.out, " bound{i}={b:?}");
+                            }
+                        }
+                        if !a.coarse {
+                            self.w(" fine");
+                        }
                     }
-                }
-                if !r.coarse {
-                    self.w(" fine");
+                    super::RegisterRowsKindL::AccountingBalance(a) => {
+                        let _ = write!(
+                            self.out,
+                            "(register-rows {:?} main={} options={} chart={} resources={:?} date={:?}",
+                            r.kind,
+                            name(a.inputs.main),
+                            name(a.inputs.options),
+                            name(a.inputs.chart),
+                            a.resources,
+                            a.date
+                        );
+                        if let Some(child) = &a.chart_input {
+                            self.w(" chart-input=");
+                            self.rel(child);
+                        }
+                    }
+                    super::RegisterRowsKindL::AccountingTurnovers(a) => {
+                        let _ = write!(
+                            self.out,
+                            "(register-rows {:?} main={} options={} account={} resources={:?} dates={:?}",
+                            r.kind,
+                            name(a.inputs.main),
+                            name(a.inputs.options),
+                            a.account,
+                            a.resources,
+                            a.dates
+                        );
+                    }
+                    super::RegisterRowsKindL::Accounting(a) => {
+                        let _ = write!(
+                            self.out,
+                            "(register-rows {:?} main={} ct={} options={} keys={:?} resources={:?} dates={:?}",
+                            r.kind,
+                            name(a.inputs.main),
+                            name(a.inputs.ct),
+                            name(a.inputs.options),
+                            a.keys,
+                            a.resources,
+                            a.date_bounds
+                        );
+                    }
                 }
                 self.w(")");
             }
@@ -489,6 +534,17 @@ impl Printer<'_> {
             PExpr::StoredSize { x, kind } => {
                 let _ = write!(self.out, "(РАЗМЕРХРАНИМЫХДАННЫХ {kind:?} ");
                 self.expr(x);
+                self.w(")");
+            }
+            PExpr::RecordInInterval {
+                period,
+                recorder,
+                bounds,
+            } => {
+                let _ = write!(self.out, "(record-in-interval {bounds:?} ");
+                self.expr(period);
+                self.w(" ");
+                self.expr(recorder);
                 self.w(")");
             }
             PExpr::Unit(k) => self.w(k.ru()),

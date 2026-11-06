@@ -1,18 +1,22 @@
+pub(crate) mod payload;
+
+use payload::{PaidValue, PaidVec};
 use std::cell::Cell;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
-use bsl_prim::{Collation, Number, Strength};
+use bsl_prim::{Collation, Strength};
 use ibschema::storage::FieldId;
 use query_ir::{ExecError, QValue};
+use query_syntax::ast::CmpOp;
 
 use crate::coll::{ExecCollation, Keys};
 use crate::eval::try_compare;
 use crate::key::{Key, try_key_of_totals};
 use crate::model::{
-    VALUE_SIZE, key_model, row_model, try_charge_totals_key, value_model, vec_block,
+    LedgerWork, SizingStack, VALUE_SIZE, key_model, try_charge_totals_key, vec_block,
 };
 use crate::ops::MemBudget;
 use crate::source::{DataSource, ExecEnv, Row};
@@ -81,10 +85,26 @@ impl TotalsTree {
     }
 
     pub fn model(&self) -> u64 {
-        vec_block(self.records.capacity(), std::mem::size_of::<Record>())
-            + vec_block(self.links.capacity(), std::mem::size_of::<u32>())
-            + vec_block(self.totals.capacity(), std::mem::size_of::<Row>())
-            + self.totals.iter().map(|r| row_model(r)).sum::<u64>()
+        self.model_charged(&MemBudget::new(u64::MAX), None)
+            .unwrap_or(u64::MAX)
+    }
+
+    pub(crate) fn model_charged(
+        &self,
+        mem: &MemBudget<'_>,
+        env: Option<&ExecEnv<'_>>,
+    ) -> Result<u64, ExecError> {
+        let backing = crate::model::size_add(
+            crate::model::size_add(
+                vec_block(self.records.capacity(), std::mem::size_of::<Record>()),
+                vec_block(self.links.capacity(), std::mem::size_of::<u32>()),
+            )?,
+            vec_block(self.totals.capacity(), std::mem::size_of::<Row>()),
+        )?;
+        let rows = self.totals.iter().try_fold(backing, |bytes, row| {
+            crate::model::size_add(bytes, crate::model::totals_row_model(row, mem, env)?)
+        })?;
+        crate::model::size_add(rows, crate::model::totals_spec_model(&self.spec, mem, env)?)
     }
 }
 
@@ -147,12 +167,216 @@ pub(crate) fn record_keys(
         .collect()
 }
 
+fn record_key_value<'v>(
+    key: &OrderKey,
+    i: usize,
+    row: &'v Row,
+    first: Option<&'v Row>,
+) -> &'v QValue {
+    match key.source {
+        KeySource::Row(column) => row.get(column).unwrap_or(&QValue::Null),
+        KeySource::FirstRow { column, point } | KeySource::Point { column, point }
+            if point <= i =>
+        {
+            first
+                .and_then(|row| row.get(column))
+                .unwrap_or(&QValue::Null)
+        }
+        _ => &QValue::Null,
+    }
+}
+
+fn order_value_key(
+    value: &QValue,
+    mem: &MemBudget<'_>,
+    coll: ExecCollation<'_>,
+    temp: &mut u64,
+) -> Result<Key, ExecError> {
+    let mut paid = 0;
+    let charged = try_charge_totals_key(value, coll, &mut |bytes| {
+        mem.grow(bytes)?;
+        paid = crate::model::size_add(paid, bytes)?;
+        Ok(())
+    });
+    *temp = crate::model::size_add(*temp, paid)?;
+    charged?;
+    let key = try_key_of_totals(value, coll)?;
+    let kept = key_model(&key);
+    if kept > paid {
+        mem.grow(kept - paid)?;
+        *temp = crate::model::size_add(*temp, kept - paid)?;
+    } else {
+        mem.shrink(paid - kept);
+        *temp -= paid - kept;
+    }
+    Ok(key)
+}
+
 fn later(what: &'static str) -> ExecError {
     ExecError::Later { what, stage: "Q4" }
 }
 
 fn fatal(what: &str) -> ExecError {
     ExecError::Fatal(format!("totals: {what}"))
+}
+
+struct ScratchCharge<'m, 'a> {
+    mem: &'m MemBudget<'a>,
+    bytes: u64,
+}
+
+impl Drop for ScratchCharge<'_, '_> {
+    fn drop(&mut self) {
+        self.mem.shrink(self.bytes);
+    }
+}
+
+fn prepaid_vec<T>(
+    capacity: usize,
+    mem: &MemBudget<'_>,
+    env: &ExecEnv<'_>,
+) -> Result<Vec<T>, ExecError> {
+    std::alloc::Layout::array::<T>(capacity).map_err(|_| crate::model::invalid_size())?;
+    let bytes = crate::model::size_vec(capacity, std::mem::size_of::<T>())?;
+    LedgerWork::new(env).check()?;
+    mem.grow(bytes)?;
+    let mut charge = ScratchCharge { mem, bytes };
+    #[cfg(test)]
+    accounting_invariants::growth_checkpoint();
+    LedgerWork::new(env).check()?;
+    let values = Vec::with_capacity(capacity);
+    charge.bytes = 0;
+    Ok(values)
+}
+
+fn reserve_backing<T>(
+    values: &mut Vec<T>,
+    additional: usize,
+    mem: &MemBudget<'_>,
+    env: &ExecEnv<'_>,
+) -> Result<(), ExecError> {
+    LedgerWork::new(env).check()?;
+    let required = values
+        .len()
+        .checked_add(additional)
+        .ok_or_else(crate::model::invalid_size)?;
+    if required <= values.capacity() {
+        return Ok(());
+    }
+    let capacity = values
+        .capacity()
+        .checked_mul(2)
+        .ok_or_else(crate::model::invalid_size)?
+        .max(4)
+        .max(required);
+    let bytes = crate::model::size_vec(capacity, std::mem::size_of::<T>())?;
+    let old_bytes = crate::model::size_vec(values.capacity(), std::mem::size_of::<T>())?;
+    let mut charge = ScratchCharge { mem, bytes: 0 };
+    let mut replacement = prepaid_vec(capacity, mem, env)?;
+    charge.bytes = bytes;
+    let mut work = LedgerWork::new(env);
+    for value in values.drain(..) {
+        work.step()?;
+        replacement.push(value);
+        #[cfg(test)]
+        accounting_invariants::move_checkpoint();
+    }
+    work.check()?;
+    drop(std::mem::replace(values, replacement));
+    mem.shrink(old_bytes);
+    charge.bytes = 0;
+    Ok(())
+}
+
+struct PaidRow<'m, 'a> {
+    row: Row,
+    mem: &'m MemBudget<'a>,
+    backing: u64,
+    payload: u64,
+}
+
+impl PaidRow<'_, '_> {
+    fn set(
+        &mut self,
+        column: usize,
+        value: PaidValue<'_, '_>,
+        charges: &mut [u64],
+    ) -> Result<(), ExecError> {
+        if !value.is_owned_by(self.mem) {
+            return Err(crate::model::invalid_size());
+        }
+        let Some(slot) = self.row.get_mut(column) else {
+            return Ok(());
+        };
+        let old_charge = charges
+            .get_mut(column)
+            .ok_or_else(crate::model::invalid_size)?;
+        let payload = self
+            .payload
+            .checked_sub(*old_charge)
+            .and_then(|bytes| bytes.checked_add(value.bytes()))
+            .ok_or_else(crate::model::invalid_size)?;
+        self.mem
+            .check_value(crate::model::size_add(self.backing, payload)?)?;
+        let (value, bytes) = value.into_parts();
+        self.payload = payload;
+        drop(std::mem::replace(slot, value));
+        self.mem.shrink(*old_charge);
+        *old_charge = bytes;
+        Ok(())
+    }
+
+    fn into_row(mut self) -> Row {
+        self.backing = 0;
+        self.payload = 0;
+        std::mem::take(&mut self.row)
+    }
+}
+
+impl std::ops::Deref for PaidRow<'_, '_> {
+    type Target = Row;
+
+    fn deref(&self) -> &Row {
+        &self.row
+    }
+}
+
+impl std::ops::DerefMut for PaidRow<'_, '_> {
+    fn deref_mut(&mut self) -> &mut Row {
+        &mut self.row
+    }
+}
+
+impl Drop for PaidRow<'_, '_> {
+    fn drop(&mut self) {
+        drop(std::mem::take(&mut self.row));
+        self.mem.shrink(self.backing + self.payload);
+    }
+}
+
+pub(crate) fn clone_spec(
+    spec: &TotalsSpec,
+    mem: &MemBudget<'_>,
+    env: &ExecEnv<'_>,
+) -> Result<TotalsSpec, ExecError> {
+    let mut work = LedgerWork::new(env);
+    clone_spec_with(spec, mem, env, &mut || work.step())
+}
+
+fn clone_spec_with(
+    spec: &TotalsSpec,
+    mem: &MemBudget<'_>,
+    env: &ExecEnv<'_>,
+    check: &mut impl FnMut() -> Result<(), ExecError>,
+) -> Result<TotalsSpec, ExecError> {
+    let bytes = crate::model::totals_spec_clone_scratch_model(spec, mem, Some(env))?;
+    mem.grow(bytes)?;
+    let scratch = ScratchCharge { mem, bytes };
+    LedgerWork::new(env).check()?;
+    let copy = spec.try_clone_with(check)?;
+    drop(scratch);
+    LedgerWork::new(env).check()?;
+    Ok(copy)
 }
 
 pub fn build(
@@ -208,6 +432,27 @@ fn run(
     ctx: &[(usize, QValue)],
     level: u32,
 ) -> Result<TotalsTree, ExecError> {
+    let known = spec.points.iter().all(|point| point.column.is_none());
+    let (records, links, totals) = if known {
+        let totals = if subset.is_empty() {
+            0
+        } else {
+            spec.points.len()
+        };
+        let records = subset
+            .len()
+            .checked_add(totals)
+            .ok_or_else(crate::model::invalid_size)?;
+        u32::try_from(records).map_err(|_| fatal("too many records"))?;
+        u32::try_from(totals).map_err(|_| fatal("too many records"))?;
+        (
+            prepaid_vec(records, mem, env)?,
+            prepaid_vec(records, mem, env)?,
+            prepaid_vec(totals, mem, env)?,
+        )
+    } else {
+        (Vec::new(), Vec::new(), Vec::new())
+    };
     let mut b = Builder {
         spec,
         rows,
@@ -215,9 +460,9 @@ fn run(
         env,
         mem,
         coll,
-        records: Vec::new(),
-        links: Vec::new(),
-        totals: Vec::new(),
+        records,
+        links,
+        totals,
         ticks: 0,
         temp: 0,
         infos: HashMap::new(),
@@ -229,10 +474,18 @@ fn run(
     let temp = b.temp;
     let error = b.div_zero.get().then_some(TotalsError::DivisionByZero);
     let (records, links, totals) = (b.records, b.links, b.totals);
+    drop(b.infos);
     mem.shrink(temp);
     let roots = r?;
+    let copy_charge = crate::model::totals_spec_copy_model(spec, mem, Some(env))?;
+    mem.grow(copy_charge)?;
+    let saved_spec = clone_spec(spec, mem, env)?;
+    let retained = crate::model::totals_spec_model(&saved_spec, mem, Some(env))?;
+    let _residual = copy_charge
+        .checked_sub(retained)
+        .ok_or_else(crate::model::invalid_size)?;
     Ok(TotalsTree {
-        spec: spec.clone(),
+        spec: saved_spec,
         records,
         links,
         root_links: roots,
@@ -242,20 +495,19 @@ fn run(
     })
 }
 
-#[derive(Clone)]
-struct NodeInfo {
-    parent: Option<QValue>,
+struct NodeInfo<'m, 'a> {
+    parent: Option<PaidValue<'m, 'a>>,
     folder: bool,
-    keys: Vec<Option<QValue>>,
+    keys: PaidVec<'m, 'a, Option<PaidValue<'m, 'a>>>,
 }
 
-struct Group {
-    value: QValue,
+struct Group<'m, 'a> {
+    value: PaidValue<'m, 'a>,
     rows: Vec<u32>,
 }
 
-struct Node {
-    value: QValue,
+struct Node<'m, 'a> {
+    value: PaidValue<'m, 'a>,
     parent: Option<usize>,
     children: Vec<usize>,
     group: Option<usize>,
@@ -281,7 +533,7 @@ struct Builder<'b, 'e> {
     totals: Vec<Row>,
     ticks: u64,
     temp: u64,
-    infos: HashMap<(u32, [u8; 16]), Option<NodeInfo>>,
+    infos: HashMap<(u32, [u8; 16]), Option<NodeInfo<'b, 'e>>>,
     div_zero: Cell<bool>,
 }
 
@@ -293,7 +545,7 @@ fn is_empty_ref(v: &QValue) -> bool {
     matches!(v, QValue::Ref { id, .. } if id.iter().all(|b| *b == 0))
 }
 
-impl Builder<'_, '_> {
+impl<'b, 'e> Builder<'b, 'e> {
     fn tick(&mut self) -> Result<(), ExecError> {
         let t = self.ticks;
         self.ticks = t.wrapping_add(1);
@@ -315,46 +567,37 @@ impl Builder<'_, '_> {
         Ok(())
     }
 
-    fn order_keys(&mut self, tuples: &[Vec<QValue>]) -> Result<Vec<Vec<Key>>, ExecError> {
-        self.temp(vec_block(tuples.len(), std::mem::size_of::<Vec<Key>>()))?;
-        let mut out = Vec::with_capacity(tuples.len());
-        for t in tuples {
-            self.temp(vec_block(t.len(), std::mem::size_of::<Key>()))?;
-            let mut keys = Vec::with_capacity(t.len());
-            for v in t {
-                keys.push(self.order_key(v)?);
-            }
-            out.push(keys);
+    fn record_order_keys(
+        &mut self,
+        i: usize,
+        row: &Row,
+        first: Option<&Row>,
+    ) -> Result<Vec<Key>, ExecError> {
+        let spec = self.spec;
+        self.temp(vec_block(spec.order.len(), std::mem::size_of::<Key>()))?;
+        let mut keys = Vec::with_capacity(spec.order.len());
+        for order in &spec.order {
+            let value = record_key_value(order, i, row, first);
+            keys.push(order_value_key(value, self.mem, self.coll, &mut self.temp)?);
         }
-        Ok(out)
-    }
-
-    fn order_key(&mut self, v: &QValue) -> Result<Key, ExecError> {
-        let mem = self.mem;
-        let mut paid = 0;
-        let charged = try_charge_totals_key(v, self.coll, &mut |n| {
-            mem.grow(n)?;
-            paid += n;
-            Ok(())
-        });
-        self.temp += paid;
-        charged?;
-        let key = try_key_of_totals(v, self.coll)?;
-        let kept = key_model(&key);
-        if kept > paid {
-            self.temp(kept - paid)?;
-        } else {
-            mem.shrink(paid - kept);
-            self.temp -= paid - kept;
-        }
-        Ok(key)
+        Ok(keys)
     }
 
     fn push_links(&mut self, ids: &[u32]) -> Result<Range<u32>, ExecError> {
-        self.mem.grow(vec_block(ids.len(), 4))?;
         let start = u32::try_from(self.links.len()).map_err(|_| fatal("too many records"))?;
-        self.links.extend_from_slice(ids);
-        let end = u32::try_from(self.links.len()).map_err(|_| fatal("too many records"))?;
+        let required = self
+            .links
+            .len()
+            .checked_add(ids.len())
+            .ok_or_else(crate::model::invalid_size)?;
+        let end = u32::try_from(required).map_err(|_| fatal("too many records"))?;
+        reserve_backing(&mut self.links, ids.len(), self.mem, self.env)?;
+        let mut work = LedgerWork::new(self.env);
+        for &id in ids {
+            work.step()?;
+            self.links.push(id);
+        }
+        work.check()?;
         Ok(start..end)
     }
 
@@ -366,13 +609,13 @@ impl Builder<'_, '_> {
         row: RowRef,
         children: &[u32],
     ) -> Result<u32, ExecError> {
-        let children = self.push_links(children)?;
-        self.mem.grow(vec_block(1, std::mem::size_of::<Record>()))?;
         let id = u32::try_from(self.records.len()).map_err(|_| fatal("too many records"))?;
         let grouping = match grouping {
             Some(g) => Some(u16::try_from(g).map_err(|_| fatal("too many control points"))?),
             None => None,
         };
+        let children = self.push_links(children)?;
+        reserve_backing(&mut self.records, 1, self.mem, self.env)?;
         self.records.push(Record {
             kind,
             grouping,
@@ -383,21 +626,22 @@ impl Builder<'_, '_> {
         Ok(id)
     }
 
-    fn push_total(&mut self, row: Row) -> Result<RowRef, ExecError> {
-        self.mem
-            .grow(row_model(&row) + vec_block(1, std::mem::size_of::<Row>()))?;
+    fn push_total(&mut self, row: PaidRow<'b, 'e>) -> Result<RowRef, ExecError> {
         let i = u32::try_from(self.totals.len()).map_err(|_| fatal("too many records"))?;
-        self.totals.push(row);
+        reserve_backing(&mut self.totals, 1, self.mem, self.env)?;
+        self.totals.push(row.into_row());
         Ok(RowRef::Total(i))
     }
 
-    fn cell(&self, row: u32, col: usize) -> QValue {
-        cell_of(self.rows, row, col)
-            .cloned()
-            .unwrap_or(QValue::Null)
+    fn cell(&self, row: u32, col: usize) -> Result<PaidValue<'b, 'e>, ExecError> {
+        PaidValue::copy(
+            cell_of(self.rows, row, col).unwrap_or(&QValue::Null),
+            self.mem,
+            Some(self.env),
+        )
     }
 
-    fn first_row(&self, rows: &[u32]) -> Option<&Row> {
+    fn first_row(&self, rows: &[u32]) -> Option<&'b Row> {
         rows.first().and_then(|r| self.rows.get(*r as usize))
     }
 
@@ -441,24 +685,31 @@ impl Builder<'_, '_> {
         };
         match point.hierarchy {
             HierarchyMode::No => {
-                let groups = self.group(rows, |b, r| Ok(b.cell(r, col)))?;
-                let mut made: Vec<(Group, Row)> = Vec::with_capacity(groups.len());
+                let groups = self.group(rows, |b, r| b.cell(r, col))?;
+                let mut made: Vec<(Group<'b, 'e>, PaidRow<'b, 'e>)> =
+                    Vec::with_capacity(groups.len());
                 for g in groups {
-                    let row = self.total_row(&g.rows, &with(ctx, col, &g.value))?;
+                    let inner = payload::context(ctx, col, &g.value, self.mem, Some(self.env))?;
+                    let row = self.total_row(&g.rows, &inner)?;
                     made.push((g, row));
                 }
                 if !spec.order.is_empty() {
-                    let keyed: Vec<Vec<QValue>> = made
-                        .iter()
-                        .map(|(g, row)| record_keys(&spec.order, i, row, self.first_row(&g.rows)))
-                        .collect();
-                    let ordered = self.order_keys(&keyed)?;
+                    self.temp(vec_block(made.len(), std::mem::size_of::<Vec<Key>>()))?;
+                    let mut ordered = Vec::with_capacity(made.len());
+                    for (group, row) in &made {
+                        ordered.push(self.record_order_keys(
+                            i,
+                            row,
+                            self.first_row(&group.rows),
+                        )?);
+                    }
                     let mut idx: Vec<usize> = (0..made.len()).collect();
                     idx.sort_by(|a, b| match (ordered.get(*a), ordered.get(*b)) {
                         (Some(x), Some(y)) => compare_keys(x, y, &spec.order),
                         _ => Ordering::Equal,
                     });
-                    let mut slots: Vec<Option<(Group, Row)>> = made.into_iter().map(Some).collect();
+                    let mut slots: Vec<Option<(Group<'b, 'e>, PaidRow<'b, 'e>)>> =
+                        made.into_iter().map(Some).collect();
                     made = idx
                         .into_iter()
                         .filter_map(|k| slots.get_mut(k).and_then(Option::take))
@@ -478,12 +729,12 @@ impl Builder<'_, '_> {
         &mut self,
         i: usize,
         col: usize,
-        g: &Group,
-        row: Row,
+        g: &Group<'b, 'e>,
+        row: PaidRow<'b, 'e>,
         ctx: &[(usize, QValue)],
         level: u32,
     ) -> Result<u32, ExecError> {
-        let inner = with(ctx, col, &g.value);
+        let inner = payload::context(ctx, col, &g.value, self.mem, Some(self.env))?;
         let children = self.level(i + 1, &g.rows, &inner, level + 1)?;
         let row = self.push_total(row)?;
         self.push_record(RecordType::GroupTotal, Some(i), level, row, &children)
@@ -492,10 +743,10 @@ impl Builder<'_, '_> {
     fn group(
         &mut self,
         rows: &[u32],
-        mut value: impl FnMut(&mut Self, u32) -> Result<QValue, ExecError>,
-    ) -> Result<Vec<Group>, ExecError> {
+        mut value: impl FnMut(&mut Self, u32) -> Result<PaidValue<'b, 'e>, ExecError>,
+    ) -> Result<Vec<Group<'b, 'e>>, ExecError> {
         let mut index: HashMap<Key, usize> = HashMap::new();
-        let mut groups: Vec<Group> = Vec::new();
+        let mut groups: Vec<Group<'b, 'e>> = Vec::new();
         for &r in rows {
             self.tick()?;
             let v = value(self, r)?;
@@ -511,8 +762,7 @@ impl Builder<'_, '_> {
                     self.temp(
                         key_model(&k)
                             + 48
-                            + value_model(&v)
-                            + vec_block(1, std::mem::size_of::<Group>())
+                            + vec_block(1, std::mem::size_of::<Group<'b, 'e>>())
                             + vec_block(1, 4),
                     )?;
                     index.insert(k, groups.len());
@@ -551,57 +801,66 @@ impl Builder<'_, '_> {
         }
     }
 
-    fn info(&mut self, i: usize, v: &QValue) -> Result<Option<NodeInfo>, ExecError> {
-        let Some(t) = self.table_of(i, v) else {
+    fn info(&mut self, i: usize, v: &QValue) -> Result<Option<&NodeInfo<'b, 'e>>, ExecError> {
+        let Some(table) = self.table_of(i, v) else {
             return Ok(None);
         };
-        let QValue::Ref { table, id } = v else {
+        let QValue::Ref { table: number, id } = v else {
             return Ok(None);
         };
-        if let Some(found) = self.infos.get(&(*table, *id)) {
-            return Ok(found.clone());
-        }
-        let Some(src) = self.src else {
-            return Err(later("переход к группировке с иерархией"));
-        };
-        self.tick()?;
-        let mut fields = vec![t.id, t.parent];
-        fields.extend(t.folder);
-        fields.extend(t.keys.iter().flatten().map(|(f, _)| *f));
-        let row = src.get_by_id_fields(t.table, v, &fields)?;
-        let order_len = self.spec.order.len();
-        let info = row.map(|row| {
-            let at = |f: FieldId| row.get(usize::from(f.0)).cloned().unwrap_or(QValue::Null);
-            let parent = match at(t.parent) {
-                p @ QValue::Ref { .. } if !is_empty_ref(&p) => Some(p),
-                _ => None,
+        let key = (*number, *id);
+        if !self.infos.contains_key(&key) {
+            let Some(source) = self.src else {
+                return Err(later("переход к группировке с иерархией"));
             };
-            NodeInfo {
-                parent,
-                folder: t.folder.is_some_and(|f| at(f) == QValue::Bool(false)),
-                keys: (0..order_len)
-                    .map(|k| {
-                        t.keys
-                            .get(k)
-                            .copied()
-                            .flatten()
-                            .map(|(f, not)| match at(f) {
-                                QValue::Bool(b) if not => QValue::Bool(!b),
-                                v => v,
-                            })
-                    })
-                    .collect(),
-            }
-        });
-        let bytes = 64
-            + info.as_ref().map_or(0, |i| {
-                i.parent.as_ref().map_or(0, value_model)
-                    + vec_block(i.keys.len(), VALUE_SIZE)
-                    + i.keys.iter().flatten().map(value_model).sum::<u64>()
-            });
-        self.temp(bytes)?;
-        self.infos.insert((*table, *id), info.clone());
-        Ok(info)
+            self.tick()?;
+            let mut fields = vec![table.id, table.parent];
+            fields.extend(table.folder);
+            fields.extend(table.keys.iter().flatten().map(|(field, _)| *field));
+            let row = source.get_by_id_fields(table.table, v, &fields)?;
+            let info = if let Some(row) = row {
+                let at = |field: FieldId| row.get(usize::from(field.0)).unwrap_or(&QValue::Null);
+                let parent = match at(table.parent) {
+                    value @ QValue::Ref { .. } if !is_empty_ref(value) => {
+                        Some(PaidValue::copy(value, self.mem, Some(self.env))?)
+                    }
+                    _ => None,
+                };
+                let folder = table
+                    .folder
+                    .is_some_and(|field| *at(field) == QValue::Bool(false));
+                let mut keys = PaidVec::new(self.spec.order.len(), self.mem, Some(self.env))?;
+                for index in 0..self.spec.order.len() {
+                    let value = match table.keys.get(index).copied().flatten() {
+                        Some((field, invert)) => {
+                            let value = at(field);
+                            let inverted;
+                            let value = if let QValue::Bool(value) = value
+                                && invert
+                            {
+                                inverted = QValue::Bool(!*value);
+                                &inverted
+                            } else {
+                                value
+                            };
+                            Some(PaidValue::copy(value, self.mem, Some(self.env))?)
+                        }
+                        None => None,
+                    };
+                    keys.push(value)?;
+                }
+                Some(NodeInfo {
+                    parent,
+                    folder,
+                    keys,
+                })
+            } else {
+                None
+            };
+            self.temp(64)?;
+            self.infos.insert(key, info);
+        }
+        Ok(self.infos.get(&key).and_then(Option::as_ref))
     }
 
     fn parents_among(
@@ -614,15 +873,16 @@ impl Builder<'_, '_> {
         let mut out: HashSet<Key> = HashSet::new();
         for &r in rows {
             self.tick()?;
-            let v = self.cell(r, col);
+            let v = self.cell(r, col)?;
             let k = try_key_of_totals(&v, self.coll)?;
             if seen.contains(&k) {
                 continue;
             }
             self.temp(key_model(&k) + 48)?;
             seen.insert(k);
-            if let Some(p) = self.info(i, &v)?.and_then(|n| n.parent) {
-                let pk = try_key_of_totals(&p, self.coll)?;
+            let coll = self.coll;
+            if let Some(p) = self.info(i, &v)?.and_then(|n| n.parent.as_ref()) {
+                let pk = try_key_of_totals(p, coll)?;
                 if !out.contains(&pk) {
                     self.temp(key_model(&pk) + 48)?;
                     out.insert(pk);
@@ -635,29 +895,39 @@ impl Builder<'_, '_> {
     fn only_key(
         &mut self,
         i: usize,
-        v: QValue,
+        v: PaidValue<'b, 'e>,
         parents: &HashSet<Key>,
-    ) -> Result<QValue, ExecError> {
+    ) -> Result<PaidValue<'b, 'e>, ExecError> {
         if self.empty_of_table(i, &v) {
             return Ok(v);
         }
-        let Some(t) = self.table_of(i, &v) else {
-            return Ok(QValue::Null);
+        let Some(table) = self.table_of(i, &v) else {
+            return Ok(PaidValue::null(self.mem));
         };
+        let mem = self.mem;
+        let env = self.env;
+        let coll = self.coll;
         let Some(info) = self.info(i, &v)? else {
-            return Ok(QValue::Null);
+            return Ok(PaidValue::null(mem));
         };
-        let parent_itself = match t.folder {
+        let parent_itself = match table.folder {
             Some(_) => info.folder,
-            None => parents.contains(&try_key_of_totals(&v, self.coll)?),
+            None => parents.contains(&try_key_of_totals(&v, coll)?),
         };
         if parent_itself {
             return Ok(v);
         }
-        Ok(info.parent.unwrap_or(QValue::Ref {
-            table: t.number,
-            id: [0u8; 16],
-        }))
+        match &info.parent {
+            Some(parent) => PaidValue::copy(parent, mem, Some(env)),
+            None => PaidValue::copy(
+                &QValue::Ref {
+                    table: table.number,
+                    id: [0; 16],
+                },
+                mem,
+                Some(env),
+            ),
+        }
     }
 
     fn node_keys(
@@ -666,36 +936,37 @@ impl Builder<'_, '_> {
         value: &QValue,
         row: &Row,
         rows: &[u32],
-    ) -> Result<Vec<QValue>, ExecError> {
-        let order = &self.spec.order;
-        let mut keys = record_keys(order, i, row, self.first_row(rows));
-        if keys.is_empty() {
-            return Ok(keys);
+    ) -> Result<Vec<Key>, ExecError> {
+        if self.spec.order.is_empty() {
+            return Ok(Vec::new());
         }
-        for (k, key) in keys.iter_mut().enumerate() {
-            if let Some(OrderKey {
-                source: KeySource::Point { point, .. },
-                ..
-            }) = order.get(k)
-                && *point == i
+        let _ = self.info(i, value)?;
+        let info = match value {
+            QValue::Ref { table, id } => self.infos.get(&(*table, *id)).and_then(Option::as_ref),
+            _ => None,
+        };
+        let spec = self.spec;
+        let first = rows.first().and_then(|r| self.rows.get(*r as usize));
+        let bytes = vec_block(spec.order.len(), std::mem::size_of::<Key>());
+        self.mem.grow(bytes)?;
+        self.temp = crate::model::size_add(self.temp, bytes)?;
+        let mut keys = Vec::with_capacity(spec.order.len());
+        for (index, order) in spec.order.iter().enumerate() {
+            let mut input = record_key_value(order, i, row, first);
+            if let KeySource::Point { point, .. } = order.source
+                && point == i
             {
-                *key = value.clone();
+                input = value;
             }
-        }
-        if let Some(info) = self.info(i, value)? {
-            for (k, key) in keys.iter_mut().enumerate() {
-                if let (
-                    Some(OrderKey {
-                        source: KeySource::FirstRow { point, .. },
-                        ..
-                    }),
-                    Some(Some(v)),
-                ) = (order.get(k), info.keys.get(k))
-                    && *point == i
-                {
-                    *key = v.clone();
-                }
+            if let KeySource::FirstRow { point, .. } = order.source
+                && point == i
+                && let Some(field) = info
+                    .and_then(|info| info.keys.get(index))
+                    .and_then(Option::as_ref)
+            {
+                input = field;
             }
+            keys.push(order_value_key(input, self.mem, self.coll, &mut self.temp)?);
         }
         Ok(keys)
     }
@@ -719,7 +990,7 @@ impl Builder<'_, '_> {
             HashSet::new()
         };
         let groups = self.group(rows, |b, r| {
-            let v = b.cell(r, col);
+            let v = b.cell(r, col)?;
             if only {
                 b.only_key(i, v, &parents)
             } else {
@@ -768,11 +1039,11 @@ impl Builder<'_, '_> {
                 *slot = acc;
             }
         }
-        let mut node_rows: Vec<Option<Row>> = nodes.iter().map(|_| None).collect();
-        let mut group_rows: Vec<Option<Row>> = groups.iter().map(|_| None).collect();
+        let mut node_rows: Vec<Option<PaidRow<'b, 'e>>> = nodes.iter().map(|_| None).collect();
+        let mut group_rows: Vec<Option<PaidRow<'b, 'e>>> = groups.iter().map(|_| None).collect();
         for k in 0..nodes.len() {
             let Some(node) = nodes.get(k) else { continue };
-            let inner = with(ctx, col, &node.value);
+            let inner = payload::context(ctx, col, &node.value, self.mem, Some(self.env))?;
             if !node.children.is_empty() {
                 let rows = under.get(k).cloned().unwrap_or_default();
                 let row = self.total_row(&rows, &inner)?;
@@ -790,40 +1061,43 @@ impl Builder<'_, '_> {
             }
         }
         let sorted = !self.spec.order.is_empty();
-        let mut node_keys: Vec<Vec<QValue>> = Vec::new();
-        let mut group_keys: Vec<Vec<QValue>> = Vec::new();
+        let mut node_keys: Vec<Vec<Key>> = Vec::new();
+        let mut group_keys: Vec<Vec<Key>> = Vec::new();
         if sorted {
+            self.temp(
+                vec_block(nodes.len(), std::mem::size_of::<Vec<Key>>())
+                    + vec_block(groups.len(), std::mem::size_of::<Vec<Key>>()),
+            )?;
+            node_keys = Vec::with_capacity(nodes.len());
+            group_keys = Vec::with_capacity(groups.len());
             for k in 0..nodes.len() {
                 let (value, group, is_hier) = match nodes.get(k) {
-                    Some(n) => (n.value.clone(), n.group, !n.children.is_empty()),
+                    Some(n) => (&*n.value, n.group, !n.children.is_empty()),
                     None => continue,
                 };
                 let row_of_node = if is_hier {
-                    node_rows.get(k).cloned().flatten()
+                    node_rows.get(k).and_then(Option::as_ref)
                 } else {
-                    group.and_then(|g| group_rows.get(g).cloned().flatten())
-                }
-                .unwrap_or_default();
+                    group.and_then(|g| group_rows.get(g).and_then(Option::as_ref))
+                };
+                let empty = Vec::new();
+                let row_of_node = row_of_node.map_or(&empty, |row| &row.row);
                 let rows = under.get(k).cloned().unwrap_or_default();
-                let ks = self.node_keys(i, &value, &row_of_node, &rows)?;
-                self.temp(
-                    vec_block(ks.len(), VALUE_SIZE) + ks.iter().map(value_model).sum::<u64>(),
-                )?;
+                let ks = self.node_keys(i, value, row_of_node, &rows)?;
                 node_keys.push(ks);
             }
             for (g, group) in groups.iter().enumerate() {
-                let row = group_rows.get(g).cloned().flatten().unwrap_or_default();
-                let ks = self.node_keys(i, &group.value, &row, &group.rows)?;
-                self.temp(
-                    vec_block(ks.len(), VALUE_SIZE) + ks.iter().map(value_model).sum::<u64>(),
-                )?;
+                let empty = Vec::new();
+                let row = group_rows
+                    .get(g)
+                    .and_then(Option::as_ref)
+                    .map_or(&empty, |row| &row.row);
+                let ks = self.node_keys(i, &group.value, row, &group.rows)?;
                 group_keys.push(ks);
             }
         }
-        let node_keys = self.order_keys(&node_keys)?;
-        let group_keys = self.order_keys(&group_keys)?;
         let spec_order = &self.spec.order;
-        let kid_first = |k: Kid, nodes: &[Node]| match k {
+        let kid_first = |k: Kid, nodes: &[Node<'_, '_>]| match k {
             Kid::Node(n) => nodes.get(n).map_or(usize::MAX, |x| x.first),
             Kid::Own(g) => g,
         };
@@ -833,7 +1107,7 @@ impl Builder<'_, '_> {
                 Kid::Own(g) => group_keys.get(g),
             }
         };
-        let arrange = |kids: &mut Vec<Kid>, nodes: &[Node]| {
+        let arrange = |kids: &mut Vec<Kid>, nodes: &[Node<'_, '_>]| {
             kids.sort_by_key(|k| (only && matches!(k, Kid::Own(_)), kid_first(*k, nodes)));
             if sorted {
                 kids.sort_by(|a, b| match (kid_keys(*a), kid_keys(*b)) {
@@ -873,7 +1147,7 @@ impl Builder<'_, '_> {
                 let row = group_rows
                     .get_mut(gi)
                     .and_then(Option::take)
-                    .unwrap_or_default();
+                    .ok_or_else(|| fatal("missing total row"))?;
                 self.group_record(i, col, g, row, ctx, lvl)?
             } else {
                 let mut children: Vec<u32> = Vec::new();
@@ -884,7 +1158,7 @@ impl Builder<'_, '_> {
                                 let row = group_rows
                                     .get_mut(gi)
                                     .and_then(Option::take)
-                                    .unwrap_or_default();
+                                    .ok_or_else(|| fatal("missing total row"))?;
                                 children.push(self.group_record(i, col, g, row, ctx, lvl + 1)?);
                             }
                         }
@@ -898,7 +1172,7 @@ impl Builder<'_, '_> {
                 let row = node_rows
                     .get_mut(k)
                     .and_then(Option::take)
-                    .unwrap_or_default();
+                    .ok_or_else(|| fatal("missing total row"))?;
                 let row = self.push_total(row)?;
                 self.push_record(RecordType::HierarchyTotal, Some(i), lvl, row, &children)?
             };
@@ -916,10 +1190,16 @@ impl Builder<'_, '_> {
             .collect())
     }
 
-    fn nodes(&mut self, i: usize, groups: &[Group], only: bool) -> Result<Vec<Node>, ExecError> {
-        let mut nodes: Vec<Node> = Vec::new();
+    fn nodes(
+        &mut self,
+        i: usize,
+        groups: &[Group<'b, 'e>],
+        only: bool,
+    ) -> Result<Vec<Node<'b, 'e>>, ExecError> {
+        let mut nodes: Vec<Node<'b, 'e>> = Vec::new();
         let mut index: HashMap<Key, usize> = HashMap::new();
-        let node_bytes = |k: &Key| key_model(k) + 48 + vec_block(1, std::mem::size_of::<Node>());
+        let node_bytes =
+            |k: &Key| key_model(k) + 48 + vec_block(1, std::mem::size_of::<Node<'b, 'e>>());
         for (gi, g) in groups.iter().enumerate() {
             let k = try_key_of_totals(&g.value, self.coll)?;
             let at = match index.get(&k) {
@@ -928,7 +1208,7 @@ impl Builder<'_, '_> {
                     self.temp(node_bytes(&k))?;
                     index.insert(k, nodes.len());
                     nodes.push(Node {
-                        value: g.value.clone(),
+                        value: PaidValue::copy(&g.value, self.mem, Some(self.env))?,
                         parent: None,
                         children: Vec::new(),
                         group: None,
@@ -945,12 +1225,18 @@ impl Builder<'_, '_> {
             loop {
                 self.tick()?;
                 let v = match nodes.get(cur) {
-                    Some(n) if n.parent.is_none() => n.value.clone(),
+                    Some(n) if n.parent.is_none() => &*n.value,
                     _ => break,
                 };
-                let Some(info) = self.info(i, &v)? else { break };
-                let Some(parent) = info.parent else { break };
-                let pk = try_key_of_totals(&parent, self.coll)?;
+                let mem = self.mem;
+                let env = self.env;
+                let coll = self.coll;
+                let Some(info) = self.info(i, v)? else { break };
+                let Some(parent) = info.parent.as_ref() else {
+                    break;
+                };
+                let parent = PaidValue::copy(parent, mem, Some(env))?;
+                let pk = try_key_of_totals(&parent, coll)?;
                 match index.get(&pk) {
                     Some(&p) => {
                         if !is_ancestor_or_self(&nodes, cur, p)
@@ -998,9 +1284,9 @@ impl Builder<'_, '_> {
                 .enumerate()
                 .filter(|(_, n)| {
                     self.empty_of_table(i, &n.value)
-                        && matches!(&n.value, QValue::Ref { table, .. } if folders.contains(table))
+                        && matches!(&*n.value, QValue::Ref { table, .. } if folders.contains(table))
                 })
-                .filter_map(|(k, n)| match &n.value {
+                .filter_map(|(k, n)| match &*n.value {
                     QValue::Ref { table, .. } => Some((*table, k)),
                     _ => None,
                 })
@@ -1011,7 +1297,7 @@ impl Builder<'_, '_> {
                         && nodes.get(k).is_some_and(|n| {
                             n.parent.is_none()
                                 && !is_empty_ref(&n.value)
-                                && matches!(&n.value, QValue::Ref { table: t, .. } if *t == table)
+                                && matches!(&*n.value, QValue::Ref { table: t, .. } if *t == table)
                         });
                     if link && let Some(n) = nodes.get_mut(k) {
                         n.parent = Some(e);
@@ -1030,24 +1316,61 @@ impl Builder<'_, '_> {
         Ok(nodes)
     }
 
-    fn total_row(&mut self, rows: &[u32], ctx: &[(usize, QValue)]) -> Result<Row, ExecError> {
+    fn total_row(
+        &mut self,
+        rows: &[u32],
+        ctx: &[(usize, QValue)],
+    ) -> Result<PaidRow<'b, 'e>, ExecError> {
+        let backing = crate::model::size_vec(self.spec.width, VALUE_SIZE)?;
+        self.mem.check_value(backing)?;
+        let values = prepaid_vec(self.spec.width, self.mem, self.env)?;
+        let mut row = PaidRow {
+            row: values,
+            mem: self.mem,
+            backing,
+            payload: 0,
+        };
+        row.resize(self.spec.width, QValue::Null);
+        let mut charges = PaidVec::new(self.spec.width, self.mem, Some(self.env))?;
+        for _ in 0..self.spec.width {
+            charges.push(0u64)?;
+        }
         let data = self.rows;
-        let aggs = aggregate(
+        let aggs = aggregate_paid(
             &self.spec.aggs,
             rows,
             |r, c| cell_of(data, r, c),
             self.coll,
             self.env.max_number_limbs,
-        )?;
-        let row = total_values(
-            self.spec,
-            &aggs,
-            ctx,
-            self.coll,
-            self.env.max_number_limbs,
             &self.div_zero,
+            self.mem,
+            Some(self.env),
         )?;
-        self.mem.check_value(row_model(&row))?;
+        for (column, value) in ctx {
+            row.set(
+                *column,
+                PaidValue::copy(value, self.mem, Some(self.env))?,
+                &mut charges,
+            )?;
+        }
+        for (expression, column) in &self.spec.items {
+            let value = eval_paid(
+                expression,
+                |index| aggs.get(index).map(|value| &**value),
+                ctx,
+                self.coll,
+                self.env.max_number_limbs,
+                &self.div_zero,
+                self.mem,
+                Some(self.env),
+            )?;
+            row.set(*column, value, &mut charges)?;
+        }
+        self.mem.check_value(crate::model::totals_row_model(
+            &row,
+            self.mem,
+            Some(self.env),
+        )?)?;
         Ok(row)
     }
 }
@@ -1066,26 +1389,56 @@ pub(crate) fn total_values(
     limbs: u64,
     div_zero: &Cell<bool>,
 ) -> Result<Row, ExecError> {
+    let mem = MemBudget::new(u64::MAX);
+    total_values_in(spec, aggs, ctx, coll, limbs, div_zero, &mem, None)
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Preserve the six total_values inputs; work-memory and cancellation are explicit execution-only additions."
+)]
+fn total_values_in<'a>(
+    spec: &TotalsSpec,
+    aggs: &[QValue],
+    ctx: &[(usize, QValue)],
+    coll: ExecCollation<'_>,
+    limbs: u64,
+    div_zero: &Cell<bool>,
+    mem: &MemBudget<'a>,
+    env: Option<&ExecEnv<'a>>,
+) -> Result<Row, ExecError> {
     let mut row = vec![QValue::Null; spec.width];
+    fill_total_values_in(&mut row, spec, aggs, ctx, coll, limbs, div_zero, mem, env)?;
+    Ok(row)
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Fill either a caller-prepaid execution row or the existing walk row without changing expression inputs."
+)]
+fn fill_total_values_in<'a>(
+    row: &mut Row,
+    spec: &TotalsSpec,
+    aggs: &[QValue],
+    ctx: &[(usize, QValue)],
+    coll: ExecCollation<'_>,
+    limbs: u64,
+    div_zero: &Cell<bool>,
+    mem: &MemBudget<'a>,
+    env: Option<&ExecEnv<'a>>,
+) -> Result<(), ExecError> {
     for (c, v) in ctx {
         if let Some(slot) = row.get_mut(*c) {
             *slot = v.clone();
         }
     }
     for (e, c) in &spec.items {
-        let v = eval(e, aggs, ctx, coll, limbs, div_zero)?;
+        let v = eval(e, aggs, ctx, coll, limbs, div_zero, mem, env)?;
         if let Some(slot) = row.get_mut(*c) {
             *slot = v;
         }
     }
-    Ok(row)
-}
-
-fn guard(n: Number, limbs: u64) -> Result<QValue, ExecError> {
-    if n.size_hint_limbs() > limbs {
-        return Err(ExecError::Fatal("превышен лимит размера числа".to_string()));
-    }
-    Ok(QValue::Number(n))
+    Ok(())
 }
 
 pub(crate) fn aggregate<'v>(
@@ -1095,190 +1448,385 @@ pub(crate) fn aggregate<'v>(
     coll: ExecCollation<'_>,
     limbs: u64,
 ) -> Result<Vec<QValue>, ExecError> {
-    let mut out = Vec::with_capacity(aggs.len());
-    for a in aggs {
-        let get = |r: u32| -> Option<&'v QValue> {
-            match &a.arg {
-                AggArg::Column(c) => cell(r, *c).filter(|v| **v != QValue::Null),
-                AggArg::Const(v) => Some(v).filter(|v| **v != QValue::Null),
-                AggArg::Star => None,
-            }
+    let mem = MemBudget::new(u64::MAX);
+    let div_zero = Cell::new(false);
+    let mut paid = aggregate_paid(aggs, rows, cell, coll, limbs, &div_zero, &mem, None)?;
+    let mut result = Vec::with_capacity(paid.len());
+    for value in paid.drain(..) {
+        result.push(value.into_unbudgeted());
+    }
+    Ok(result)
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Aggregate inputs and payload ownership share the explicit execution context."
+)]
+fn aggregate_paid<'v, 'm, 'a>(
+    aggs: &'v [AggSpec],
+    rows: &[u32],
+    cell: impl Fn(u32, usize) -> Option<&'v QValue>,
+    coll: ExecCollation<'_>,
+    limbs: u64,
+    div_zero: &Cell<bool>,
+    mem: &'m MemBudget<'a>,
+    env: Option<&ExecEnv<'a>>,
+) -> Result<PaidVec<'m, 'a, PaidValue<'m, 'a>>, ExecError> {
+    let mut out = PaidVec::new(aggs.len(), mem, env)?;
+    for agg in aggs {
+        payload::checkpoint(env)?;
+        let get = |r| match &agg.arg {
+            AggArg::Column(column) => cell(r, *column).filter(|value| **value != QValue::Null),
+            AggArg::Const(value) => Some(value).filter(|value| **value != QValue::Null),
+            AggArg::Star => None,
         };
-        let v = match (a.f, &a.arg) {
-            (AggFunc::Count, AggArg::Star) => QValue::Number(Number::from_u64(rows.len() as u64)),
-            (_, AggArg::Star) => QValue::Null,
-            (AggFunc::Count, _) if a.distinct => {
-                let mut seen: HashSet<Key> = HashSet::new();
+        let value = match (agg.f, &agg.arg) {
+            (AggFunc::Count, AggArg::Star) => payload::count(rows.len() as u64, mem, env)?,
+            (_, AggArg::Star) => PaidValue::null(mem),
+            (AggFunc::Count, _) => {
+                let mut count = 0u64;
+                let mut seen = HashSet::new();
                 for &r in rows {
-                    if let Some(v) = get(r) {
-                        seen.insert(try_key_of_totals(v, coll)?);
+                    payload::checkpoint(env)?;
+                    if let Some(value) = get(r) {
+                        if agg.distinct && !seen.insert(try_key_of_totals(value, coll)?) {
+                            continue;
+                        }
+                        count = count
+                            .checked_add(1)
+                            .ok_or_else(crate::model::invalid_size)?;
                     }
                 }
-                QValue::Number(Number::from_u64(seen.len() as u64))
+                payload::count(count, mem, env)?
             }
-            (AggFunc::Count, _) => QValue::Number(Number::from_u64(
-                rows.iter().filter(|r| get(**r).is_some()).count() as u64,
-            )),
             (AggFunc::Sum | AggFunc::Avg, _) => {
-                let mut sum: Option<Number> = None;
-                let mut seen: HashSet<Key> = HashSet::new();
-                let mut count: u64 = 0;
+                let mut sum: Option<PaidValue<'m, 'a>> = None;
+                let mut seen = HashSet::new();
+                let mut count = 0u64;
                 for &r in rows {
-                    let Some(v) = get(r) else { continue };
-                    let QValue::Number(n) = v else {
+                    payload::checkpoint(env)?;
+                    let Some(value) = get(r) else { continue };
+                    let QValue::Number(_) = value else {
                         return Err(later("ИТОГИ: СУММА/СРЕДНЕЕ не числа"));
                     };
-                    if a.distinct && !seen.insert(try_key_of_totals(v, coll)?) {
+                    if agg.distinct && !seen.insert(try_key_of_totals(value, coll)?) {
                         continue;
                     }
-                    count += 1;
-                    let s = match &sum {
-                        Some(s) => s.add(n),
-                        None => n.clone(),
+                    count = count
+                        .checked_add(1)
+                        .ok_or_else(crate::model::invalid_size)?;
+                    let next = match &sum {
+                        Some(sum) => {
+                            payload::binary(ArithOp::Add, sum, value, limbs, div_zero, mem, env)?
+                        }
+                        None => PaidValue::copy(value, mem, env)?,
                     };
-                    if s.size_hint_limbs() > limbs {
+                    if let QValue::Number(number) = &*next
+                        && number.size_hint_limbs() > limbs
+                    {
                         return Err(ExecError::Fatal("превышен лимит размера числа".to_string()));
                     }
-                    sum = Some(s);
+                    sum = Some(next);
                 }
-                match (sum, a.f) {
-                    (None, _) => QValue::Null,
-                    (Some(s), AggFunc::Avg) => match s.div(&Number::from_u64(count)) {
-                        Ok(q) => guard(q, limbs)?,
-                        Err(_) => QValue::Null,
-                    },
-                    (Some(s), _) => QValue::Number(s),
+                match sum {
+                    None => PaidValue::null(mem),
+                    Some(sum) if agg.f == AggFunc::Avg => {
+                        let count = payload::count(count, mem, env)?;
+                        payload::binary(ArithOp::Div, &sum, &count, limbs, div_zero, mem, env)?
+                    }
+                    Some(sum) => sum,
                 }
             }
             (AggFunc::Min | AggFunc::Max, _) => {
                 let mut best: Option<&QValue> = None;
                 for &r in rows {
-                    let Some(v) = get(r) else { continue };
+                    payload::checkpoint(env)?;
+                    let Some(value) = get(r) else { continue };
                     best = match best {
-                        None => Some(v),
-                        Some(b) => {
-                            let o = try_compare_totals(v, b, coll)?;
-                            let better = if a.f == AggFunc::Min {
-                                o == Ordering::Less
+                        None => Some(value),
+                        Some(current) => {
+                            let ordering = try_compare_totals(value, current, coll)?;
+                            let better = if agg.f == AggFunc::Min {
+                                ordering == Ordering::Less
                             } else {
-                                o == Ordering::Greater
+                                ordering == Ordering::Greater
                             };
-                            Some(if better { v } else { b })
+                            Some(if better { value } else { current })
                         }
                     };
                 }
-                best.cloned().unwrap_or(QValue::Null)
+                PaidValue::copy(best.unwrap_or(&QValue::Null), mem, env)?
             }
         };
-        out.push(v);
+        out.push(value)?;
     }
+    payload::checkpoint(env)?;
     Ok(out)
 }
 
-pub(crate) fn eval(
+enum EvalFrame<'e> {
+    Visit(&'e TotalsExpr),
+    Neg,
+    Not,
+    Bin(ArithOp),
+    Cmp(CmpOp),
+    IsNull(&'e TotalsExpr),
+    CaseNext {
+        whens: &'e [(TotalsExpr, TotalsExpr)],
+        otherwise: Option<&'e TotalsExpr>,
+        index: usize,
+    },
+    CaseAfter {
+        value: &'e TotalsExpr,
+        whens: &'e [(TotalsExpr, TotalsExpr)],
+        otherwise: Option<&'e TotalsExpr>,
+        next: usize,
+    },
+    BooleanNext {
+        rest: &'e [TotalsExpr],
+        unknown: bool,
+        short: bool,
+    },
+    BooleanAfter {
+        rest: &'e [TotalsExpr],
+        unknown: bool,
+        short: bool,
+    },
+}
+
+fn eval_pop<'m, 'a>(
+    values: &mut SizingStack<'m, 'a, PaidValue<'m, 'a>>,
+) -> Result<PaidValue<'m, 'a>, ExecError> {
+    values
+        .pop()
+        .ok_or_else(|| fatal("unbalanced total expression values"))
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Match total_values_in borrowed evaluation inputs, with explicit work-memory and optional cancellation contexts."
+)]
+pub(crate) fn eval<'a>(
     e: &TotalsExpr,
     aggs: &[QValue],
     ctx: &[(usize, QValue)],
     coll: ExecCollation<'_>,
     limbs: u64,
     div_zero: &Cell<bool>,
+    mem: &MemBudget<'a>,
+    env: Option<&ExecEnv<'a>>,
 ) -> Result<QValue, ExecError> {
-    let ev = |x: &TotalsExpr| eval(x, aggs, ctx, coll, limbs, div_zero);
-    Ok(match e {
-        TotalsExpr::Agg(i) => aggs.get(*i).cloned().unwrap_or(QValue::Null),
-        TotalsExpr::Param(_) => return Err(fatal("an unbound parameter in a total")),
-        TotalsExpr::Column(c) => ctx
-            .iter()
-            .rev()
-            .find(|(k, _)| k == c)
-            .map_or(QValue::Null, |(_, v)| v.clone()),
-        TotalsExpr::Const(v) => v.clone(),
-        TotalsExpr::Neg(x) => match ev(x)? {
-            QValue::Null => QValue::Null,
-            QValue::Number(n) => QValue::Number(n.neg()),
-            _ => return Err(later("ИТОГИ: унарный минус не числа")),
-        },
-        TotalsExpr::Bin(op, l, r) => {
-            let (a, b) = (ev(l)?, ev(r)?);
-            match (a, b) {
-                (QValue::Null, _) | (_, QValue::Null) => QValue::Null,
-                (QValue::Number(x), QValue::Number(y)) => match op {
-                    ArithOp::Add => guard(x.add(&y), limbs)?,
-                    ArithOp::Sub => guard(x.sub(&y), limbs)?,
-                    ArithOp::Mul => guard(x.mul(&y), limbs)?,
-                    ArithOp::Div => match x.div(&y) {
-                        Ok(q) => guard(q, limbs)?,
-                        Err(_) => {
-                            div_zero.set(true);
-                            QValue::Null
-                        }
-                    },
-                },
-                (QValue::String(x), QValue::String(y)) if *op == ArithOp::Add => {
-                    let mut units: Vec<u16> = x.0.to_vec();
-                    units.extend_from_slice(&y.0);
-                    QValue::String(query_ir::QStr(units.into()))
-                }
-                _ => return Err(later("ИТОГИ: операция над нечисловыми значениями")),
-            }
-        }
-        TotalsExpr::IsNull(a, b) => match ev(a)? {
-            QValue::Null => ev(b)?,
-            v => v,
-        },
-        TotalsExpr::Case { whens, otherwise } => {
-            for (c, v) in whens {
-                if ev(c)? == QValue::Bool(true) {
-                    return ev(v);
-                }
-            }
-            match otherwise {
-                Some(o) => ev(o)?,
-                None => QValue::Null,
-            }
-        }
-        TotalsExpr::Cmp(op, l, r) => match try_compare(*op, &ev(l)?, &ev(r)?, coll)? {
-            Some(b) => QValue::Bool(b),
-            None => QValue::Null,
-        },
-        TotalsExpr::Not(x) => match ev(x)? {
-            QValue::Bool(b) => QValue::Bool(!b),
-            _ => QValue::Null,
-        },
-        TotalsExpr::And(xs) => {
-            let mut unknown = false;
-            for x in xs {
-                match ev(x)? {
-                    QValue::Bool(false) => return Ok(QValue::Bool(false)),
-                    QValue::Bool(true) => {}
-                    _ => unknown = true,
-                }
-            }
-            if unknown {
-                QValue::Null
-            } else {
-                QValue::Bool(true)
-            }
-        }
-        TotalsExpr::Or(xs) => {
-            let mut unknown = false;
-            for x in xs {
-                match ev(x)? {
-                    QValue::Bool(true) => return Ok(QValue::Bool(true)),
-                    QValue::Bool(false) => {}
-                    _ => unknown = true,
-                }
-            }
-            if unknown {
-                QValue::Null
-            } else {
-                QValue::Bool(false)
-            }
-        }
-    })
+    eval_paid(
+        e,
+        |index| aggs.get(index),
+        ctx,
+        coll,
+        limbs,
+        div_zero,
+        mem,
+        env,
+    )
+    .map(PaidValue::into_unbudgeted)
 }
 
-fn is_ancestor_or_self(nodes: &[Node], a: usize, b: usize) -> bool {
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Preserve evaluation inputs with an explicit payload owner and budget."
+)]
+fn eval_paid<'v, 'm, 'a>(
+    e: &TotalsExpr,
+    aggs: impl Fn(usize) -> Option<&'v QValue>,
+    ctx: &[(usize, QValue)],
+    coll: ExecCollation<'_>,
+    limbs: u64,
+    div_zero: &Cell<bool>,
+    mem: &'m MemBudget<'a>,
+    env: Option<&ExecEnv<'a>>,
+) -> Result<PaidValue<'m, 'a>, ExecError> {
+    let mut frames = SizingStack::new(mem);
+    let mut values = SizingStack::new(mem);
+    let mut cancel = env.map(LedgerWork::new);
+    frames.push(EvalFrame::Visit(e))?;
+    while let Some(frame) = frames.pop() {
+        if let Some(cancel) = &mut cancel {
+            cancel.step()?;
+        }
+        match frame {
+            EvalFrame::Visit(expression) => match expression {
+                TotalsExpr::Agg(i) => values.push(PaidValue::copy(
+                    aggs(*i).unwrap_or(&QValue::Null),
+                    mem,
+                    env,
+                )?)?,
+                TotalsExpr::Param(_) => return Err(fatal("an unbound parameter in a total")),
+                TotalsExpr::Column(column) => values.push(PaidValue::copy(
+                    ctx.iter()
+                        .rev()
+                        .find(|(key, _)| key == column)
+                        .map_or(&QValue::Null, |(_, value)| value),
+                    mem,
+                    env,
+                )?)?,
+                TotalsExpr::Const(value) => values.push(PaidValue::copy(value, mem, env)?)?,
+                TotalsExpr::Neg(child) | TotalsExpr::Not(child) => {
+                    frames.push(if matches!(expression, TotalsExpr::Neg(_)) {
+                        EvalFrame::Neg
+                    } else {
+                        EvalFrame::Not
+                    })?;
+                    frames.push(EvalFrame::Visit(child))?;
+                }
+                TotalsExpr::Bin(op, left, right) => {
+                    frames.push(EvalFrame::Bin(*op))?;
+                    frames.push(EvalFrame::Visit(right))?;
+                    frames.push(EvalFrame::Visit(left))?;
+                }
+                TotalsExpr::Cmp(op, left, right) => {
+                    frames.push(EvalFrame::Cmp(*op))?;
+                    frames.push(EvalFrame::Visit(right))?;
+                    frames.push(EvalFrame::Visit(left))?;
+                }
+                TotalsExpr::IsNull(left, right) => {
+                    frames.push(EvalFrame::IsNull(right))?;
+                    frames.push(EvalFrame::Visit(left))?;
+                }
+                TotalsExpr::Case { whens, otherwise } => frames.push(EvalFrame::CaseNext {
+                    whens,
+                    otherwise: otherwise.as_deref(),
+                    index: 0,
+                })?,
+                TotalsExpr::And(rest) | TotalsExpr::Or(rest) => {
+                    frames.push(EvalFrame::BooleanNext {
+                        rest,
+                        unknown: false,
+                        short: matches!(expression, TotalsExpr::Or(_)),
+                    })?
+                }
+            },
+            EvalFrame::Neg => {
+                let input = eval_pop(&mut values)?;
+                values.push(payload::neg(&input, mem, env)?)?;
+            }
+            EvalFrame::Not => {
+                let input = eval_pop(&mut values)?;
+                let value = match &*input {
+                    QValue::Bool(value) => QValue::Bool(!*value),
+                    _ => QValue::Null,
+                };
+                values.push(PaidValue::copy(&value, mem, env)?)?;
+            }
+            EvalFrame::Bin(op) => {
+                let right = eval_pop(&mut values)?;
+                let left = eval_pop(&mut values)?;
+                values.push(payload::binary(
+                    op, &left, &right, limbs, div_zero, mem, env,
+                )?)?;
+            }
+            EvalFrame::Cmp(op) => {
+                let right = eval_pop(&mut values)?;
+                let left = eval_pop(&mut values)?;
+                values.push(PaidValue::copy(
+                    &try_compare(op, &left, &right, coll)?.map_or(QValue::Null, QValue::Bool),
+                    mem,
+                    env,
+                )?)?;
+            }
+            EvalFrame::IsNull(right) => {
+                let value = eval_pop(&mut values)?;
+                if matches!(&*value, QValue::Null) {
+                    frames.push(EvalFrame::Visit(right))?;
+                } else {
+                    values.push(value)?;
+                }
+            }
+            EvalFrame::CaseNext {
+                whens,
+                otherwise,
+                index,
+            } => {
+                if let Some((condition, value)) = whens.get(index) {
+                    frames.push(EvalFrame::CaseAfter {
+                        value,
+                        whens,
+                        otherwise,
+                        next: index + 1,
+                    })?;
+                    frames.push(EvalFrame::Visit(condition))?;
+                } else if let Some(otherwise) = otherwise {
+                    frames.push(EvalFrame::Visit(otherwise))?;
+                } else {
+                    values.push(PaidValue::null(mem))?;
+                }
+            }
+            EvalFrame::CaseAfter {
+                value,
+                whens,
+                otherwise,
+                next,
+            } => {
+                if *eval_pop(&mut values)? == QValue::Bool(true) {
+                    frames.push(EvalFrame::Visit(value))?;
+                } else {
+                    frames.push(EvalFrame::CaseNext {
+                        whens,
+                        otherwise,
+                        index: next,
+                    })?;
+                }
+            }
+            EvalFrame::BooleanNext {
+                rest,
+                unknown,
+                short,
+            } => {
+                if let Some((first, rest)) = rest.split_first() {
+                    frames.push(EvalFrame::BooleanAfter {
+                        rest,
+                        unknown,
+                        short,
+                    })?;
+                    frames.push(EvalFrame::Visit(first))?;
+                } else {
+                    values.push(PaidValue::copy(
+                        &if unknown {
+                            QValue::Null
+                        } else {
+                            QValue::Bool(!short)
+                        },
+                        mem,
+                        env,
+                    )?)?;
+                }
+            }
+            EvalFrame::BooleanAfter {
+                rest,
+                unknown,
+                short,
+            } => {
+                let value = eval_pop(&mut values)?;
+                if *value == QValue::Bool(short) {
+                    values.push(value)?;
+                } else {
+                    frames.push(EvalFrame::BooleanNext {
+                        rest,
+                        unknown: unknown || *value != QValue::Bool(!short),
+                        short,
+                    })?;
+                }
+            }
+        }
+    }
+    if let Some(cancel) = cancel {
+        cancel.check()?;
+    }
+    let result = eval_pop(&mut values)?;
+    if values.pop().is_some() {
+        return Err(fatal("unbalanced total expression values"));
+    }
+    Ok(result)
+}
+
+fn is_ancestor_or_self(nodes: &[Node<'_, '_>], a: usize, b: usize) -> bool {
     let mut cur = Some(b);
     let mut steps = 0usize;
     while let Some(c) = cur {
@@ -1294,7 +1842,7 @@ fn is_ancestor_or_self(nodes: &[Node], a: usize, b: usize) -> bool {
     false
 }
 
-fn post_order(nodes: &[Node]) -> Vec<usize> {
+fn post_order(nodes: &[Node<'_, '_>]) -> Vec<usize> {
     let mut out = Vec::with_capacity(nodes.len());
     let mut stack: Vec<(usize, bool)> = (0..nodes.len())
         .filter(|k| nodes.get(*k).is_some_and(|n| n.parent.is_none()))

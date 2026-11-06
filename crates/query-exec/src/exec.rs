@@ -97,7 +97,7 @@ impl Drop for ObservationGuard<'_> {
     }
 }
 
-fn charge_sets(r: &query_ir::RelL, cx: &mut Cx<'_>) -> Result<(), ExecError> {
+fn charge_legacy_sets(r: &query_ir::RelL, cx: &mut Cx<'_>) -> Result<(), ExecError> {
     use query_ir::{PExpr, RelL};
     fn expr(e: &PExpr, bytes: &mut u64) {
         crate::plan::walk(e, &mut |x| match x {
@@ -125,11 +125,12 @@ fn charge_sets(r: &query_ir::RelL, cx: &mut Cx<'_>) -> Result<(), ExecError> {
     }
     fn rel(r: &RelL, b: &mut u64) {
         match r {
-            RelL::Empty
-            | RelL::Scan { .. }
-            | RelL::TempScan { .. }
-            | RelL::Values { .. }
-            | RelL::RegisterRows(_) => {}
+            RelL::Empty | RelL::Scan { .. } | RelL::TempScan { .. } | RelL::Values { .. } => {}
+            RelL::RegisterRows(step) => {
+                if let Some(child) = step.chart_input() {
+                    rel(child, b);
+                }
+            }
             RelL::Slice {
                 input,
                 totals,
@@ -204,6 +205,34 @@ fn run(
     observation: Option<&crate::observe::ObservationSession>,
 ) -> Result<QueryResult, ExecError> {
     crate::register::check_slice_use(stmt, src, observation)?;
+    let managed = crate::coll::open(env)?;
+    let mut cx = Cx::new(env, src);
+    cx.coll = crate::coll::route(env, managed.as_ref());
+    cx.temps = temps;
+    cx.observation = observation.cloned();
+    cx.week_start = stmt.week_start;
+    cx.plan_options(opts);
+    let mut protected =
+        stmt.requires_calculation_admission || crate::accounting_inputs::protected(&stmt.root)?;
+    for nested in stmt.nested.iter().filter_map(|n| n.rows.as_ref()) {
+        protected |= nested.requires_calculation_admission
+            || crate::accounting_inputs::protected(&nested.rel)?;
+    }
+    if protected {
+        let mut payloads = crate::accounting_inputs::PaidPayloads::new(&cx.mem)?;
+        payloads.relation(&stmt.root, &cx.mem)?;
+        for nested in stmt.nested.iter().filter_map(|n| n.rows.as_ref()) {
+            payloads.relation(&nested.rel, &cx.mem)?;
+        }
+        cx.input_payloads = Some(std::rc::Rc::new(std::cell::RefCell::new(payloads)));
+        cx.input_structure = crate::accounting_inputs::admit_plan_for_calculation(
+            &stmt.root,
+            &cx.mem,
+            stmt.requires_calculation_admission,
+        )?;
+    } else {
+        charge_legacy_sets(&stmt.root, &mut cx)?;
+    }
     let mut plan = plan_temps(stmt, src, temps, opts)?;
     if let Some(obs) = observation {
         obs.plan(&mut plan, &[0]);
@@ -220,15 +249,7 @@ fn run(
             }
         }
     }
-    let managed = crate::coll::open(env)?;
     let mut op = build(&plan);
-    let mut cx = Cx::new(env, src);
-    cx.coll = crate::coll::route(env, managed.as_ref());
-    cx.temps = temps;
-    cx.observation = observation.cloned();
-    cx.week_start = stmt.week_start;
-    cx.plan_options(opts);
-    charge_sets(&stmt.root, &mut cx)?;
     let width = if stmt.totals.is_some() {
         usize::MAX
     } else {
@@ -250,6 +271,7 @@ fn run(
     drop(shared);
     op.close(&mut cx);
     drop(op);
+    drop(plan);
     cx.mem.release_scratch();
     crate::ops::nested::stitch(stmt, &mut rows, &mut cx, temps, opts)?;
     if let Some(c) = stmt.auto_number {
@@ -262,23 +284,26 @@ fn run(
     cx.mem.release_held();
     cx.mem.release_scratch();
     let totals = match &stmt.totals {
-        Some(spec) => Some(crate::totals::build(
-            spec.clone(),
-            &rows,
-            src,
-            env,
-            cx.coll,
-            &cx.mem,
-        )?),
+        Some(spec) => {
+            let input_copy = crate::model::totals_spec_clone_model(spec, &cx.mem, Some(env))?;
+            cx.mem.grow(input_copy)?;
+            let copy = crate::totals::clone_spec(spec, &cx.mem, env)?;
+            let tree = crate::totals::build(copy, &rows, src, env, cx.coll, &cx.mem)?;
+            cx.mem.shrink(input_copy);
+            Some(tree)
+        }
         None => None,
     };
     let columns = stmt.columns.clone();
     cx.mem.grow(crate::model::columns_model(&columns))?;
-    cx.mem.reconcile(
-        rows_model(&rows)
-            + crate::model::columns_model(&columns)
-            + totals.as_ref().map_or(0, crate::totals::TotalsTree::model),
-    );
+    let retained = crate::model::size_add(
+        crate::model::size_add(rows_model(&rows), crate::model::columns_model(&columns))?,
+        totals
+            .as_ref()
+            .map_or(Ok(0), |tree| tree.model_charged(&cx.mem, Some(env)))?,
+    )?;
+    cx.release_inputs();
+    cx.mem.reconcile(retained);
     Ok(QueryResult {
         columns,
         rows,

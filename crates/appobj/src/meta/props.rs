@@ -26,11 +26,12 @@ fn prop_of<'a>(props: &'a [Prop], name: &str) -> Option<&'a Prop> {
     props.iter().find(|p| p.name.eq_ignore_ascii_case(xml))
 }
 
-const XML_NAMES: [(&str, &str); 4] = [
+const XML_NAMES: [(&str, &str); 5] = [
     ("FillingValue", "FillValue"),
     ("ActionsWritingOnPost", "RegisterRecordsWritingOnPost"),
     ("PrivilegedPostingMode", "PostInPrivilegedMode"),
     ("PrivilegedUnpostingMode", "UnpostInPrivilegedMode"),
+    ("ParameterUsageMode", "ParameterUseMode"),
 ];
 
 fn is_undefined_prop(f: &str) -> bool {
@@ -40,17 +41,12 @@ fn is_undefined_prop(f: &str) -> bool {
 fn is_unmodeled_collection(f: &str) -> bool {
     matches!(
         f,
-        "формы"
-            | "команды"
-            | "макеты"
-            | "характеристики"
+        "характеристики"
             | "агрегаты"
             | "графы"
             | "признакиучета"
             | "признакиучетасубконто"
             | "колонки"
-            | "шаблоныurl"
-            | "методы"
             | "операции"
             | "параметры"
             | "каналы"
@@ -66,6 +62,9 @@ pub(crate) fn obj_get(
     ru: &str,
     en: &str,
 ) -> CallResult<Value> {
+    if matches!(path, MdPath::WebOperation(..) | MdPath::WebParameter(..)) {
+        return super::web::get(cx, path, ru, en);
+    }
     let f = fold(ru);
     let inf = info(cx, path).ok_or_else(|| no_field(ru))?;
     let (obj, tab) = match path {
@@ -74,6 +73,20 @@ pub(crate) fn obj_get(
         _ => (None, None),
     };
     let model = cx.model();
+    if matches!(
+        path,
+        MdPath::Template(..) | MdPath::HttpUrlTemplate(..) | MdPath::HttpMethod(..)
+    ) {
+        let property = prop_of(inf.props, en);
+        let value = property.map(|p| &p.value);
+        let url_template = matches!(path, MdPath::HttpUrlTemplate(..)) && en == "Template";
+        if (en == "Synonym" && !matches!(value, Some(Mv::LStr(_))))
+            || ((en == "Comment" || url_template) && !matches!(value, Some(Mv::Text(_))))
+            || (url_template && !property.is_some_and(|p| p.codec == Codec::Str))
+        {
+            return Err(not_implemented(ru).into());
+        }
+    }
     match f.as_str() {
         "имя" => return Ok(Value::from(inf.name)),
         "синоним" => {
@@ -128,6 +141,35 @@ pub(crate) fn obj_get(
                 _ => coll::new_coll(cx, CollTy::Objects, Vec::new()),
             });
         }
+        "команды" | "макеты" => {
+            let Some(o) = obj.filter(|_| tab.is_none()) else {
+                return Err(not_implemented(ru).into());
+            };
+            return if f == "команды" {
+                coll::commands_coll(cx, o)
+            } else {
+                coll::templates_coll(cx, o)
+            };
+        }
+        "операции" if matches!(path, MdPath::Other(s) if model.config.objects.get(s).is_some_and(|o| o.kind == MdKind::WebService)) =>
+        {
+            let MdPath::Other(s) = path else {
+                return Err(not_implemented(ru).into());
+            };
+            return super::web::operations(cx, s);
+        }
+        "шаблоныurl" => {
+            let MdPath::Other(s) = path else {
+                return Err(not_implemented(ru).into());
+            };
+            return super::http::urls(cx, s);
+        }
+        "методы" => {
+            let MdPath::HttpUrlTemplate(s, u) = path else {
+                return Err(not_implemented(ru).into());
+            };
+            return super::http::methods(cx, s, u);
+        }
         s if is_undefined_prop(s) => return Ok(Value::Undefined),
         s if is_unmodeled_collection(s) => return Err(not_implemented(ru).into()),
         _ => {}
@@ -144,8 +186,15 @@ pub(crate) fn obj_get(
             _ => {}
         }
     }
+    if matches!(path, MdPath::Command(..)) && matches!(en, "Group" | "Shortcut" | "Picture") {
+        return Err(not_implemented(ru).into());
+    }
+    if matches!(path, MdPath::HttpMethod(..)) && matches!(en, "HTTPMethod" | "Handler") {
+        return Err(not_implemented(ru).into());
+    }
     let kind = match path {
-        MdPath::Object(o) => Some(model.obj(o).kind),
+        MdPath::Object(o) => Some(model.obj(o).kind.name(Lang::Ru)),
+        MdPath::Command(..) => Some("Команда"),
         _ => None,
     };
     let Some(p) = prop_of(inf.props, en) else {
@@ -155,7 +204,7 @@ pub(crate) fn obj_get(
         }
         return Err(not_implemented(ru).into());
     };
-    convert(cx, ex, kind.map(|k| k.name(Lang::Ru)), ru, p)
+    convert(cx, ex, kind, ru, p)
 }
 
 pub(crate) fn predefined_names(
@@ -257,7 +306,7 @@ pub(crate) fn std_get(
             Some(Mv::Text(t)) => t.as_str(),
             _ => "",
         })),
-        "тип" => Err(not_implemented("Тип").into()),
+        "тип" => crate::values::typedesc::from_standard(&cx.app, ex, &fd.types),
         "проверказаполнения" => {
             let lit = match xml.map(|p| &p.value) {
                 Some(Mv::Text(t)) => t.as_str(),
@@ -278,7 +327,13 @@ fn enum_by_name(cx: &MdCtx, type_ru: &str, literal: &str) -> Option<Value> {
     bsl_stdlib::enums::enum_value(t, literal)
 }
 
-const ENUM_TYPES: [(&str, &str, &str); 38] = [
+const ENUM_TYPES: [(&str, &str, &str); 40] = [
+    (
+        "РежимИспользованияПараметра",
+        "Команда",
+        "РежимИспользованияПараметраКоманды",
+    ),
+    ("Отображение", "Команда", "ОтображениеКнопки"),
     ("ТипКода", "Справочник", "ТипКодаСправочника"),
     ("ТипКода", "ПланВидовРасчета", "ТипКодаПланаВидовРасчета"),
     (
@@ -463,7 +518,8 @@ pub(crate) fn convert(
             Ok(coll::new_coll(cx, CollTy::Values, items))
         }
         Mv::Typed(t) => typed(cx, ex, t, ru),
-        Mv::Type(_) | Mv::FieldList(_) | Mv::StandardAttributes(_) | Mv::Xml(_) => {
+        Mv::Type(t) => crate::values::typedesc::from_metadata(&cx.app, ex, t),
+        Mv::FieldList(_) | Mv::StandardAttributes(_) | Mv::Xml(_) => {
             Err(not_implemented(ru).into())
         }
     }
@@ -479,7 +535,12 @@ fn typed(cx: &MdCtx, ex: &mut Execution, t: &TypedValue, ru: &str) -> CallResult
         TypedValue::DesignTimeRef(s) => {
             design_time_ref(cx, ex, s)?.ok_or_else(|| not_implemented(ru))?
         }
-        TypedValue::EmptyTypeDescription | TypedValue::FixedArray(_) => {
+        TypedValue::EmptyTypeDescription => crate::values::typedesc::from_metadata(
+            &cx.app,
+            ex,
+            &md_model::TypeDescription::default(),
+        )?,
+        TypedValue::FixedArray(_) => {
             return Err(not_implemented(ru).into());
         }
     })

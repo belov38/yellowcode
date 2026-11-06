@@ -268,6 +268,9 @@ pub(super) fn build(b: &mut Builder<'_>, commons: &[Common]) -> Result<(), Schem
         b.meta.insert(r.table, r.meta.clone());
     }
     for r in &regs {
+        if r.obj.kind == MdKind::CalculationRegister {
+            super::schedule::build(b, r.table, r.obj);
+        }
         match r.obj.kind {
             MdKind::AccumulationRegister => accumulation_vts(b, r)?,
             MdKind::InformationRegister => information_vts(b, r)?,
@@ -721,6 +724,10 @@ fn add_vt(
             Vec::new()
         }
     };
+    if r.obj.kind == MdKind::AccountingRegister && r.meta.ext_dims == 0 {
+        t.params
+            .retain(|p| p.kind != super::VtParamKind::ExtDimensions);
+    }
     let name = t.name_en.clone();
     let missing = f.into_table(&mut t);
     for m in missing {
@@ -1050,7 +1057,8 @@ fn accounting_vts(b: &mut Builder<'_>, r: &Reg<'_>) -> Result<(), SchemaError> {
                 if x.balance {
                     resource_fields(f, x, &["Оборот"]);
                 } else {
-                    resource_fields(f, x, &["ОборотДт", "ОборотКт"]);
+                    f.sided(super::Side::Dr, |f| resource_fields(f, x, &["ОборотДт"]));
+                    f.sided(super::Side::Cr, |f| resource_fields(f, x, &["ОборотКт"]));
                 }
             }
         })?;

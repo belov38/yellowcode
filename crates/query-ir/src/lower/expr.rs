@@ -118,7 +118,7 @@ impl Lower<'_> {
             },
             ExprKind::Col { src, col } => self.col(*src, *col)?,
             ExprKind::Deref { base, steps } => self.deref_chain(row, base, steps)?,
-            ExprKind::KeyRef(i) => {
+            ExprKind::KeyRef(i) | ExprKind::LocalKey { key: i, .. } => {
                 if row.keys.is_none() {
                     return internal("a group key outside the rows of an aggregate");
                 }

@@ -1,6 +1,6 @@
 use super::array::Array;
 use super::structure::{Fields, Structure};
-use super::{KeyValue, Snapshot, is_name, reserve_values, snapshot, types, vec_with_capacity};
+use super::{KeyValue, Snapshot, is_name, reserve_values, types, vec_with_capacity};
 use crate::serial::codec::{InternalReader, InternalWriter, ValueCodec};
 use crate::serial::internal::text::decode_str;
 use brace::Node;
@@ -57,7 +57,7 @@ fn write_all(
     let n = match &snap {
         Snapshot::Array(a) => a.len(),
         Snapshot::Structure(f) => f.len(),
-        Snapshot::Map(m) => m.len(),
+        Snapshot::Map(m) => m.len().saturating_mul(2),
     };
     w.hold(ex, n)?;
     let r = write_items(ex, w, snap);
@@ -70,7 +70,15 @@ fn write_items(
     w: &mut InternalWriter,
     snap: Snapshot,
 ) -> Result<Vec<Node>, Exception> {
+    let count = match &snap {
+        Snapshot::Array(v) => v.len(),
+        Snapshot::Structure(v) => v.len(),
+        Snapshot::Map(v) => v.len(),
+    };
+    w.account(ex, (count as u64).saturating_mul(512).saturating_add(128))?;
     let mut out = Vec::new();
+    out.try_reserve_exact(count.saturating_add(1))
+        .map_err(|_| ex.out_of_memory())?;
     match snap {
         Snapshot::Array(items) => {
             out.push(Node::int(items.len() as i64));
@@ -104,11 +112,19 @@ impl ValueCodec for Collection {
         v: &ObjRef,
         w: &mut InternalWriter,
     ) -> Result<Option<Vec<Node>>, Exception> {
-        let snap = match (self.kind, snapshot(&Value::Object(v.clone()))) {
-            (Kind::Array, Some(s @ Snapshot::Array(_)))
-            | (Kind::Structure, Some(s @ Snapshot::Structure(_)))
-            | (Kind::Map, Some(s @ Snapshot::Map(_))) => s,
-            _ => return Ok(None),
+        let snap = match self.kind {
+            Kind::Array => match v.as_any().downcast_ref::<Array>() {
+                Some(array) => Snapshot::Array(array.serial_snapshot(ex, w)?),
+                None => return Ok(None),
+            },
+            Kind::Structure => match v.as_any().downcast_ref::<Structure>() {
+                Some(structure) => Snapshot::Structure(structure.serial_snapshot(ex, w)?),
+                None => return Ok(None),
+            },
+            Kind::Map => match v.as_any().downcast_ref::<super::map::Map>() {
+                Some(map) => Snapshot::Map(map.serial_snapshot(ex, w)?),
+                None => return Ok(None),
+            },
         };
         Ok(Some(vec![Node::List(write_all(ex, w, snap)?)]))
     }
@@ -195,10 +211,16 @@ impl ValueCodec for Pair {
         let Some(kv) = v.as_any().downcast_ref::<KeyValue>() else {
             return Ok(None);
         };
-        let [k, val] = kv.pair();
-        let k = w.write_value(ex, &k)?;
-        let val = w.write_value(ex, &val)?;
-        Ok(Some(vec![Node::List(vec![k, val])]))
+        let [k, val] = kv.serial_snapshot(ex, w)?;
+        w.hold(ex, 2)?;
+        let result = (|| {
+            w.account(ex, 512)?;
+            let k = w.write_value(ex, &k)?;
+            let val = w.write_value(ex, &val)?;
+            Ok(Some(vec![Node::List(vec![k, val])]))
+        })();
+        w.release(2);
+        result
     }
 
     fn internal_read(
@@ -214,5 +236,26 @@ impl ValueCodec for Pair {
         let k = r.read_value(ex, k)?;
         let v = r.read_value(ex, v)?;
         Ok(KeyValue::new_value(k, v))
+    }
+}
+
+pub(super) fn serial_value_bytes(value: &Value) -> u64 {
+    super::retained_shallow_bytes(value)
+        .saturating_add(super::value_list::scalar_clone_bytes(value))
+        .saturating_add(match value {
+            Value::String(s) => (s.len() as u64).saturating_mul(12),
+            _ => 0,
+        })
+}
+pub(super) fn serial_clone(ex: &mut Execution, value: &Value) -> Result<Value, Exception> {
+    match value {
+        Value::Number(n) => {
+            ex.charge(n.size_hint_limbs() / 64 + 1)?;
+            Ok(Value::Number(
+                n.try_clone_with(|_| Ok::<_, Exception>(()))
+                    .map_err(|_| ex.out_of_memory())?,
+            ))
+        }
+        _ => Ok(value.clone()),
     }
 }

@@ -38,6 +38,91 @@ fn fold_units(key: &[u16]) -> String {
 }
 
 impl Fields {
+    pub(super) fn json_scan_work(&self, key_len: usize) -> Option<u64> {
+        let width = self.by_name.capacity().checked_add(1)?;
+        u64::try_from(width.checked_mul(key_len.checked_add(1)?)?).ok()
+    }
+
+    pub(super) fn json_insert_estimate(&self, key: &str) -> Option<(bool, u64)> {
+        fn folded(c: char) -> char {
+            let mut lower = c.to_lowercase();
+            match (lower.next(), lower.next()) {
+                (Some(one), None) => one,
+                _ => c,
+            }
+        }
+        let duplicate = self
+            .by_name
+            .keys()
+            .any(|name| name.chars().eq(key.chars().map(folded)));
+        let key_bytes = u64::try_from(key.len())
+            .ok()?
+            .checked_mul(16)?
+            .checked_add(64)?;
+        if duplicate {
+            return Some((false, key_bytes));
+        }
+        let slots = self
+            .entries
+            .capacity()
+            .checked_add(1)?
+            .checked_mul(2)?
+            .checked_mul(std::mem::size_of::<Field>())?;
+        let names_capacity = self.by_name.capacity().checked_add(1)?.checked_mul(2)?;
+        let ids_capacity = self.by_id.capacity().checked_add(1)?.checked_mul(2)?;
+        let names = bsl_vm::retained_hash_bytes::<(String, usize)>(names_capacity)?;
+        let ids = bsl_vm::retained_hash_bytes::<(u32, usize)>(ids_capacity)?;
+        let renumber = if self.next_id >= MAX_KEY_ID {
+            self.entries.iter().try_fold(0u64, |sum, field| {
+                sum.checked_add(u64::try_from(field.key.len()).ok()?.checked_mul(32)?)
+            })?
+        } else {
+            0
+        };
+        Some((
+            true,
+            key_bytes
+                .checked_add(u64::try_from(slots).ok()?)?
+                .checked_add(names)?
+                .checked_add(ids)?
+                .checked_add(renumber)?,
+        ))
+    }
+
+    pub(super) fn prepare_json_insert(&mut self, new_entry: bool) -> Result<(), ()> {
+        if new_entry {
+            self.entries.try_reserve(1).map_err(|_| ())?;
+            self.by_name.try_reserve(1).map_err(|_| ())?;
+            self.by_id.try_reserve(1).map_err(|_| ())?;
+        }
+        Ok(())
+    }
+    pub(super) fn visit_json_retained(
+        &self,
+        visit: &mut dyn bsl_vm::RetainedMemory,
+        oom: &bsl_vm::Exception,
+    ) -> Result<(), bsl_vm::Exception> {
+        visit.work((self.entries.len() as u64).saturating_add(self.by_name.capacity() as u64))?;
+        visit.bytes(
+            (self.entries.capacity() as u64).saturating_mul(std::mem::size_of::<Field>() as u64),
+        )?;
+        visit.bytes(
+            bsl_vm::retained_hash_bytes::<(String, usize)>(self.by_name.capacity())
+                .ok_or_else(|| oom.clone())?,
+        )?;
+        visit.bytes(
+            bsl_vm::retained_hash_bytes::<(u32, usize)>(self.by_id.capacity())
+                .ok_or_else(|| oom.clone())?,
+        )?;
+        for name in self.by_name.keys() {
+            visit.bytes(name.capacity() as u64)?;
+        }
+        for field in &self.entries {
+            visit.string(&field.key)?;
+            visit.value(&field.value)?;
+        }
+        Ok(())
+    }
     fn find(&self, name: &str) -> Option<usize> {
         self.by_name.get(&fold_name(name)).copied()
     }
@@ -741,5 +826,42 @@ impl Structure {
             a.value(&field.value)?;
         }
         Ok(())
+    }
+}
+
+impl Structure {
+    pub(super) fn serial_snapshot(
+        &self,
+        ex: &mut Execution,
+        w: &mut crate::serial::codec::InternalWriter,
+    ) -> Result<Vec<(Str, Value)>, bsl_vm::Exception> {
+        let base = self.retained_bytes(ex).map_err(|e| match e {
+            bsl_vm::CallError::Host(e) => ex.error(e),
+            bsl_vm::CallError::Exc(e) => e,
+        })?;
+        let fields = self.fields.borrow();
+        ex.charge(fields.entries.len() as u64)?;
+        let mut bytes = base.saturating_add(
+            (fields.entries.len() as u64)
+                .saturating_mul(std::mem::size_of::<(Str, Value)>() as u64),
+        );
+        for field in &fields.entries {
+            bytes = bytes
+                .saturating_add(super::retained::text_extra(&field.key))
+                .saturating_add((field.key.len() as u64).saturating_mul(12))
+                .saturating_add(super::codec::serial_value_bytes(&field.value));
+        }
+        w.account(ex, bytes)?;
+        let mut snapshot = Vec::new();
+        snapshot
+            .try_reserve_exact(fields.entries.len())
+            .map_err(|_| ex.out_of_memory())?;
+        for field in &fields.entries {
+            snapshot.push((
+                field.key.clone(),
+                super::codec::serial_clone(ex, &field.value)?,
+            ));
+        }
+        Ok(snapshot)
     }
 }

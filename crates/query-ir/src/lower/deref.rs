@@ -1,10 +1,10 @@
 use super::layout::{R, Row, fatal, internal, later, p16};
 use super::rel::Lower;
 use super::{PExpr, RelL};
-use crate::ir::{ColSel, Expr, SrcId};
+use crate::ir::{ColSel, Expr, ExprKind, Rel, SrcId, SrcKind};
 use crate::schema::{FieldRole, Only, QFieldId, QTableId, StdRole, TableKind};
 use crate::tir;
-use crate::types::Other;
+use crate::types::{Other, QType};
 use crate::value::QValue;
 use bsl_prim::fold_name;
 use ibschema::names::StdField;
@@ -123,6 +123,7 @@ pub(super) fn plan_expr(plan: &Plan, mk: &mut dyn FnMut(Sf) -> R<PExpr>) -> R<PE
 pub(super) enum NodeKey {
     Base(SrcId, ColSel),
     Expr(String),
+    CaseArm(String, u8),
     Step(u32, String),
     Policy(u32),
 }
@@ -143,6 +144,79 @@ pub(super) struct Chain {
 enum Cur {
     Base,
     Chain(u32),
+}
+
+struct OnCase<'a> {
+    condition: &'a Expr,
+    arms: [&'a Expr; 2],
+    to: &'a QType,
+    step: &'a tir::Deref,
+}
+
+fn on_case<'a>(base: &'a Expr, steps: &'a [tir::Deref]) -> Option<OnCase<'a>> {
+    let [step] = steps else { return None };
+    if step.targets.len() != 1 {
+        return None;
+    }
+    let ExprKind::Cast { x, to, num: None } = &base.kind else {
+        return None;
+    };
+    if to.refs.len() != 1 || to.atom_count() != 1 {
+        return None;
+    }
+    let ExprKind::Case {
+        operand: None,
+        whens,
+        else_: Some(other),
+    } = &x.kind
+    else {
+        return None;
+    };
+    let [(condition, then)] = whens.as_slice() else {
+        return None;
+    };
+    let ExprKind::Compare(_, a, b) = &condition.kind else {
+        return None;
+    };
+    for scalar in [a.as_ref(), b.as_ref()] {
+        if !scalar.ty.refs.is_empty()
+            || !scalar.ty.others.is_empty()
+            || !matches!(
+                &scalar.kind,
+                ExprKind::Col {
+                    col: ColSel::Field(_),
+                    ..
+                } | ExprKind::Lit(
+                    QValue::Null
+                        | QValue::Bool(_)
+                        | QValue::Number(_)
+                        | QValue::String(_)
+                        | QValue::Date(_)
+                )
+            )
+        {
+            return None;
+        }
+    }
+    let arms = [then, other.as_ref()];
+    if arms.iter().any(|arm| {
+        !matches!(
+            arm.kind,
+            ExprKind::Col {
+                col: ColSel::Field(_),
+                ..
+            }
+        ) || arm.ty.refs != to.refs
+            || arm.ty.atom_count() != 1
+    }) {
+        return None;
+    }
+    Some(OnCase {
+        condition,
+        arms,
+        to,
+        step,
+    })
 }
 
 impl Lower<'_> {
@@ -514,12 +588,179 @@ impl Lower<'_> {
         Ok(Chain { anchor, targets })
     }
 
+    pub(super) fn prepare_case_on(
+        &mut self,
+        base: &Expr,
+        steps: &[tir::Deref],
+        mut inputs: [(&Rel, &mut Row); 2],
+    ) -> R<bool> {
+        if self.frozen || self.policy_depth != 0 {
+            return Ok(false);
+        }
+        let Some(case) = on_case(base, steps) else {
+            return Ok(false);
+        };
+        let mut sources = [SrcId(0); 2];
+        for (source, (rel, row)) in sources.iter_mut().zip(&inputs) {
+            let Rel::Scan { src, table } = rel else {
+                return Ok(false);
+            };
+            if !matches!(self.schema.table(*table).kind, TableKind::Object(_))
+                || self.schema.is_unstored(*table)
+                || self.src_level.get(src.0 as usize).copied() != Some(self.level)
+                || !row.rep.is_some_and(|rep| self.offs.same(*src, rep))
+                || !matches!(self.stmt.sources.get(src.0 as usize).map(|s| &s.kind),
+                    Some(SrcKind::Table(qt)) if qt == table)
+                || !self
+                    .storage
+                    .table(*table)
+                    .and_then(|t| self.map.try_table(t))
+                    .is_some_and(|t| t.separators.is_empty())
+            {
+                return Ok(false);
+            }
+            *source = *src;
+        }
+        let [left, right] = sources;
+        if left == right {
+            return Ok(false);
+        }
+        let mut sides = [0; 2];
+        for (input, arm) in sides.iter_mut().zip(case.arms) {
+            let ExprKind::Col { src, .. } = &arm.kind else {
+                return Ok(false);
+            };
+            let Some(side) = sources.iter().position(|source| source == src) else {
+                return Ok(false);
+            };
+            *input = side;
+        }
+        let [then_side, other_side] = sides;
+        if then_side == other_side {
+            return Ok(false);
+        }
+        let ExprKind::Compare(_, a, b) = &case.condition.kind else {
+            return Ok(false);
+        };
+        if [a.as_ref(), b.as_ref()]
+            .iter()
+            .any(|e| matches!(&e.kind, ExprKind::Col { src, .. } if !sources.contains(src)))
+        {
+            return Ok(false);
+        }
+        let [atom] = case.to.refs.as_slice() else {
+            return Ok(false);
+        };
+        let reference = self.schema.ref_info(*atom);
+        let [(qt, field)] = case.step.targets.as_slice() else {
+            return Ok(false);
+        };
+        let (qt, field) = (*qt, *field);
+        if reference.table != qt
+            || reference.kind != mdschema::MdKind::Catalog
+            || self.schema.table(qt).kind != TableKind::Object(mdschema::MdKind::Catalog)
+            || self.schema.is_unstored(qt)
+        {
+            return Ok(false);
+        }
+        let Some(info) = self.storage.table(qt).and_then(|t| self.map.try_table(t)) else {
+            return Ok(false);
+        };
+        let Some(id) = info.field_by_std(StdField::Id) else {
+            return Ok(false);
+        };
+        if !info.separators.is_empty()
+            || !info
+                .key_index
+                .as_ref()
+                .is_some_and(|key| key.prefix == 0 && key.fields == [id])
+        {
+            return Ok(false);
+        }
+        if self.schema.field(qt, field).is_none_or(|field| {
+            field.nested.is_some()
+                || !field.ty.refs.is_empty()
+                || !field.ty.others.is_empty()
+                || field.ty.atom_count() != 1
+                || matches!(
+                    field.role,
+                    FieldRole::Virtual | FieldRole::Std(StdRole::PredefinedDataName)
+                )
+        }) {
+            return Ok(false);
+        }
+        let target = self.storage.table(qt);
+        if !matches!(self.plan(qt, field)?.as_ref(), Plan::Col((table, _)) if Some(*table) == target)
+        {
+            return Ok(false);
+        }
+        let identity = format!("{base:?}:{:?}", case.step.targets);
+        for (ordinal, (arm, side)) in case.arms.into_iter().zip(sides).enumerate() {
+            let node = self.node(NodeKey::CaseArm(identity.clone(), ordinal as u8));
+            let Some((_, row)) = inputs.get_mut(side) else {
+                return internal("a CASE arm input");
+            };
+            if self.chain_valid(node, row) {
+                continue;
+            }
+            let cast = Expr {
+                kind: ExprKind::Cast {
+                    x: Box::new(arm.clone()),
+                    to: case.to.clone(),
+                    num: None,
+                },
+                ty: base.ty.clone(),
+            };
+            let key = self.expr(&cast, row)?;
+            let chain = self.step_joins(row, &key, &[], case.step, base, &[])?;
+            let old = self.chains.insert(node, chain);
+            if let Some(log) = &mut self.chain_log {
+                log.push((node, old));
+            }
+        }
+        Ok(true)
+    }
+
+    fn prepared_case_on(
+        &mut self,
+        row: &mut Row,
+        base: &Expr,
+        steps: &[tir::Deref],
+    ) -> R<Option<PExpr>> {
+        if !self.frozen || self.policy_depth != 0 {
+            return Ok(None);
+        }
+        let Some(case) = on_case(base, steps) else {
+            return Ok(None);
+        };
+        let identity = format!("{base:?}:{:?}", case.step.targets);
+        let nodes = [0, 1].map(|arm| {
+            self.nodes
+                .get(&NodeKey::CaseArm(identity.clone(), arm))
+                .copied()
+        });
+        let [Some(then), Some(other)] = nodes else {
+            return Ok(None);
+        };
+        if !self.chain_valid(then, row) || !self.chain_valid(other, row) {
+            return Ok(None);
+        }
+        Ok(Some(PExpr::Case {
+            operand: None,
+            whens: vec![(self.expr(case.condition, row)?, self.chain_value(then)?)],
+            else_: Some(Box::new(self.chain_value(other)?)),
+        }))
+    }
+
     pub(super) fn deref_chain(
         &mut self,
         row: &mut Row,
         base: &Expr,
         steps: &[tir::Deref],
     ) -> R<PExpr> {
+        if let Some(value) = self.prepared_case_on(row, base, steps)? {
+            return Ok(value);
+        }
         let mut node = match &base.kind {
             crate::ir::ExprKind::Col { src, col } => self.node(NodeKey::Base(*src, *col)),
             _ => self.node(NodeKey::Expr(format!("{:?}", base))),

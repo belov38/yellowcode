@@ -188,6 +188,7 @@ impl ValueTree {
                 parent: source.parent,
                 level: source.level,
                 active: Cell::new(true),
+                materialized: Cell::new(source.materialized.get()),
                 children: RefCell::new(copied_children),
                 cells: RefCell::new(Cells(std::mem::take(&mut cells.0.0))),
                 bytes: Cell::new(0),

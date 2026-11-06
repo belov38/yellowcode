@@ -33,6 +33,7 @@ struct Plan {
     text: String,
     nil: bool,
     type_value: Option<(String, String)>,
+    description: bool,
 }
 
 fn plan(ex: &mut Execution, v: &Value) -> CallResult<Plan> {
@@ -43,6 +44,7 @@ fn plan(ex: &mut Execution, v: &Value) -> CallResult<Plan> {
             text: String::new(),
             nil: true,
             type_value: None,
+            description: false,
         });
     }
     if let Value::Type(t) = v {
@@ -53,6 +55,23 @@ fn plan(ex: &mut Execution, v: &Value) -> CallResult<Plan> {
             text: String::new(),
             nil: false,
             type_value: Some(named),
+            description: false,
+        });
+    }
+    if let Some(td) = v.as_object().and_then(|o| {
+        o.as_any()
+            .downcast_ref::<crate::typedesc::TypeDescription>()
+    }) {
+        if !super::typedesc::legacy_xml_supported(td) {
+            return Err(not_serializable());
+        }
+        return Ok(Plan {
+            family: Family::Data,
+            name: "TypeDescription".into(),
+            text: String::new(),
+            nil: false,
+            type_value: None,
+            description: true,
         });
     }
     let (ns, name) = xml_type_of(ex, v.type_id()).ok_or_else(not_serializable)?;
@@ -75,6 +94,7 @@ fn plan(ex: &mut Execution, v: &Value) -> CallResult<Plan> {
         text,
         nil: false,
         type_value: None,
+        description: false,
     })
 }
 
@@ -112,6 +132,7 @@ fn emit(
     match custom {
         Some((name, "")) if name.contains(':') => st.start_element_full(ex, name)?,
         Some((name, uri)) => st.start_element(ex, name, (!uri.is_empty()).then_some(uri))?,
+        None if p.description => st.start_element(ex, &p.name, Some(NS_DATA))?,
         None if in_data && explicit => st.start_element(ex, &p.name, Some(NS_DATA))?,
         None if in_data => st.start_element_prefixed(ex, &p.name, NS_DATA, &gen_prefix)?,
         None => st.start_element(ex, &p.name, None)?,
@@ -137,7 +158,9 @@ fn emit(
         ensure_prefix(st, ex, NS_XSI, "xsi")?;
         st.attribute(ex, "nil", Some(NS_XSI), "true")?;
     }
-    if !text.is_empty() {
+    if p.description {
+        super::typedesc::write_legacy_xml_body(ex, st)?;
+    } else if !text.is_empty() {
         st.text(ex, &text)?;
     }
     st.end_element(ex)
@@ -163,11 +186,15 @@ fn write_xml(ex: &mut Execution, args: &mut [Arg]) -> CallResult<Value> {
     let p = plan(ex, &v)?;
     crate::xml::check_chars(&p.text)?;
     let custom = match names.as_slice() {
+        _ if p.description && names.iter().all(String::is_empty) => None,
         [] => None,
         [n] if n.is_empty() => None,
         [n] => Some((n.as_str(), "")),
         [n, u, ..] => Some((n.as_str(), u.as_str())),
     };
+    if p.description && (custom.is_some() || explicit) {
+        return Err(not_serializable());
+    }
     emit(&mut st, ex, &p, custom, explicit)?;
     Ok(Value::Undefined)
 }

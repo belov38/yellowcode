@@ -91,6 +91,7 @@ pub enum Plan {
         rows: Arc<query_ir::ValueRows>,
     },
     RegisterRows {
+        chart: Option<Box<Plan>>,
         step: Box<query_ir::lower::RegisterRowsL>,
         #[doc(hidden)]
         observation: Option<crate::observe::RegisterObservation>,
@@ -344,7 +345,13 @@ impl Planner<'_> {
             ),
             R::RegisterRows(step) => wrap(
                 Plan::RegisterRows {
-                    step: step.clone(),
+                    chart: step
+                        .chart_input()
+                        .map(|r| self.rel(r, false, Vec::new()).map(Box::new))
+                        .transpose()?,
+                    step: Box::new(crate::accounting_inputs::clone_register_step_without_chart(
+                        step,
+                    )),
                     observation: None,
                 },
                 pending,
@@ -532,7 +539,12 @@ pub(crate) fn walk(e: &PExpr, f: &mut dyn FnMut(&PExpr)) {
             steps.iter().for_each(|(_, x, _)| go(x));
         }
         PExpr::And(v) | PExpr::Or(v) => v.iter().for_each(go),
-        PExpr::Compare(_, a, b) => {
+        PExpr::RecordInInterval {
+            period: a,
+            recorder: b,
+            ..
+        }
+        | PExpr::Compare(_, a, b) => {
             go(a);
             go(b);
         }
@@ -605,7 +617,7 @@ pub(crate) fn width(r: &query_ir::RelL) -> usize {
         R::Union { parts, .. } => parts.first().map_or(0, width),
         R::HierarchyClosure { .. } => 1,
         R::RunningBalance { step, .. } => step.width(),
-        R::RegisterRows(s) => query_ir::ir::raw_layout::width(s.dims.len(), s.resources.len()),
+        R::RegisterRows(s) => s.raw_width(),
         R::Slice { step, .. } => step.width,
     }
 }
@@ -635,8 +647,16 @@ pub fn build<'a>(p: &Plan) -> BoxOp<'a> {
             totals.as_ref().map(|t| (**t).clone()),
             observation.clone(),
         )),
-        Plan::RegisterRows { step, observation } => Box::new(
-            crate::ops::register::RegisterRows::observed((**step).clone(), observation.clone()),
+        Plan::RegisterRows {
+            step,
+            observation,
+            chart,
+        } => Box::new(
+            crate::ops::register::RegisterRows::observed(
+                crate::accounting_inputs::clone_register_step_without_chart(step),
+                observation.clone(),
+            )
+            .with_chart(chart.as_ref().map(|p| build(p))),
         ),
         Plan::TempIndexRange {
             table,
@@ -902,8 +922,8 @@ impl Plan {
                 kids = vec![input];
                 "running-balance".to_string()
             }
-            Plan::RegisterRows { step, .. } => {
-                kids = vec![];
+            Plan::RegisterRows { step, chart, .. } => {
+                kids = chart.iter().map(|r| &**r).collect();
                 format!("register-rows {:?}", step.kind)
             }
             Plan::TempIndexRange {

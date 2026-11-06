@@ -21,6 +21,11 @@ pub struct SubCache {
 }
 
 impl SubCache {
+    pub(crate) fn clear(&self) {
+        self.plans.borrow_mut().clear();
+        self.sets.borrow_mut().clear();
+        self.sections.borrow_mut().clear();
+    }
     pub(crate) fn new(opts: PlanOptions) -> SubCache {
         SubCache {
             opts,

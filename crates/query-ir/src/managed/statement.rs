@@ -144,7 +144,10 @@ pub(crate) fn columns<'a>(
             scope,
             name,
             ty.trusted_borrow(),
-            item.nested.as_deref(),
+            query
+                .parts
+                .first()
+                .and_then(|select| tir::nested_output_fields(select, item)),
             0,
             !inter,
         )?)?;

@@ -31,6 +31,20 @@ pub fn eval<'a>(e: &PExpr, row: &[QValue], cx: &Cx<'a>) -> R<QValue> {
             .cloned()
             .ok_or_else(|| fatal("outer column out of range"))?,
         PExpr::Lit(v) => v.clone(),
+        PExpr::RecordInInterval {
+            period,
+            recorder,
+            bounds,
+        } => {
+            use query_ir::value::register_bounds::{after_start, before_end};
+            let [start, end] = *bounds;
+            match (eval(period, row, cx)?, eval(recorder, row, cx)?) {
+                (QValue::Date(t), QValue::Ref { table, id }) => QValue::Bool(
+                    after_start(t, (table, id), start) && before_end(t, (table, id), end),
+                ),
+                _ => QValue::Null,
+            }
+        }
         PExpr::Set(_) => return Err(fatal("a value set outside В (..)")),
         PExpr::Unit(k) => unit_arg(*k),
         PExpr::Neg(x) => match eval(x, row, cx)? {

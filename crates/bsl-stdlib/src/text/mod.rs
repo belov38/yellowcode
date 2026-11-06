@@ -2,6 +2,8 @@ mod document;
 mod reader;
 mod writer;
 
+pub(crate) use document::TextDocument;
+
 use crate::binary::guard_bytes;
 use crate::bind::{arg_str, is_given, lib_error, msg};
 use crate::enums::type_by_id;

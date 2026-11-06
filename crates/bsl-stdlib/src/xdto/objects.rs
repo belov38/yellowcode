@@ -96,9 +96,10 @@ impl DataObject {
         }
         match ep.prop.default.as_deref() {
             Some(d) if !super::is_any(&ep.prop.ty) => {
-                match value_from_text(ex, &self.factory.model, &ep.prop.ty, d, false)? {
-                    XdtoData::Value { value, .. } => Ok(value),
-                    _ => Ok(Value::Undefined),
+                match value_from_text(ex, &self.factory.model, &ep.prop.ty, d, false)?.take_value()
+                {
+                    Some((_, _, value)) => Ok(value),
+                    None => Ok(Value::Undefined),
                 }
             }
             _ => Ok(Value::Undefined),
@@ -143,7 +144,134 @@ impl DataObject {
     }
 }
 
+fn retained_factory(
+    factory: &FactoryRef,
+    visit: &mut dyn bsl_vm::RetainedMemory,
+) -> Result<bool, bsl_vm::Exception> {
+    if !super::factory::is_platform_model(&factory.model) {
+        return Ok(false);
+    }
+    let Ok(cache) = factory.props.map.try_borrow() else {
+        return Ok(false);
+    };
+    if visit.allocation(
+        Rc::as_ptr(factory) as usize,
+        bsl_vm::session_shared_bytes::<super::data::Factory>(),
+    )? {
+        visit.mutable();
+        visit.bytes(
+            (factory.named_types.capacity() as u64)
+                .saturating_mul(std::mem::size_of::<Vec<usize>>() as u64),
+        )?;
+        for names in &factory.named_types {
+            visit.work(1)?;
+            visit.bytes(
+                (names.capacity() as u64).saturating_mul(std::mem::size_of::<usize>() as u64),
+            )?;
+        }
+        type Entry = (bsl_lib::xdto::QName, std::sync::Arc<Vec<EProp>>);
+        let Some(bytes) = bsl_vm::retained_hash_bytes::<Entry>(cache.capacity()) else {
+            return Ok(false);
+        };
+        visit.bytes(bytes)?;
+        for (name, props) in cache.iter() {
+            visit.work(1)?;
+            retained_name(name, visit)?;
+            retained_properties(props, visit)?;
+        }
+    }
+    Ok(true)
+}
+
+fn retained_name(
+    name: &bsl_lib::xdto::QName,
+    visit: &mut dyn bsl_vm::RetainedMemory,
+) -> Result<(), bsl_vm::Exception> {
+    visit.bytes(name.ns.capacity() as u64)?;
+    visit.bytes(name.name.capacity() as u64)
+}
+
+fn retained_properties(
+    props: &std::sync::Arc<Vec<EProp>>,
+    visit: &mut dyn bsl_vm::RetainedMemory,
+) -> Result<(), bsl_vm::Exception> {
+    if visit.allocation(
+        std::sync::Arc::as_ptr(props) as usize,
+        bsl_vm::session_shared_bytes::<Vec<EProp>>(),
+    )? {
+        visit
+            .bytes((props.capacity() as u64).saturating_mul(std::mem::size_of::<EProp>() as u64))?;
+        for ep in props.iter() {
+            visit.work(1)?;
+            retained_name(&ep.prop.ty, visit)?;
+            for text in [
+                Some(&ep.owner_ns),
+                Some(&ep.prop.name),
+                ep.prop.default.as_ref(),
+                ep.prop.local_name.as_ref(),
+                ep.prop.fixed.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                visit.bytes(text.capacity() as u64)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 impl HostObject for DataObject {
+    fn retained_memory(
+        &self,
+        visit: &mut dyn bsl_vm::RetainedMemory,
+    ) -> Result<bool, bsl_vm::Exception> {
+        let Ok(props) = self.props.try_borrow() else {
+            return Ok(false);
+        };
+        if !retained_factory(&self.factory, visit)? {
+            return Ok(false);
+        }
+        visit.mutable();
+        retained_name(&self.ty, visit)?;
+        retained_properties(&self.eps, visit)?;
+        visit.bytes(
+            (props.capacity() as u64)
+                .saturating_mul(std::mem::size_of::<(String, Vec<Item>)>() as u64),
+        )?;
+        for (name, items) in props.iter() {
+            visit.work(1)?;
+            visit.bytes(name.capacity() as u64)?;
+            visit.bytes(
+                (items.capacity() as u64).saturating_mul(std::mem::size_of::<Item>() as u64),
+            )?;
+            for item in items {
+                visit.work(1)?;
+                match item {
+                    Item::Obj(object) => visit.value(&Value::Object(object.clone()))?,
+                    Item::Data(XdtoData::Nil) => (),
+                    Item::Data(XdtoData::Value {
+                        projection,
+                        ty,
+                        lexical,
+                        value,
+                    }) => {
+                        retained_name(ty, visit)?;
+                        visit.bytes(lexical.capacity() as u64)?;
+                        if let Some(super::data::ScalarProjection::Read { source_text, .. }) =
+                            projection
+                        {
+                            visit.bytes(source_text.capacity() as u64)?;
+                        }
+                        visit.value(value)?;
+                    }
+                    Item::Data(XdtoData::Object { .. }) => return Ok(false),
+                }
+            }
+        }
+        Ok(true)
+    }
+
     fn type_id(&self) -> TypeId {
         TypeId::of_catalog(types().object)
     }

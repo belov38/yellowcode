@@ -41,6 +41,7 @@ pub(super) struct Lower<'a> {
     pub slice_cols: HashMap<SrcId, Vec<QFieldId>>,
     pub inner: u32,
     pub membership: bool,
+    pub requires_calculation_admission: bool,
     pub policy_depth: u32,
     pub applied_security: std::collections::HashSet<SrcId>,
 }
@@ -134,6 +135,7 @@ impl<'a> Lower<'a> {
             slice_cols: HashMap::new(),
             inner: 0,
             membership: false,
+            requires_calculation_admission: false,
             policy_depth: 0,
             applied_security: Default::default(),
         }
@@ -174,6 +176,13 @@ impl<'a> Lower<'a> {
     }
 
     fn nested_rows(&mut self, r: &NestedRows) -> R<NestedRowsL> {
+        let parent = std::mem::take(&mut self.requires_calculation_admission);
+        let result = self.nested_rows_input(r);
+        self.requires_calculation_admission = parent;
+        result
+    }
+
+    fn nested_rows_input(&mut self, r: &NestedRows) -> R<NestedRowsL> {
         let mut row = self.rel(&r.scan)?;
         let PExpr::Col(ref_col) = self.expr(&r.owner, &mut row)? else {
             return internal("the owner of a tabular section is not a column");
@@ -206,6 +215,7 @@ impl<'a> Lower<'a> {
         }
         let mut row = row.checked();
         Ok(NestedRowsL {
+            requires_calculation_admission: self.requires_calculation_admission,
             rel: RelL::Project {
                 input: row.take(),
                 exprs,
@@ -339,6 +349,20 @@ impl<'a> Lower<'a> {
             Rel::Scan { src, table } => self.scan(*src, *table),
             Rel::TempScan { src, name } => self.temp_scan(*src, name),
             Rel::ParamScan { src, param } => self.param_scan(*src, *param),
+            Rel::RegisterVt(v) if v.kind == crate::VtKind::RecordsWithExtDimensions => {
+                self.records(v)
+            }
+            Rel::RegisterVt(v) if v.kind == crate::VtKind::ActualActionPeriod => {
+                self.actual_action_period(v)
+            }
+            Rel::RegisterVt(v) if v.kind == crate::VtKind::ScheduleData => self.schedule_data(v),
+            Rel::RegisterVt(v) if v.kind == crate::VtKind::DrCrTurnovers => self.drcr(v),
+            Rel::RegisterVt(v) if super::is_accounting_balance(self.schema, v.table) => {
+                self.accounting_balance(v)
+            }
+            Rel::RegisterVt(v) if super::is_accounting_turnovers(self.schema, v.table) => {
+                self.accounting_turnovers(v)
+            }
             Rel::RegisterVt(v) | Rel::RunningBalance(v) => self.register_vt(v),
             Rel::Slice(v) => self.slice(v),
             Rel::Subquery { src, input } => {
@@ -809,6 +833,11 @@ impl<'a> Lower<'a> {
             };
             let side = self.side_mask(base, lrep, rrep)?;
             if side == LEFT | RIGHT {
+                if kind == JoinKind::Left
+                    && self.prepare_case_on(base, steps, [(l, &mut lr), (r, &mut rr)])?
+                {
+                    continue;
+                }
                 if kind != JoinKind::Inner {
                     return later("разыменование выражения из двух источников в ПО", "Q3");
                 }

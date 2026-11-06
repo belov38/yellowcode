@@ -38,6 +38,7 @@ pub mod temp;
 pub mod totals;
 pub mod walk;
 
+mod accounting_inputs;
 mod exec;
 
 pub use access::{AccessCtx, RowView, eval_access};

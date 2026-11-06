@@ -135,6 +135,7 @@ impl TableState {
             schema,
             cells: vec_with_capacity(ex, count as u64)?,
             clear: false,
+            materialize: true,
             retired: Vec::new(),
         });
         for (index, record) in rows.iter().enumerate() {

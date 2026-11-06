@@ -6,6 +6,7 @@ pub mod names;
 mod objects;
 pub(crate) mod qr8;
 mod registers;
+mod schedule;
 pub mod templates;
 mod typemap;
 
@@ -365,6 +366,7 @@ pub struct QuerySchema {
     values: ValueIndex,
     meta: HashMap<QTableId, ObjMeta>,
     diagnostics: Vec<String>,
+    schedules: HashMap<QTableId, schedule::Facts>,
 }
 
 static EMPTY_TABLE: QTable = QTable {
@@ -484,7 +486,9 @@ impl QuerySchema {
                 self.table(id).kind,
                 TableKind::Changes
                     | TableKind::Virtual(
-                        VtKind::SequenceBoundaries | VtKind::BusinessProcessPoints
+                        VtKind::SequenceBoundaries
+                            | VtKind::BusinessProcessPoints
+                            | VtKind::ExtDimensions
                     )
             )
     }
@@ -499,6 +503,17 @@ impl QuerySchema {
                     TableKind::Virtual(
                         VtKind::Balance | VtKind::Turnovers | VtKind::BalanceAndTurnovers
                     )
+                ) | (
+                    TableKind::Object(mdschema::MdKind::AccountingRegister),
+                    TableKind::Virtual(
+                        VtKind::RecordsWithExtDimensions
+                            | VtKind::DrCrTurnovers
+                            | VtKind::Turnovers
+                            | VtKind::Balance
+                    )
+                ) | (
+                    TableKind::Object(mdschema::MdKind::CalculationRegister),
+                    TableKind::Virtual(VtKind::ActualActionPeriod | VtKind::ScheduleData)
                 ) | (
                     TableKind::Object(mdschema::MdKind::InformationRegister),
                     TableKind::Virtual(VtKind::SliceLast | VtKind::SliceFirst)
@@ -719,6 +734,7 @@ pub(crate) struct Builder<'a> {
     pub by_object: HashMap<Guid, QTableId>,
     pub by_full: HashMap<String, QTableId>,
     pub meta: HashMap<QTableId, ObjMeta>,
+    schedules: HashMap<QTableId, schedule::Facts>,
     pub refs: RefIndex,
     pub sys: SysTypes,
     pub sys_enums: SysEnums,
@@ -738,6 +754,7 @@ impl<'a> Builder<'a> {
             by_object: HashMap::new(),
             by_full: HashMap::new(),
             meta: HashMap::new(),
+            schedules: HashMap::new(),
             refs: RefIndex::default(),
             sys,
             sys_enums: SysEnums::new(cat),
@@ -813,8 +830,11 @@ impl<'a> Builder<'a> {
             &route_points,
             &self.meta,
         );
+        let mut schedule_version = Fnv(version);
+        hash_sorted(&self.schedules, &mut schedule_version);
         Ok(QuerySchema {
-            version,
+            version: schedule_version.finish(),
+            schedules: self.schedules,
             script,
             tables: self.tables,
             by_name,

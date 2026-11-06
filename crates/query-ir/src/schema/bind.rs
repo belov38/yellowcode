@@ -359,6 +359,14 @@ impl QuerySchema {
             (TableKind::Virtual(VtKind::SequenceBoundaries), None) => {
                 map.service_table(owner_object()?, role::SEQUENCE_BOUNDARIES, None)
             }
+            (
+                TableKind::Virtual(
+                    VtKind::RecordsWithExtDimensions
+                    | VtKind::ActualActionPeriod
+                    | VtKind::ScheduleData,
+                ),
+                None,
+            ) => map.main_table(owner_object()?),
             (TableKind::Virtual(VtKind::ExtDimensions), None) => {
                 map.service_table(owner_object()?, role::EXT_DIMENSIONS_VALUES, None)
             }
@@ -460,7 +468,12 @@ fn has_storage(k: TableKind) -> bool {
     match k {
         TableKind::Virtual(v) => matches!(
             v,
-            VtKind::ExtDimensions | VtKind::BusinessProcessPoints | VtKind::SequenceBoundaries
+            VtKind::ExtDimensions
+                | VtKind::RecordsWithExtDimensions
+                | VtKind::ActualActionPeriod
+                | VtKind::ScheduleData
+                | VtKind::BusinessProcessPoints
+                | VtKind::SequenceBoundaries
         ),
         TableKind::Constants => false,
         _ => true,

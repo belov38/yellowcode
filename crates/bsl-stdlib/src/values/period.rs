@@ -379,6 +379,11 @@ impl StdPeriod {
 }
 
 impl HostObject for StdPeriod {
+    fn retained_memory(&self, visit: &mut dyn bsl_vm::RetainedMemory) -> Result<bool, Exception> {
+        visit.mutable();
+        Ok(true)
+    }
+
     fn type_id(&self) -> TypeId {
         TypeId::of_catalog(types().period)
     }
@@ -514,6 +519,11 @@ impl StdBegin {
 }
 
 impl HostObject for StdBegin {
+    fn retained_memory(&self, visit: &mut dyn bsl_vm::RetainedMemory) -> Result<bool, Exception> {
+        visit.mutable();
+        Ok(true)
+    }
+
     fn type_id(&self) -> TypeId {
         TypeId::of_catalog(types().begin)
     }

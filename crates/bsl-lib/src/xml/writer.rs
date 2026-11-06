@@ -63,6 +63,72 @@ fn esc(out: &mut String, s: &str, attr: bool) {
 }
 
 impl XmlWriter {
+    pub fn retained_bytes<E>(
+        &self,
+        mut charge: impl FnMut(u64) -> Result<(), E>,
+    ) -> Result<Option<u64>, E> {
+        use std::mem::size_of;
+        fn add(total: &mut u64, value: usize) {
+            *total = total.saturating_add(value as u64);
+        }
+        fn vector<T>(total: &mut u64, capacity: usize) {
+            *total = total.saturating_add((capacity as u64).saturating_mul(size_of::<T>() as u64));
+        }
+        let mut total = 0u64;
+        add(&mut total, self.out.capacity());
+        add(&mut total, self.o.indent_chars.capacity());
+        add(&mut total, self.o.newline.capacity());
+        vector::<Elem>(&mut total, self.stack.capacity());
+        charge(self.stack.len() as u64)?;
+        for item in &self.stack {
+            add(&mut total, item.qname.capacity());
+        }
+        if let Some(p) = &self.pending {
+            add(&mut total, p.local.capacity());
+            if let Some(ns) = &p.ns {
+                add(&mut total, ns.capacity());
+            }
+            vector::<(String, String)>(&mut total, p.decls.capacity());
+            vector::<(String, Option<String>, String)>(&mut total, p.attrs.capacity());
+            charge((p.decls.len() as u64).saturating_add(p.attrs.len() as u64))?;
+            for (a, b) in &p.decls {
+                add(&mut total, a.capacity());
+                add(&mut total, b.capacity());
+            }
+            for (a, b, c) in &p.attrs {
+                add(&mut total, a.capacity());
+                if let Some(b) = b {
+                    add(&mut total, b.capacity());
+                }
+                add(&mut total, c.capacity());
+            }
+        }
+        vector::<(String, String)>(&mut total, self.scope_log.capacity());
+        charge(self.scope_log.len() as u64)?;
+        for (a, b) in &self.scope_log {
+            add(&mut total, a.capacity());
+            add(&mut total, b.capacity());
+        }
+        for map in [&self.by_prefix, &self.by_uri] {
+            charge(map.capacity() as u64)?;
+            total = total
+                .saturating_add(
+                    (map.capacity() as u64)
+                        .saturating_mul(2)
+                        .saturating_mul((size_of::<(String, Vec<String>)>() + 1) as u64),
+                )
+                .saturating_add(64);
+            for (key, values) in map {
+                add(&mut total, key.capacity());
+                vector::<String>(&mut total, values.capacity());
+                charge(values.len() as u64)?;
+                for value in values {
+                    add(&mut total, value.capacity());
+                }
+            }
+        }
+        Ok((total != u64::MAX).then_some(total))
+    }
     pub fn new(o: XmlWriteOptions) -> XmlWriter {
         XmlWriter {
             o,

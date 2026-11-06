@@ -1,4 +1,5 @@
 mod from_tir;
+pub(crate) mod nested_union;
 mod running;
 pub use running::RunningBalanceS;
 pub(crate) mod print;
@@ -6,6 +7,8 @@ pub mod stats;
 
 pub use from_tir::build_stmt;
 pub(crate) use from_tir::visit_expr as visit_expr_in_place;
+pub(crate) use from_tir::{distinct_movement_presentation, uniform_movement_union_presentation};
+pub(crate) use from_tir::{hierarchy_union_shape, uniform_union_autoorder};
 pub use print::print;
 
 use crate::schema::{QFieldId, QTableId, QuerySchema, ValuePath};
@@ -174,6 +177,8 @@ pub struct RegisterVtS {
     pub kind: crate::schema::VtKind,
     pub bounds: [Option<Expr>; 2],
     pub cond: Option<Expr>,
+    pub order: Option<SortKey>,
+    pub top: Option<u64>,
     pub periodicity: crate::schema::Periodicity,
     pub complement: Option<crate::schema::Complement>,
     pub area: Option<AreaFilter>,
@@ -220,6 +225,10 @@ pub enum ExprKind {
     Param(u16),
     Value(u16),
     KeyRef(u16),
+    LocalKey {
+        key: u16,
+        orig: Box<Expr>,
+    },
     AggRef(u16),
     OuterKey {
         src: SrcId,

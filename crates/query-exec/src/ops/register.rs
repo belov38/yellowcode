@@ -1,14 +1,14 @@
-use std::cmp::Ordering;
 use std::rc::Rc;
 
 use bsl_prim::{BslDate, Number};
 use ibschema::storage::{FieldId, TableId};
 use query_ir::ir::raw_layout as raw;
-use query_ir::lower::{RegisterRowsL, StoredTotals};
+use query_ir::lower::{AccumulationRowsL, RegisterRowsKindL, RegisterRowsL, StoredTotals};
 use query_ir::schema::VtKind;
 use query_ir::{ExecError, QValue};
 
-use super::{Cx, Op};
+use super::accounting::{self, DrCrSelection};
+use super::{Cx, Op, accounting_balance, accounting_turnovers};
 use crate::register::{RegisterKind, RegisterSettings};
 use crate::source::{Row, RowIter};
 
@@ -16,88 +16,9 @@ fn fatal(s: impl Into<String>) -> ExecError {
     ExecError::Fatal(s.into())
 }
 
-type Rec = (u32, [u8; 16]);
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum Point {
-    Date(BslDate),
-    Moment(BslDate, Rec),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum Bnd {
-    None,
-    Date(BslDate),
-    Moment(BslDate, Rec),
-    Incl(Point),
-    Excl(Point),
-}
-
-fn point_of(v: &QValue) -> Option<Point> {
-    match v {
-        QValue::Date(d) if *d != BslDate::EMPTY => Some(Point::Date(*d)),
-        QValue::PointInTime(m) if m.date != BslDate::EMPTY => Some(match m.reference {
-            Some(r) => Point::Moment(m.date, r),
-            None => Point::Date(m.date),
-        }),
-        _ => None,
-    }
-}
-
-fn bound_of(v: Option<&QValue>) -> Bnd {
-    match v {
-        None => Bnd::None,
-        Some(QValue::Boundary(b)) => match point_of(&b.point) {
-            Some(p) if b.include => Bnd::Incl(p),
-            Some(p) => Bnd::Excl(p),
-            None => Bnd::None,
-        },
-        Some(v) => match point_of(v) {
-            Some(Point::Date(d)) => Bnd::Date(d),
-            Some(Point::Moment(d, r)) => Bnd::Moment(d, r),
-            None => Bnd::None,
-        },
-    }
-}
-
-fn cmp_pos(t: BslDate, r: Rec, p: Point, date_side: Ordering) -> Ordering {
-    match p {
-        Point::Date(d) => t.ticks().cmp(&d.ticks()).then(date_side.reverse()),
-        Point::Moment(d, pr) => t.ticks().cmp(&d.ticks()).then_with(|| r.cmp(&pr)),
-    }
-}
-
-fn in_balance(t: BslDate, r: Rec, b: Bnd) -> bool {
-    match b {
-        Bnd::None => true,
-        Bnd::Date(d) => t.ticks() < d.ticks(),
-        Bnd::Moment(d, pr) => cmp_pos(t, r, Point::Moment(d, pr), Ordering::Less) == Ordering::Less,
-        Bnd::Incl(p) => cmp_pos(t, r, p, Ordering::Greater) != Ordering::Greater,
-        Bnd::Excl(p) => cmp_pos(t, r, p, Ordering::Less) == Ordering::Less,
-    }
-}
-
-fn after_start(t: BslDate, r: Rec, b: Bnd) -> bool {
-    match b {
-        Bnd::None => true,
-        Bnd::Date(d) => t.ticks() >= d.ticks(),
-        Bnd::Moment(d, pr) => cmp_pos(t, r, Point::Moment(d, pr), Ordering::Less) != Ordering::Less,
-        Bnd::Incl(p) => cmp_pos(t, r, p, Ordering::Less) != Ordering::Less,
-        Bnd::Excl(p) => cmp_pos(t, r, p, Ordering::Greater) == Ordering::Greater,
-    }
-}
-
-fn before_end(t: BslDate, r: Rec, b: Bnd) -> bool {
-    match b {
-        Bnd::None => true,
-        Bnd::Date(d) => t.ticks() <= d.ticks(),
-        Bnd::Moment(d, pr) => {
-            cmp_pos(t, r, Point::Moment(d, pr), Ordering::Greater) != Ordering::Greater
-        }
-        Bnd::Incl(p) => cmp_pos(t, r, p, Ordering::Greater) != Ordering::Greater,
-        Bnd::Excl(p) => cmp_pos(t, r, p, Ordering::Less) == Ordering::Less,
-    }
-}
+use query_ir::value::register_bounds::{
+    Bnd, Point, Rec, after_start, before_end, bound_of, in_balance,
+};
 
 fn date_of(b: Bnd) -> Option<BslDate> {
     match b {
@@ -184,7 +105,16 @@ enum Keep {
 pub(crate) struct SelectedRegister {
     pub(crate) bounds: [Option<QValue>; 2],
     pub(crate) settings: RegisterSettings,
-    parts: Vec<Part>,
+    parts: SelectedParts,
+    _charge: Option<super::OwnedCharge>,
+}
+
+#[derive(Debug)]
+enum SelectedParts {
+    Accumulation(Vec<Part>),
+    Accounting(DrCrSelection),
+    AccountingTurnoversMain,
+    AccountingBalance,
 }
 
 impl SelectedRegister {
@@ -197,35 +127,88 @@ impl SelectedRegister {
             .sum::<u64>();
         std::mem::size_of::<Self>()
             .saturating_add(16)
-            .saturating_add(
-                self.parts
-                    .capacity()
-                    .saturating_mul(std::mem::size_of::<Part>()),
-            )
+            .saturating_add(match &self.parts {
+                SelectedParts::Accumulation(parts) => {
+                    parts.capacity().saturating_mul(std::mem::size_of::<Part>())
+                }
+                SelectedParts::Accounting(_)
+                | SelectedParts::AccountingTurnoversMain
+                | SelectedParts::AccountingBalance => 0,
+            })
             .saturating_add(usize::try_from(values).unwrap_or(usize::MAX))
     }
 
     pub(crate) fn tables(&self, step: &RegisterRowsL) -> impl Iterator<Item = TableId> + '_ {
-        let movements = step.movements;
-        let totals = step.totals.as_ref().map(|t| t.table);
-        let turnovers = step.turnovers.as_ref().map(|t| t.table);
-        self.parts.iter().filter_map(move |part| match part {
-            Part::Movements { .. } => Some(movements),
-            Part::Totals { .. } => totals,
-            Part::Turnovers { .. } => turnovers,
-        })
+        let (movements, totals, turnovers) = match &step.rows {
+            RegisterRowsKindL::Accumulation(a) => (
+                Some(a.movements),
+                a.totals.as_ref().map(|t| t.table),
+                a.turnovers.as_ref().map(|t| t.table),
+            ),
+            RegisterRowsKindL::Accounting(_)
+            | RegisterRowsKindL::AccountingTurnovers(_)
+            | RegisterRowsKindL::AccountingBalance(_) => (None, None, None),
+        };
+        let (parts, accounting) = match &self.parts {
+            SelectedParts::Accumulation(parts) => (parts.as_slice(), [None, None]),
+            SelectedParts::AccountingTurnoversMain => {
+                let table = match &step.rows {
+                    RegisterRowsKindL::AccountingTurnovers(a) => Some(a.inputs.main),
+                    _ => None,
+                };
+                (&[][..], [table, None])
+            }
+            SelectedParts::AccountingBalance => {
+                let tables = match &step.rows {
+                    RegisterRowsKindL::AccountingBalance(a) => {
+                        [Some(a.inputs.main), Some(a.inputs.chart)]
+                    }
+                    _ => [None, None],
+                };
+                (&[][..], tables)
+            }
+            SelectedParts::Accounting(mode) => {
+                let tables = match (&step.rows, mode) {
+                    (RegisterRowsKindL::Accounting(a), DrCrSelection::Main) => {
+                        [Some(a.inputs.main), None]
+                    }
+                    (RegisterRowsKindL::Accounting(a), DrCrSelection::CtAndMain { .. }) => {
+                        [Some(a.inputs.ct), Some(a.inputs.main)]
+                    }
+                    _ => [None, None],
+                };
+                (&[][..], tables)
+            }
+        };
+        parts
+            .iter()
+            .filter_map(move |part| match part {
+                Part::Movements { .. } => movements,
+                Part::Totals { .. } => totals,
+                Part::Turnovers { .. } => turnovers,
+            })
+            .chain(accounting.into_iter().flatten())
     }
 }
 
 pub struct RegisterRows<'a> {
     step: RegisterRowsL,
+    chart: Option<super::BoxOp<'a>>,
     selected: Option<Rc<SelectedRegister>>,
     cursor: usize,
     observation: Option<crate::observe::RegisterObservation>,
     cur: Option<(Part, RowIter<'a>)>,
+    accounting: Option<accounting::Cursor<'a>>,
+    turnovers: Option<accounting_turnovers::Cursor<'a>>,
+    balance: Option<accounting_balance::Cursor<'a>>,
 }
 
 impl<'a> RegisterRows<'a> {
+    pub(crate) fn with_chart(mut self, chart: Option<super::BoxOp<'a>>) -> Self {
+        self.chart = chart;
+        self
+    }
+
     pub fn new(step: RegisterRowsL) -> RegisterRows<'a> {
         Self::observed(step, None)
     }
@@ -236,10 +219,14 @@ impl<'a> RegisterRows<'a> {
     ) -> RegisterRows<'a> {
         RegisterRows {
             step,
+            chart: None,
             selected: None,
             cursor: 0,
             observation,
             cur: None,
+            accounting: None,
+            turnovers: None,
+            balance: None,
         }
     }
 }
@@ -249,11 +236,15 @@ fn select_parts(
     bounds: &[Option<QValue>; 2],
     s: &RegisterSettings,
 ) -> Result<Vec<Part>, ExecError> {
+    let RegisterRowsKindL::Accumulation(stored) = &st.rows else {
+        return Err(fatal("accounting DrCrTurnovers: execution is not enabled"));
+    };
     let b0 = bound_of(bounds[0].as_ref());
     let b1 = bound_of(bounds[1].as_ref());
     let mut parts = Vec::new();
-    let balance_at =
-        |b: Bnd, parts: &mut Vec<Part>| -> Result<(), ExecError> { balance_parts(st, s, b, parts) };
+    let balance_at = |b: Bnd, parts: &mut Vec<Part>| -> Result<(), ExecError> {
+        balance_parts(stored, s, b, parts)
+    };
     match st.kind {
         VtKind::Balance => balance_at(b0, &mut parts)?,
         VtKind::BalanceAndTurnovers => {
@@ -271,7 +262,7 @@ fn select_parts(
             });
         }
         _ => {
-            let months = turnover_months(st, s, b0, b1);
+            let months = turnover_months(stored, s, b0, b1);
             if let Some((lo, hi)) = months {
                 parts.push(Part::Turnovers { lo, hi });
             }
@@ -319,7 +310,7 @@ fn opening_bound(b: Bnd) -> Bnd {
 }
 
 fn balance_parts(
-    st: &RegisterRowsL,
+    st: &AccumulationRowsL,
     s: &RegisterSettings,
     b: Bnd,
     parts: &mut Vec<Part>,
@@ -378,7 +369,7 @@ fn balance_parts(
 }
 
 fn turnover_months(
-    st: &RegisterRowsL,
+    st: &AccumulationRowsL,
     s: &RegisterSettings,
     b0: Bnd,
     b1: Bnd,
@@ -455,7 +446,7 @@ fn rec(v: &QValue) -> Rec {
 
 impl<'a> RegisterRows<'a> {
     fn width(&self) -> usize {
-        raw::width(self.step.dims.len(), self.step.resources.len())
+        self.step.raw_width()
     }
 
     fn base(&self, period: QValue, recorder: QValue, line: QValue, dims: Vec<QValue>) -> Row {
@@ -469,13 +460,24 @@ impl<'a> RegisterRows<'a> {
     }
 
     fn set(&self, row: &mut Row, r: usize, c: usize, v: Number) {
-        if let Some(x) = row.get_mut(raw::component(self.step.dims.len(), r, c)) {
+        if let Some(x) = row.get_mut(raw::component(
+            match &self.step.rows {
+                RegisterRowsKindL::Accumulation(a) => a.dims.len(),
+                RegisterRowsKindL::Accounting(a) => a.keys.len(),
+                RegisterRowsKindL::AccountingTurnovers(a) => usize::from(a.account),
+                RegisterRowsKindL::AccountingBalance(_) => 2,
+            },
+            r,
+            c,
+        )) {
             *x = QValue::Number(v);
         }
     }
 
     fn movement(&self, part: &Part, m: &Row) -> Option<Row> {
-        let st = &self.step;
+        let RegisterRowsKindL::Accumulation(st) = &self.step.rows else {
+            return None;
+        };
         let Part::Movements { keep, balance, neg } = part else {
             return None;
         };
@@ -514,7 +516,7 @@ impl<'a> RegisterRows<'a> {
             get(m, st.line).clone(),
             dims,
         );
-        if *balance && st.periodic && st.kind == VtKind::BalanceAndTurnovers {
+        if *balance && st.periodic && self.step.kind == VtKind::BalanceAndTurnovers {
             if let Some(period) = out.get_mut(raw::PERIOD) {
                 *period = QValue::Null;
             }
@@ -587,7 +589,11 @@ impl<'a> RegisterRows<'a> {
     }
 
     fn open(&self, part: &Part, cx: &Cx<'a>) -> Result<RowIter<'a>, ExecError> {
-        let st = &self.step;
+        let RegisterRowsKindL::Accumulation(st) = &self.step.rows else {
+            return Err(fatal(
+                "accounting DrCrTurnovers: invalid accumulation cursor",
+            ));
+        };
         let src = cx.src;
         match part {
             Part::Movements { .. } => {
@@ -630,9 +636,18 @@ pub(crate) fn totals_off() -> ExecError {
 
 impl<'a> Op<'a> for RegisterRows<'a> {
     fn next(&mut self, cx: &mut Cx<'a>) -> Result<Option<Row>, ExecError> {
+        if matches!(&self.step.rows, RegisterRowsKindL::AccountingBalance(_)) {
+            return self.next_balance(cx);
+        }
+        if matches!(&self.step.rows, RegisterRowsKindL::AccountingTurnovers(_)) {
+            return self.next_turnovers(cx);
+        }
+        if matches!(&self.step.rows, RegisterRowsKindL::Accounting(_)) {
+            return self.next_accounting(cx);
+        }
         if self.selected.is_none() {
             let mut bounds = [None, None];
-            for (slot, b) in bounds.iter_mut().zip(&self.step.bounds) {
+            for (slot, b) in bounds.iter_mut().zip(self.step.bounds()) {
                 *slot = match b {
                     Some(e) => Some(super::eval(e, &[], cx)?),
                     None => None,
@@ -651,7 +666,8 @@ impl<'a> Op<'a> for RegisterRows<'a> {
             let selected = Rc::new(SelectedRegister {
                 bounds,
                 settings: s,
-                parts,
+                parts: SelectedParts::Accumulation(parts),
+                _charge: None,
             });
             if let (Some(observation), Some(session)) = (&self.observation, &cx.observation) {
                 observation.publish(session, &self.step, selected.clone());
@@ -663,7 +679,12 @@ impl<'a> Op<'a> for RegisterRows<'a> {
                 let Some(part) = self
                     .selected
                     .as_ref()
-                    .and_then(|s| s.parts.get(self.cursor))
+                    .and_then(|s| match &s.parts {
+                        SelectedParts::Accumulation(parts) => parts.get(self.cursor),
+                        SelectedParts::Accounting(_)
+                        | SelectedParts::AccountingTurnoversMain
+                        | SelectedParts::AccountingBalance => None,
+                    })
                     .cloned()
                 else {
                     return Ok(None);
@@ -684,13 +705,23 @@ impl<'a> Op<'a> for RegisterRows<'a> {
             let part = part.clone();
             let out = match &part {
                 Part::Movements { .. } => self.movement(&part, &row),
-                Part::Totals { .. } => match &self.step.totals {
-                    Some(t) => self.stored(&part, t, &row),
-                    None => None,
+                Part::Totals { .. } => match &self.step.rows {
+                    RegisterRowsKindL::Accumulation(st) => match &st.totals {
+                        Some(t) => self.stored(&part, t, &row),
+                        None => None,
+                    },
+                    RegisterRowsKindL::Accounting(_)
+                    | RegisterRowsKindL::AccountingTurnovers(_)
+                    | RegisterRowsKindL::AccountingBalance(_) => None,
                 },
-                Part::Turnovers { .. } => match &self.step.turnovers {
-                    Some(t) => self.stored(&part, t, &row),
-                    None => None,
+                Part::Turnovers { .. } => match &self.step.rows {
+                    RegisterRowsKindL::Accumulation(st) => match &st.turnovers {
+                        Some(t) => self.stored(&part, t, &row),
+                        None => None,
+                    },
+                    RegisterRowsKindL::Accounting(_)
+                    | RegisterRowsKindL::AccountingTurnovers(_)
+                    | RegisterRowsKindL::AccountingBalance(_) => None,
                 },
             };
             if let Some(out) = out {
@@ -698,21 +729,230 @@ impl<'a> Op<'a> for RegisterRows<'a> {
             }
         }
     }
+
+    fn close(&mut self, cx: &mut Cx<'a>) {
+        if let Some(mut chart) = self.chart.take() {
+            chart.close(cx);
+        }
+        if let Some(cursor) = self.balance.as_mut() {
+            cursor.close(cx);
+            self.selected = None;
+        }
+        if let Some(cursor) = self.turnovers.as_mut() {
+            cursor.close();
+            self.selected = None;
+        }
+        if let Some(cursor) = self.accounting.as_mut() {
+            cursor.close(cx);
+        }
+    }
+}
+
+impl<'a> RegisterRows<'a> {
+    fn next_balance(&mut self, cx: &mut Cx<'a>) -> Result<Option<Row>, ExecError> {
+        let RegisterRowsKindL::AccountingBalance(step) = &self.step.rows else {
+            return Err(fatal("accounting Balance: missing payload"));
+        };
+        if step.chart_input.is_some()
+            || (self.selected.is_none() && step.chart_layout.is_some() != self.chart.is_some())
+        {
+            return Err(fatal(
+                "accounting Balance: inconsistent secured chart child",
+            ));
+        }
+        if self.step.kind != VtKind::Balance || step.resources.is_empty() {
+            return Err(fatal("accounting Balance: invalid kind or resource layout"));
+        }
+        if self.selected.is_none() {
+            accounting::check_cancel(cx.env)?;
+            let settings = crate::register::read_register_settings_with_observation(
+                cx.src,
+                self.step.register,
+                RegisterKind::Accounting,
+                cx.observation.as_ref(),
+            )?;
+            accounting::check_cancel(cx.env)?;
+            if !settings.use_totals {
+                return Err(totals_off());
+            }
+            accounting_balance::check_balance_settings_shape(&settings)?;
+            let bytes = std::mem::size_of::<SelectedRegister>()
+                .checked_add(2 * std::mem::size_of::<usize>())
+                .ok_or_else(|| fatal("accounting Balance: selection model overflow"))?;
+            let charge = cx.mem.hold_owned(
+                u64::try_from(bytes)
+                    .map_err(|_| fatal("accounting Balance: selection model overflow"))?,
+            )?;
+            let selected = Rc::new(SelectedRegister {
+                bounds: [step.date.map(QValue::Date), None],
+                settings,
+                parts: SelectedParts::AccountingBalance,
+                _charge: Some(charge),
+            });
+            if let (Some(observation), Some(session)) = (&self.observation, &cx.observation) {
+                observation.publish(session, &self.step, selected.clone());
+            }
+            self.selected = Some(selected);
+            self.balance = Some(accounting_balance::Cursor::new(step, cx)?);
+        }
+        self.balance
+            .as_mut()
+            .ok_or_else(|| fatal("accounting Balance: missing cursor"))?
+            .next(step, &mut self.chart, cx)
+    }
+
+    fn next_turnovers(&mut self, cx: &mut Cx<'a>) -> Result<Option<Row>, ExecError> {
+        let RegisterRowsKindL::AccountingTurnovers(step) = &self.step.rows else {
+            return Err(fatal("accounting Turnovers: missing payload"));
+        };
+        if self.step.kind != VtKind::Turnovers || step.resources.is_empty() {
+            return Err(fatal("accounting Turnovers: invalid kind or resources"));
+        }
+        if self.selected.is_none() {
+            accounting::check_cancel(cx.env)?;
+            let settings = crate::register::read_register_settings_with_observation(
+                cx.src,
+                self.step.register,
+                RegisterKind::Accounting,
+                cx.observation.as_ref(),
+            )?;
+            accounting::check_cancel(cx.env)?;
+            if !settings.use_totals {
+                return Err(totals_off());
+            }
+            let bytes = std::mem::size_of::<SelectedRegister>()
+                .checked_add(2 * std::mem::size_of::<usize>())
+                .ok_or_else(|| fatal("accounting Turnovers: selection model overflow"))?;
+            let charge = cx.mem.hold_owned(
+                u64::try_from(bytes)
+                    .map_err(|_| fatal("accounting Turnovers: selection model overflow"))?,
+            )?;
+            let selected = Rc::new(SelectedRegister {
+                bounds: step.dates.map(|date| date.map(QValue::Date)),
+                settings,
+                parts: SelectedParts::AccountingTurnoversMain,
+                _charge: Some(charge),
+            });
+            if let (Some(observation), Some(session)) = (&self.observation, &cx.observation) {
+                observation.publish(session, &self.step, selected.clone());
+            }
+            self.selected = Some(selected);
+            self.turnovers = Some(accounting_turnovers::Cursor::new(step, cx)?);
+        }
+        self.turnovers
+            .as_mut()
+            .ok_or_else(|| fatal("accounting Turnovers: missing cursor"))?
+            .next(step, cx)
+    }
+
+    fn next_accounting(&mut self, cx: &mut Cx<'a>) -> Result<Option<Row>, ExecError> {
+        let RegisterRowsKindL::Accounting(step) = &self.step.rows else {
+            return Err(fatal(
+                "accounting DrCrTurnovers: missing accounting payload",
+            ));
+        };
+        if self.step.kind != VtKind::DrCrTurnovers
+            || step.resources.is_empty()
+            || !matches!(
+                step.keys.as_slice(),
+                [] | [query_ir::lower::DrCrSideL::Dr]
+                    | [query_ir::lower::DrCrSideL::Cr]
+                    | [
+                        query_ir::lower::DrCrSideL::Dr,
+                        query_ir::lower::DrCrSideL::Cr
+                    ]
+            )
+        {
+            return Err(fatal(
+                "accounting DrCrTurnovers: invalid kind or raw layout",
+            ));
+        }
+        if self.selected.is_none() {
+            accounting::check_cancel(cx.env)?;
+            let settings = crate::register::read_register_settings_with_observation(
+                cx.src,
+                self.step.register,
+                RegisterKind::Accounting,
+                cx.observation.as_ref(),
+            )?;
+            accounting::check_cancel(cx.env)?;
+            if !settings.use_totals {
+                return Err(totals_off());
+            }
+            let mode =
+                accounting::selection(&settings, step.date_bounds.iter().any(Option::is_some))?;
+            let bytes = std::mem::size_of::<SelectedRegister>()
+                .checked_add(2 * std::mem::size_of::<usize>())
+                .ok_or_else(|| fatal("accounting DrCrTurnovers: selection model overflow"))?;
+            let charge =
+                cx.mem
+                    .hold_owned(u64::try_from(bytes).map_err(|_| {
+                        fatal("accounting DrCrTurnovers: selection model overflow")
+                    })?)?;
+            let selected = Rc::new(SelectedRegister {
+                bounds: step.date_bounds.map(|date| date.map(QValue::Date)),
+                settings,
+                parts: SelectedParts::Accounting(mode),
+                _charge: Some(charge),
+            });
+            if let (Some(observation), Some(session)) = (&self.observation, &cx.observation) {
+                observation.publish(session, &self.step, selected.clone());
+            }
+            self.selected = Some(selected);
+            self.accounting = Some(accounting::Cursor::new(step, cx)?);
+        }
+        let mode = match self.selected.as_ref().map(|s| &s.parts) {
+            Some(SelectedParts::Accounting(mode)) => *mode,
+            _ => return Err(fatal("accounting DrCrTurnovers: invalid selection owner")),
+        };
+        let cursor = self
+            .accounting
+            .as_mut()
+            .ok_or_else(|| fatal("accounting DrCrTurnovers: missing cursor"))?;
+        cursor.next(step, mode, cx)
+    }
 }
 
 pub fn tables_read(step: &RegisterRowsL, s: &RegisterSettings) -> Vec<TableId> {
+    if let RegisterRowsKindL::AccountingBalance(a) = &step.rows {
+        return if s.use_totals && accounting_balance::check_balance_settings_shape(s).is_ok() {
+            vec![a.inputs.main, a.inputs.chart]
+        } else {
+            Vec::new()
+        };
+    }
+    if let RegisterRowsKindL::AccountingTurnovers(a) = &step.rows {
+        return if s.use_totals {
+            vec![a.inputs.main]
+        } else {
+            Vec::new()
+        };
+    }
+    let RegisterRowsKindL::Accumulation(a) = &step.rows else {
+        let RegisterRowsKindL::Accounting(a) = &step.rows else {
+            return Vec::new();
+        };
+        if !s.use_totals {
+            return Vec::new();
+        }
+        return match accounting::selection(s, a.date_bounds.iter().any(Option::is_some)) {
+            Ok(DrCrSelection::Main) => vec![a.inputs.main],
+            Ok(DrCrSelection::CtAndMain { .. }) => vec![a.inputs.ct, a.inputs.main],
+            Err(_) => Vec::new(),
+        };
+    };
     let mut bounds = [None, None];
-    for (slot, b) in bounds.iter_mut().zip(&step.bounds) {
+    for (slot, b) in bounds.iter_mut().zip(step.bounds()) {
         if let Some(query_ir::PExpr::Lit(v)) = b {
             *slot = Some(v.clone());
         }
     }
-    let mut out = vec![step.movements];
+    let mut out = vec![a.movements];
     if let Ok(parts) = select_parts(step, &bounds, s) {
         for p in parts {
             match p {
-                Part::Totals { .. } => out.extend(step.totals.as_ref().map(|t| t.table)),
-                Part::Turnovers { .. } => out.extend(step.turnovers.as_ref().map(|t| t.table)),
+                Part::Totals { .. } => out.extend(a.totals.as_ref().map(|t| t.table)),
+                Part::Turnovers { .. } => out.extend(a.turnovers.as_ref().map(|t| t.table)),
                 Part::Movements { .. } => {}
             }
         }

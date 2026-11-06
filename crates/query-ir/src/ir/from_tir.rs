@@ -16,13 +16,294 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
 mod autoorder;
+mod hierarchy_union;
 mod qr8;
 mod totals;
+
+pub(crate) use hierarchy_union::hierarchy_union_shape;
 
 type R<T> = Result<T, BuildError>;
 
 fn internal<T>(s: &str) -> R<T> {
     Err(BuildError::Internal(s.to_string()))
+}
+
+pub(crate) fn distinct_movement_presentation(
+    schema: &QuerySchema,
+    select: &Select,
+    item: &tir::Item,
+    source_table: impl FnOnce(u16) -> Option<QTableId>,
+) -> bool {
+    if select.group.is_some() || select.having.is_some() {
+        return false;
+    }
+    let TKind::Func {
+        f: Func::Presentation,
+        args,
+    } = &item.expr.kind
+    else {
+        return false;
+    };
+    let [arg] = args.as_slice() else {
+        return false;
+    };
+    let TKind::Field {
+        level: 0,
+        source,
+        col: Col::Field(field),
+        derefs,
+    } = &arg.kind
+    else {
+        return false;
+    };
+    if !derefs.is_empty() || arg.ty.atom_count() != 1 {
+        return false;
+    }
+    let [crate::Other::SysEnum(kind)] = arg.ty.others.as_slice() else {
+        return false;
+    };
+    let Some(table) = source_table(*source) else {
+        return false;
+    };
+    if schema.table(table).kind != TableKind::Object(mdschema::MdKind::AccumulationRegister) {
+        return false;
+    }
+    let Some(field_info) = schema.field(table, *field) else {
+        return false;
+    };
+    if field_info.role != FieldRole::Std(StdRole::RecordKind)
+        || field_info.ty.atom_count() != 1
+        || field_info.ty.others.as_slice() != [crate::Other::SysEnum(*kind)]
+    {
+        return false;
+    }
+    select.items.iter().any(|raw| {
+        raw.nested.is_none()
+            && matches!(
+                &raw.expr.kind,
+                TKind::Field { level: 0, source: raw_source, col: Col::Field(raw_field), derefs }
+                    if raw_source == source && raw_field == field && derefs.is_empty()
+            )
+    })
+}
+
+pub(crate) fn uniform_union_autoorder(query: &Query, schema: &QuerySchema) -> Option<bool> {
+    if !query.autoorder
+        || query.parts.len() < 2
+        || query.unions.len() != query.parts.len() - 1
+        || query.unions.iter().any(|all| !*all)
+        || query.parts.iter().skip(1).any(|arm| arm.allowed)
+        || query.totals.is_some()
+    {
+        return None;
+    }
+    let [order] = query.order.as_slice() else {
+        return None;
+    };
+    if order.col != Some(0) {
+        return None;
+    }
+    let desc = match order.dir {
+        OrderDir::Asc => false,
+        OrderDir::Desc => true,
+        _ => return None,
+    };
+    let first = query.parts.first()?;
+    let [item] = first.items.as_slice() else {
+        return None;
+    };
+    let [atom] = item.expr.ty.refs.as_slice() else {
+        return None;
+    };
+    let info = schema.ref_info(*atom);
+    let required = match info.kind {
+        mdschema::MdKind::Catalog => StdRole::Description,
+        mdschema::MdKind::Document => StdRole::Date,
+        mdschema::MdKind::Enum => StdRole::Order,
+        _ => return None,
+    };
+    if !schema
+        .table(info.table)
+        .fields
+        .iter()
+        .any(|f| f.role == FieldRole::Std(required))
+    {
+        return None;
+    }
+    for arm in &query.parts {
+        let [item] = arm.items.as_slice() else {
+            return None;
+        };
+        let [source] = arm.sources.as_slice() else {
+            return None;
+        };
+        if arm.distinct
+            || arm.top.is_some()
+            || arm.group.is_some()
+            || arm.having.is_some()
+            || arm.for_update.is_some()
+            || !arm.index_by.is_empty()
+            || !arm.index_unique.is_empty()
+            || item.star
+            || item.unknown
+            || item.nested.is_some()
+            || item.expr.ty.atom_count() != 1
+            || item.expr.ty.refs.as_slice() != [*atom]
+            || source.all_fields
+            || !source.joins.is_empty()
+        {
+            return None;
+        }
+        let TKind::Field {
+            level: 0,
+            source: 0,
+            col: Col::Field(_),
+            derefs,
+        } = &item.expr.kind
+        else {
+            return None;
+        };
+        if !derefs.is_empty() {
+            return None;
+        }
+        let From::Table {
+            id,
+            args,
+            records,
+            drcr,
+            complement,
+            breakdown,
+            ..
+        } = &source.from
+        else {
+            return None;
+        };
+        if !matches!(schema.table(*id).kind, TableKind::Object(_))
+            || !args.is_empty()
+            || records.is_some()
+            || drcr.is_some()
+            || complement.is_some()
+            || !breakdown.is_empty()
+            || arm
+                .where_
+                .as_ref()
+                .is_some_and(|e| !union_autoorder_filter(e, schema, *id))
+        {
+            return None;
+        }
+    }
+    Some(desc)
+}
+
+fn union_autoorder_filter(expr: &TExpr, schema: &QuerySchema, table: QTableId) -> bool {
+    match &expr.kind {
+        TKind::InQuery { .. }
+        | TKind::Agg { .. }
+        | TKind::InList {
+            hierarchy: true, ..
+        } => return false,
+        TKind::Func {
+            f: Func::Presentation | Func::RefPresentation,
+            ..
+        } => return false,
+        TKind::Field {
+            level: 0,
+            source: 0,
+            col: Col::Field(field),
+            derefs,
+        } if derefs.is_empty() => {
+            if schema.field(table, *field).is_none_or(|field| {
+                field.nested.is_some() || field.role == FieldRole::Std(StdRole::Presentation)
+            }) {
+                return false;
+            }
+        }
+        TKind::Field { .. } => return false,
+        TKind::Cast { derefs, .. } if !derefs.is_empty() => return false,
+        _ => {}
+    }
+    let mut scalar = true;
+    crate::sema::select::each_child(expr, &mut |child| {
+        scalar = scalar && union_autoorder_filter(child, schema, table);
+    });
+    scalar
+}
+
+pub(crate) fn uniform_movement_union_presentation(query: &Query) -> Option<(u16, u16)> {
+    if query.parts.len() < 2
+        || query.unions.len() != query.parts.len() - 1
+        || query.unions.iter().any(|all| !all)
+        || !query.order.is_empty()
+        || query.autoorder
+        || query.totals.is_some()
+    {
+        return None;
+    }
+    let slots = |select: &Select| -> Option<(u16, u16, platform_catalog::TypeIdx)> {
+        if select.distinct
+            || select.group.is_some()
+            || select.having.is_some()
+            || select.items.iter().any(|item| item.nested.is_some())
+        {
+            return None;
+        }
+        let mut presentations =
+            select
+                .items
+                .iter()
+                .enumerate()
+                .filter_map(|(col, item)| match &item.expr.kind {
+                    TKind::Func {
+                        f: Func::Presentation,
+                        args,
+                    } => Some((col, args)),
+                    _ => None,
+                });
+        let (present, args) = presentations.next()?;
+        if presentations.next().is_some() {
+            return None;
+        }
+        let [arg] = args.as_slice() else {
+            return None;
+        };
+        let TKind::Field {
+            level: 0,
+            source,
+            col: Col::Field(field),
+            derefs,
+        } = &arg.kind
+        else {
+            return None;
+        };
+        if !derefs.is_empty() || arg.ty.atom_count() != 1 {
+            return None;
+        }
+        let [crate::Other::SysEnum(kind)] = arg.ty.others.as_slice() else {
+            return None;
+        };
+        let raw = select.items.iter().position(|item| {
+            item.nested.is_none()
+                && item.expr.ty.atom_count() == 1
+                && item.expr.ty.others.as_slice() == [crate::Other::SysEnum(*kind)]
+                && matches!(
+                    &item.expr.kind,
+                    TKind::Field { level: 0, source: raw_source, col: Col::Field(raw_field), derefs }
+                        if raw_source == source && raw_field == field && derefs.is_empty()
+                )
+        })?;
+        Some((
+            u16::try_from(present).ok()?,
+            u16::try_from(raw).ok()?,
+            *kind,
+        ))
+    };
+    let expected = slots(query.parts.first()?)?;
+    for part in query.parts.iter().skip(1) {
+        if slots(part) != Some(expected) {
+            return None;
+        }
+    }
+    Some((expected.0, expected.1))
 }
 
 pub fn build_stmt(c: &CompiledStmt, schema: &QuerySchema) -> Result<StmtS, BuildError> {
@@ -126,8 +407,12 @@ struct Builder<'a> {
     joins: u32,
     allowed: bool,
     nested: Vec<NestedS>,
+    nested_from: Option<&'a Select>,
+    nested_outputs: &'a [tir::Item],
+    nested_source: Option<(SrcId, Vec<NestedS>)>,
     present: Vec<u16>,
     single_part: bool,
+    union_present: Option<(u16, u16)>,
     query_depth: u32,
     pending_auto: bool,
     temp_out: bool,
@@ -157,7 +442,24 @@ struct SectionMap {
 }
 
 impl<'a> Builder<'a> {
-    fn new(c: &CompiledStmt, schema: &'a QuerySchema) -> Builder<'a> {
+    fn new(c: &'a CompiledStmt, schema: &'a QuerySchema) -> Builder<'a> {
+        let nested_from = match &c.typed.kind {
+            tir::StmtKind::Query(query) if c.temp_out.is_none() => tir::nested_from_select(query)
+                .filter(|select| {
+                    select.sources.iter().all(|source| {
+                        matches!(&source.from, From::Table { id, .. }
+                            if !matches!(schema.table(*id).kind, TableKind::Virtual(_)))
+                    })
+                }),
+            _ => None,
+        };
+        let nested_outputs: &[tir::Item] = match &c.typed.kind {
+            tir::StmtKind::Query(query) if nested_from.is_some() => query
+                .parts
+                .first()
+                .map_or(&[][..], |select| select.items.as_slice()),
+            _ => &[],
+        };
         let mut b = Builder {
             qr8: Vec::new(),
             schema,
@@ -173,8 +475,12 @@ impl<'a> Builder<'a> {
             joins: 0,
             allowed: false,
             nested: Vec::new(),
+            nested_from,
+            nested_outputs,
+            nested_source: None,
             present: Vec::new(),
             single_part: false,
+            union_present: None,
             query_depth: 0,
             pending_auto: false,
             temp_out: c.temp_out.is_some(),
@@ -234,9 +540,14 @@ impl<'a> Builder<'a> {
     }
 
     fn query_inner(&mut self, q: &'a Query) -> R<(Rel, Vec<QType>)> {
-        if q.autoorder && q.parts.len() > 1 {
-            return later("АВТОУПОРЯДОЧИВАНИЕ объединения", "Q3");
-        }
+        let union_auto = if q.autoorder && q.parts.len() > 1 {
+            match uniform_union_autoorder(q, self.schema) {
+                Some(desc) if self.query_depth == 1 && !self.temp_out => Some(desc),
+                _ => return later("АВТОУПОРЯДОЧИВАНИЕ объединения", "Q3"),
+            }
+        } else {
+            None
+        };
         let Some(first) = q.parts.first() else {
             return internal("a query without parts");
         };
@@ -245,17 +556,27 @@ impl<'a> Builder<'a> {
                 return later("ИТОГИ вне запроса оператора", "Q4");
             }
             self.totals_prepare(q, t)?;
-            let (rel, types) = self.query_rows(q, first)?;
+            let (rel, types) = self.query_rows(q, first, union_auto)?;
             self.totals = Some(self.totals_finish(q, t, &types)?);
             self.totals_open = false;
             return Ok((rel, types));
         }
-        self.query_rows(q, first)
+        self.query_rows(q, first, union_auto)
     }
 
-    fn query_rows(&mut self, q: &'a Query, first: &'a Select) -> R<(Rel, Vec<QType>)> {
+    fn query_rows(
+        &mut self,
+        q: &'a Query,
+        first: &'a Select,
+        union_auto: Option<bool>,
+    ) -> R<(Rel, Vec<QType>)> {
         if self.query_depth == 1 {
             self.single_part = q.parts.len() == 1;
+            self.union_present = if self.temp_out {
+                None
+            } else {
+                uniform_movement_union_presentation(q)
+            };
         }
         let mut types: Vec<QType> = first.items.iter().map(|i| i.expr.ty.clone()).collect();
         if q.parts.len() == 1 {
@@ -267,22 +588,41 @@ impl<'a> Builder<'a> {
             .iter()
             .any(|p| p.items.iter().any(|i| i.nested.is_some()))
         {
-            return later("вложенная таблица в объединении", "Q3");
+            if self.query_depth != 1
+                || self.temp_out
+                || !super::nested_union::supported(self.schema, q)
+            {
+                return later("вложенная таблица в объединении", "Q3");
+            }
+            if let Err(what) = super::nested_union::validate_order(q) {
+                return later(what, "Q3");
+            }
         }
         let mut parts = Vec::with_capacity(q.parts.len());
+        let mut auto_sort = Vec::new();
         for (i, p) in q.parts.iter().enumerate() {
-            parts.push(self.select(p, None)?);
+            let mut part = self.select(p, None)?;
+            if let Some(desc) = union_auto {
+                self.union_autoorder_part(&mut part, &mut auto_sort, desc)?;
+            }
+            parts.push(part);
             if i > 0 {
                 for (t, it) in types.iter_mut().zip(&p.items) {
                     *t = t.merge(&it.expr.ty);
                 }
             }
         }
-        let mut rel = Rel::Union {
+        let rel = Rel::Union {
             parts,
             all: q.unions.clone(),
         };
-        if !q.order.is_empty() {
+        let (mut rel, hierarchy) = self.hierarchy_union(q, rel, &types)?;
+        if union_auto.is_some() {
+            rel = Rel::Sort {
+                input: Box::new(rel),
+                keys: auto_sort,
+            };
+        } else if !hierarchy && !q.order.is_empty() {
             let mut keys = Vec::with_capacity(q.order.len());
             for k in &q.order {
                 let desc = order_desc(k.dir)?;
@@ -303,11 +643,43 @@ impl<'a> Builder<'a> {
         Ok((rel, types))
     }
 
+    fn union_autoorder_part(
+        &mut self,
+        part: &mut Rel,
+        sort: &mut Vec<SortKey>,
+        desc: bool,
+    ) -> R<()> {
+        let Rel::Project { exprs, .. } = part else {
+            return internal("an autoordered union arm without a projection");
+        };
+        let [base] = exprs.as_slice() else {
+            return internal("an autoordered union arm without one raw reference");
+        };
+        let automatic = self.auto_keys(base)?;
+        if sort.is_empty() {
+            for (index, key) in automatic.iter().enumerate() {
+                sort.push(SortKey {
+                    expr: out(index + 1, key.ty.clone())?,
+                    desc,
+                });
+            }
+        } else if sort.len() != automatic.len() {
+            return internal("nonuniform automatic union key layout");
+        }
+        exprs.extend(automatic);
+        Ok(())
+    }
+
     fn select(&mut self, sel: &'a Select, order: Option<&'a [tir::OrderKey]>) -> R<Rel> {
         let auto = std::mem::take(&mut self.pending_auto);
         self.allowed |= sel.allowed;
         if sel.items.iter().any(|i| i.nested.is_some()) {
-            if self.query_depth != 1 {
+            if self.query_depth != 1
+                && !(self.query_depth == 2
+                    && self
+                        .nested_from
+                        .is_some_and(|inner| std::ptr::eq(inner, sel)))
+            {
                 return later("вложенная таблица в подзапросе", "Q3");
             }
             if self.temp_out {
@@ -373,11 +745,27 @@ impl<'a> Builder<'a> {
                 pred,
             };
         }
+        let forwarding = self.query_depth == 2
+            && self
+                .nested_from
+                .is_some_and(|inner| std::ptr::eq(inner, sel));
         let mut items = Vec::with_capacity(sel.items.len());
         for i in &sel.items {
             let e = if i.nested.is_some() {
-                self.nested_item(i, items.len())?
-            } else if let Some(arg) = self.presentation_item(sel, i, items.len())? {
+                let retain = !forwarding
+                    || self.nested_outputs.iter().any(|output| {
+                        tir::forwarded_nested_column(output)
+                            .is_some_and(|column| usize::from(column) == items.len())
+                    });
+                self.nested_item(i, items.len(), retain)?
+            } else if let Some(expr) = self.forward_nested(i, items.len())? {
+                expr
+            } else if let Some(arg) = self.presentation_item(
+                sel,
+                i,
+                items.len(),
+                !auto && order.is_none_or(<[_]>::is_empty),
+            )? {
                 arg
             } else {
                 self.expr(&i.expr)?
@@ -398,7 +786,30 @@ impl<'a> Builder<'a> {
             let h_at = order
                 .iter()
                 .position(|k| matches!(k.dir, OrderDir::Hierarchy | OrderDir::HierarchyDesc));
-            if h_at.is_some() && (order.len() != 1 || aggregated || sel.distinct) {
+            let paired_hierarchy = matches!(order, [_, suffix]
+                if h_at == Some(0)
+                && self.query_depth == 1
+                && !self.temp_out
+                && self.single_part
+                && !auto
+                && matches!(suffix.dir, OrderDir::Asc | OrderDir::Desc)
+                && suffix.expr.ty.refs.is_empty()
+                && suffix.expr.ty.others.is_empty()
+                && order.iter().all(|key| {
+                    matches!(
+                        &key.expr.kind,
+                        TKind::Field { level: 0, source: 0, derefs, .. } if derefs.is_empty()
+                    )
+                })
+                && matches!(sel.sources.as_slice(), [source]
+                    if source.joins.is_empty()
+                        && matches!(&source.from, tir::From::Table { id, .. }
+                            if matches!(self.schema.table(*id).kind, TableKind::Object(_))
+                                && self.role_field(*id, StdRole::Ref).is_some()
+                                && self.role_field(*id, StdRole::Parent).is_some())));
+            if h_at.is_some()
+                && (aggregated || sel.distinct || (order.len() != 1 && !paired_hierarchy))
+            {
                 return later("ИЕРАРХИЯ с несколькими ключами или группировкой", "Q3");
             }
             for k in order {
@@ -440,7 +851,7 @@ impl<'a> Builder<'a> {
                         (e, same)
                     }
                 };
-                if h_at.is_some() {
+                if matches!(k.dir, OrderDir::Hierarchy | OrderDir::HierarchyDesc) {
                     if autoorder::last_deref_tables(&base)
                         .into_iter()
                         .any(|t| self.role_field(t, StdRole::Parent).is_some())
@@ -605,6 +1016,7 @@ impl<'a> Builder<'a> {
                 own: &own,
                 anchor,
                 in_sub: false,
+                allow_prefix: sets.len() == 1,
             };
             items = items.into_iter().map(|e| ki.rekey(e)).collect();
             having = having.map(|e| ki.rekey(e));
@@ -685,7 +1097,27 @@ impl<'a> Builder<'a> {
         Ok(rel)
     }
 
-    fn nested_item(&mut self, it: &'a tir::Item, col: usize) -> R<Expr> {
+    fn forward_nested(&mut self, item: &'a tir::Item, col: usize) -> R<Option<Expr>> {
+        let Some(column) = tir::forwarded_nested_column(item) else {
+            return Ok(None);
+        };
+        let Some((source, recipes)) = &self.nested_source else {
+            return Ok(None);
+        };
+        if self.query_depth != 1 || self.levels.last().and_then(|ids| ids.first()) != Some(source) {
+            return Ok(None);
+        }
+        let Some(mut recipe) = recipes.iter().find(|recipe| recipe.col == column).cloned() else {
+            return Ok(None);
+        };
+        recipe.col =
+            u16::try_from(col).map_err(|_| BuildError::Internal("too many columns".into()))?;
+        let expr = self.expr(&item.expr)?;
+        self.nested.push(recipe);
+        Ok(Some(expr))
+    }
+
+    fn nested_item(&mut self, it: &'a tir::Item, col: usize, retain: bool) -> R<Expr> {
         let Ok(col) = u16::try_from(col) else {
             return internal("too many columns");
         };
@@ -701,6 +1133,10 @@ impl<'a> Builder<'a> {
             return internal("a nested table of an unknown type in Execute");
         }
         let (owner_ref, tab) = self.owner_of(&it.expr)?;
+        if self.query_depth == 1 && self.nested.iter().any(|nested| nested.col == col) {
+            return Ok(owner_ref);
+        }
+        let sources_before = self.sources.len();
         let Some(tab_src) = self.section_source(tab, nested.iter().any(|item| item.star))? else {
             return internal("a tabular section without a source");
         };
@@ -717,7 +1153,13 @@ impl<'a> Builder<'a> {
                 res = later("вложенная таблица во вложенной", "Q3");
                 break;
             }
-            match self.expr(&n.expr) {
+            let expression = self
+                .nested_owner_field(&n.expr, &owner_ref, &owner)
+                .and_then(|field| match field {
+                    Some(field) => Ok(field),
+                    None => self.expr(&n.expr),
+                });
+            match expression {
                 Ok(e) => exprs.push(e),
                 Err(e) => {
                     res = Err(e);
@@ -758,7 +1200,73 @@ impl<'a> Builder<'a> {
                 exprs,
             }),
         });
+        if !retain {
+            drop(self.nested.pop());
+            self.sources.truncate(sources_before);
+        }
         Ok(owner_ref)
+    }
+
+    fn nested_owner_field(
+        &mut self,
+        expr: &'a TExpr,
+        owner_ref: &Expr,
+        section_owner: &Expr,
+    ) -> R<Option<Expr>> {
+        let (
+            TKind::Field {
+                level,
+                source,
+                col: Col::Field(field),
+                derefs,
+            },
+            ExprKind::Col {
+                src: owner_src,
+                col: ColSel::Field(owner_field),
+            },
+            ExprKind::Col {
+                col: ColSel::Field(section_field),
+                ..
+            },
+        ) = (&expr.kind, &owner_ref.kind, &section_owner.kind)
+        else {
+            return Ok(None);
+        };
+        let source = self
+            .levels
+            .len()
+            .checked_sub(1 + usize::from(*level))
+            .and_then(|index| self.levels.get(index))
+            .and_then(|ids| ids.get(usize::from(*source)))
+            .copied();
+        if source != Some(*owner_src) || field != owner_field || derefs.len() > 1 {
+            return Ok(None);
+        }
+        let Some(SrcKind::Table(table)) = self
+            .sources
+            .get(owner_src.0 as usize)
+            .map(|source| &source.kind)
+        else {
+            return Ok(None);
+        };
+        if !self
+            .schema
+            .field(*table, *owner_field)
+            .is_some_and(|field| field.role == FieldRole::Std(StdRole::Ref))
+            || derefs
+                .iter()
+                .flat_map(|step| &step.targets)
+                .any(|(table, field)| {
+                    self.schema
+                        .field(*table, *field)
+                        .is_none_or(|field| field.nested.is_some())
+                        || self.schema.is_presentation_field(*table, *field)
+                })
+        {
+            return Ok(None);
+        }
+        self.field(&expr.ty, 0, 0, Col::Field(*section_field), derefs)
+            .map(Some)
     }
 
     fn section_agg(
@@ -1004,15 +1512,47 @@ impl<'a> Builder<'a> {
         });
         let rel = match &s.from {
             From::Table {
+                id: table,
+                accounting_dependencies,
+                ..
+            } if matches!(
+                self.schema.table(*table).kind,
+                TableKind::Virtual(VtKind::ScheduleData | VtKind::ActualActionPeriod)
+            ) && accounting_dependencies
+                .as_ref()
+                .is_none_or(|capture| !capture.complete) =>
+            {
+                return Err(BuildError::Later {
+                    what: if self.schema.table(*table).kind
+                        == TableKind::Virtual(VtKind::ScheduleData)
+                    {
+                        "Q6c-ScheduleDataArguments"
+                    } else {
+                        "Q6c-ActualActionPeriodArguments"
+                    },
+                    stage: "Q6c",
+                });
+            }
+            From::Table {
                 id: t,
                 args,
+                records,
+                accounting,
+                drcr,
                 periodicity,
                 complement,
                 span,
                 ..
-            } if self.schema.supports_register_vt(*t) => {
-                self.register_vt(id, *t, args, *periodicity, *complement, *span)?
-            }
+            } if self.schema.supports_register_vt(*t) => self.register_vt(
+                id,
+                *t,
+                args,
+                records.as_ref(),
+                *accounting,
+                drcr.as_ref(),
+                (*periodicity, *complement),
+                *span,
+            )?,
             From::Table { id: t, args, .. }
                 if matches!(
                     self.schema.table(*t).kind,
@@ -1026,7 +1566,9 @@ impl<'a> Builder<'a> {
                     TableKind::Virtual(v)
                         if !matches!(
                             v,
-                            VtKind::SequenceBoundaries | VtKind::BusinessProcessPoints
+                            VtKind::SequenceBoundaries
+                                | VtKind::BusinessProcessPoints
+                                | VtKind::ExtDimensions
                         ) =>
                     {
                         return Err(BuildError::Later {
@@ -1073,7 +1615,20 @@ impl<'a> Builder<'a> {
                 Rel::ParamScan { src: id, param }
             }
             From::Subquery(q) => {
-                let (input, columns) = self.query(q)?;
+                let forwarding = self.query_depth == 1
+                    && q.parts.first().is_some_and(|select| {
+                        self.nested_from
+                            .is_some_and(|inner| std::ptr::eq(inner, select))
+                    });
+                let (input, columns) = if forwarding {
+                    let outer = std::mem::take(&mut self.nested);
+                    let built = self.query(q);
+                    let recipes = std::mem::replace(&mut self.nested, outer);
+                    self.nested_source = Some((id, recipes));
+                    built?
+                } else {
+                    self.query(q)?
+                };
                 if let Some(x) = self.sources.get_mut(n as usize) {
                     x.kind = SrcKind::Subquery { columns };
                 }
@@ -1438,6 +1993,7 @@ impl<'a> Builder<'a> {
         sel: &'a Select,
         it: &'a tir::Item,
         col: usize,
+        unordered: bool,
     ) -> R<Option<Expr>> {
         let arg = match &it.expr.kind {
             TKind::Func {
@@ -1461,10 +2017,33 @@ impl<'a> Builder<'a> {
         if arg.is_none() && field.is_none() {
             return Ok(None);
         }
-        if self.query_depth != 1 || !self.single_part {
+        if self.query_depth != 1
+            || (!self.single_part
+                && !(self
+                    .union_present
+                    .is_some_and(|(present, _)| usize::from(present) == col)
+                    && distinct_movement_presentation(self.schema, sel, it, |source| {
+                        let src = self.levels.last()?.get(usize::from(source))?;
+                        match self.sources.get(src.0 as usize)?.kind {
+                            SrcKind::Table(table) => Some(table),
+                            _ => None,
+                        }
+                    })))
+        {
             return later("ПРЕДСТАВЛЕНИЕ в подзапросе или в объединении", "Q3");
         }
-        if sel.distinct {
+        if sel.distinct
+            && !(unordered
+                && !self.temp_out
+                && !self.totals_open
+                && distinct_movement_presentation(self.schema, sel, it, |source| {
+                    let src = self.levels.last()?.get(usize::from(source))?;
+                    match self.sources.get(src.0 as usize)?.kind {
+                        SrcKind::Table(table) => Some(table),
+                        _ => None,
+                    }
+                }))
+        {
             return later("ПРЕДСТАВЛЕНИЕ при РАЗЛИЧНЫЕ", "Q3");
         }
         let Ok(c) = u16::try_from(col) else {
@@ -1475,7 +2054,9 @@ impl<'a> Builder<'a> {
             (None, Some(f)) => f,
             (None, None) => return Ok(None),
         };
-        self.present.push(c);
+        if self.single_part || !self.present.contains(&c) {
+            self.present.push(c);
+        }
         Ok(Some(e))
     }
 
@@ -1553,15 +2134,67 @@ impl<'a> Builder<'a> {
         }))
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "source options retain separate typed ownership"
+    )]
     fn register_vt(
         &mut self,
         src: SrcId,
         t: QTableId,
         args: &'a [Option<TExpr>],
-        periodicity: crate::schema::Periodicity,
-        complement: Option<crate::schema::Complement>,
+        records: Option<&tir::RecordsOptions>,
+        accounting: Option<tir::AccountingArguments>,
+        drcr: Option<&'a tir::DrCrSource>,
+        period: (
+            crate::schema::Periodicity,
+            Option<crate::schema::Complement>,
+        ),
         span: Option<query_syntax::Span>,
     ) -> R<Rel> {
+        let (periodicity, complement) = period;
+        let accounting_balance = crate::lower::is_accounting_balance(self.schema, t);
+        if accounting_balance && !accounting.is_some_and(|a| a.supports(args, 1)) {
+            return Err(BuildError::Later {
+                what: "Q6a-AccountingBalanceArguments",
+                stage: "Q6a",
+            });
+        }
+        let accounting_turnovers = crate::lower::is_accounting_turnovers(self.schema, t);
+        if accounting_turnovers && !accounting.is_some_and(|a| a.supports(args, 2)) {
+            return Err(BuildError::Later {
+                what: "Q6b-TurnoversArguments",
+                stage: "Q6b",
+            });
+        }
+        if self.schema.table(t).kind == TableKind::Virtual(VtKind::DrCrTurnovers) {
+            let Some(source) = drcr else {
+                return internal("DrCr source without a semantic marker");
+            };
+            if source.supplied.len() != args.len()
+                || source.supplied.iter().any(|x| *x > 1)
+                || args.iter().any(Option::is_some)
+                || source.date_slots & !0b11 != 0
+                || (0..2)
+                    .any(|i| source.date_slots & (1 << i) != 0 && source.date_argument(i).is_none())
+            {
+                return internal("invalid DrCr semantic marker or executable arguments");
+            }
+        } else if drcr.is_some() {
+            return internal("DrCr marker on another virtual table");
+        }
+        if drcr.is_some_and(tir::DrCrSource::has_unsupported_arguments) {
+            return Err(BuildError::Later {
+                what: "Q6b-DrCrTurnoversArguments",
+                stage: "Q6b",
+            });
+        }
+        if let Some(reason) = records.and_then(|r| r.deferred) {
+            return Err(BuildError::Later {
+                what: reason.what(),
+                stage: "Q6a",
+            });
+        }
         let table = self.schema.table(t);
         let Some(register) = table.owner else {
             return internal("a virtual table without its register");
@@ -1587,7 +2220,14 @@ impl<'a> Builder<'a> {
                 *c = Some(*f);
             }
         }
-        if slice {
+        if slice
+            || matches!(
+                kind,
+                VtKind::RecordsWithExtDimensions
+                    | VtKind::ActualActionPeriod
+                    | VtKind::ScheduleData
+            )
+        {
             inner_cols = (0..table.fields.len())
                 .map(|i| u16::try_from(i).ok().map(QFieldId))
                 .collect();
@@ -1629,7 +2269,47 @@ impl<'a> Builder<'a> {
                 _ => {}
             }
         }
-        self.touch(register);
+        if let Some(source) = drcr {
+            for (i, bound) in bounds.iter_mut().enumerate() {
+                if source.date_slots & (1 << i) != 0 {
+                    let Some(expression) = source.date_argument(i) else {
+                        return internal("missing DrCr Date argument owner");
+                    };
+                    *bound = Some(self.expr(expression)?);
+                }
+            }
+        }
+        let mut order = None;
+        if let Some(options) = records
+            && let Some(Some(e)) = args.get(3)
+        {
+            self.levels.push(vec![inner]);
+            let expr = self.expr(e);
+            self.levels.pop();
+            order = Some(SortKey {
+                expr: expr?,
+                desc: options.order_desc,
+            });
+        }
+        self.touch(
+            if accounting_balance
+                || accounting_turnovers
+                || records.is_some()
+                || matches!(
+                    kind,
+                    VtKind::ActualActionPeriod | VtKind::ScheduleData | VtKind::DrCrTurnovers
+                )
+            {
+                t
+            } else {
+                register
+            },
+        );
+        if accounting_balance {
+            let chart = crate::lower::balance_chart(self.schema, t)
+                .map_err(|e| BuildError::Internal(e.to_string()))?;
+            self.touch(chart);
+        }
         let v = Box::new(crate::ir::RegisterVtS {
             src,
             inner,
@@ -1638,6 +2318,8 @@ impl<'a> Builder<'a> {
             kind,
             bounds,
             cond,
+            order,
+            top: records.and_then(|r| r.top),
             periodicity,
             complement,
             area: None,
@@ -1756,6 +2438,19 @@ fn shallow(e: &Expr, h: &mut impl Hasher) {
 
 const SHALLOW_DEPTH: u8 = 3;
 
+fn shallow_deref_prefixes(e: &Expr, mut visit: impl FnMut(usize, u64)) {
+    let ExprKind::Deref { base, steps } = &e.kind else {
+        return;
+    };
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    std::mem::discriminant(&e.kind).hash(&mut h);
+    shallow_d(base, &mut h, SHALLOW_DEPTH);
+    for (i, step) in steps.iter().take(steps.len().saturating_sub(1)).enumerate() {
+        step.name.hash(&mut h);
+        visit(i + 1, h.finish());
+    }
+}
+
 fn shallow_d(e: &Expr, h: &mut impl Hasher, d: u8) {
     std::mem::discriminant(&e.kind).hash(h);
     let kids = |v: &[&Expr], h: &mut _| {
@@ -1780,6 +2475,10 @@ fn shallow_d(e: &Expr, h: &mut impl Hasher, d: u8) {
         ExprKind::Lit(v) => format!("{v:?}").hash(h),
         ExprKind::Param(i) | ExprKind::Value(i) | ExprKind::Out(i) => i.hash(h),
         ExprKind::KeyRef(i) | ExprKind::AggRef(i) => i.hash(h),
+        ExprKind::LocalKey { key, orig } => {
+            key.hash(h);
+            kids(&[orig], h);
+        }
         ExprKind::OuterKey { src, key, .. } => {
             src.hash(h);
             key.hash(h);
@@ -1962,6 +2661,7 @@ pub(crate) fn visit_rel<'e>(r: &'e Rel, f: &mut dyn FnMut(&'e Expr)) {
                 .iter()
                 .chain(v.area.iter().map(|a| &a.pred))
                 .chain(v.access.iter())
+                .chain(v.order.iter().map(|k| &k.expr))
                 .for_each(|c| visit_expr(c, true, f));
         }
     }
@@ -2011,6 +2711,7 @@ struct KeyIndex<'k> {
     own: &'k HashSet<SrcId>,
     anchor: Option<SrcId>,
     in_sub: bool,
+    allow_prefix: bool,
 }
 
 fn reads_own(e: &Expr, own: &HashSet<SrcId>) -> bool {
@@ -2039,6 +2740,37 @@ impl KeyIndex<'_> {
             .find(|&i| self.keys.get(usize::from(i)).map(|k| &k.kind) == Some(&e.kind))
     }
 
+    fn find_prefix(&self, e: &Expr) -> Option<(u16, usize)> {
+        if !self.allow_prefix || self.keys.is_empty() {
+            return None;
+        }
+        let ExprKind::Deref { base, steps } = &e.kind else {
+            return None;
+        };
+        let mut found = None;
+        shallow_deref_prefixes(e, |len, hash| {
+            if let Some(bucket) = self.index.get(&hash) {
+                for &i in bucket {
+                    let Some(key) = self.keys.get(usize::from(i)) else {
+                        continue;
+                    };
+                    if let ExprKind::Deref {
+                        base: key_base,
+                        steps: key_steps,
+                    } = &key.kind
+                        && !key.ty.refs.is_empty()
+                        && key_base == base
+                        && key_steps.as_slice().iter().eq(steps.iter().take(len))
+                    {
+                        found = Some((i, len));
+                        break;
+                    }
+                }
+            }
+        });
+        found
+    }
+
     fn rel(&self, r: Rel) -> Rel {
         let bx = |x: Box<Rel>| Box::new(self.rel(*x));
         match r {
@@ -2047,6 +2779,10 @@ impl KeyIndex<'_> {
                 let [a, b] = std::mem::take(&mut v.bounds);
                 v.bounds = [a.map(|e| self.rekey(e)), b.map(|e| self.rekey(e))];
                 v.cond = v.cond.take().map(|e| self.rekey(e));
+                v.order = v.order.take().map(|k| SortKey {
+                    expr: self.rekey(k.expr),
+                    desc: k.desc,
+                });
                 v.area = v.area.take().map(|a| super::AreaFilter {
                     pred: self.rekey(a.pred),
                 });
@@ -2057,6 +2793,10 @@ impl KeyIndex<'_> {
                 let [a, b] = std::mem::take(&mut v.bounds);
                 v.bounds = [a.map(|e| self.rekey(e)), b.map(|e| self.rekey(e))];
                 v.cond = v.cond.take().map(|e| self.rekey(e));
+                v.order = v.order.take().map(|k| SortKey {
+                    expr: self.rekey(k.expr),
+                    desc: k.desc,
+                });
                 v.area = v.area.take().map(|a| super::AreaFilter {
                     pred: self.rekey(a.pred),
                 });
@@ -2067,6 +2807,10 @@ impl KeyIndex<'_> {
                 let [a, b] = std::mem::take(&mut v.bounds);
                 v.bounds = [a.map(|e| self.rekey(e)), b.map(|e| self.rekey(e))];
                 v.cond = v.cond.take().map(|e| self.rekey(e));
+                v.order = v.order.take().map(|k| SortKey {
+                    expr: self.rekey(k.expr),
+                    desc: k.desc,
+                });
                 Rel::RunningBalance(v)
             }
             Rel::Subquery { src, input } => Rel::Subquery {
@@ -2169,12 +2913,36 @@ impl KeyIndex<'_> {
                 };
             }
         }
+        let prefix = self.find_prefix(&e);
         let Expr { kind, ty } = e;
         let kind = match kind {
-            ExprKind::Deref { base, steps } => ExprKind::Deref {
-                base: self.bx(base),
-                steps,
-            },
+            ExprKind::Deref { base, mut steps } => {
+                if let Some((i, len)) = prefix
+                    && let Some(key) = self.keys.get(usize::from(i))
+                    && (!self.in_sub || (self.anchor.is_some() && reads_own(key, self.own)))
+                {
+                    let suffix = steps.split_off(len);
+                    let key_ty = key.ty.clone();
+                    let orig = Box::new(Expr {
+                        kind: ExprKind::Deref { base, steps },
+                        ty: key_ty.clone(),
+                    });
+                    let kind = if let (true, Some(src)) = (self.in_sub, self.anchor) {
+                        ExprKind::OuterKey { src, key: i, orig }
+                    } else {
+                        ExprKind::LocalKey { key: i, orig }
+                    };
+                    ExprKind::Deref {
+                        base: Box::new(Expr { kind, ty: key_ty }),
+                        steps: suffix,
+                    }
+                } else {
+                    ExprKind::Deref {
+                        base: self.bx(base),
+                        steps,
+                    }
+                }
+            }
             ExprKind::Neg(x) => ExprKind::Neg(self.bx(x)),
             ExprKind::Not(x) => ExprKind::Not(self.bx(x)),
             ExprKind::Arith { first, steps } => ExprKind::Arith {

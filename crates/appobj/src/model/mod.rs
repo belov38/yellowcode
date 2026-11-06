@@ -1,6 +1,7 @@
 mod behavior;
 mod extra;
 mod kinds;
+mod recorders;
 mod stdattrs;
 mod storage;
 mod types;
@@ -230,6 +231,8 @@ impl AppModel {
             src.get(id.0 as usize).map(|(_, o)| o.id)
         };
 
+        let recorder_docs = recorders::index(&src, &by_uuid, &resolve, &mut diagnostics);
+
         let mut cx = Ctx {
             cfg,
             by_type_id: &by_type_id,
@@ -248,6 +251,7 @@ impl AppModel {
                 kind: *kind,
                 me: id,
                 owners: &owners,
+                recorder_docs: recorder_docs.get(i).map_or(&[], Vec::as_slice),
                 script,
             };
             let mut fields = stdattrs::std_fields(o, &behavior, &sx);
@@ -477,6 +481,78 @@ impl AppModel {
     pub fn find_full_name(&self, full: &str) -> Option<MdPath> {
         let seg: Vec<&str> = full.split('.').collect();
         let word = fold_name(seg.first()?);
+        if matches!(word.as_str(), "httpсервис" | "httpservice") {
+            let name = fold_name(seg.get(1)?);
+            let (s, service) = self
+                .config
+                .objects
+                .iter()
+                .enumerate()
+                .find(|(_, o)| o.kind == MdKind::HTTPService && fold_name(&o.name) == name)?;
+            if seg.len() == 2 {
+                return Some(MdPath::Other(s));
+            }
+            if !matches!(seg.len(), 4 | 6)
+                || !matches!(fold_name(seg.get(2)?).as_str(), "шаблонurl" | "urltemplate")
+            {
+                return None;
+            }
+            let name = fold_name(seg.get(3)?);
+            let u = service
+                .children
+                .iter()
+                .position(|c| c.tag == ChildTag::URLTemplate && fold_name(&c.name) == name)?;
+            if seg.len() == 4 {
+                return Some(MdPath::HttpUrlTemplate(s, u));
+            }
+            if !matches!(fold_name(seg.get(4)?).as_str(), "метод" | "method") {
+                return None;
+            }
+            let name = fold_name(seg.get(5)?);
+            return service
+                .children
+                .get(u)?
+                .children
+                .iter()
+                .position(|c| c.tag == ChildTag::Method && fold_name(&c.name) == name)
+                .map(|m| MdPath::HttpMethod(s, u, m));
+        }
+        if matches!(word.as_str(), "webсервис" | "webservice") {
+            let name = fold_name(seg.get(1)?);
+            let (s, service) = self
+                .config
+                .objects
+                .iter()
+                .enumerate()
+                .find(|(_, o)| o.kind == MdKind::WebService && fold_name(&o.name) == name)?;
+            if seg.len() == 2 {
+                return Some(MdPath::Other(s));
+            }
+            if !matches!(seg.len(), 4 | 6)
+                || !matches!(fold_name(seg.get(2)?).as_str(), "операция" | "operation")
+            {
+                return None;
+            }
+            let name = fold_name(seg.get(3)?);
+            let u = service
+                .children
+                .iter()
+                .position(|c| c.tag == ChildTag::Operation && fold_name(&c.name) == name)?;
+            if seg.len() == 4 {
+                return Some(MdPath::WebOperation(s, u));
+            }
+            if !matches!(fold_name(seg.get(4)?).as_str(), "параметр" | "parameter") {
+                return None;
+            }
+            let name = fold_name(seg.get(5)?);
+            return service
+                .children
+                .get(u)?
+                .children
+                .iter()
+                .position(|c| c.tag == ChildTag::Parameter && fold_name(&c.name) == name)
+                .map(|m| MdPath::WebParameter(s, u, m));
+        }
         match (word.as_str(), seg.len()) {
             ("конфигурация" | "configuration", 1) => {
                 return Some(MdPath::Configuration);
@@ -545,6 +621,26 @@ impl AppModel {
                         .iter()
                         .position(|f| fold_name(&f.name) == nn)
                         .map(|i| MdPath::Form(id, i))
+                } else if matches!(fold_name(w).as_str(), "команда" | "command") {
+                    let nn = fold_name(n);
+                    self.config
+                        .objects
+                        .iter()
+                        .find(|m| m.id == o.md)?
+                        .children
+                        .iter()
+                        .position(|c| c.tag == ChildTag::Command && fold_name(&c.name) == nn)
+                        .map(|i| MdPath::Command(id, i))
+                } else if matches!(fold_name(w).as_str(), "макет" | "template") {
+                    let nn = fold_name(n);
+                    self.config
+                        .objects
+                        .iter()
+                        .find(|m| m.id == o.md)?
+                        .templates
+                        .iter()
+                        .position(|t| fold_name(&t.name) == nn)
+                        .map(|i| MdPath::Template(id, i))
                 } else if matches!(fold_name(w).as_str(), "значениеперечисления" | "enumvalue")
                 {
                     let nn = fold_name(n);

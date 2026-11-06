@@ -119,6 +119,7 @@ impl TreeRows {
         }
         for (node, cells) in &mut prepared {
             std::mem::swap(&mut *node.cells.borrow_mut(), cells);
+            node.materialized.set(true);
             self.state.update_bytes(node);
             cells.drain_into(&mut retired, true);
         }

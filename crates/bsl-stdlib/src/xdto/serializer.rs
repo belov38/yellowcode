@@ -1,7 +1,7 @@
 use super::data::{XdtoData, XdtoWriteFlags, data_to_value};
-use super::factory::{data_of, explicit_arg, factory_ref, platform_factory};
-use super::io_json::{read_json_mode, write_json};
-use super::io_xml::{ReadMode, read_xml_mode, write_xml};
+use super::factory::{data_of, explicit_arg, factory_ref, is_platform_model, platform_factory};
+use super::io_json::{read_json_mode, read_serializer_json, write_serializer_json};
+use super::io_xml::{ReadMode, read_serializer_xml, write_serializer_xml};
 use super::value_map::{XdtoCtx, type_qname};
 use super::{is_any, types};
 use crate::bind::{arg_value, is_given, msg, type_mismatch};
@@ -80,8 +80,26 @@ impl Serializer {
         Ok(WriteArgs { root, explicit })
     }
 
-    fn data(&self, ex: &mut Execution, v: &Value, param: usize) -> CallResult<XdtoData> {
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "writer accounting is scoped to this invocation"
+    )]
+    fn data(
+        &self,
+        ex: &mut Execution,
+        v: &Value,
+        param: usize,
+        xml_write: bool,
+        json_write: bool,
+        json_prefix: u64,
+        xml_table_writer: Option<&Value>,
+    ) -> CallResult<(XdtoData, u64)> {
         let mut ctx = XdtoCtx::new(self.f.clone(), param);
+        ctx.xml_write(xml_write);
+        ctx.json_write(json_write, json_prefix);
+        if let Some(writer) = xml_table_writer {
+            ctx.xml_prefix(json_prefix, writer);
+        }
         match ctx.to_data(ex, v) {
             Ok(d) => {
                 if let XdtoData::Value { ty, .. } | XdtoData::Object { ty, .. } = &d
@@ -91,16 +109,32 @@ impl Serializer {
                     let e = ctx.mismatch(ex);
                     return Err(ctx.call_error(e));
                 }
-                Ok(d)
+                let live = if xml_table_writer.is_some() {
+                    ctx.output_scratch()
+                } else {
+                    ctx.read_scratch(0).saturating_sub(json_prefix)
+                };
+                Ok((d, live))
             }
             Err(e) => Err(ctx.call_error(e)),
         }
     }
 
-    fn value(&self, ex: &mut Execution, d: &XdtoData, wire: bool) -> CallResult<Value> {
+    fn value(
+        &self,
+        ex: &mut Execution,
+        d: &XdtoData,
+        wire: bool,
+        xml: bool,
+        json_input: Option<(Value, u64)>,
+    ) -> CallResult<Value> {
         let mut ctx = XdtoCtx::new(self.f.clone(), 1);
         if wire {
             ctx.wire_read();
+        }
+        ctx.xml_read(xml && is_platform_model(&self.f.model));
+        if let Some((reader, projection)) = json_input {
+            ctx.json_read(reader, projection);
         }
         match ctx.from_data(ex, d) {
             Ok(v) => Ok(v),
@@ -112,9 +146,24 @@ impl Serializer {
         let wv = arg_value(ex, args.first())?;
         let item = arg_value(ex, args.get(1))?;
         let a = self.write_args(ex, args, m)?;
+        let table = item
+            .as_object()
+            .is_some_and(|o| o.as_any().is::<crate::collections::ValueTable>());
+        let prefix = {
+            let st = xml_writer(ex, &wv)?;
+            if table {
+                st.retained_prefix_bytes(ex)?
+            } else {
+                0
+            }
+        };
+        let (d, live) = self.data(ex, &item, 2, true, false, prefix, table.then_some(&wv))?;
         let mut st = xml_writer(ex, &wv)?;
-        let d = self.data(ex, &item, 2)?;
-        write_xml(
+        if table {
+            let current = st.retained_prefix_bytes(ex)?;
+            ex.reserve(current.saturating_add(live))?;
+        }
+        write_serializer_xml(
             ex,
             self.model(),
             &mut st,
@@ -124,6 +173,7 @@ impl Serializer {
                 explicit_type: a.explicit,
                 untyped: false,
             },
+            table,
         )?;
         Ok(Value::Undefined)
     }
@@ -133,12 +183,25 @@ impl Serializer {
         let item = arg_value(ex, args.get(1))?;
         let explicit = explicit_arg(ex, args.get(2))?;
         drop(crate::json::json_writer(ex, &wv)?);
-        let d = self.data(ex, &item, 2)?;
-        write_json(
+        let platform = is_platform_model(&self.f.model);
+        let prefix = if platform {
+            crate::json::json_prefix_bytes(&wv)?
+        } else {
+            0
+        };
+        let (d, live) = self.data(ex, &item, 2, false, platform, prefix, None)?;
+        let live = if platform {
+            crate::serial::valuelist_json::data_envelope(ex, &item, &d, live, prefix)?
+        } else {
+            None
+        };
+        write_serializer_json(
             ex,
             self.model(),
             &wv,
             &d,
+            live.is_some(),
+            live.unwrap_or(0),
             XdtoWriteFlags {
                 explicit_type: explicit,
                 untyped: false,
@@ -159,8 +222,14 @@ impl Serializer {
         let rv = arg_value(ex, args.first())?;
         let expect = self.expected(ex, args.get(1))?;
         let mut st = xml_reader(ex, &rv)?;
-        let d = read_xml_mode(ex, self.model(), &mut st, expect.as_ref(), ReadMode::Values)?;
-        self.value(ex, &d, true)
+        let d = read_serializer_xml(
+            ex,
+            self.model(),
+            &mut st,
+            expect.as_ref(),
+            is_platform_model(&self.f.model),
+        )?;
+        self.value(ex, &d, true, true, None)
     }
 
     fn read_json(&self, ex: &mut Execution, args: &[Arg], m: MemberId) -> CallResult<Value> {
@@ -170,13 +239,18 @@ impl Serializer {
         let rv = arg_value(ex, args.first())?;
         let expect = self.expected(ex, args.get(1))?;
         drop(crate::json::json_reader(ex, &rv)?);
-        let d = read_json_mode(ex, self.model(), &rv, expect.as_ref(), ReadMode::Values)?;
-        self.value(ex, &d, true)
+        if is_platform_model(&self.f.model) {
+            let (d, projection) = read_serializer_json(ex, self.model(), &rv, expect.as_ref())?;
+            self.value(ex, &d, true, false, Some((rv, projection)))
+        } else {
+            let d = read_json_mode(ex, self.model(), &rv, expect.as_ref(), ReadMode::Values)?;
+            self.value(ex, &d, true, false, None)
+        }
     }
 
     fn write_xdto(&self, ex: &mut Execution, args: &[Arg]) -> CallResult<Value> {
         let v = arg_value(ex, args.first())?;
-        let d = match self.data(ex, &v, 1) {
+        let (d, _) = match self.data(ex, &v, 1, false, false, 0, None) {
             Err(bsl_vm::CallError::Host(e)) if matches!(&e.msg, bsl_vm::MsgRef::Key(k) if k.key == msg::TYPE_MISMATCH) =>
             {
                 let name = type_qname(ex, v.type_id()).name;
@@ -201,7 +275,7 @@ impl Serializer {
             );
             return Err(super::headed(msg::XDTO_TYPE_MISMATCH, &detail).into());
         }
-        self.value(ex, &d, false)
+        self.value(ex, &d, false, false, None)
     }
 
     fn can_read(&self, ex: &mut Execution, args: &[Arg]) -> CallResult<Value> {

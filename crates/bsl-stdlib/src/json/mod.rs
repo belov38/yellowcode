@@ -2,8 +2,8 @@ mod reader;
 mod values;
 mod writer;
 
-pub(crate) use reader::json_reader;
-pub(crate) use writer::{json_account, json_writer};
+pub(crate) use reader::{json_reader, reader_live_bytes};
+pub(crate) use writer::{json_account, json_account_with_live, json_prefix_bytes, json_writer};
 
 use crate::enums::type_by_id;
 use bsl_vm::Registry;

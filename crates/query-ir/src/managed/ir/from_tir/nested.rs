@@ -2,10 +2,39 @@ use super::*;
 use crate::schema::{FieldRole, QFieldId, QTableId, StdRole};
 
 impl<'c, 'a, 'r, 'w, 't> Builder<'c, 'a, 'r, 'w, 't> {
+    pub(super) fn forward_nested(
+        &mut self,
+        item: &'t tir::Item,
+        col: usize,
+    ) -> BuildResult<Option<NativeOwned<'a, ir::Expr>>> {
+        let Some(column) = tir::forwarded_nested_column(item) else {
+            return Ok(None);
+        };
+        let Some((source, recipes)) = &self.nested_source else {
+            return Ok(None);
+        };
+        if self.query_depth != 1 || self.levels.last().and_then(|ids| ids.first()) != Some(source) {
+            return Ok(None);
+        }
+        let Some(recipe) = recipes
+            .iter()
+            .find(|recipe| recipe.trusted_borrow().col == column)
+        else {
+            return Ok(None);
+        };
+        let ctx = self.ctx;
+        let col = u16::try_from(col).map_err(|_| BuildProblem::Internal("too many columns"))?;
+        let recipe = copy_forwarded_recipe(ctx, recipe.trusted_borrow(), col)?;
+        let expr = self.expr(&item.expr)?;
+        ctx.scratch_push(&mut self.nested, recipe)?;
+        Ok(Some(expr))
+    }
+
     pub(super) fn nested_item(
         &mut self,
         item: &'t tir::Item,
         col: usize,
+        retain: bool,
     ) -> BuildResult<NativeOwned<'a, ir::Expr>> {
         let ctx = self.ctx;
         let col = u16::try_from(col).map_err(|_| BuildProblem::Internal("too many columns"))?;
@@ -26,6 +55,15 @@ impl<'c, 'a, 'r, 'w, 't> Builder<'c, 'a, 'r, 'w, 't> {
             ));
         }
         let (owner_ref, tab) = self.owner_of(&item.expr)?;
+        if self.query_depth == 1
+            && self
+                .nested
+                .iter()
+                .any(|nested| nested.trusted_borrow().col == col)
+        {
+            return Ok(owner_ref);
+        }
+        let sources_before = self.sources.len();
         let src = self.section_source(tab, item.nested.iter().flatten().any(|item| item.star))?;
         let owner = self.section_col(src, tab, StdRole::Ref)?;
         let number = self.section_col(src, tab, StdRole::LineNumber)?;
@@ -50,7 +88,14 @@ impl<'c, 'a, 'r, 'w, 't> Builder<'c, 'a, 'r, 'w, 't> {
                         stage: "Q3",
                     });
                 }
-                let e = self.expr(&item.expr)?;
+                let e = match self.nested_owner_field(
+                    &item.expr,
+                    owner_ref.trusted_borrow(),
+                    owner.trusted_borrow(),
+                )? {
+                    Some(field) => field,
+                    None => self.expr(&item.expr)?,
+                };
                 ctx.parent_depth(std::iter::once(e.depth()))?;
                 ctx.push(&mut output, e)?;
             }
@@ -104,8 +149,77 @@ impl<'c, 'a, 'r, 'w, 't> Builder<'c, 'a, 'r, 'w, 't> {
                 rows: Some(rows),
             }),
         )?;
+        if !retain {
+            drop(self.nested.pop());
+            while self.sources.len() > sources_before {
+                drop(self.sources.pop());
+            }
+        }
         Ok(owner_ref)
     }
+
+    fn nested_owner_field(
+        &mut self,
+        expr: &'t tir::TExpr,
+        owner_ref: &ir::Expr,
+        section_owner: &ir::Expr,
+    ) -> BuildResult<Option<NativeOwned<'a, ir::Expr>>> {
+        let (
+            tir::TKind::Field {
+                level,
+                source,
+                col: tir::Col::Field(field),
+                derefs,
+            },
+            ir::ExprKind::Col {
+                src: owner_src,
+                col: ir::ColSel::Field(owner_field),
+            },
+            ir::ExprKind::Col {
+                col: ir::ColSel::Field(section_field),
+                ..
+            },
+        ) = (&expr.kind, &owner_ref.kind, &section_owner.kind)
+        else {
+            return Ok(None);
+        };
+        let source = self
+            .levels
+            .len()
+            .checked_sub(1 + usize::from(*level))
+            .and_then(|index| self.levels.get(index))
+            .and_then(|ids| ids.get(usize::from(*source)))
+            .copied();
+        if source != Some(*owner_src) || field != owner_field || derefs.len() > 1 {
+            return Ok(None);
+        }
+        let Some(ir::SrcKind::Table(table)) = self
+            .sources
+            .get(owner_src.0 as usize)
+            .map(|source| &source.trusted_borrow().kind)
+        else {
+            return Ok(None);
+        };
+        if !self
+            .schema
+            .field(*table, *owner_field)
+            .is_some_and(|field| field.role == FieldRole::Std(StdRole::Ref))
+            || derefs
+                .iter()
+                .flat_map(|step| &step.targets)
+                .any(|(table, field)| {
+                    self.schema
+                        .field(*table, *field)
+                        .is_none_or(|field| field.nested.is_some())
+                        || self.schema.is_presentation_field(*table, *field)
+                })
+        {
+            return Ok(None);
+        }
+        self.field(&expr.ty, 0, 0, tir::Col::Field(*section_field), derefs)
+            .map(Some)
+    }
+
     fn owner_of(
         &mut self,
         e: &'t tir::TExpr,
@@ -288,4 +402,45 @@ impl<'c, 'a, 'r, 'w, 't> Builder<'c, 'a, 'r, 'w, 't> {
             ty,
         )
     }
+}
+
+fn copy_forwarded_recipe<'a>(
+    ctx: &BuildCtx<'a, '_, '_>,
+    recipe: &ir::NestedS,
+    col: u16,
+) -> BuildResult<NativeOwned<'a, ir::NestedS>> {
+    let Some(rows) = &recipe.rows else {
+        return Ok(ctx.scalar(col).map(|col| ir::NestedS { col, rows: None }));
+    };
+    let keys = ctx.scratch(0)?;
+    let index = Index::new();
+    let copier = super::super::rebuild::Rebuild {
+        ctx,
+        keys: &keys,
+        index: &index,
+        own: &[],
+        anchor: None,
+        in_sub: false,
+        replace: false,
+        allow_prefix: false,
+    };
+    let scan = copier.rel(&rows.scan)?;
+    let owner = copier.expr(&rows.owner)?;
+    let number = copier.expr(&rows.number)?;
+    let exprs = copier.exprs(&rows.exprs)?;
+    let parts = ctx.allocated(scan.zip(owner))?;
+    let parts = ctx.allocated(parts.zip(number))?;
+    let rows = ctx
+        .allocated(parts.zip(exprs))?
+        .map(|(((scan, owner), number), exprs)| ir::NestedRows {
+            scan,
+            owner,
+            number,
+            exprs,
+        });
+    ctx.parent_depth(std::iter::once(rows.depth()))?;
+    Ok(rows.map(|rows| ir::NestedS {
+        col,
+        rows: Some(rows),
+    }))
 }

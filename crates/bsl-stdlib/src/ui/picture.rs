@@ -102,6 +102,16 @@ impl Picture {
 }
 
 impl HostObject for Picture {
+    fn retained_memory(&self, visit: &mut dyn bsl_vm::RetainedMemory) -> Result<bool, Exception> {
+        if let Some(data) = &self.data {
+            visit.allocation(
+                Arc::as_ptr(data).cast::<()>() as usize,
+                crate::session::shared_bytes(&**data),
+            )?;
+        }
+        Ok(true)
+    }
+
     fn type_id(&self) -> TypeId {
         TypeId::of_catalog(types().picture)
     }

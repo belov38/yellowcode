@@ -172,11 +172,25 @@ pub struct XdtoCtx {
     guard: DepthGuard,
     bytes: u64,
     live: u64,
+    read_live_bytes: u64,
     param: usize,
     pending: Option<HostError>,
     marker: Rc<FatalError>,
     wire_read: bool,
+    xml_write: bool,
+    xml_table_writer: Option<Value>,
+    json_write: bool,
+    json_prefix_bytes: u64,
+    xml_read: bool,
+    json_read: bool,
+    json_read_input: u64,
+    json_read_projection: u64,
+    json_reader: Option<Value>,
+    json_roots: Vec<JsonRoot>,
+    json_roots_bytes: u64,
 }
+
+type JsonRoot = Rc<dyn Fn(&mut dyn bsl_vm::RetainedMemory) -> Result<(), Exception>>;
 
 const NODE_BYTES: u64 = std::mem::size_of::<XdtoData>() as u64 + 64;
 
@@ -187,15 +201,173 @@ impl XdtoCtx {
             guard: DepthGuard::new(),
             bytes: 0,
             live: 0,
+            read_live_bytes: 0,
             param,
             pending: None,
             wire_read: false,
+            xml_write: false,
+            xml_table_writer: None,
+            json_write: false,
+            json_prefix_bytes: 0,
+            xml_read: false,
+            json_read: false,
+            json_read_input: 0,
+            json_read_projection: 0,
+            json_reader: None,
+            json_roots: Vec::new(),
+            json_roots_bytes: 0,
             marker: Rc::new(FatalError {
                 kind: FatalKind::StackOverflow,
                 text: String::new(),
                 cause: None,
             }),
         }
+    }
+
+    pub(crate) fn xml_write(&mut self, enabled: bool) {
+        self.xml_write = enabled;
+    }
+
+    pub(crate) fn xml_prefix(&mut self, bytes: u64, writer: &Value) {
+        self.json_prefix_bytes = bytes;
+        self.xml_table_writer = Some(writer.clone());
+    }
+
+    pub(crate) fn refresh_xml_prefix(&mut self, ex: &mut Execution) -> Result<(), Exception> {
+        let Some(writer) = self.xml_table_writer.clone() else {
+            return Ok(());
+        };
+        let result = (|| {
+            let state = crate::xml::xml_writer(ex, &writer)?;
+            state.retained_prefix_bytes(ex)
+        })();
+        self.json_prefix_bytes = result.map_err(|e| self.exc(e))?;
+        let scratch = self
+            .bytes
+            .checked_mul(2)
+            .and_then(|n| n.checked_add(self.read_live_bytes))
+            .and_then(|n| n.checked_add(self.json_prefix_bytes))
+            .ok_or_else(|| ex.out_of_memory())?;
+        ex.reserve(scratch)
+    }
+
+    pub(crate) fn json_write(&mut self, enabled: bool, prefix_bytes: u64) {
+        self.json_write = enabled;
+        self.json_prefix_bytes = if enabled { prefix_bytes } else { 0 };
+    }
+
+    pub(crate) fn xml_read(&mut self, enabled: bool) {
+        self.xml_read = enabled;
+    }
+
+    pub(crate) fn json_read(&mut self, reader: Value, projection: u64) {
+        self.json_read = true;
+        self.json_reader = Some(reader);
+        self.json_read_projection = projection;
+    }
+
+    pub(crate) fn refresh_json_input(&mut self, ex: &mut Execution) -> Result<(), Exception> {
+        if let Some(reader) = &self.json_reader {
+            let source =
+                crate::json::reader_live_bytes(reader).ok_or_else(|| ex.out_of_memory())?;
+            self.json_read_input = source
+                .checked_add(self.json_read_projection)
+                .ok_or_else(|| ex.out_of_memory())?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn is_json_read(&self) -> bool {
+        self.json_read
+    }
+
+    pub(crate) fn push_json_root<F>(&mut self, ex: &mut Execution, root: F) -> Result<(), Exception>
+    where
+        F: Fn(&mut dyn bsl_vm::RetainedMemory) -> Result<(), Exception> + 'static,
+    {
+        let (layout, _) = std::alloc::Layout::new::<[usize; 2]>()
+            .extend(std::alloc::Layout::new::<F>())
+            .map_err(|_| ex.out_of_memory())?;
+        let slots = self
+            .json_roots
+            .capacity()
+            .checked_add(1)
+            .and_then(|n| n.checked_mul(2))
+            .and_then(|n| {
+                n.checked_mul(std::mem::size_of::<
+                    Rc<dyn Fn(&mut dyn bsl_vm::RetainedMemory) -> Result<(), Exception>>,
+                >())
+            })
+            .ok_or_else(|| ex.out_of_memory())?;
+        let bytes = layout
+            .pad_to_align()
+            .size()
+            .checked_add(slots)
+            .ok_or_else(|| ex.out_of_memory())?;
+        let bytes = u64::try_from(bytes).map_err(|_| ex.out_of_memory())?;
+        self.account(ex, bytes)?;
+        self.json_roots
+            .try_reserve(1)
+            .map_err(|_| ex.out_of_memory())?;
+        self.json_roots.push(Rc::new(root));
+        Ok(())
+    }
+
+    pub(crate) fn pop_json_root(&mut self) {
+        self.json_roots.pop();
+    }
+
+    pub(crate) fn refresh_json_roots(&mut self, ex: &mut Execution) -> Result<(), Exception> {
+        self.refresh_json_roots_with(ex, None)
+    }
+
+    fn refresh_json_roots_with(
+        &mut self,
+        ex: &mut Execution,
+        value: Option<&Value>,
+    ) -> Result<(), Exception> {
+        if !self.json_read || (self.json_roots.is_empty() && value.is_none()) {
+            self.json_roots_bytes = 0;
+            return Ok(());
+        }
+        self.refresh_json_input(ex)?;
+        let scratch = self.read_scratch(0).saturating_sub(self.json_roots_bytes);
+        let bytes = ex.measure_retained(scratch, |visit| {
+            visit.work(self.json_roots.len() as u64)?;
+            for root in &self.json_roots {
+                root(visit)?;
+            }
+            if let Some(value) = value {
+                visit.value(value)?;
+            }
+            Ok(())
+        })?;
+        self.json_roots_bytes = bytes;
+        Ok(())
+    }
+
+    pub(crate) fn json_admit_extra(
+        &mut self,
+        ex: &mut Execution,
+        bytes: u64,
+        extra: impl FnOnce(&mut dyn bsl_vm::RetainedMemory) -> Result<(), Exception>,
+    ) -> Result<(), Exception> {
+        self.refresh_json_input(ex)?;
+        let scratch = self.read_scratch(0).saturating_sub(self.json_roots_bytes);
+        let live = ex.measure_retained(scratch, |visit| {
+            visit.work(self.json_roots.len() as u64)?;
+            for root in &self.json_roots {
+                root(visit)?;
+            }
+            extra(visit)
+        })?;
+        ex.charge(1 + bytes / 64)?;
+        ex.reserve(
+            scratch
+                .checked_add(live)
+                .and_then(|n| n.checked_add(bytes))
+                .ok_or_else(|| ex.out_of_memory())?,
+        )
     }
 
     pub(crate) fn wire_read(&mut self) {
@@ -229,13 +401,93 @@ impl XdtoCtx {
     }
 
     pub fn account(&mut self, ex: &mut Execution, add: u64) -> Result<(), Exception> {
-        self.bytes = self.bytes.saturating_add(add).saturating_add(NODE_BYTES);
+        self.refresh_xml_prefix(ex)?;
+        self.refresh_json_input(ex)?;
+        self.refresh_json_roots(ex)?;
+        self.bytes = if self.json_read || self.xml_table_writer.is_some() {
+            self.bytes
+                .checked_add(add)
+                .and_then(|n| n.checked_add(NODE_BYTES))
+                .ok_or_else(|| ex.out_of_memory())?
+        } else {
+            self.bytes.saturating_add(add).saturating_add(NODE_BYTES)
+        };
         ex.charge(1 + add / 64)?;
-        ex.reserve(self.bytes.saturating_mul(2))
+        if self.json_read || self.xml_table_writer.is_some() {
+            let live = self
+                .bytes
+                .checked_mul(2)
+                .and_then(|n| n.checked_add(self.read_live_bytes))
+                .and_then(|n| n.checked_add(self.json_read_input))
+                .and_then(|n| n.checked_add(self.json_roots_bytes))
+                .and_then(|n| n.checked_add(self.json_prefix_bytes))
+                .ok_or_else(|| ex.out_of_memory())?;
+            return ex.reserve(live);
+        }
+        ex.reserve(
+            self.bytes
+                .saturating_mul(2)
+                .saturating_add(self.read_live_bytes)
+                .saturating_add(self.json_read_input)
+                .saturating_add(self.json_roots_bytes)
+                .saturating_add(self.json_prefix_bytes),
+        )
+    }
+
+    pub(crate) fn read_scratch(&self, own: u64) -> u64 {
+        self.bytes
+            .saturating_mul(2)
+            .saturating_add(self.read_live_bytes.saturating_sub(own))
+            .saturating_add(self.json_read_input)
+            .saturating_add(self.json_roots_bytes)
+            .saturating_add(self.json_prefix_bytes)
+    }
+
+    pub(crate) fn output_scratch(&self) -> u64 {
+        self.bytes
+            .saturating_mul(2)
+            .saturating_add(self.read_live_bytes)
+    }
+
+    pub(crate) fn replace_read_live(
+        &mut self,
+        ex: &mut Execution,
+        old: u64,
+        new: u64,
+    ) -> Result<(), Exception> {
+        self.refresh_json_input(ex)?;
+        self.refresh_json_roots(ex)?;
+        let live = self
+            .read_live_bytes
+            .checked_sub(old)
+            .and_then(|n| n.checked_add(new))
+            .ok_or_else(|| ex.out_of_memory())?;
+        ex.reserve(
+            self.bytes
+                .saturating_mul(2)
+                .saturating_add(live)
+                .saturating_add(self.json_read_input)
+                .saturating_add(self.json_roots_bytes),
+        )?;
+        self.read_live_bytes = live;
+        Ok(())
+    }
+
+    pub(crate) fn release_read_live(&mut self, bytes: u64) {
+        self.read_live_bytes = self.read_live_bytes.saturating_sub(bytes);
     }
 
     pub fn hold(&mut self, ex: &mut Execution, n: usize) -> Result<(), Exception> {
         self.live = self.live.saturating_add(n as u64);
+        self.refresh_xml_prefix(ex)?;
+        if self.json_prefix_bytes != 0 {
+            ex.reserve(
+                self.read_scratch(0).saturating_add(
+                    self.live
+                        .saturating_mul(std::mem::size_of::<Value>() as u64),
+                ),
+            )?;
+        }
         crate::collections::reserve_values(ex, self.live)
     }
 
@@ -293,6 +545,29 @@ impl XdtoCtx {
     }
 
     pub fn to_data(&mut self, ex: &mut Execution, v: &Value) -> Result<XdtoData, Exception> {
+        self.refresh_xml_prefix(ex)?;
+        if self.xml_table_writer.is_some() {
+            let bytes =
+                match v {
+                    Value::Number(n) => (n.backing_capacity_limbs() as u64)
+                        .checked_mul(4)
+                        .and_then(|b| {
+                            n.size_hint_limbs()
+                                .checked_mul(64)
+                                .and_then(|n| b.checked_add(n))
+                        }),
+                    Value::String(s) => (s.backing_capacity_units() as u64)
+                        .checked_mul(2)
+                        .and_then(|b| {
+                            (s.len() as u64)
+                                .checked_mul(128)
+                                .and_then(|n| b.checked_add(n))
+                        }),
+                    _ => Some(0),
+                }
+                .ok_or_else(|| ex.out_of_memory())?;
+            self.account(ex, bytes)?;
+        }
         let (ty, text) = match v {
             Value::Undefined => {
                 self.account(ex, 0)?;
@@ -304,7 +579,13 @@ impl XdtoCtx {
             Value::String(_) => (xs("string"), self.text(ex, v)?),
             Value::Date(_) => (xs("dateTime"), self.text(ex, v)?),
             Value::Type(t) => (core("Type"), type_qname(ex, *t).clark()),
-            Value::Object(o) => return self.object_data(ex, o),
+            Value::Object(o) => {
+                let result = self.object_data(ex, o);
+                if result.is_ok() {
+                    self.refresh_xml_prefix(ex)?;
+                }
+                return result;
+            }
         };
         self.account(ex, text.len() as u64)?;
         Ok(XdtoData::Value {
@@ -327,6 +608,47 @@ impl XdtoCtx {
         if ex.runtime().types().app_type(t).is_some() {
             self.enter(ex, false)?;
             let result = self.applied_data(ex, o, t);
+            self.leave();
+            return result;
+        }
+        if self.json_write
+            && let Some(list) = o.as_any().downcast_ref::<crate::collections::ValueList>()
+        {
+            self.enter(ex, false)?;
+            let result = crate::serial::valuelist_json::json_data(ex, list, o, self);
+            self.leave();
+            return result;
+        }
+        if self.xml_write
+            && let Some(document) = o.as_any().downcast_ref::<crate::text::TextDocument>()
+        {
+            self.enter(ex, false)?;
+            let result = crate::serial::textdoc::xml_data(ex, document, self);
+            self.leave();
+            return result;
+        }
+        if self.xml_write
+            && let Some(list) = o.as_any().downcast_ref::<crate::collections::ValueList>()
+        {
+            self.enter(ex, false)?;
+            let result = crate::serial::valuelist_xml::xml_data(ex, list, self);
+            self.leave();
+            return result;
+        }
+        if self.xml_write
+            && let Some(table) = o.as_any().downcast_ref::<crate::collections::ValueTable>()
+        {
+            if self.json_prefix_bytes == 0 {
+                return Err(self.mismatch(ex));
+            }
+            self.enter(ex, false)?;
+            let result = crate::serial::valuetable_xml::xml_data(ex, table, o, self);
+            self.leave();
+            return result;
+        }
+        if self.xml_write && o.as_any().is::<crate::values::boundary::Boundary>() {
+            self.enter(ex, false)?;
+            let result = crate::serial::boundary::xml_data(ex, o, self);
             self.leave();
             return result;
         }
@@ -405,11 +727,66 @@ impl XdtoCtx {
     }
 
     pub fn from_data(&mut self, ex: &mut Execution, d: &XdtoData) -> Result<Value, Exception> {
+        self.refresh_json_input(ex)?;
+        self.refresh_json_roots(ex)?;
+        if self.json_read {
+            ex.reserve(self.read_scratch(0))?;
+        }
+        let value = self.value_from_data(ex, d)?;
+        self.refresh_json_input(ex)?;
+        self.refresh_json_roots_with(ex, Some(&value))?;
+        if self.json_read {
+            ex.reserve(self.read_scratch(0))?;
+        }
+        Ok(value)
+    }
+
+    fn value_from_data(&mut self, ex: &mut Execution, d: &XdtoData) -> Result<Value, Exception> {
         ex.charge(1)?;
         let ty = match d {
             XdtoData::Nil => return Ok(Value::Undefined),
             XdtoData::Value { ty, .. } | XdtoData::Object { ty, .. } => ty,
         };
+        if self.json_read
+            && let XdtoData::Value { lexical, value, .. } = d
+        {
+            let backing = match value {
+                Value::Number(n) => (n.backing_capacity_limbs() as u64).saturating_mul(4),
+                Value::String(s) => (s.backing_capacity_units() as u64).saturating_mul(2),
+                _ => 0,
+            };
+            self.account(ex, backing.saturating_add(lexical.len() as u64))?;
+        }
+        if self.xml_read && ty.ns == "http://v8.1c.ru/8.1/data/txtedt" && ty.name == "TextDocument"
+        {
+            self.enter(ex, true)?;
+            let result = crate::serial::textdoc::read_xml_data(ex, d, self);
+            self.leave();
+            return result;
+        }
+        if self.xml_read && ty.ns == "http://v8.1c.ru/8.1/data/enterprise" && ty.name == "Bound" {
+            self.enter(ex, true)?;
+            let result = crate::serial::boundary::read_xml_data(ex, d, self);
+            self.leave();
+            return result;
+        }
+        if self.xml_read && ty.ns == NS_CORE && ty.name == "ValueListType" {
+            self.enter(ex, true)?;
+            let result = crate::serial::valuelist_xml::read_xml_data(ex, d, self);
+            self.leave();
+            return result;
+        }
+        if self.json_read && ty.ns == NS_CORE && ty.name == "ValueListType" {
+            self.enter(ex, true)?;
+            let result = crate::serial::valuelist_xml::read_data(
+                ex,
+                d,
+                self,
+                crate::serial::valuelist_xml::RestoreMode::Json,
+            );
+            self.leave();
+            return result;
+        }
         if let Some(c) = codec_of_name(ty) {
             self.enter(ex, true)?;
             let r = c.from_xdto(ex, d, self);

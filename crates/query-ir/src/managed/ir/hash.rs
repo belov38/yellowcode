@@ -7,6 +7,19 @@ pub(super) fn shallow(e: &Expr, h: &mut impl Hasher) {
 
 const SHALLOW_DEPTH: u8 = 3;
 
+pub(super) fn deref_prefixes(e: &Expr, mut visit: impl FnMut(usize, u64)) {
+    let ExprKind::Deref { base, steps } = &e.kind else {
+        return;
+    };
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    std::mem::discriminant(&e.kind).hash(&mut h);
+    shallow_d(base, &mut h, SHALLOW_DEPTH);
+    for (i, step) in steps.iter().take(steps.len().saturating_sub(1)).enumerate() {
+        step.name.hash(&mut h);
+        visit(i + 1, h.finish());
+    }
+}
+
 fn shallow_d(e: &Expr, h: &mut impl Hasher, d: u8) {
     std::mem::discriminant(&e.kind).hash(h);
     match &e.kind {
@@ -23,6 +36,10 @@ fn shallow_d(e: &Expr, h: &mut impl Hasher, d: u8) {
         ExprKind::Lit(v) => value(v, h),
         ExprKind::Param(i) | ExprKind::Value(i) | ExprKind::Out(i) => i.hash(h),
         ExprKind::KeyRef(i) | ExprKind::AggRef(i) => i.hash(h),
+        ExprKind::LocalKey { key, orig } => {
+            key.hash(h);
+            kids([&**orig].into_iter(), h, d);
+        }
         ExprKind::OuterKey { src, key, .. } => {
             src.hash(h);
             key.hash(h);

@@ -115,6 +115,34 @@ pub(crate) struct ValueList {
     hash: i32,
 }
 
+pub(crate) struct SerialItem {
+    pub value: Value,
+    pub presentation: Str,
+    pub check: bool,
+    pub picture: Value,
+    pub id: u64,
+}
+impl Drop for SerialItem {
+    fn drop(&mut self) {
+        release(vec![
+            std::mem::take(&mut self.value),
+            std::mem::take(&mut self.picture),
+        ]);
+    }
+}
+pub(crate) struct SerialSnapshot {
+    pub items: Vec<SerialItem>,
+    pub policy: Option<TypeDescription>,
+    pub available: Value,
+    pub next_id: u64,
+    pub revision: u64,
+}
+impl Drop for SerialSnapshot {
+    fn drop(&mut self) {
+        release(vec![std::mem::take(&mut self.available)]);
+    }
+}
+
 thread_local! { static PRESENT_DEPTH: Cell<u32> = const { Cell::new(0) }; }
 struct PresentGuard;
 impl PresentGuard {
@@ -501,6 +529,168 @@ impl ValueList {
             super::retire::push(out, Value::Object(item));
         }
         super::retire::push(out, std::mem::take(&mut *self.available.borrow_mut()));
+    }
+
+    pub(crate) fn serial_json_snapshot_admission(
+        &self,
+        ex: &mut Execution,
+    ) -> Result<(u64, u64), Exception> {
+        ex.charge(1)?;
+        if !matches!(*self.available.borrow(), Value::Undefined) {
+            return Err(ex.error(HostError::not_implemented(
+                "СписокЗначений",
+                "Запись JSON картинки или доступных значений",
+            )));
+        }
+        let items = self.items.borrow();
+        let mut bytes = (items.len() as u64)
+            .saturating_mul(std::mem::size_of::<SerialItem>() as u64 + 4096)
+            .saturating_add(2048);
+        for item in items.iter() {
+            ex.charge(1)?;
+            let data = item.data.borrow();
+            if !matches!(data.picture, Value::Undefined) {
+                return Err(ex.error(HostError::not_implemented(
+                    "СписокЗначений",
+                    "Запись JSON картинки или доступных значений",
+                )));
+            }
+            bytes = bytes.saturating_add(
+                (data.presentation.backing_capacity_units() as u64).saturating_mul(16),
+            );
+            bytes = bytes.saturating_add(match &data.value {
+                Value::Number(n) => (n.backing_capacity_limbs() as u64)
+                    .saturating_mul(8)
+                    .saturating_add(n.size_hint_limbs().saturating_mul(64))
+                    .saturating_add(256),
+                Value::String(s) => (s.backing_capacity_units() as u64).saturating_mul(16),
+                _ => 0,
+            });
+        }
+        if let Some(policy) = &*self.policy.borrow() {
+            bytes = bytes.saturating_add(policy.backing_bytes().saturating_mul(2));
+        }
+        Ok((bytes, self.revision.get()))
+    }
+
+    pub(crate) fn serial_snapshot_bytes(&self, ex: &mut Execution) -> Result<u64, Exception> {
+        ex.charge(1)?;
+        let items = self.items.borrow();
+        let mut bytes = (items.len() as u64)
+            .saturating_mul(std::mem::size_of::<SerialItem>() as u64)
+            .saturating_add(scalar_clone_bytes(&self.available.borrow()));
+        for item in items.iter() {
+            ex.charge(1)?;
+            let data = item.data.borrow();
+            for value in [&data.value, &data.picture] {
+                let scratch = match value {
+                    Value::Number(n) => n.size_hint_limbs().saturating_mul(64).saturating_add(256),
+                    _ => scalar_clone_bytes(value),
+                };
+                bytes = bytes.saturating_add(scratch);
+            }
+        }
+        if let Some(policy) = &*self.policy.borrow() {
+            bytes = bytes.saturating_add(policy.backing_bytes());
+        }
+        Ok(bytes)
+    }
+    pub(crate) fn serial_snapshot(&self, ex: &mut Execution) -> Result<SerialSnapshot, Exception> {
+        let items = self.items.borrow();
+        ex.charge(items.len() as u64)?;
+        let mut out = Vec::new();
+        out.try_reserve_exact(items.len())
+            .map_err(|_| ex.out_of_memory())?;
+        for item in items.iter() {
+            let data = item.data.borrow();
+            out.push(SerialItem {
+                value: data.value.clone(),
+                presentation: data.presentation.clone(),
+                check: data.check,
+                picture: data.picture.clone(),
+                id: item.id,
+            });
+        }
+        Ok(SerialSnapshot {
+            items: out,
+            policy: self.policy.borrow().clone(),
+            available: self.available.borrow().clone(),
+            next_id: self.next_id.get(),
+            revision: self.revision.get(),
+        })
+    }
+    pub(crate) fn serial_check_revision(
+        &self,
+        ex: &mut Execution,
+        revision: u64,
+    ) -> Result<(), Exception> {
+        if revision != self.revision.get() {
+            return Err(ex.error(reentrant()));
+        }
+        Ok(())
+    }
+    pub(crate) fn serial_restore_bytes(count: usize, policy_bytes: u64) -> Option<u64> {
+        use std::alloc::Layout;
+        fn rc_bytes<T>() -> Option<usize> {
+            let (layout, _) = Layout::new::<(usize, usize)>()
+                .extend(Layout::new::<T>())
+                .ok()?;
+            Some(layout.pad_to_align().size())
+        }
+        let slots = Layout::array::<Rc<ValueListItem>>(count).ok()?.size();
+        let items = rc_bytes::<ValueListItem>()?.checked_mul(count)?;
+        let fixed = rc_bytes::<Self>()?
+            .checked_add(rc_bytes::<RefCell<Option<TypeDescription>>>()?)?
+            .checked_add(rc_bytes::<Cell<u64>>()?)?;
+        u64::try_from(fixed.checked_add(slots)?.checked_add(items)?)
+            .ok()?
+            .checked_add(policy_bytes)
+    }
+
+    pub(crate) fn serial_restore_capacity(&self) -> usize {
+        self.items.borrow().capacity()
+    }
+
+    pub(crate) fn serial_restore(
+        ex: &mut Execution,
+        count: usize,
+        policy: TypeDescription,
+        next_id: u64,
+    ) -> Result<Rc<Self>, Exception> {
+        ex.charge(count as u64 + 1)?;
+        ex.reserve(
+            (count as u64)
+                .saturating_mul(
+                    (std::mem::size_of::<ValueListItem>() + 4 * std::mem::size_of::<usize>())
+                        as u64,
+                )
+                .saturating_add(512)
+                .saturating_add(policy.backing_bytes()),
+        )?;
+        let list = Self::empty();
+        list.items
+            .borrow_mut()
+            .try_reserve_exact(count)
+            .map_err(|_| ex.out_of_memory())?;
+        *list.policy.borrow_mut() = Some(policy);
+        list.next_id.set(next_id);
+        Ok(Rc::new(list))
+    }
+    pub(crate) fn serial_push(&self, id: u64, value: Value, presentation: Str, check: bool) {
+        self.items.borrow_mut().push(ValueListItem::new(
+            ItemData {
+                value,
+                presentation,
+                check,
+                picture: Value::Undefined,
+            },
+            self.policy.clone(),
+            self.revision.clone(),
+            id,
+        ));
+    }
+    pub(crate) fn serial_available(&self, value: Value) {
+        *self.available.borrow_mut() = value;
     }
 
     fn empty() -> Self {

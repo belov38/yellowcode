@@ -315,16 +315,17 @@ impl HostObject for PropertyObj {
                 let Some(d) = p.default.as_deref() else {
                     return Ok(Value::Undefined);
                 };
-                match super::data::value_from_text(ex, &self.f.model, &p.ty, d, false)? {
-                    super::data::XdtoData::Value {
-                        ty, lexical, value, ..
-                    } => Ok(Value::Object(Rc::new(super::data::DataValue {
-                        factory: self.f.clone(),
-                        ty,
-                        lexical,
-                        value,
-                    }))),
-                    _ => Ok(Value::from(d)),
+                match super::data::value_from_text(ex, &self.f.model, &p.ty, d, false)?.take_value()
+                {
+                    Some((ty, lexical, value)) => {
+                        Ok(Value::Object(Rc::new(super::data::DataValue {
+                            factory: self.f.clone(),
+                            ty,
+                            lexical,
+                            value,
+                        })))
+                    }
+                    None => Ok(Value::from(d)),
                 }
             }
             Some("Fixed") => Ok(Value::Bool(p.fixed.is_some())),

@@ -160,3 +160,25 @@ impl bsl_vm::SessionObject for SessionPair {
         (std::mem::size_of::<KeyValue>() + 16) as u64
     }
 }
+
+impl KeyValue {
+    pub(super) fn serial_snapshot(
+        &self,
+        ex: &mut Execution,
+        w: &mut crate::serial::codec::InternalWriter,
+    ) -> Result<[Value; 2], bsl_vm::Exception> {
+        let pair = self.pair.borrow();
+        ex.charge(2)?;
+        w.account(
+            ex,
+            super::retained::rc_bytes(self)
+                .saturating_add(2 * std::mem::size_of::<Value>() as u64)
+                .saturating_add(super::codec::serial_value_bytes(&pair[0]))
+                .saturating_add(super::codec::serial_value_bytes(&pair[1])),
+        )?;
+        Ok([
+            super::codec::serial_clone(ex, &pair[0])?,
+            super::codec::serial_clone(ex, &pair[1])?,
+        ])
+    }
+}

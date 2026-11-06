@@ -4,7 +4,9 @@ use super::{
 };
 use crate::bind::{arg_value, msg, type_mismatch};
 use bsl_prim::{BoostKey, BoostMap, Str, boost_hash};
-use bsl_vm::{Arg, CallResult, Execution, HostError, HostObject, MemberId, TypeId, TypeIdx, Value};
+use bsl_vm::{
+    Arg, CallResult, Exception, Execution, HostError, HostObject, MemberId, TypeId, TypeIdx, Value,
+};
 use platform_catalog::catalog;
 use std::any::Any;
 use std::cell::RefCell;
@@ -67,7 +69,141 @@ pub(crate) struct Table {
     next: i32,
 }
 
+pub(super) struct JsonMapLookup {
+    key: Key,
+    existing: Option<u32>,
+    new_identity: Option<usize>,
+}
+
+impl JsonMapLookup {
+    pub(super) fn value(&self) -> &Value {
+        &self.key.value
+    }
+}
+
 impl Table {
+    pub(super) fn json_empty_bytes() -> Option<u64> {
+        let bytes =
+            std::mem::size_of::<Self>().checked_add(BoostMap::<Key, Value>::empty_buffer_bytes())?;
+        u64::try_from(bytes).ok()
+    }
+    pub(super) fn try_json_new() -> Option<Self> {
+        Some(Self {
+            pairs: BoostMap::try_new()?,
+            numbers: HashMap::new(),
+            next: 0,
+        })
+    }
+
+    pub(super) fn json_charge_lookup(
+        &self,
+        ex: &mut Execution,
+        key: &Value,
+    ) -> Result<(), Exception> {
+        let work = match key {
+            Value::Number(n) => n.size_hint_limbs(),
+            Value::String(s) => s.len() as u64,
+            _ => 1,
+        };
+        ex.charge(work.saturating_add(self.pairs.storage_slots() as u64))?;
+        for (candidate, _) in self.pairs.iter() {
+            if let (Value::Number(left), Value::Number(right)) = (&candidate.value, key) {
+                ex.charge(left.size_hint_limbs().min(right.size_hint_limbs()))?;
+            }
+            bsl_vm::ops::charge_equal(ex, &candidate.value, key)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn json_lookup(&self, ex: &Execution, value: Value) -> JsonMapLookup {
+        let (hash, new_identity) = match own_hash(ex, &value) {
+            Some(hash) => (hash, None),
+            None => {
+                let id = identity(&value).unwrap_or_default();
+                match self.numbers.get(&id) {
+                    Some(hash) => (*hash, None),
+                    None => (self.next, Some(id)),
+                }
+            }
+        };
+        let key = Key { value, hash };
+        let existing = self.pairs.prepared_lookup(&key);
+        JsonMapLookup {
+            key,
+            existing,
+            new_identity,
+        }
+    }
+
+    pub(super) fn json_plan(
+        &self,
+        lookup: &JsonMapLookup,
+    ) -> Option<(bsl_prim::boostmap::InsertPlan, u64, u64)> {
+        let plan = self.pairs.plan_insert(lookup.existing)?;
+        let node_growth = self.pairs.node_reserve_bound(plan)?;
+        let numbers_growth =
+            super::json_map_numbering::growth_bound(&self.numbers, lookup.new_identity.is_some())?;
+        Some((plan, node_growth, numbers_growth))
+    }
+
+    pub(super) fn json_reserve_numbers(
+        &mut self,
+        lookup: &JsonMapLookup,
+        bound: u64,
+    ) -> Option<()> {
+        super::json_map_numbering::reserve(&mut self.numbers, lookup.new_identity.is_some(), bound)
+    }
+
+    pub(super) fn json_reserve_node(&mut self, plan: bsl_prim::boostmap::InsertPlan) -> Option<()> {
+        self.pairs.reserve_prepared_node(plan)
+    }
+
+    pub(super) fn json_insert_prepared(
+        &mut self,
+        lookup: JsonMapLookup,
+        value: Value,
+        plan: bsl_prim::boostmap::InsertPlan,
+        scratch: bsl_prim::boostmap::InsertScratch,
+    ) -> Result<(Option<Value>, Option<Key>), (JsonMapLookup, Value)> {
+        let Some(prepared) = self.pairs.finish_prepared(plan, scratch) else {
+            return Err((lookup, value));
+        };
+        let JsonMapLookup {
+            key, new_identity, ..
+        } = lookup;
+        let hash = key.hash;
+        if let Some(id) = new_identity {
+            self.numbers.insert(id, hash);
+            self.next = self.next.wrapping_add(1);
+        }
+        Ok(prepared.commit(key, value, hash))
+    }
+
+    pub(super) fn visit_json_retained(
+        &self,
+        visit: &mut dyn bsl_vm::RetainedMemory,
+        oom: &Exception,
+    ) -> Result<(), Exception> {
+        let work = (self.pairs.storage_slots() as u64)
+            .checked_add(self.numbers.capacity() as u64)
+            .ok_or_else(|| oom.clone())?;
+        visit.work(work)?;
+        visit.bytes(std::mem::size_of::<Self>() as u64)?;
+        visit.bytes(
+            self.pairs
+                .checked_backing_bytes()
+                .ok_or_else(|| oom.clone())?,
+        )?;
+        visit.bytes(
+            bsl_vm::retained_hash_bytes::<(usize, i32)>(self.numbers.capacity())
+                .ok_or_else(|| oom.clone())?,
+        )?;
+        for (key, value) in self.pairs.iter() {
+            visit.value(&key.value)?;
+            visit.value(value)?;
+        }
+        Ok(())
+    }
     fn key(&self, ex: &Execution, v: Value) -> Option<Key> {
         let hash = match own_hash(ex, &v) {
             Some(h) => h,
@@ -578,4 +714,67 @@ pub fn new_fixed_map(ex: &Execution, pairs: Vec<(Value, Value)>) -> Value {
         drop(table.insert(ex, k, v));
     }
     Map::new_value(table, true)
+}
+
+impl Map {
+    pub(super) fn serial_snapshot(
+        &self,
+        ex: &mut Execution,
+        w: &mut crate::serial::codec::InternalWriter,
+    ) -> Result<Vec<(Value, Value)>, bsl_vm::Exception> {
+        let table = self.table.borrow();
+        let order = self.order.borrow();
+        ex.charge(table.pairs.len() as u64 + table.numbers.capacity() as u64 + 1)?;
+        let mut bytes = super::retained::rc_bytes(self)
+            .saturating_add(table.pairs.backing_bytes())
+            .saturating_add(
+                (table.numbers.capacity() as u64)
+                    .saturating_mul(2 * (std::mem::size_of::<(usize, i32)>() as u64 + 1)),
+            )
+            .saturating_add(64)
+            .saturating_add(
+                (table.pairs.len() as u64)
+                    .saturating_mul(std::mem::size_of::<(Value, Value)>() as u64),
+            );
+        for (key, value) in table.pairs.iter() {
+            bytes = bytes
+                .saturating_add(super::codec::serial_value_bytes(&key.value))
+                .saturating_add(super::codec::serial_value_bytes(value));
+        }
+        if let Some(order) = order.as_ref() {
+            ex.charge(order.len() as u64)?;
+            bytes = bytes
+                .saturating_add(super::retained::rc_bytes(order.as_ref()))
+                .saturating_add(
+                    (order.capacity() as u64)
+                        .saturating_mul(std::mem::size_of::<(Value, Value)>() as u64),
+                );
+            for (key, value) in order.iter() {
+                bytes = bytes
+                    .saturating_add(super::codec::serial_value_bytes(key))
+                    .saturating_add(super::codec::serial_value_bytes(value));
+            }
+        }
+        w.account(ex, bytes)?;
+        let mut snapshot = Vec::new();
+        snapshot
+            .try_reserve_exact(table.pairs.len())
+            .map_err(|_| ex.out_of_memory())?;
+        if let Some(order) = order.as_ref() {
+            for (key, value) in order.iter() {
+                snapshot.push((
+                    super::codec::serial_clone(ex, key)?,
+                    super::codec::serial_clone(ex, value)?,
+                ));
+            }
+        } else {
+            for (key, value) in table.pairs.iter() {
+                snapshot.push((
+                    super::codec::serial_clone(ex, &key.value)?,
+                    super::codec::serial_clone(ex, value)?,
+                ));
+            }
+        }
+        Ok(snapshot)
+    }
 }

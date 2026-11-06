@@ -188,13 +188,34 @@ pub(crate) fn json_writer<'a>(_ex: &mut Execution, v: &'a Value) -> CallResult<R
 }
 
 pub(crate) fn json_account(ex: &mut Execution, v: &Value, add: u64, depth: u64) -> CallResult<()> {
+    json_account_with_live(ex, v, add, depth, 0)
+}
+
+pub(crate) fn json_prefix_bytes(v: &Value) -> CallResult<u64> {
     let Some(w) = v
         .as_object()
         .and_then(|o| o.as_any().downcast_ref::<JsonWriter>())
     else {
         return Err(type_mismatch(1).into());
     };
-    w.grow_at(ex, add, w.depth.get().saturating_add(depth))
+    let writer = writer_of(w)?;
+    Ok((writer.backing_capacity_units() as u64).saturating_mul(2))
+}
+
+pub(crate) fn json_account_with_live(
+    ex: &mut Execution,
+    v: &Value,
+    add: u64,
+    depth: u64,
+    live: u64,
+) -> CallResult<()> {
+    let Some(w) = v
+        .as_object()
+        .and_then(|o| o.as_any().downcast_ref::<JsonWriter>())
+    else {
+        return Err(type_mismatch(1).into());
+    };
+    w.grow_at_with_live(ex, add, w.depth.get().saturating_add(depth), live)
 }
 
 fn writer_of(w: &JsonWriter) -> CallResult<RefMut<'_, Writer>> {
@@ -252,6 +273,16 @@ impl JsonWriter {
     }
 
     fn grow_at(&self, ex: &mut Execution, add: u64, depth: u64) -> CallResult<()> {
+        self.grow_at_with_live(ex, add, depth, 0)
+    }
+
+    fn grow_at_with_live(
+        &self,
+        ex: &mut Execution,
+        add: u64,
+        depth: u64,
+        live: u64,
+    ) -> CallResult<()> {
         let extra = if self.pretty.get() {
             depth.saturating_mul(self.indent.get()).saturating_add(4)
         } else {
@@ -262,7 +293,21 @@ impl JsonWriter {
             return Err(ex.out_of_memory().into());
         }
         ex.charge(add.saturating_add(extra) / 64)?;
-        ex.reserve(total.saturating_mul(2))?;
+        let output_bytes = if live == 0 {
+            total.saturating_mul(2)
+        } else {
+            let capacity = self
+                .w
+                .try_borrow()
+                .map_err(|_| no_target())?
+                .as_ref()
+                .ok_or_else(no_target)?
+                .backing_capacity_units() as u64;
+            capacity
+                .saturating_mul(2)
+                .saturating_add(total.saturating_mul(4))
+        };
+        ex.reserve(output_bytes.saturating_add(live))?;
         Ok(())
     }
 

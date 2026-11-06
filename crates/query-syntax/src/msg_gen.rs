@@ -190,10 +190,12 @@ pub enum MsgId {
     DBERROR_UNIQUEINDEX,
     USE_TOTALS_SWITCH_OFF,
     INVALID_PERIOD,
+    MAIN_REGISTER_DIMS_PARAMETER_UNDEFINED,
+    MAIN_REGISTER_DIMS_PARAMETER_VALUE_MISMATCH,
 }
 
 impl MsgId {
-    pub const ALL: [MsgId; 189] = [
+    pub const ALL: [MsgId; 191] = [
         MsgId::DBERROR_ACCESSDENIED,
         MsgId::DBERROR_SECURITYINSTR,
         MsgId::SELECT_ERROR_ACCESSDENIEDFIELD,
@@ -383,10 +385,12 @@ impl MsgId {
         MsgId::DBERROR_UNIQUEINDEX,
         MsgId::USE_TOTALS_SWITCH_OFF,
         MsgId::INVALID_PERIOD,
+        MsgId::MAIN_REGISTER_DIMS_PARAMETER_UNDEFINED,
+        MsgId::MAIN_REGISTER_DIMS_PARAMETER_VALUE_MISMATCH,
     ];
 }
 
-pub(crate) static MESSAGES: [(&str, &str, &str, &str); 189] = [
+pub(crate) static MESSAGES: [(&str, &str, &str, &str); 191] = [
     (
         "backend",
         "IDS_DBERROR_ACCESSDENIED",
@@ -1520,5 +1524,17 @@ pub(crate) static MESSAGES: [(&str, &str, &str, &str); 189] = [
         "IDS_INVALID_PERIOD",
         "Неправильно задан период: начало периода должно быть меньше или равно окончанию",
         "Invalid period definition: period begin should be less than or equal to period end",
+    ),
+    (
+        "calc",
+        "IDS_MAIN_REGISTER_DIMS_PARAMETER_UNDEFINED",
+        "Не задан параметр \"%s\"",
+        "Parameter \"%s\" is not specified",
+    ),
+    (
+        "calc",
+        "IDS_MAIN_REGISTER_DIMS_PARAMETER_VALUE_MISMATCH",
+        "Неверный параметр \"%s\" (измерение %d не соответствует ни одному из измерений основного регистра)",
+        "Invalid parameter \"%s\" (dimension %d does not match any of the main register dimensions)",
     ),
 ];

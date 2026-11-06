@@ -1,7 +1,10 @@
+mod children;
 mod coll;
+mod http;
 mod object;
 mod props;
 mod stdtab;
+mod web;
 
 use crate::errors::{self, keys};
 use crate::model::{AppModel, ObjId, ObjKind, Uuid16};
@@ -79,6 +82,38 @@ impl MdKey {
                     put(11);
                     put(o.0);
                     put(idx(i));
+                }
+                MdPath::Command(o, i) => {
+                    put(12);
+                    put(o.0);
+                    put(idx(i));
+                }
+                MdPath::Template(o, i) => {
+                    put(13);
+                    put(o.0);
+                    put(idx(i));
+                }
+                MdPath::HttpUrlTemplate(s, u) => {
+                    put(14);
+                    put(idx(s));
+                    put(idx(u));
+                }
+                MdPath::HttpMethod(s, u, m) => {
+                    put(15);
+                    put(idx(s));
+                    put(idx(u));
+                    put(idx(m));
+                }
+                MdPath::WebOperation(s, o) => {
+                    put(16);
+                    put(idx(s));
+                    put(idx(o));
+                }
+                MdPath::WebParameter(s, o, p) => {
+                    put(17);
+                    put(idx(s));
+                    put(idx(o));
+                    put(idx(p));
                 }
                 MdPath::Configuration => put(9),
             },
@@ -184,7 +219,12 @@ pub(crate) fn register(app: &Arc<Application>, reg: &mut Registry) -> Result<()>
 
 pub(crate) fn value_of(cx: &Arc<MdCtx>, ex: &mut Execution, key: MdKey) -> Value {
     if let Some(o) = call_ctx(ex).and_then(|c| c.md_cache.get(&key).cloned()) {
-        return Value::Object(o);
+        let value = Value::Object(o);
+        if key_with_app(&value)
+            .is_some_and(|(cached_key, app)| cached_key == key && Arc::ptr_eq(app, &cx.app))
+        {
+            return value;
+        }
     }
     let o: ObjRef = match key {
         MdKey::Path(MdPath::Configuration) => Rc::new(object::MdRoot { cx: cx.clone() }),
@@ -206,15 +246,19 @@ pub(crate) fn value_of(cx: &Arc<MdCtx>, ex: &mut Execution, key: MdKey) -> Value
 }
 
 pub(crate) fn key_of(v: &Value) -> Option<MdKey> {
+    key_with_app(v).map(|(key, _)| key)
+}
+
+pub(crate) fn key_with_app(v: &Value) -> Option<(MdKey, &Arc<Application>)> {
     let any = v.as_object()?.as_any();
-    if any.is::<object::MdRoot>() {
-        return Some(MdKey::Path(MdPath::Configuration));
+    if let Some(o) = any.downcast_ref::<object::MdRoot>() {
+        return Some((MdKey::Path(MdPath::Configuration), &o.cx.app));
     }
     if let Some(o) = any.downcast_ref::<object::MdObj>() {
-        return Some(MdKey::Path(o.path));
+        return Some((MdKey::Path(o.path), &o.cx.app));
     }
     any.downcast_ref::<object::MdStd>()
-        .map(|s| MdKey::Std(s.obj, s.tab, s.idx))
+        .map(|s| (MdKey::Std(s.obj, s.tab, s.idx), &s.cx.app))
 }
 
 pub(crate) fn no_field(name: &str) -> HostError {

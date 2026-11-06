@@ -550,3 +550,93 @@ fn retained_definition(
     }
     Ok(())
 }
+
+impl Indexes {
+    pub(super) fn serial_bytes(&self, ex: &mut Execution) -> Result<u64, bsl_vm::Exception> {
+        let entries = self.state.entries.borrow();
+        ex.charge(entries.len() as u64 + 1)?;
+        let mut bytes = vector::<Vec<u32>>(entries.len());
+        for entry in entries.iter() {
+            ex.charge(entry.columns.len() as u64)?;
+            bytes = bytes.saturating_add(vector::<u32>(entry.columns.len()));
+        }
+        Ok(bytes)
+    }
+    pub(super) fn serial_definitions(
+        &self,
+        ex: &mut Execution,
+    ) -> Result<Vec<Vec<u32>>, bsl_vm::Exception> {
+        let entries = self.state.entries.borrow();
+        ex.charge(entries.len() as u64)?;
+        let mut definitions = Vec::new();
+        definitions
+            .try_reserve_exact(entries.len())
+            .map_err(|_| ex.out_of_memory())?;
+        for entry in entries.iter() {
+            ex.charge(entry.columns.len() as u64)?;
+            let mut ids = Vec::new();
+            ids.try_reserve_exact(entry.columns.len())
+                .map_err(|_| ex.out_of_memory())?;
+            ids.extend(entry.columns.iter().map(|column| column.id));
+            definitions.push(ids);
+        }
+        Ok(definitions)
+    }
+}
+
+impl Indexes {
+    pub(super) fn serial_reserve_entries(
+        &self,
+        ex: &mut Execution,
+        count: usize,
+    ) -> CallResult<()> {
+        self.state
+            .entries
+            .borrow_mut()
+            .try_reserve_exact(count)
+            .map_err(|_| ex.out_of_memory())?;
+        self.state.bytes.set(
+            Self::allocation_bytes().saturating_add(vector::<Rc<Definition>>(
+                self.state.entries.borrow().capacity(),
+            )),
+        );
+        Ok(())
+    }
+    pub(super) fn serial_restore(&self, ex: &mut Execution, ids: &[u32]) -> CallResult<()> {
+        let mut columns = vec_with_capacity(ex, ids.len() as u64)?;
+        let mut live = self.state.live(ex, None)?;
+        live = live
+            .saturating_add(vector::<Rc<ColumnRecord>>(ids.len()))
+            .saturating_add(256);
+        ex.reserve(live)?;
+        ex.charge((ids.len() as u64).saturating_mul(self.state.columns.len() as u64 + 1))?;
+        for id in ids {
+            let column = self.state.columns.record(*id).ok_or_else(changed)?;
+            columns.push(column);
+        }
+        let id = self.state.next_id.get();
+        let next = id.checked_add(1).ok_or_else(|| ex.out_of_memory())?;
+        let record = Rc::new(Definition {
+            id,
+            hash: creation_number(),
+            member: Cell::new(true),
+            columns,
+        });
+        let mut entries = self.state.entries.borrow_mut();
+        ex.charge(entries.len() as u64 + 1)?;
+        if entries.len() == entries.capacity() {
+            return Err(ex.out_of_memory().into());
+        }
+        entries.push(record);
+        let bytes = Self::allocation_bytes()
+            .saturating_add(vector::<Rc<Definition>>(entries.capacity()))
+            .saturating_add(
+                entries
+                    .iter()
+                    .fold(0u64, |n, r| n.saturating_add(record_bytes(r))),
+            );
+        self.state.bytes.set(bytes);
+        self.state.next_id.set(next);
+        Ok(())
+    }
+}

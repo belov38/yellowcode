@@ -8,6 +8,22 @@ use brace::Node;
 use bsl_vm::{Exception, Execution, ObjRef, TypeId, TypeIdx, Value};
 use std::{mem::size_of, sync::Arc};
 
+pub(super) fn legacy_xml_supported(td: &TypeDescription) -> bool {
+    td.types() == [TypeId::NUMBER] && td.number() == NumberQualifiers::default()
+}
+
+pub(super) fn write_legacy_xml_body(
+    ex: &mut Execution,
+    writer: &mut crate::xml::XmlWriterState,
+) -> bsl_vm::CallResult<()> {
+    writer.start_element(ex, "Types", Some(crate::xml::NS_DATA))?;
+    writer.namespace(ex, "p1", crate::xml::NS_XS)?;
+    writer.start_element(ex, "Type", Some(crate::xml::NS_DATA))?;
+    writer.text(ex, "p1:decimal")?;
+    writer.end_element(ex)?;
+    writer.end_element(ex)
+}
+
 struct Description;
 
 pub(super) fn codecs() -> Vec<(TypeIdx, Arc<dyn ValueCodec>)> {

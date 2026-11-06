@@ -1,6 +1,6 @@
 use super::object::{info, number};
 use super::{
-    MdCtx, MdKey, MdPath, Ty, arg_value, fold, is_model_kind, key_of, member_name, member_of,
+    MdCtx, MdKey, MdPath, Ty, arg_value, fold, is_model_kind, key_with_app, member_name, member_of,
     no_field, value_of,
 };
 use crate::model::{FieldRole, ObjId};
@@ -128,6 +128,33 @@ pub(crate) fn forms_coll(cx: &Arc<MdCtx>, obj: ObjId) -> Value {
     )
 }
 
+pub(crate) fn commands_coll(cx: &Arc<MdCtx>, obj: ObjId) -> CallResult<Value> {
+    let source =
+        super::children::owner(cx, obj).ok_or_else(|| super::not_implemented("Команды"))?;
+    let mut items = Vec::new();
+    for (i, child) in source.children.iter().enumerate() {
+        if child.tag == md_model::ChildTag::Command {
+            if super::children::command(cx, obj, i).is_none() {
+                return Err(super::not_implemented("Команды").into());
+            }
+            items.push(MdKey::Path(MdPath::Command(obj, i)));
+        }
+    }
+    Ok(new_coll(cx, CollTy::Objects, items))
+}
+
+pub(crate) fn templates_coll(cx: &Arc<MdCtx>, obj: ObjId) -> CallResult<Value> {
+    let source = super::children::owner(cx, obj).ok_or_else(|| super::not_implemented("Макеты"))?;
+    let mut items = Vec::new();
+    for i in 0..source.templates.len() {
+        if super::children::template(cx, obj, i).is_none() {
+            return Err(super::not_implemented("Макеты").into());
+        }
+        items.push(MdKey::Path(MdPath::Template(obj, i)));
+    }
+    Ok(new_coll(cx, CollTy::Objects, items))
+}
+
 pub(crate) fn enum_values_coll(cx: &Arc<MdCtx>, obj: ObjId) -> Value {
     let n = cx.model().obj(obj).enum_values.len();
     new_coll(
@@ -201,8 +228,12 @@ impl MdColl {
             }
             "индекс" => {
                 let v = arg_value(ex, args, 0)?;
-                let k = key_of(&v).ok_or_else(|| super::props::type_mismatch(1))?;
-                let pos = self.items.iter().position(|x| *x == k);
+                let (k, app) = key_with_app(&v).ok_or_else(|| super::props::type_mismatch(1))?;
+                let pos = if Arc::ptr_eq(app, &self.cx.app) {
+                    self.items.iter().position(|x| *x == k)
+                } else {
+                    None
+                };
                 Ok(match pos {
                     Some(i) => number(i),
                     None => Value::from(-1_i64),
@@ -210,8 +241,10 @@ impl MdColl {
             }
             "содержит" => {
                 let v = arg_value(ex, args, 0)?;
-                let k = key_of(&v).ok_or_else(|| super::props::type_mismatch(1))?;
-                Ok(Value::Bool(self.items.contains(&k)))
+                let (k, app) = key_with_app(&v).ok_or_else(|| super::props::type_mismatch(1))?;
+                Ok(Value::Bool(
+                    Arc::ptr_eq(app, &self.cx.app) && self.items.contains(&k),
+                ))
             }
             _ => Err(no_field(ru).into()),
         }

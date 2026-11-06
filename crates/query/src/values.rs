@@ -86,8 +86,15 @@ pub fn from_value(
 ) -> CallResult<ConvertedParam> {
     ex.charge(1)?;
     if let Some(q) = scalar(ex, host, v)? {
+        let mut ty = value_type(host, &q)?;
+        if let Value::String(s) = v {
+            ty.string = Some(StrQ {
+                len: u32::try_from(s.len()).unwrap_or(u32::MAX),
+                fixed: false,
+            });
+        }
         return Ok(ConvertedParam {
-            shape: ParamShape::Value(value_type(host, &q)?),
+            shape: ParamShape::Value(ty),
             value: Some(ParamValue::Value(q)),
         });
     }

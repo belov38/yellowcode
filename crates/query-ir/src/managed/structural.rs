@@ -35,6 +35,9 @@ copy_clone!(
     query_syntax::Span
 );
 copy_clone!(
+    crate::tir::RecordsDeferred,
+    crate::tir::AccountingArguments,
+    crate::tir::DrCrArgScope,
     crate::schema::Periodicity,
     crate::schema::Complement,
     crate::tir::TotalsHierarchy,
@@ -166,6 +169,11 @@ struct_clone!(crate::tir::Query {
     autoorder,
     totals
 });
+struct_clone!(crate::tir::RecordsOptions {
+    order_desc,
+    top,
+    deferred
+});
 struct_clone!(crate::tir::OrderKey { expr, col, dir });
 struct_clone!(crate::tir::Totals {
     items,
@@ -292,7 +300,15 @@ impl ManagedClone for crate::tir::ControlPoint {
 impl ManagedClone for crate::tir::From {
     fn graph_depth(&self, remaining: u16) -> AResult<u16> {
         match self {
-            Self::Table { args, .. } => args.graph_depth(remaining),
+            Self::Table {
+                args,
+                drcr,
+                accounting_dependencies,
+                ..
+            } => Ok(args
+                .graph_depth(remaining)?
+                .max(drcr.graph_depth(remaining)?)
+                .max(accounting_dependencies.graph_depth(remaining)?)),
             Self::Subquery(query) => {
                 Ok(query.graph_depth(remaining.checked_sub(1).ok_or(BudgetError::Overflow)?)? + 1)
             }
@@ -304,6 +320,10 @@ impl ManagedClone for crate::tir::From {
             Self::Table {
                 id,
                 args,
+                records,
+                accounting,
+                accounting_dependencies,
+                drcr,
                 periodicity,
                 complement,
                 span,
@@ -313,6 +333,10 @@ impl ManagedClone for crate::tir::From {
                 Self::Table {
                     id,
                     args,
+                    records,
+                    accounting,
+                    accounting_dependencies,
+                    drcr,
                     periodicity,
                     complement,
                     span,
@@ -565,6 +589,75 @@ impl ManagedClone for crate::value::QValue {
                     .ok_or(BudgetError::Overflow)?;
                 Ok(NativeOwned::leaf(Self::Number(value), Some(arena), bytes))
             }
+        }
+    }
+}
+
+struct_clone!(crate::tir::AccountingDependencies {
+    supplied,
+    dependencies,
+    complete
+});
+struct_clone!(crate::tir::DrCrSource {
+    supplied,
+    dependencies,
+    date_slots
+});
+struct_clone!(crate::tir::DrCrArgDependency {
+    argument,
+    ordinal,
+    scope,
+    read
+});
+struct_clone!(crate::tir::DrCrWildcard {
+    base,
+    targets,
+    span
+});
+struct_clone!(crate::tir::DrCrWildcardTarget {
+    table,
+    path,
+    fields,
+    all_fields
+});
+impl ManagedClone for crate::tir::DrCrNested {
+    fn graph_depth(&self, remaining: u16) -> AResult<u16> {
+        let next = remaining.checked_sub(1).ok_or(BudgetError::Overflow)?;
+        Ok(self
+            .base
+            .graph_depth(next)?
+            .max(self.dependencies.graph_depth(next)?)
+            + 1)
+    }
+    fn clone_owned<'a>(&self, arena: &'a CompileArena) -> AResult<NativeOwned<'a, Self>> {
+        let depth = self.graph_depth(128)?;
+        let (base, table, dependencies, span) =
+            (&self.base, &self.table, &self.dependencies, &self.span);
+        fields!(
+            arena,
+            Self {
+                base,
+                table,
+                dependencies,
+                span
+            }
+        )
+        .map(|x| x.set_depth(depth))
+    }
+}
+impl ManagedClone for crate::tir::DrCrArgRead {
+    fn graph_depth(&self, remaining: u16) -> AResult<u16> {
+        match self {
+            Self::Expression(x) => x.graph_depth(remaining),
+            Self::Wildcard(x) => x.graph_depth(remaining),
+            Self::Nested(x) => x.graph_depth(remaining),
+        }
+    }
+    fn clone_owned<'a>(&self, arena: &'a CompileArena) -> AResult<NativeOwned<'a, Self>> {
+        match self {
+            Self::Expression(x) => Ok(x.clone_owned(arena)?.map(Self::Expression)),
+            Self::Wildcard(x) => Ok(x.clone_owned(arena)?.map(Self::Wildcard)),
+            Self::Nested(x) => Ok(x.clone_owned(arena)?.map(Self::Nested)),
         }
     }
 }

@@ -438,7 +438,7 @@ impl<'scope> Analyzer<'scope> {
             .items
             .iter()
             .zip(select::column_types(q))
-            .map(|(it, ty)| self.column_info(&it.name, &ty, it.nested.as_deref()))
+            .map(|(it, ty)| self.column_info(&it.name, &ty, tir::nested_output_fields(first, it)))
             .collect()
     }
 

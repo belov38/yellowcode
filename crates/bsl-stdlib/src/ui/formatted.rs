@@ -49,6 +49,11 @@ pub(super) fn ctor(ex: &mut Execution, args: &mut [Arg]) -> CallResult<Value> {
 }
 
 impl HostObject for Formatted {
+    fn retained_memory(&self, visit: &mut dyn bsl_vm::RetainedMemory) -> Result<bool, Exception> {
+        visit.bytes(self.markup.capacity() as u64)?;
+        Ok(true)
+    }
+
     fn type_id(&self) -> TypeId {
         TypeId::of_catalog(types().formatted)
     }

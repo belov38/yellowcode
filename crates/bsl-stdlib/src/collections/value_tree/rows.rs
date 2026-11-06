@@ -132,6 +132,7 @@ impl TreeRows {
             parent: self.parent.as_ref().map(|p| p.id),
             level,
             active: Cell::new(true),
+            materialized: Cell::new(false),
             children: RefCell::new(Vec::new()),
             cells: RefCell::new(cells),
             bytes: Cell::new(0),

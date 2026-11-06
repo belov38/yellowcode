@@ -11,6 +11,7 @@ pub(super) struct Rebuild<'c, 'a, 'r, 'w, 'k> {
     pub(super) anchor: Option<ir::SrcId>,
     pub(super) in_sub: bool,
     pub(super) replace: bool,
+    pub(super) allow_prefix: bool,
 }
 impl<'a> Rebuild<'_, 'a, '_, '_, '_> {
     pub(super) fn find(&self, e: &Expr) -> Option<u16> {
@@ -22,6 +23,37 @@ impl<'a> Rebuild<'_, 'a, '_, '_, '_> {
                 .map(|k| &k.trusted_borrow().kind)
                 == Some(&e.kind)
         })
+    }
+    fn find_prefix(&self, e: &Expr) -> Option<(u16, usize)> {
+        if !self.allow_prefix || self.keys.is_empty() {
+            return None;
+        }
+        let E::Deref { base, steps } = &e.kind else {
+            return None;
+        };
+        let mut found = None;
+        hash::deref_prefixes(e, |len, hash| {
+            if let Some(bucket) = self.index.get(&hash) {
+                for &i in bucket.iter() {
+                    let Some(key) = self.keys.get(usize::from(i)) else {
+                        continue;
+                    };
+                    let key = key.trusted_borrow();
+                    if let E::Deref {
+                        base: key_base,
+                        steps: key_steps,
+                    } = &key.kind
+                        && !key.ty.refs.is_empty()
+                        && key_base == base
+                        && key_steps.as_slice().iter().eq(steps.iter().take(len))
+                    {
+                        found = Some((i, len));
+                        break;
+                    }
+                }
+            }
+        });
+        found
     }
     fn reads_own(&self, e: &Expr) -> bool {
         let mut found = false;
@@ -81,6 +113,13 @@ impl<'a> Rebuild<'_, 'a, '_, '_, '_> {
             E::Param(i) => c.scalar(*i).map(E::Param),
             E::Value(i) => c.scalar(*i).map(E::Value),
             E::KeyRef(i) => c.scalar(*i).map(E::KeyRef),
+            E::LocalKey { key, orig } => {
+                let copier = Self {
+                    replace: false,
+                    ..*self
+                };
+                copier.bx(orig)?.map(|orig| E::LocalKey { key: *key, orig })
+            }
             E::AggRef(i) => c.scalar(*i).map(E::AggRef),
             E::Out(i) => c.scalar(*i).map(E::Out),
             E::Unit(k) => c.scalar(*k).map(E::Unit),
@@ -96,6 +135,48 @@ impl<'a> Rebuild<'_, 'a, '_, '_, '_> {
                 })
             }
             E::Deref { base, steps } => {
+                if self.replace
+                    && let Some((key, len)) = self.find_prefix(e)
+                    && let Some(prefix) = self.keys.get(usize::from(key))
+                {
+                    let prefix = prefix.trusted_borrow();
+                    let kind = if !self.in_sub {
+                        let copier = Self {
+                            replace: false,
+                            ..*self
+                        };
+                        Some(copier.bx(prefix)?.map(|orig| E::LocalKey { key, orig }))
+                    } else if let Some(src) = self.anchor
+                        && self.reads_own(prefix)
+                    {
+                        let copier = Self {
+                            replace: false,
+                            ..*self
+                        };
+                        Some(
+                            copier
+                                .bx(prefix)?
+                                .map(|orig| E::OuterKey { src, key, orig }),
+                        )
+                    } else {
+                        None
+                    };
+                    if let Some(kind) = kind {
+                        let prefix = c.expr(kind, c.copy(&prefix.ty)?)?;
+                        let suffix = steps.get(len..).ok_or(BuildProblem::Internal(
+                            "a grouping prefix beyond its dereference chain",
+                        ))?;
+                        let mut copied = c.vector(suffix.len())?;
+                        for step in suffix {
+                            c.push(&mut copied, c.copy(step)?)?;
+                        }
+                        let base = c.boxed(prefix)?;
+                        let kind = c
+                            .allocated(base.zip(copied.finish()))?
+                            .map(|(base, steps)| E::Deref { base, steps });
+                        return c.expr(kind, c.copy(&e.ty)?);
+                    }
+                }
                 let base = self.bx(base)?;
                 c.allocated(base.zip(c.copy(steps)?))?
                     .map(|(base, steps)| E::Deref { base, steps })
@@ -386,6 +467,7 @@ impl<'a> Rebuild<'_, 'a, '_, '_, '_> {
                         .iter()
                         .chain(v.area.iter().map(|a| &a.pred))
                         .chain(v.access.iter())
+                        .chain(v.order.iter().map(|k| &k.expr))
                         .any(reads)
             }
         }

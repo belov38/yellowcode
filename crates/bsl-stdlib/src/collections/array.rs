@@ -466,3 +466,33 @@ impl Array {
         Ok(())
     }
 }
+
+impl Array {
+    pub(super) fn serial_snapshot(
+        &self,
+        ex: &mut Execution,
+        w: &mut crate::serial::codec::InternalWriter,
+    ) -> Result<Vec<Value>, Exception> {
+        let values = self.items.borrow();
+        ex.charge(values.len() as u64 + 1)?;
+        let bytes = values.iter().fold(
+            super::retained::rc_bytes(self)
+                .saturating_add(
+                    (values.capacity() as u64).saturating_mul(std::mem::size_of::<Value>() as u64),
+                )
+                .saturating_add(
+                    (values.len() as u64).saturating_mul(std::mem::size_of::<Value>() as u64),
+                ),
+            |bytes, value| bytes.saturating_add(super::codec::serial_value_bytes(value)),
+        );
+        w.account(ex, bytes)?;
+        let mut snapshot = Vec::new();
+        snapshot
+            .try_reserve_exact(values.len())
+            .map_err(|_| ex.out_of_memory())?;
+        for value in values.iter() {
+            snapshot.push(super::codec::serial_clone(ex, value)?);
+        }
+        Ok(snapshot)
+    }
+}

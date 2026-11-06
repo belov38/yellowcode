@@ -24,6 +24,10 @@ fn platform() -> Arc<Model> {
     M.get_or_init(|| Arc::new(platform_model().clone())).clone()
 }
 
+pub(super) fn is_platform_model(model: &Arc<Model>) -> bool {
+    Arc::ptr_eq(model, &platform())
+}
+
 pub(crate) fn factory_value(f: FactoryRef) -> Value {
     Value::Object(Rc::new(FactoryObject { f }))
 }
@@ -92,11 +96,11 @@ impl FactoryObject {
             return Err(type_mismatch(1).into());
         }
         let v = arg_value(ex, args.get(1))?;
-        let d = match &v {
+        let mut d = match &v {
             Value::Object(o) if o.as_any().is::<DataValue>() => data_of(ex, &v, 2)?,
             _ => super::data::value_to_data(ex, m, &q, &v)?,
         };
-        let XdtoData::Value { lexical, value, .. } = d else {
+        let Some((_, lexical, value)) = d.take_value() else {
             return Err(type_mismatch(2).into());
         };
         Ok(Value::Object(Rc::new(DataValue {

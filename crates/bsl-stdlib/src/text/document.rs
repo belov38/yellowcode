@@ -19,7 +19,7 @@ struct Doc {
     raw: Option<Vec<u16>>,
 }
 
-struct TextDocument {
+pub(crate) struct TextDocument {
     d: RefCell<Doc>,
     sep: RefCell<Vec<u16>>,
 }
@@ -64,7 +64,130 @@ fn string(units: Vec<u16>) -> Value {
     Value::String(Str::from_vec(units))
 }
 
+fn xml_line_ranges(text: &[u16]) -> impl Iterator<Item = std::ops::Range<usize>> + '_ {
+    let mut at = 0;
+    std::iter::from_fn(move || {
+        if at == text.len() {
+            return None;
+        }
+        let start = at;
+        while at < text.len() && !matches!(text[at], 0x0D | 0x0A) {
+            at += 1;
+        }
+        let end = at;
+        if at < text.len() {
+            let cr = text[at] == 0x0D;
+            at += 1;
+            if cr && text.get(at) == Some(&0x0A) {
+                at += 1;
+            }
+        }
+        Some(start..end)
+    })
+}
+
 impl TextDocument {
+    pub(crate) fn from_xml_text(
+        ex: &mut Execution,
+        text: &[u16],
+    ) -> Result<Value, bsl_vm::Exception> {
+        ex.charge(1 + text.len() as u64 / 64)?;
+        let (count, line_units) = xml_line_ranges(text)
+            .try_fold((0usize, 0usize), |(count, units), range| {
+                Some((count.checked_add(1)?, units.checked_add(range.len())?))
+            })
+            .ok_or_else(|| ex.out_of_memory())?;
+        let bytes = text
+            .len()
+            .checked_add(line_units)
+            .and_then(|n| n.checked_mul(2))
+            .and_then(|n| n.checked_add(count.checked_mul(std::mem::size_of::<Vec<u16>>())?))
+            .and_then(|n| {
+                n.checked_add(4 + std::mem::size_of::<Self>() + 2 * std::mem::size_of::<usize>())
+            })
+            .ok_or_else(|| ex.out_of_memory())?;
+        ex.reserve(u64::try_from(bytes).map_err(|_| ex.out_of_memory())?)?;
+        ex.charge(1 + text.len() as u64 / 64 + count as u64)?;
+        let mut raw = Vec::new();
+        raw.try_reserve_exact(text.len())
+            .map_err(|_| ex.out_of_memory())?;
+        raw.extend_from_slice(text);
+        let mut lines = Vec::new();
+        lines
+            .try_reserve_exact(count)
+            .map_err(|_| ex.out_of_memory())?;
+        for range in xml_line_ranges(text) {
+            let mut line = Vec::new();
+            line.try_reserve_exact(range.len())
+                .map_err(|_| ex.out_of_memory())?;
+            line.extend_from_slice(&text[range]);
+            lines.push(line);
+        }
+        let mut sep = Vec::new();
+        sep.try_reserve_exact(CRLF.len())
+            .map_err(|_| ex.out_of_memory())?;
+        sep.extend_from_slice(&CRLF);
+        Ok(Value::Object(Rc::new(Self {
+            d: RefCell::new(Doc {
+                lines,
+                raw: Some(raw),
+            }),
+            sep: RefCell::new(sep),
+        })))
+    }
+
+    pub(crate) fn serial_text(&self, ex: &mut Execution) -> Result<Vec<u16>, bsl_vm::Exception> {
+        let units = {
+            let d = self.d.borrow();
+            match &d.raw {
+                Some(raw) => Some(raw.len()),
+                None => d.lines.iter().try_fold(0usize, |total, line| {
+                    total.checked_add(line.len())?.checked_add(1)
+                }),
+            }
+        }
+        .ok_or_else(|| ex.out_of_memory())?;
+        let bytes = units.checked_mul(2).ok_or_else(|| ex.out_of_memory())?;
+        ex.reserve(u64::try_from(bytes).map_err(|_| ex.out_of_memory())?)?;
+        ex.charge(1 + units as u64 / 64)?;
+        let mut text = Vec::new();
+        text.try_reserve_exact(units)
+            .map_err(|_| ex.out_of_memory())?;
+        let d = self.d.borrow();
+        if let Some(raw) = &d.raw {
+            text.extend_from_slice(raw);
+        } else {
+            for line in &d.lines {
+                text.extend_from_slice(line);
+                text.push(0x0A);
+            }
+        }
+        Ok(text)
+    }
+
+    pub(crate) fn from_serial_text(
+        ex: &mut Execution,
+        text: Vec<u16>,
+    ) -> Result<Value, bsl_vm::Exception> {
+        let per_unit =
+            std::mem::size_of::<Vec<u16>>() + std::mem::size_of::<std::ops::Range<usize>>() + 4;
+        let bytes = text
+            .len()
+            .checked_mul(per_unit)
+            .and_then(|n| {
+                n.checked_add(std::mem::size_of::<Self>() + 2 * std::mem::size_of::<usize>())
+            })
+            .ok_or_else(|| ex.out_of_memory())?;
+        ex.reserve(u64::try_from(bytes).map_err(|_| ex.out_of_memory())?)?;
+        ex.charge(1 + text.len() as u64 / 64)?;
+        let mut d = Doc::default();
+        d.set_text(text);
+        Ok(Value::Object(Rc::new(Self {
+            d: RefCell::new(d),
+            sep: RefCell::new(CRLF.to_vec()),
+        })))
+    }
+
     fn number(ex: &mut Execution, args: &[Arg]) -> CallResult<i64> {
         arg_i64(ex, args.first(), 1)
     }
@@ -207,6 +330,29 @@ fn index(n: i64, len: usize) -> Option<usize> {
 }
 
 impl HostObject for TextDocument {
+    fn retained_memory(
+        &self,
+        visit: &mut dyn bsl_vm::RetainedMemory,
+    ) -> Result<bool, bsl_vm::Exception> {
+        visit.mutable();
+        let count = self.d.borrow().lines.len();
+        visit.work(1 + count as u64)?;
+        let bytes = {
+            let d = self.d.borrow();
+            let mut bytes =
+                (d.lines.capacity() as u64).saturating_mul(std::mem::size_of::<Vec<u16>>() as u64);
+            for line in &d.lines {
+                bytes = bytes.saturating_add((line.capacity() as u64).saturating_mul(2));
+            }
+            if let Some(raw) = &d.raw {
+                bytes = bytes.saturating_add((raw.capacity() as u64).saturating_mul(2));
+            }
+            bytes.saturating_add((self.sep.borrow().capacity() as u64).saturating_mul(2))
+        };
+        visit.bytes(bytes)?;
+        Ok(true)
+    }
+
     fn type_id(&self) -> TypeId {
         TypeId::of_catalog(text_types().document)
     }

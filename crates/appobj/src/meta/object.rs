@@ -123,6 +123,52 @@ pub(crate) fn info<'a>(cx: &'a MdCtx, p: MdPath) -> Option<Info<'a>> {
                 props: &sub.props,
             })
         }
+        MdPath::Command(o, i) => {
+            let command = super::children::command(cx, o, i)?;
+            Some(Info {
+                name: &command.name,
+                synonym: Some(&command.synonym),
+                comment: &command.comment,
+                props: &command.props,
+            })
+        }
+        MdPath::HttpUrlTemplate(..) | MdPath::HttpMethod(..) => {
+            let child = super::http::child(cx, p)?;
+            Some(Info {
+                name: &child.name,
+                synonym: Some(&child.synonym),
+                comment: &child.comment,
+                props: &child.props,
+            })
+        }
+        MdPath::WebOperation(..) | MdPath::WebParameter(..) => {
+            let child = super::web::child(cx, p)?;
+            Some(Info {
+                name: &child.name,
+                synonym: Some(&child.synonym),
+                comment: &child.comment,
+                props: &child.props,
+            })
+        }
+        MdPath::Template(o, i) => {
+            let template = super::children::template(cx, o, i)?;
+            Some(Info {
+                name: &template.name,
+                synonym: template.props.iter().find_map(|p| match &p.value {
+                    md_model::Value::LStr(s) if p.name == "Synonym" => Some(s),
+                    _ => None,
+                }),
+                comment: template
+                    .props
+                    .iter()
+                    .find_map(|p| match &p.value {
+                        md_model::Value::Text(s) if p.name == "Comment" => Some(s.as_str()),
+                        _ => None,
+                    })
+                    .unwrap_or(""),
+                props: &template.props,
+            })
+        }
         MdPath::CommonModule(i) => {
             let def = model.common_modules.get(i)?;
             let md = md_of(cx, def.md);
@@ -179,11 +225,26 @@ pub(crate) fn name_of(cx: &MdCtx, p: MdPath) -> String {
     }
 }
 
-fn presentation_of(cx: &MdCtx, p: MdPath) -> String {
-    let syn = info(cx, p)
+fn presentation_of(cx: &MdCtx, p: MdPath) -> Result<String, HostError> {
+    if matches!(p, MdPath::WebOperation(..) | MdPath::WebParameter(..)) {
+        let syn = super::web::synonym(cx, p)?;
+        return Ok(if syn.is_empty() { name_of(cx, p) } else { syn });
+    }
+    let inf = info(cx, p);
+    if matches!(
+        p,
+        MdPath::Template(..) | MdPath::HttpUrlTemplate(..) | MdPath::HttpMethod(..)
+    ) && inf.as_ref().is_none_or(|i| {
+        !i.props
+            .iter()
+            .any(|p| p.name == "Synonym" && matches!(&p.value, md_model::Value::LStr(_)))
+    }) {
+        return Err(not_implemented("Синоним"));
+    }
+    let syn = inf
         .and_then(|i| i.synonym.map(|s| synonym_text(s, &cx.model().lang_code)))
         .unwrap_or_default();
-    if syn.is_empty() { name_of(cx, p) } else { syn }
+    Ok(if syn.is_empty() { name_of(cx, p) } else { syn })
 }
 
 pub(crate) fn root_text(cx: &MdCtx, name: &str) -> String {
@@ -252,6 +313,40 @@ fn words(cx: &MdCtx, p: MdPath) -> Vec<String> {
             w.push(name_of(cx, p));
             w
         }
+        MdPath::Command(o, _) | MdPath::Template(o, _) => {
+            let mut w = words(cx, MdPath::Object(o));
+            w.push(if matches!(p, MdPath::Command(..)) {
+                pick("Команда", "Command")
+            } else {
+                pick("Макет", "Template")
+            });
+            w.push(name_of(cx, p));
+            w
+        }
+        MdPath::HttpUrlTemplate(s, _) => {
+            let mut w = words(cx, MdPath::Other(s));
+            w.push(pick("ШаблонURL", "URLTemplate"));
+            w.push(name_of(cx, p));
+            w
+        }
+        MdPath::HttpMethod(s, u, _) => {
+            let mut w = words(cx, MdPath::HttpUrlTemplate(s, u));
+            w.push(pick("Метод", "Method"));
+            w.push(name_of(cx, p));
+            w
+        }
+        MdPath::WebOperation(s, _) => {
+            let mut w = words(cx, MdPath::Other(s));
+            w.push(pick("Операция", "Operation"));
+            w.push(name_of(cx, p));
+            w
+        }
+        MdPath::WebParameter(s, o, _) => {
+            let mut w = words(cx, MdPath::WebOperation(s, o));
+            w.push(pick("Параметр", "Parameter"));
+            w.push(name_of(cx, p));
+            w
+        }
         MdPath::CommonModule(_) => vec![pick("ОбщийМодуль", "CommonModule"), name_of(cx, p)],
         MdPath::SessionParam(_) => vec![pick("ПараметрСеанса", "SessionParameter"), name_of(cx, p)],
         MdPath::Subscription(_) => {
@@ -289,8 +384,14 @@ fn parent_of(p: MdPath) -> MdPath {
         MdPath::Field(o, None, _)
         | MdPath::Tabular(o, _)
         | MdPath::EnumValue(o, _)
-        | MdPath::Form(o, _) => MdPath::Object(o),
+        | MdPath::Form(o, _)
+        | MdPath::Command(o, _)
+        | MdPath::Template(o, _) => MdPath::Object(o),
         MdPath::Field(o, Some(t), _) => MdPath::Tabular(o, t),
+        MdPath::WebOperation(s, _) => MdPath::Other(s),
+        MdPath::WebParameter(s, o, _) => MdPath::WebOperation(s, o),
+        MdPath::HttpUrlTemplate(s, _) => MdPath::Other(s),
+        MdPath::HttpMethod(s, u, _) => MdPath::HttpUrlTemplate(s, u),
         _ => MdPath::Configuration,
     }
 }
@@ -307,6 +408,12 @@ pub(crate) fn type_idx(cx: &MdCtx, p: MdPath) -> Option<TypeIdx> {
         MdPath::Tabular(..) => "TabularSection",
         MdPath::EnumValue(..) => "EnumValue",
         MdPath::Form(..) => "Form",
+        MdPath::Command(..) => "Command",
+        MdPath::Template(..) => "Template",
+        MdPath::HttpUrlTemplate(..) => "HTTPServiceURLTemplate",
+        MdPath::HttpMethod(..) => "HttpServiceMethod",
+        MdPath::WebOperation(..) => "WebServiceOperation",
+        MdPath::WebParameter(..) => "WebServiceParameter",
         MdPath::CommonModule(_) => "CommonModule",
         MdPath::SessionParam(_) => "SessionParameter",
         MdPath::Subscription(_) => "EventSubscription",
@@ -352,7 +459,10 @@ impl HostObject for MdRoot {
                         return Err(props::type_mismatch(1).into());
                     };
                     Ok(match props::resolve_full(&self.cx, &s.to_string_lossy()) {
-                        Some(p) => value_of(&self.cx, ex, MdKey::Path(p)),
+                        Some(p) => {
+                            super::children::admit(&self.cx, p)?;
+                            value_of(&self.cx, ex, MdKey::Path(p))
+                        }
                         None => Value::Undefined,
                     })
                 }
@@ -398,7 +508,12 @@ impl HostObject for MdRoot {
         Some(MdKey::Path(MdPath::Configuration).hash32())
     }
     fn equals(&self, other: &dyn HostObject) -> Option<bool> {
-        Some(other.as_any().is::<MdRoot>())
+        Some(
+            other
+                .as_any()
+                .downcast_ref::<MdRoot>()
+                .is_some_and(|o| Arc::ptr_eq(&o.cx.app, &self.cx.app)),
+        )
     }
 }
 
@@ -411,6 +526,13 @@ impl MdObj {
     fn tidx(&self) -> Option<TypeIdx> {
         type_idx(&self.cx, self.path)
     }
+
+    fn member_source(&self, m: MemberId) -> Option<(TypeIdx, MemberId)> {
+        if matches!(self.path, MdPath::HttpMethod(..)) && m.0 >= super::http::COMMON_BASE {
+            return super::http::common_source(&self.cx, m);
+        }
+        self.tidx().map(|t| (t, m))
+    }
 }
 
 impl HostObject for MdObj {
@@ -421,7 +543,8 @@ impl HostObject for MdObj {
         self
     }
     fn get(&self, ex: &mut Execution, m: MemberId) -> CallResult<Value> {
-        let t = self.tidx().ok_or_else(|| no_field(""))?;
+        super::children::admit(&self.cx, self.path)?;
+        let (t, m) = self.member_source(m).ok_or_else(|| no_field(""))?;
         match member_name(self.cx.catalog, t, m) {
             Some((false, ru, en)) => props::obj_get(&self.cx, ex, self.path, ru, en),
             _ => Err(no_field(&m.0.to_string()).into()),
@@ -429,20 +552,21 @@ impl HostObject for MdObj {
     }
     fn set(&self, _: &mut Execution, m: MemberId, _: Value) -> CallResult<()> {
         let name = self
-            .tidx()
-            .and_then(|t| member_name(self.cx.catalog, t, m))
+            .member_source(m)
+            .and_then(|(t, m)| member_name(self.cx.catalog, t, m))
             .map_or("", |n| n.1);
         Err(read_only(name).into())
     }
     fn call(&self, ex: &mut Execution, m: MemberId, _: &mut [Arg]) -> CallResult<Value> {
-        let t = self.tidx().ok_or_else(|| no_field(""))?;
+        super::children::admit(&self.cx, self.path)?;
+        let (t, m) = self.member_source(m).ok_or_else(|| no_field(""))?;
         let Some((true, ru, _)) = member_name(self.cx.catalog, t, m) else {
             return Err(no_field(&m.0.to_string()).into());
         };
         match fold(ru).as_str() {
             "полноеимя" => Ok(Value::from(full_name(&self.cx, self.path).as_str())),
             "представление" => {
-                Ok(Value::from(presentation_of(&self.cx, self.path).as_str()))
+                Ok(Value::from(presentation_of(&self.cx, self.path)?.as_str()))
             }
             "родитель" => Ok(value_of(&self.cx, ex, MdKey::Path(parent_of(self.path)))),
             "получитьименапредопределенных" => {
@@ -457,16 +581,25 @@ impl HostObject for MdObj {
     }
     fn find_member(&self, name: &str) -> Option<MemberId> {
         let t = self.tidx()?;
-        member_of(self.cx.catalog, t, name).map(|(id, _)| id)
+        member_of(self.cx.catalog, t, name)
+            .or_else(|| {
+                if matches!(self.path, MdPath::HttpMethod(..)) {
+                    super::http::common_member(&self.cx, name)
+                } else {
+                    None
+                }
+            })
+            .map(|(id, _)| id)
     }
     fn member_kind(&self, m: MemberId) -> Option<MemberKind> {
-        let t = self.tidx()?;
+        let (t, m) = self.member_source(m)?;
         let (_, ru, _) = member_name(self.cx.catalog, t, m)?;
         member_of(self.cx.catalog, t, ru).map(|k| k.1)
     }
     fn presentation(&self, _: &mut Execution) -> CallResult<Option<Str>> {
+        super::children::admit(&self.cx, self.path)?;
         Ok(Some(Str::from(
-            presentation_of(&self.cx, self.path).as_str(),
+            presentation_of(&self.cx, self.path)?.as_str(),
         )))
     }
     fn boost_hash(&self) -> Option<i32> {
@@ -477,7 +610,7 @@ impl HostObject for MdObj {
             other
                 .as_any()
                 .downcast_ref::<MdObj>()
-                .is_some_and(|o| o.path == self.path),
+                .is_some_and(|o| Arc::ptr_eq(&o.cx.app, &self.cx.app) && o.path == self.path),
         )
     }
 }
@@ -543,12 +676,10 @@ impl HostObject for MdStd {
         Some(MdKey::Std(self.obj, self.tab, self.idx).hash32())
     }
     fn equals(&self, other: &dyn HostObject) -> Option<bool> {
-        Some(
-            other
-                .as_any()
-                .downcast_ref::<MdStd>()
-                .is_some_and(|o| (o.obj, o.tab, o.idx) == (self.obj, self.tab, self.idx)),
-        )
+        Some(other.as_any().downcast_ref::<MdStd>().is_some_and(|o| {
+            Arc::ptr_eq(&o.cx.app, &self.cx.app)
+                && (o.obj, o.tab, o.idx) == (self.obj, self.tab, self.idx)
+        }))
     }
 }
 

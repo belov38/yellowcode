@@ -353,9 +353,13 @@ impl ObservationSession {
             PExpr::And(es) | PExpr::Or(es) | PExpr::Func { args: es, .. } => {
                 self.expressions(es, path)
             }
-            PExpr::Compare(_, l, r) | PExpr::Like { l, pat: r, .. } => {
-                self.expressions([l.as_ref(), r.as_ref()], path)
+            PExpr::RecordInInterval {
+                period: l,
+                recorder: r,
+                ..
             }
+            | PExpr::Compare(_, l, r)
+            | PExpr::Like { l, pat: r, .. } => self.expressions([l.as_ref(), r.as_ref()], path),
             PExpr::InList { l, rhs, .. } => self.expressions(l.iter().chain(rhs), path),
             PExpr::InQuery { l, q, .. } => {
                 self.deferred(q, &child(path, 0));
@@ -435,9 +439,13 @@ impl ObservationSession {
                 });
                 self.expressions(step.bound.iter(), &child(path, 0));
             }
-            Plan::RegisterRows { step, observation } => {
+            Plan::RegisterRows {
+                step,
+                observation,
+                chart,
+            } => {
                 let mut outer = false;
-                for e in step.bounds.iter().flatten() {
+                for e in step.bounds().iter().flatten() {
                     crate::plan::walk(e, &mut |e| {
                         if matches!(
                             e,
@@ -456,7 +464,10 @@ impl ObservationSession {
                     path: path.to_vec(),
                     outer_dependent: outer,
                 });
-                self.expressions(step.bounds.iter().flatten(), &child(path, 0));
+                self.expressions(step.bounds().iter().flatten(), &child(path, 0));
+                if let Some(chart) = chart {
+                    self.plan(chart, &child(path, 1));
+                }
             }
             Plan::RunningBalance { input, step } => {
                 self.plan(input, &child(path, 0));

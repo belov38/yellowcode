@@ -293,7 +293,7 @@ impl<'a, T> NativeOwned<'a, T> {
     pub(crate) fn depth(&self) -> u16 {
         self.depth
     }
-    pub(super) fn set_depth(mut self, depth: u16) -> Self {
+    pub(crate) fn set_depth(mut self, depth: u16) -> Self {
         self.depth = depth;
         self
     }

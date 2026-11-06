@@ -1105,3 +1105,124 @@ impl HostObject for Column {
         }))
     }
 }
+
+pub(crate) struct SerialColumn {
+    pub(crate) id: u32,
+    pub(crate) name: Str,
+    pub(crate) value_type: Value,
+    pub(crate) title: Str,
+    pub(crate) width: i64,
+}
+impl Columns {
+    pub(super) fn serial_bytes(&self, ex: &mut Execution) -> Result<u64, bsl_vm::Exception> {
+        let entries = self.schema.entries.borrow();
+        ex.charge(entries.len() as u64 + 1)?;
+        Ok(entries.iter().fold(
+            (entries.len() as u64).saturating_mul(std::mem::size_of::<SerialColumn>() as u64),
+            |bytes, column| {
+                let data = column.data.borrow();
+                bytes
+                    .saturating_add(
+                        (data.name.len() as u64)
+                            .saturating_add(data.title.len() as u64)
+                            .saturating_mul(12),
+                    )
+                    .saturating_add(super::retained::text_extra(&data.name))
+                    .saturating_add(super::retained::text_extra(&data.title))
+            },
+        ))
+    }
+    pub(super) fn serial_columns(
+        &self,
+        ex: &mut Execution,
+    ) -> Result<Vec<SerialColumn>, bsl_vm::Exception> {
+        let entries = self.schema.entries.borrow();
+        ex.charge(entries.len() as u64)?;
+        let mut columns = Vec::new();
+        columns
+            .try_reserve_exact(entries.len())
+            .map_err(|_| ex.out_of_memory())?;
+        for record in entries.iter() {
+            let data = record.data.borrow();
+            columns.push(SerialColumn {
+                id: record.id,
+                name: data.name.clone(),
+                value_type: data.value_type.clone(),
+                title: data.title.clone(),
+                width: data.width,
+            });
+        }
+        Ok(columns)
+    }
+    pub(super) fn serial_next_id(&self) -> u32 {
+        self.schema.next_id.get()
+    }
+}
+
+impl Columns {
+    pub(super) fn serial_name_keys(ex: &mut Execution, names: &[Str]) -> CallResult<bool> {
+        let mut keys = super::vec_with_capacity(ex, names.len() as u64)?;
+        for name in names {
+            ex.charge(names.len() as u64 + 1)?;
+            if !is_name(name.units()) {
+                return Ok(false);
+            }
+            let key = fold(ex, name, (name.len() as u64).saturating_mul(2))?;
+            ex.charge((key.len() as u64 / 32 + 1).saturating_mul(keys.len() as u64))?;
+            if keys.contains(&key) {
+                return Ok(false);
+            }
+            keys.push(key);
+        }
+        Ok(true)
+    }
+
+    pub(super) fn serial_restore_column(
+        &self,
+        ex: &mut Execution,
+        column: SerialColumn,
+    ) -> CallResult<()> {
+        let count = self.len();
+        let live = self
+            .owned_bytes(ex)?
+            .saturating_add((column.name.len() as u64).saturating_mul(12))
+            .saturating_add((column.title.len() as u64).saturating_mul(2))
+            .saturating_add(std::mem::size_of::<ColumnRecord>() as u64 + 128);
+        ex.reserve(live)?;
+        let folded = fold(ex, &column.name, live)?;
+        let mut entries = self.schema.entries.borrow_mut();
+        if entries.len() == entries.capacity() {
+            return Err(ex.out_of_memory().into());
+        }
+        entries.push(Rc::new(ColumnRecord {
+            id: column.id,
+            hash: creation_number(),
+            data: RefCell::new(ColumnData {
+                name: column.name,
+                folded,
+                title: column.title,
+                width: column.width,
+                value_type: column.value_type,
+            }),
+        }));
+        ex.charge(count as u64 + 1)?;
+        Ok(())
+    }
+
+    pub(super) fn serial_reserve_entries(
+        &self,
+        ex: &mut Execution,
+        count: usize,
+    ) -> CallResult<()> {
+        self.schema
+            .entries
+            .borrow_mut()
+            .try_reserve_exact(count)
+            .map_err(|_| ex.out_of_memory())?;
+        Ok(())
+    }
+
+    pub(super) fn serial_set_next(&self, next: u32) {
+        self.schema.next_id.set(next);
+    }
+}

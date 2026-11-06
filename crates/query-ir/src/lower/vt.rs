@@ -16,6 +16,24 @@ use query_syntax::{Func, Kw};
 pub struct RegisterRowsL {
     pub register: brace::Guid,
     pub kind: VtKind,
+    pub view: Option<query_syntax::Span>,
+    pub rows: RegisterRowsKindL,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "payloads share the existing RegisterRows allocation"
+)]
+pub enum RegisterRowsKindL {
+    Accumulation(AccumulationRowsL),
+    Accounting(AccountingRowsL),
+    AccountingTurnovers(super::AccountingTurnoversL),
+    AccountingBalance(super::BalanceRowsL),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct AccumulationRowsL {
     pub balance_register: bool,
     pub movements: TableId,
     pub period: FieldId,
@@ -31,7 +49,91 @@ pub struct RegisterRowsL {
     pub coarse: bool,
     pub periodic: bool,
     pub needed_dims: Vec<bool>,
-    pub view: Option<query_syntax::Span>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct AccountingRowsL {
+    pub inputs: DrCrInputsL,
+    pub keys: Vec<DrCrSideL>,
+    pub resources: Vec<DrCrResourceL>,
+    pub date_bounds: [Option<bsl_prim::BslDate>; 2],
+    pub area: Option<DrCrAreaL>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DrCrAreaL {
+    pub main: FieldId,
+    pub ct: FieldId,
+    pub value: i64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DrCrSideL {
+    Dr,
+    Cr,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DrCrInputsL {
+    pub main: TableId,
+    pub ct: TableId,
+    pub options: TableId,
+    pub main_period: FieldId,
+    pub ct_period: FieldId,
+    pub main_active: FieldId,
+    pub accounts: [DrCrAccountL; 2],
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DrCrAccountL {
+    pub output: QFieldId,
+    pub main: FieldId,
+    pub ct: FieldId,
+    pub ref_table: u32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DrCrResourceL {
+    pub metadata: brace::Guid,
+    pub output: QFieldId,
+    pub main: FieldId,
+    pub ct: FieldId,
+    pub main_dec: Dec,
+    pub ct_dec: Dec,
+}
+
+impl RegisterRowsL {
+    pub fn chart_input(&self) -> Option<&RelL> {
+        match &self.rows {
+            RegisterRowsKindL::AccountingBalance(a) => a.chart_input.as_deref(),
+            _ => None,
+        }
+    }
+
+    pub fn bounds(&self) -> &[Option<PExpr>] {
+        match &self.rows {
+            RegisterRowsKindL::Accumulation(a) => &a.bounds,
+            RegisterRowsKindL::Accounting(_) => &[],
+            RegisterRowsKindL::AccountingTurnovers(_) | RegisterRowsKindL::AccountingBalance(_) => {
+                &[]
+            }
+        }
+    }
+
+    pub fn raw_width(&self) -> usize {
+        match &self.rows {
+            RegisterRowsKindL::Accumulation(a) => raw::width(a.dims.len(), a.resources.len()),
+            RegisterRowsKindL::Accounting(a) => raw::width(a.keys.len(), a.resources.len()),
+            RegisterRowsKindL::AccountingBalance(a) => {
+                raw::width(2, a.resources.len())
+                    + a.policy_fields.len()
+                    + usize::from(a.chart_layout.is_some_and(|l| l.signal.is_some()))
+            }
+            RegisterRowsKindL::AccountingTurnovers(a) => {
+                raw::width(usize::from(a.account), a.resources.len()) + a.policy_fields.len()
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -278,30 +380,32 @@ impl Lower<'_> {
         let step = RegisterRowsL {
             register: md,
             kind: v.kind,
-            balance_register,
-            movements: mv,
-            period: std_field(info, StdField::Period)?,
-            recorder: std_field(info, StdField::Recorder)?,
-            line: std_field(info, StdField::LineNo)?,
-            active: std_field(info, StdField::Active)?,
-            record_kind,
-            dims,
-            resources,
-            totals: if balance_register {
-                self.stored_totals(md, role::TOTALS, &dim_mds, &res_mds)?
-            } else {
-                None
-            },
-            turnovers: if balance_register {
-                None
-            } else {
-                self.stored_totals(md, role::TURNOVERS, &dim_mds, &res_mds)?
-            },
-            bounds: bounds.clone(),
-            coarse,
-            periodic: !matches!(v.periodicity, Periodicity::Absent) && !flat_auto,
-            needed_dims,
             view: v.span,
+            rows: RegisterRowsKindL::Accumulation(AccumulationRowsL {
+                balance_register,
+                movements: mv,
+                period: std_field(info, StdField::Period)?,
+                recorder: std_field(info, StdField::Recorder)?,
+                line: std_field(info, StdField::LineNo)?,
+                active: std_field(info, StdField::Active)?,
+                record_kind,
+                dims,
+                resources,
+                totals: if balance_register {
+                    self.stored_totals(md, role::TOTALS, &dim_mds, &res_mds)?
+                } else {
+                    None
+                },
+                turnovers: if balance_register {
+                    None
+                } else {
+                    self.stored_totals(md, role::TURNOVERS, &dim_mds, &res_mds)?
+                },
+                bounds: bounds.clone(),
+                coarse,
+                periodic: !matches!(v.periodicity, Periodicity::Absent) && !flat_auto,
+                needed_dims,
+            }),
         };
         let nd = shape.dims.len();
         let nr = shape.resources.len();

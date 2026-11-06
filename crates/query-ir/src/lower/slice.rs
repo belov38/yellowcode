@@ -1,7 +1,7 @@
-use super::layout::{R, Row, internal};
+use super::layout::{R, Row, internal, later, p16};
 use super::rel::Lower;
 use super::{PExpr, RelL};
-use crate::ir::{ColSel, ExprKind, SliceS};
+use crate::ir::{ColSel, Expr, ExprKind, SliceS};
 use crate::schema::{FieldRole, QFieldId, StdRole, VtKind};
 use ibschema::names::{StdField, role};
 use ibschema::storage::{FieldId, TableId};
@@ -29,6 +29,13 @@ impl Lower<'_> {
         let Some(main) = self.storage.table(v.register) else {
             return internal("slice register storage");
         };
+        if self
+            .b
+            .security
+            .slice_condition_has_deferred_reference(self.schema, v)
+        {
+            return later("Q7b-DeferredSecurityRead", "Q7c");
+        }
         let mut needed: std::collections::HashSet<QFieldId> = self
             .vt_used
             .get(v.src.0 as usize)
@@ -160,15 +167,22 @@ impl Lower<'_> {
             None
         };
         let totals = totals.filter(|t| self.slice_fields(v, *t, &fields).is_some());
-        let input = self.slice_input(v, main, &fields)?;
+        let mut input = self.slice_input(v, main, &fields)?;
         let totals = totals
-            .map(|t| self.slice_input(v, t, &fields).map(Box::new))
+            .map(|t| {
+                let branch = self.slice_input(v, t, &fields)?;
+                if branch.width != input.width || branch.signal != input.signal {
+                    return later("Q7b-DeferredSecurityRead", "Q7c");
+                }
+                Ok(Box::new(branch.rel))
+            })
             .transpose()?;
         self.set_level(v.src);
         let row = Row {
-            signal: None,
+            signal: input.signal,
+            width: input.width,
             rel: RelL::Slice {
-                input: Box::new(input),
+                input: input.take(),
                 totals,
                 step: Box::new(SliceL {
                     register: md,
@@ -178,11 +192,10 @@ impl Lower<'_> {
                     period,
                     recorder,
                     active: pos(StdRole::Active),
-                    width: fields.len(),
+                    width: input.width,
                     view: v.span,
                 }),
             },
-            width: fields.len(),
             rep: Some(v.src),
             keys: None,
         };
@@ -217,7 +230,103 @@ impl Lower<'_> {
         Some(fields)
     }
 
-    fn slice_input(&mut self, v: &SliceS, table: TableId, required: &[QFieldId]) -> R<RelL> {
+    fn slice_condition_signal_supported(&self, v: &SliceS, table: TableId) -> bool {
+        if v.bounds.iter().any(Option::is_some)
+            || v.area.is_some()
+            || v.access.is_some()
+            || !self
+                .schema
+                .meta(v.register)
+                .is_some_and(|meta| meta.periodic && !meta.subordinate && !meta.recorder_position)
+            || !self.map.table(table).separators.is_empty()
+        {
+            return false;
+        }
+        let Some(condition) = &v.cond else {
+            return false;
+        };
+        let dereference = match &condition.kind {
+            ExprKind::Compare(_, left, right) if slice_scalar_literal(right) => left,
+            ExprKind::Compare(_, left, right) if slice_scalar_literal(left) => right,
+            ExprKind::IsNull { l, .. } => l,
+            _ => return false,
+        };
+        let ExprKind::Deref { base, steps } = &dereference.kind else {
+            return false;
+        };
+        let ExprKind::Col {
+            src,
+            col: ColSel::Field(dimension),
+        } = base.kind
+        else {
+            return false;
+        };
+        if src != v.inner
+            || base.ty.refs.len() != 1
+            || base.ty.atom_count() != 1
+            || !self
+                .schema
+                .field(v.table, dimension)
+                .is_some_and(|field| field.role == FieldRole::Dimension && field.nested.is_none())
+        {
+            return false;
+        }
+        let [step] = steps.as_slice() else {
+            return false;
+        };
+        let [(target, field)] = step.targets.as_slice() else {
+            return false;
+        };
+        let Some(storage) = self.storage.table(*target) else {
+            return false;
+        };
+        if !self.map.table(storage).separators.is_empty()
+            || self.storage.field(*target, *field).is_none()
+            || !self
+                .schema
+                .field(*target, *field)
+                .is_some_and(|field| field.nested.is_none() && slice_primitive(&field.ty))
+        {
+            return false;
+        }
+        let Some(source) = self.b.security.target(self.schema, base, &[], *target) else {
+            return false;
+        };
+        let Some(policy) = self.b.security.conditions.get(&source) else {
+            return false;
+        };
+        let ExprKind::Or(predicates) = &policy.kind else {
+            return false;
+        };
+        if predicates.len() > 1 {
+            return false;
+        }
+        predicates.first().is_none_or(|predicate| {
+            let local_scalar = |expr: &Expr| match expr.kind {
+                ExprKind::Col {
+                    src,
+                    col: ColSel::Field(field),
+                } if src == source => {
+                    self.storage.field(*target, field).is_some()
+                        && self.schema.field(*target, field).is_some_and(|field| {
+                            field.nested.is_none() && slice_primitive(&field.ty)
+                        })
+                }
+                _ => false,
+            };
+            match &predicate.kind {
+                ExprKind::Lit(crate::QValue::Bool(_) | crate::QValue::Null) => true,
+                ExprKind::Compare(_, left, right) => {
+                    ((local_scalar(left) || slice_scalar_literal(left))
+                        && slice_scalar_literal(right))
+                        || (slice_scalar_literal(left) && local_scalar(right))
+                }
+                _ => false,
+            }
+        })
+    }
+
+    fn slice_input(&mut self, v: &SliceS, table: TableId, required: &[QFieldId]) -> R<Row> {
         let fields = self.slice_fields(v, table, required).ok_or_else(|| {
             crate::ExecError::Fatal("slice field missing from base storage".into())
         })?;
@@ -239,18 +348,56 @@ impl Lower<'_> {
             {
                 row = self.filter_row(row, pred)?;
             }
-            Ok(RelL::Project {
+            if row.signal.is_some() && !self.slice_condition_signal_supported(v, table) {
+                return later("Q7b-DeferredSecurityRead", "Q7c");
+            }
+            let mut exprs = (0..required.len())
+                .map(|i| p16(i as i64).map(PExpr::Col))
+                .collect::<R<Vec<_>>>()?;
+            let signal = row
+                .signal
+                .map(|_| {
+                    let index = exprs.len();
+                    exprs.push(row.signal_expr());
+                    p16(index as i64)
+                })
+                .transpose()?;
+            row.width = exprs.len();
+            row.rel = RelL::Project {
                 input: row.take(),
-                exprs: (0..required.len())
-                    .map(|i| {
-                        u16::try_from(i)
-                            .map(PExpr::Col)
-                            .map_err(|_| crate::ExecError::Fatal("too many slice fields".into()))
-                    })
-                    .collect::<Result<Vec<_>, _>>()?,
-            })
+                exprs,
+            };
+            row.signal = signal;
+            if self.membership
+                && let Some(signal) = signal
+            {
+                row.rel = RelL::CheckAccess {
+                    input: row.take(),
+                    signal,
+                };
+                self.added = self.added.saturating_add(1);
+            }
+            Ok(row)
         })();
         self.inner -= 1;
         result
     }
+}
+
+fn slice_primitive(ty: &crate::QType) -> bool {
+    ty.refs.is_empty() && ty.others.is_empty() && ty.atom_count() <= 1
+}
+
+fn slice_scalar_literal(expr: &Expr) -> bool {
+    slice_primitive(&expr.ty)
+        && matches!(
+            expr.kind,
+            ExprKind::Lit(
+                crate::QValue::Null
+                    | crate::QValue::Bool(_)
+                    | crate::QValue::Number(_)
+                    | crate::QValue::String(_)
+                    | crate::QValue::Date(_)
+            )
+        )
 }

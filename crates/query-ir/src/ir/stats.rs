@@ -1,4 +1,5 @@
 use crate::ir::{AggCall, Expr, ExprKind, Rel, SortKey, StmtS};
+use crate::totals::TotalsExpr;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct IrStats {
@@ -13,6 +14,7 @@ pub struct IrStats {
 enum Node<'a> {
     Rel(&'a Rel),
     Expr(&'a Expr),
+    Totals(&'a TotalsExpr),
 }
 
 fn sort_keys<'a>(keys: &'a [SortKey], todo: &mut Vec<Node<'a>>) {
@@ -53,8 +55,44 @@ pub fn stats(s: &StmtS) -> IrStats {
             todo.extend(r.exprs.iter().map(Node::Expr));
         }
     }
+    if let Some(totals) = &s.totals {
+        todo.extend(totals.items.iter().map(|(expr, _)| Node::Totals(expr)));
+        for point in &totals.points {
+            if let Some(periods) = &point.periods {
+                todo.extend(periods.begin.iter().chain(&periods.end).map(Node::Expr));
+            }
+        }
+    }
     while let Some(node) = todo.pop() {
         match node {
+            Node::Totals(expr) => {
+                out.exprs += 1;
+                match expr {
+                    TotalsExpr::Agg(_)
+                    | TotalsExpr::Param(_)
+                    | TotalsExpr::Column(_)
+                    | TotalsExpr::Const(_) => {}
+                    TotalsExpr::Neg(child) | TotalsExpr::Not(child) => {
+                        todo.push(Node::Totals(child));
+                    }
+                    TotalsExpr::Bin(_, left, right)
+                    | TotalsExpr::Cmp(_, left, right)
+                    | TotalsExpr::IsNull(left, right) => {
+                        todo.push(Node::Totals(left));
+                        todo.push(Node::Totals(right));
+                    }
+                    TotalsExpr::And(values) | TotalsExpr::Or(values) => {
+                        todo.extend(values.iter().map(Node::Totals));
+                    }
+                    TotalsExpr::Case { whens, otherwise } => {
+                        for (condition, value) in whens {
+                            todo.push(Node::Totals(condition));
+                            todo.push(Node::Totals(value));
+                        }
+                        todo.extend(otherwise.iter().map(|child| Node::Totals(child)));
+                    }
+                }
+            }
             Node::Rel(r) => {
                 out.rels += 1;
                 match r {
@@ -99,6 +137,7 @@ pub fn stats(s: &StmtS) -> IrStats {
                                 .iter()
                                 .chain(v.area.iter().map(|a| &a.pred))
                                 .chain(v.access.iter())
+                                .chain(v.order.iter().map(|k| &k.expr))
                                 .map(Node::Expr),
                         );
                     }
@@ -121,7 +160,9 @@ pub fn stats(s: &StmtS) -> IrStats {
                         out.fanout_sum += steps.iter().map(|d| d.targets.len() as u64).sum::<u64>();
                         todo.push(Node::Expr(base));
                     }
-                    ExprKind::OuterKey { orig, .. } => todo.push(Node::Expr(orig)),
+                    ExprKind::LocalKey { orig, .. } | ExprKind::OuterKey { orig, .. } => {
+                        todo.push(Node::Expr(orig));
+                    }
                     ExprKind::Neg(x) | ExprKind::Not(x) => todo.push(Node::Expr(x)),
                     ExprKind::Arith { first, steps } => {
                         todo.push(Node::Expr(first));

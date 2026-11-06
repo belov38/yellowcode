@@ -7,6 +7,13 @@ enum Backing<T> {
     Managed(Shared<T>),
 }
 impl<T> QShared<T> {
+    pub fn backing_layout(&self) -> Result<super::SharedBacking, std::alloc::LayoutError> {
+        match &self.0 {
+            Backing::Legacy(value) => super::SharedBacking::arc(value),
+            Backing::Managed(value) => Ok(super::SharedBacking::managed(value)),
+        }
+    }
+
     pub(crate) fn managed_on(&self, budget: &MemoryBudget) -> Option<Self> {
         match &self.0 {
             Backing::Managed(value) if value.reservation().budget().same_instance(budget) => {

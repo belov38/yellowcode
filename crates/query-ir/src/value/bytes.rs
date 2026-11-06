@@ -9,6 +9,17 @@ enum Backing {
     Managed(Shared<Vec<u8>>),
 }
 impl QBytes {
+    pub fn backing_layout(&self) -> Result<super::SharedBacking, std::alloc::LayoutError> {
+        match &self.0 {
+            Backing::Legacy(value) => super::SharedBacking::arc(value),
+            Backing::Managed(value) => {
+                let mut backing = super::SharedBacking::managed(value);
+                backing.buffer = Some(std::alloc::Layout::array::<u8>(value.capacity())?);
+                Ok(backing)
+            }
+        }
+    }
+
     pub fn try_clone_budgeted(&self, budget: &MemoryBudget) -> Result<Self, BudgetError> {
         if let Backing::Managed(value) = &self.0
             && value.reservation().budget().same_instance(budget)

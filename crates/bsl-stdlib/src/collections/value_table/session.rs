@@ -43,6 +43,7 @@ struct Record {
     id: u64,
     hash: i32,
     member: bool,
+    materialized: bool,
     fields: Vec<u32>,
 }
 struct Snapshot {
@@ -96,6 +97,7 @@ pub(super) fn capture(
                         id: record.id,
                         hash: record.hash,
                         member: record.member.get(),
+                        materialized: record.materialized.get(),
                         fields: {
                             let mut fields = Vec::new();
                             fields
@@ -189,6 +191,7 @@ impl SessionObject for Snapshot {
                     member: Cell::new(record.member),
                     cells: RefCell::new(Cells(Vec::new())),
                     bytes: Cell::new(0),
+                    materialized: Cell::new(record.materialized),
                 }))
             })?;
             Value::Object(Rc::new(TableRow { state, record }))

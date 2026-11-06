@@ -1,10 +1,30 @@
+mod accounting;
+pub(crate) use accounting::drcr_inputs;
+mod accounting_balance;
+mod accounting_security;
+pub use accounting_balance::{
+    AccountingChartLayoutL, BalanceInputsL, BalanceResourceL, BalanceRowsL,
+};
+pub(crate) use accounting_balance::{
+    balance_chart, balance_form, balance_inputs, balance_resources, is_accounting_balance,
+};
+mod accounting_turnovers;
+pub use accounting_turnovers::{
+    AccountingTurnoversInputsL, AccountingTurnoversL, AccountingTurnoversResourceL,
+};
+pub(crate) use accounting_turnovers::{is_accounting_turnovers, turnovers_inputs};
+mod calculation;
+mod calculation_security;
 mod dec;
+mod depth;
 mod deref;
 mod expr;
 mod layout;
 mod print;
+mod records;
 mod rel;
 mod running;
+mod schedule;
 mod security;
 mod slice;
 pub use running::RunningBalanceL;
@@ -12,13 +32,18 @@ mod totals;
 pub use slice::SliceL;
 pub(crate) mod vt;
 
+pub(crate) use calculation::actual_inputs;
 pub use dec::{
     ArithDec, Dec, MAX_DIGITS, MIN_DIV_SCALE, MIN_MUL_SCALE, Opd, agg_dec, dec_add, dec_div,
     dec_mul, dec_mul_floor, dec_of, dec_of_lit, dec_op, dec_op_k, mul_floor, opd_of,
 };
 pub use print::print;
+pub(crate) use schedule::schedule_inputs;
 pub(crate) use vt::vt_shape;
-pub use vt::{RegisterRowsL, StoredTotals};
+pub use vt::{
+    AccountingRowsL, AccumulationRowsL, DrCrAccountL, DrCrInputsL, DrCrResourceL, DrCrSideL,
+    RegisterRowsKindL, RegisterRowsL, StoredTotals,
+};
 
 use crate::bind::{BindCtx, Bound};
 use crate::exec_error::ExecError;
@@ -34,6 +59,7 @@ use std::sync::Arc;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct StmtL {
+    pub requires_calculation_admission: bool,
     pub root: RelL,
     pub auto_number: Option<u16>,
     pub columns: Vec<ColumnInfo>,
@@ -64,6 +90,7 @@ pub struct NestedL {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct NestedRowsL {
+    pub requires_calculation_admission: bool,
     pub rel: RelL,
     pub owners: Arc<crate::bind::ValueRows>,
 }
@@ -72,7 +99,8 @@ impl Drop for StmtL {
     fn drop(&mut self) {
         if self.max_depth > INLINE_DEPTH {
             let root = std::mem::replace(&mut self.root, RelL::Empty);
-            with_deep_stack(self.max_depth, move || drop(root));
+            let nested = std::mem::take(&mut self.nested);
+            with_deep_stack(self.max_depth, move || drop((root, nested)));
         }
     }
 }
@@ -265,6 +293,11 @@ pub enum PExpr {
         x: Box<PExpr>,
         kind: SizeKind,
     },
+    RecordInInterval {
+        period: Box<PExpr>,
+        recorder: Box<PExpr>,
+        bounds: [crate::value::register_bounds::Bnd; 2],
+    },
     Unit(Kw),
 }
 
@@ -282,6 +315,7 @@ pub(crate) fn lower(b: &Bound<'_>, ctx: &BindCtx<'_>) -> Result<StmtL, ExecError
         let (out, wanted) = with_deep_stack(b.stmt.max_depth, || {
             let mut l = rel::Lower::new(schema, storage, map, b, names.clone());
             let root = l.run().and_then(|root| {
+                let requires_calculation_admission = l.requires_calculation_admission;
                 let nested = l.run_nested()?;
                 if b.security
                     .conditions
@@ -293,7 +327,7 @@ pub(crate) fn lower(b: &Bound<'_>, ctx: &BindCtx<'_>) -> Result<StmtL, ExecError
                         stage: "Q7c",
                     });
                 }
-                Ok((root, nested))
+                Ok((root, nested, requires_calculation_admission))
             });
             let wanted = std::mem::take(&mut l.predef_wanted);
             let max_depth = b
@@ -301,17 +335,28 @@ pub(crate) fn lower(b: &Bound<'_>, ctx: &BindCtx<'_>) -> Result<StmtL, ExecError
                 .max_depth
                 .saturating_add(l.added_depth())
                 .saturating_add(4);
-            let out = root.map(|(root, nested)| StmtL {
-                root,
-                nested,
-                auto_number: b.stmt.auto_number,
-                columns: b.stmt.columns.clone(),
-                touched: b.tables.clone(),
-                present: Vec::new(),
-                present_targets: Vec::new(),
-                totals: None,
-                week_start: None,
-                max_depth,
+            let out = root.map(|(root, nested, requires_calculation_admission)| {
+                let max_depth = max_depth.max(depth::relation(&root)).max(
+                    nested
+                        .iter()
+                        .filter_map(|n| n.rows.as_ref())
+                        .map(|r| depth::relation(&r.rel))
+                        .max()
+                        .unwrap_or(0),
+                );
+                StmtL {
+                    requires_calculation_admission,
+                    root,
+                    nested,
+                    auto_number: b.stmt.auto_number,
+                    columns: b.stmt.columns.clone(),
+                    touched: b.tables.clone(),
+                    present: Vec::new(),
+                    present_targets: Vec::new(),
+                    totals: None,
+                    week_start: None,
+                    max_depth,
+                }
             });
             (out, wanted)
         });
@@ -348,6 +393,44 @@ pub(crate) fn presentation_expr(stmt: &crate::ir::StmtS, col: u16) -> Option<&cr
     loop {
         match rel {
             crate::ir::Rel::Project { exprs, .. } => return exprs.get(usize::from(col)),
+            crate::ir::Rel::Union { parts, all } => {
+                if parts.len() < 2 || all.len() != parts.len() - 1 || all.iter().any(|all| !all) {
+                    return None;
+                }
+                let mut representative: Option<&crate::ir::Expr> = None;
+                for part in parts {
+                    let mut arm = part;
+                    let expr = loop {
+                        match arm {
+                            crate::ir::Rel::Project { exprs, .. } => {
+                                break exprs.get(usize::from(col))?;
+                            }
+                            crate::ir::Rel::Top { input, .. } => arm = input,
+                            _ => return None,
+                        }
+                    };
+                    if expr.ty.atom_count() != 1
+                        || !matches!(expr.ty.others.as_slice(), [crate::Other::SysEnum(_)])
+                        || !matches!(
+                            expr.kind,
+                            crate::ir::ExprKind::Col {
+                                col: crate::ir::ColSel::Field(_),
+                                ..
+                            }
+                        )
+                    {
+                        return None;
+                    }
+                    if let Some(first) = representative {
+                        if first.ty.others != expr.ty.others {
+                            return None;
+                        }
+                    } else {
+                        representative = Some(expr);
+                    }
+                }
+                return representative;
+            }
             crate::ir::Rel::Sort { input, .. }
             | crate::ir::Rel::Top { input, .. }
             | crate::ir::Rel::Hierarchy { input, .. }

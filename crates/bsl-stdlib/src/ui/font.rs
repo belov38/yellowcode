@@ -300,6 +300,13 @@ impl Font {
 }
 
 impl HostObject for Font {
+    fn retained_memory(&self, visit: &mut dyn bsl_vm::RetainedMemory) -> Result<bool, Exception> {
+        if let Some(face) = &self.data.face {
+            visit.bytes(face.capacity() as u64)?;
+        }
+        Ok(true)
+    }
+
     fn type_id(&self) -> TypeId {
         TypeId::of_catalog(types().font)
     }

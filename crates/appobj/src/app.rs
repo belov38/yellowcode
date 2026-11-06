@@ -244,6 +244,7 @@ impl Application {
             Arc::new(move |_| Ok(session_params_value(&app, ty))),
         );
         crate::meta::register(self, reg)?;
+        crate::current_language::register(self, reg);
         crate::managers::register(self, reg);
         crate::rights::register(self, reg);
         crate::session_info::register(reg);

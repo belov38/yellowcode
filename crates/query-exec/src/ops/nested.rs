@@ -145,8 +145,8 @@ fn read_section<'a>(
     let seeds = vec_block(owners.len(), std::mem::size_of::<Row>())
         + owners.len() as u64 * vec_block(1, crate::model::VALUE_SIZE)
         + 64;
-    cx.mem.grow(seeds)?;
-    let mut transient = seeds;
+    let _seeds = cx.mem.hold_owned(seeds)?;
+    let mut transient = 0;
     let real = Arc::new(ValueRows {
         width: 1,
         rows: owners
@@ -159,10 +159,21 @@ fn read_section<'a>(
             })
             .collect(),
     });
-    let rel_bytes = rel_model(&second.rel);
-    cx.mem.grow(rel_bytes)?;
-    transient += rel_bytes;
+    let rel_bytes = rel_model(&second.rel)?;
+    let _logical_copy = cx.mem.hold_owned(rel_bytes)?;
+    if let Some(payloads) = &cx.input_payloads {
+        payloads.borrow_mut().relation(&second.rel, &cx.mem)?;
+    } else if second.requires_calculation_admission
+        || crate::accounting_inputs::protected(&second.rel)?
+    {
+        return Err(super::fatal("unprepared accounting input payloads"));
+    }
     let mut rel = second.rel.clone();
+    let _plan_copy = crate::accounting_inputs::admit_plan_for_calculation(
+        &rel,
+        &cx.mem,
+        second.requires_calculation_admission,
+    )?;
     if !replace_values(&mut rel, &second.owners, &real) {
         return Err(super::fatal(
             "the owners of a nested table are not in its statement",
@@ -208,7 +219,9 @@ fn read_section<'a>(
             }
         }
     }
+    op.close(cx);
     drop(op);
+    drop(plan);
     let out_table = crate::model::hash_table_model(
         crate::model::hash_buckets_for(groups.len()),
         (std::mem::size_of::<Owner>() + std::mem::size_of::<Arc<NestedResult>>()) as u64,
@@ -241,87 +254,8 @@ fn read_section<'a>(
     Ok(out)
 }
 
-fn rel_model(r: &RelL) -> u64 {
-    const REL_NODE: u64 = 256;
-    const EXPR_NODE: u64 = 128;
-    fn expr(e: &query_ir::PExpr, bytes: &mut u64) {
-        crate::plan::walk(e, &mut |x| {
-            *bytes += EXPR_NODE;
-            if let query_ir::PExpr::Lit(v) = x {
-                *bytes += crate::model::value_model(v);
-            }
-            if let query_ir::PExpr::InQuery { q, .. } = x {
-                *bytes += rel_model(q);
-            }
-        });
-    }
-    fn exprs<'e>(es: impl IntoIterator<Item = &'e query_ir::PExpr>, bytes: &mut u64) {
-        for e in es {
-            expr(e, bytes);
-        }
-    }
-    let mut b = REL_NODE;
-    match r {
-        RelL::Empty | RelL::Scan { .. } | RelL::TempScan { .. } | RelL::RegisterRows(_) => {}
-        RelL::Slice {
-            input,
-            totals,
-            step,
-        } => {
-            b += rel_model(input);
-            if let Some(totals) = totals {
-                b += rel_model(totals);
-            }
-            exprs(step.bound.iter(), &mut b);
-        }
-        RelL::RunningBalance { input, step } => {
-            b += rel_model(input);
-            expr(&step.period, &mut b);
-            exprs(&step.period_fields, &mut b);
-            exprs(step.bounds.iter().flatten(), &mut b);
-        }
-        RelL::Values { rows } => b += crate::model::rows_model(&rows.rows),
-        RelL::Join { l, r, on, eq, .. } => {
-            b += rel_model(l) + rel_model(r);
-            expr(on, &mut b);
-            for (x, y) in eq {
-                expr(x, &mut b);
-                expr(y, &mut b);
-            }
-        }
-        RelL::Filter { input, pred } => {
-            b += rel_model(input);
-            expr(pred, &mut b);
-        }
-        RelL::Project { input, exprs: es } => {
-            b += rel_model(input);
-            exprs(es, &mut b);
-        }
-        RelL::Aggregate {
-            input, keys, aggs, ..
-        } => {
-            b += rel_model(input);
-            exprs(keys, &mut b);
-            exprs(aggs.iter().filter_map(|a| a.arg.as_ref()), &mut b);
-        }
-        RelL::CheckAccess { input, .. } | RelL::Distinct(input) | RelL::Top { input, .. } => {
-            b += rel_model(input)
-        }
-        RelL::Sort { input, keys } | RelL::HierarchyOrder { input, keys, .. } => {
-            b += rel_model(input);
-            exprs(keys.iter().map(|(k, _)| k), &mut b);
-        }
-        RelL::Union { parts, .. } => b += parts.iter().map(rel_model).sum::<u64>(),
-        RelL::HierarchyClosure { seeds, .. } => match seeds {
-            query_ir::HierSeeds::Values(v) => exprs(v, &mut b),
-            query_ir::HierSeeds::Rel(r) => b += rel_model(r),
-        },
-        RelL::SemiJoin { input, l, q, .. } => {
-            b += rel_model(input) + rel_model(q);
-            exprs(l, &mut b);
-        }
-    }
-    b
+fn rel_model(r: &RelL) -> Result<u64, ExecError> {
+    crate::accounting_inputs::structural_model(r)
 }
 
 pub const OWNER_SEEK_ROWS: u64 = 32;

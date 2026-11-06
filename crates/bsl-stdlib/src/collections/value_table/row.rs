@@ -31,6 +31,7 @@ pub(super) struct RowRecord {
     pub(super) member: Cell<bool>,
     pub(super) cells: RefCell<Cells>,
     pub(super) bytes: Cell<u64>,
+    pub(super) materialized: Cell<bool>,
 }
 impl RowRecord {
     pub(super) fn calculate_bytes(&self) -> u64 {
@@ -119,6 +120,7 @@ impl TableRow {
                 .saturating_sub(before)
                 .saturating_add(after),
         );
+        self.record.materialized.set(true);
         self.state.bump();
     }
 
@@ -187,6 +189,7 @@ impl TableRow {
                 .saturating_sub(before)
                 .saturating_add(after),
         );
+        self.record.materialized.set(true);
         self.state.bump();
         release(vec![old]);
         Ok(())

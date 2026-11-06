@@ -132,6 +132,7 @@ impl TableState {
                 member: Cell::new(true),
                 cells: RefCell::new(cells),
                 bytes: Cell::new(0),
+                materialized: Cell::new(row.materialized.get()),
             });
             ex.charge(columns.len() as u64)?;
             record.bytes.set(record.calculate_bytes());

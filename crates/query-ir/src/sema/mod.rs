@@ -1,4 +1,5 @@
 pub(crate) mod batch;
+mod calculation_base;
 pub(crate) mod columns;
 pub(crate) mod dcs;
 pub(crate) mod expr;
@@ -431,7 +432,7 @@ impl<'a> Analyzer<'a> {
                     typed: tir::Stmt {
                         static_analysis: self.opts.mode == AnalyzeMode::Static,
                         kind: tir::StmtKind::Query(query),
-                        max_depth,
+                        max_depth: self.max_depth.max(max_depth),
                     },
                 })
             }
@@ -571,7 +572,7 @@ impl<'a> Analyzer<'a> {
                 continue;
             };
             let ty = crate::managed::type_copy(self.memory, ty)?.without_null();
-            if want.is_undefined() || (ty.is_subtype_of(want) && qualifiers_fit(want, &ty)) {
+            if add_type_compatible(want, &ty) {
                 continue;
             }
             return Err(self.quoted_text_error(
@@ -609,7 +610,7 @@ impl<'a> Analyzer<'a> {
         for ((item, col), ty) in first.items.iter().zip(&table.columns).zip(&types) {
             let Some(want) = &col.ty else { continue };
             let ty = ty.clone().without_null();
-            if want.is_undefined() || (ty.is_subtype_of(want) && qualifiers_fit(want, &ty)) {
+            if add_type_compatible(want, &ty) {
                 continue;
             }
             return Err(self.quoted_text_error(
@@ -860,6 +861,10 @@ pub(crate) fn boolean_of(xs: &[&TExpr]) -> QType {
     } else {
         t
     }
+}
+
+pub(crate) fn add_type_compatible(want: &QType, source: &QType) -> bool {
+    want.is_undefined() || (source.is_subtype_of(want) && qualifiers_fit(want, source))
 }
 
 fn qualifiers_fit(want: &QType, ty: &QType) -> bool {

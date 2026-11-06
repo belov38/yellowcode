@@ -93,6 +93,35 @@ impl OwnedReader {
         }
     }
 
+    pub fn retained_bytes(&self) -> Option<u64> {
+        let text = u64::try_from(self.text.len()).ok()?.checked_mul(2)?;
+        let stack = u64::try_from(self.stack.capacity())
+            .ok()?
+            .checked_mul(u64::try_from(std::mem::size_of::<Frame>()).ok()?)?;
+        text.checked_add(stack)
+    }
+
+    pub fn remaining_work_bound(&self) -> Option<u64> {
+        u64::try_from(self.text.len().checked_sub(self.pos)?)
+            .ok()?
+            .checked_add(self.padding_left)
+    }
+
+    pub fn next_scratch_bound(&self) -> Option<u64> {
+        let remaining = u64::try_from(self.text.len().checked_sub(self.pos)?).ok()?;
+        let padding = self.padding_left.min(MAX_PADDING);
+        remaining
+            .checked_add(padding)?
+            .checked_add(64)?
+            .checked_mul(64)?
+            .checked_add(
+                u64::try_from(self.stack.len())
+                    .ok()?
+                    .checked_add(1)?
+                    .checked_mul(2)?,
+            )
+    }
+
     #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Result<Option<Token>, LibError> {
         if let Some(e) = &self.failed {

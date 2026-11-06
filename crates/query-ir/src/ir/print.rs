@@ -215,6 +215,17 @@ impl Printer<'_> {
                     self.w(" cond=");
                     self.expr(c);
                 }
+                if let Some(k) = &v.order {
+                    self.w(if k.desc {
+                        " order-desc="
+                    } else {
+                        " order-asc="
+                    });
+                    self.expr(&k.expr);
+                }
+                if let Some(n) = v.top {
+                    let _ = write!(self.out, " top={n}");
+                }
                 self.w(")");
             }
         }
@@ -288,7 +299,7 @@ impl Printer<'_> {
                     let _ = write!(self.out, "val{i}");
                 }
             },
-            ExprKind::KeyRef(i) => {
+            ExprKind::KeyRef(i) | ExprKind::LocalKey { key: i, .. } => {
                 let _ = write!(self.out, "key{i}");
             }
             ExprKind::AggRef(i) => {

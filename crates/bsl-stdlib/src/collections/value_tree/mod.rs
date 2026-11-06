@@ -8,6 +8,7 @@ pub(super) mod row;
 mod rows;
 mod schema;
 mod search;
+mod serial;
 mod sort;
 use super::{
     columns::{ColumnRecord, Columns, PreparedSchemaChange, SchemaChange, SchemaRows},
@@ -52,6 +53,7 @@ struct Node {
     parent: Option<usize>,
     level: i64,
     active: Cell<bool>,
+    materialized: Cell<bool>,
     children: RefCell<Vec<usize>>,
     cells: RefCell<Cells>,
     bytes: Cell<u64>,

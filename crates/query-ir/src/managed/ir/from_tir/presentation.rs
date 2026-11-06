@@ -6,6 +6,7 @@ impl<'c, 'a, 'r, 'w, 't> Builder<'c, 'a, 'r, 'w, 't> {
         select: &'t tir::Select,
         item: &'t tir::Item,
         col: usize,
+        unordered: bool,
     ) -> BuildResult<Option<NativeOwned<'a, ir::Expr>>> {
         let arg = match &item.expr.kind {
             tir::TKind::Func {
@@ -29,13 +30,35 @@ impl<'c, 'a, 'r, 'w, 't> Builder<'c, 'a, 'r, 'w, 't> {
         if arg.is_none() && field.is_none() {
             return Ok(None);
         }
-        if self.query_depth != 1 || !self.single_part {
+        if self.query_depth != 1
+            || (!self.single_part
+                && !(self
+                    .union_present
+                    .is_some_and(|(present, _)| usize::from(present) == col)
+                    && ir::distinct_movement_presentation(self.schema, select, item, |source| {
+                        let src = self.levels.last()?.get(usize::from(source))?;
+                        match self.sources.get(src.0 as usize)?.trusted_borrow().kind {
+                            ir::SrcKind::Table(table) => Some(table),
+                            _ => None,
+                        }
+                    })))
+        {
             return Err(BuildProblem::Later {
                 what: "ПРЕДСТАВЛЕНИЕ в подзапросе или в объединении",
                 stage: "Q3",
             });
         }
-        if select.distinct {
+        if select.distinct
+            && !(unordered
+                && !self.temp_out
+                && ir::distinct_movement_presentation(self.schema, select, item, |source| {
+                    let src = self.levels.last()?.get(usize::from(source))?;
+                    match self.sources.get(src.0 as usize)?.trusted_borrow().kind {
+                        ir::SrcKind::Table(table) => Some(table),
+                        _ => None,
+                    }
+                }))
+        {
             return Err(BuildProblem::Later {
                 what: "ПРЕДСТАВЛЕНИЕ при РАЗЛИЧНЫЕ",
                 stage: "Q3",
@@ -47,8 +70,15 @@ impl<'c, 'a, 'r, 'w, 't> Builder<'c, 'a, 'r, 'w, 't> {
             (None, Some(field)) => field,
             (None, None) => return Ok(None),
         };
-        self.ctx
-            .scratch_push(&mut self.present, self.ctx.scalar(col))?;
+        if self.single_part
+            || !self
+                .present
+                .iter()
+                .any(|value| *value.trusted_borrow() == col)
+        {
+            self.ctx
+                .scratch_push(&mut self.present, self.ctx.scalar(col))?;
+        }
         Ok(Some(expr))
     }
     fn presentation_of_field(

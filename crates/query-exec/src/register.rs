@@ -54,6 +54,7 @@ impl RegisterSettings {
 pub enum RegisterKind {
     Accumulation,
     Information,
+    Accounting,
 }
 
 fn fatal(s: impl Into<String>) -> ExecError {
@@ -162,6 +163,126 @@ fn apply_accumulation_row(info: &TableInfo, row: &[QValue], s: &mut RegisterSett
     s.min_calculated = date(get(info, row, StdField::MinCalculatedPeriod));
 }
 
+fn accounting_options(map: &StorageMap, md: Uuid16) -> Result<TableId, ExecError> {
+    let mut tables = map
+        .object(md)
+        .into_iter()
+        .flat_map(|o| &o.service)
+        .filter(|(r, _)| r == role::ACCOUNT_REGISTER_TOTALS_OPTIONS);
+    let t = tables.next().map(|(_, t)| *t).ok_or_else(|| {
+        fatal(format!(
+            "register settings: no {} service table for register {md}",
+            purpose::ACC_RG_OPT
+        ))
+    })?;
+    if tables.next().is_some() {
+        return Err(fatal("register settings: ambiguous AccRgOpt service role"));
+    }
+    Ok(t)
+}
+
+fn validate_accounting_layout(info: &TableInfo) -> Result<(), ExecError> {
+    if !info.separators.is_empty() {
+        return Err(fatal(
+            "register settings: AccRgOpt physical separators require accounting area selection (stage Q7)",
+        ));
+    }
+    for std in [
+        StdField::RegId,
+        StdField::Period,
+        StdField::ActualPeriod,
+        StdField::UseTotals,
+        StdField::MinPeriod,
+        StdField::UseSplitter,
+        StdField::MinCalculatedPeriod,
+    ] {
+        let mut positions = info
+            .fields
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| f.std == Some(std));
+        let first = positions.next();
+        if first.is_none() && std == StdField::MinCalculatedPeriod {
+            continue;
+        }
+        if first.is_none_or(|(i, _)| u16::try_from(i).is_err()) || positions.next().is_some() {
+            return Err(fatal(format!(
+                "register settings: AccRgOpt missing or ambiguous {} field",
+                std.logical()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn accounting_row(
+    info: &TableInfo,
+    rows: RowIter<'_>,
+    md: Uuid16,
+) -> Result<Option<Row>, ExecError> {
+    let want = reg_id(md);
+    let mut found = None;
+    let mut duplicate = false;
+    let mut malformed = false;
+    for row in rows {
+        let row = row?;
+        let id = match get(info, &row, StdField::RegId) {
+            Some(QValue::Binary(id)) if id.len() == 16 => id,
+            _ => {
+                malformed = true;
+                continue;
+            }
+        };
+        if id.as_ref() == want.as_slice() {
+            if found.is_some() {
+                duplicate = true;
+            } else {
+                found = Some(row);
+            }
+        }
+    }
+    if malformed {
+        return Err(fatal(
+            "register settings: AccRgOpt RegID must be 16-byte Binary",
+        ));
+    }
+    if duplicate {
+        return Err(fatal("register settings: duplicate AccRgOpt RegID"));
+    }
+    Ok(found)
+}
+
+fn validate_accounting_row(info: &TableInfo, row: &[QValue]) -> Result<(), ExecError> {
+    for std in [
+        StdField::UseTotals,
+        StdField::ActualPeriod,
+        StdField::UseSplitter,
+        StdField::Period,
+        StdField::MinPeriod,
+        StdField::MinCalculatedPeriod,
+    ] {
+        if std == StdField::MinCalculatedPeriod && info.field_by_std(std).is_none() {
+            continue;
+        }
+        let valid = match (std, get(info, row, std)) {
+            (StdField::UseTotals, Some(QValue::Number(n))) => {
+                *n == Number::zero() || *n == Number::from(1)
+            }
+            (StdField::ActualPeriod | StdField::UseSplitter, Some(QValue::Bool(_))) => true,
+            (StdField::MinPeriod, Some(QValue::Date(d))) => *d != BslDate::EMPTY,
+            (StdField::Period | StdField::MinCalculatedPeriod, Some(QValue::Date(_))) => true,
+            _ => false,
+        };
+        if !valid {
+            return Err(fatal(format!(
+                "register settings: invalid AccRgOpt {} value",
+                std.logical()
+            )));
+        }
+    }
+    Ok(())
+}
+
 pub fn read_register_settings(
     src: &dyn DataSource,
     md: Uuid16,
@@ -184,6 +305,21 @@ pub(crate) fn read_register_settings_with_observation(
     }
     let mut s = RegisterSettings::defaults();
     match kind {
+        RegisterKind::Accounting => {
+            let t = accounting_options(map, md)?;
+            let info = map
+                .try_table(t)
+                .ok_or_else(|| fatal("register settings: unknown AccRgOpt table"))?;
+            validate_accounting_layout(info)?;
+            if let Some(obs) = observation {
+                obs.table(t);
+            }
+            let rows = src.scan(t)?;
+            if let Some(row) = accounting_row(info, rows, md)? {
+                validate_accounting_row(info, &row)?;
+                apply_accumulation_row(info, &row, &mut s);
+            }
+        }
         RegisterKind::Accumulation => {
             let t =
                 service(map, md, role::ACCUMULATION_REGISTER_TOTALS_OPTIONS).ok_or_else(|| {
@@ -228,6 +364,7 @@ pub fn settings_tables(map: &StorageMap, md: Uuid16) -> Vec<TableId> {
         role::ACCUMULATION_REGISTER_TOTALS_OPTIONS,
         role::ACCUMULATION_REGISTERS_AGGREGATES_OPTIONS,
         role::INFORMATION_REGISTER_TOTALS_OPTIONS,
+        role::ACCOUNT_REGISTER_TOTALS_OPTIONS,
     ]
     .into_iter()
     .filter_map(|p| service(map, md, p))
@@ -465,7 +602,9 @@ fn totals_off_cause() -> query_ir::CompileError {
 struct TotalsUseStep {
     register: Uuid16,
     kind: RegisterKind,
+    vt_kind: Option<query_ir::VtKind>,
     view: Option<query_syntax::Span>,
+    has_dates: bool,
 }
 
 fn steps_of(r: &query_ir::RelL, out: &mut Vec<TotalsUseStep>) {
@@ -482,11 +621,34 @@ fn steps_of(r: &query_ir::RelL, out: &mut Vec<TotalsUseStep>) {
         }
     };
     match r {
-        RelL::RegisterRows(s) => out.push(TotalsUseStep {
-            register: s.register,
-            kind: RegisterKind::Accumulation,
-            view: s.view,
-        }),
+        RelL::RegisterRows(s) => {
+            out.push(TotalsUseStep {
+                register: s.register,
+                kind: match &s.rows {
+                    query_ir::lower::RegisterRowsKindL::Accumulation(_) => {
+                        RegisterKind::Accumulation
+                    }
+                    query_ir::lower::RegisterRowsKindL::Accounting(_) => RegisterKind::Accounting,
+                    query_ir::lower::RegisterRowsKindL::AccountingTurnovers(_)
+                    | query_ir::lower::RegisterRowsKindL::AccountingBalance(_) => {
+                        RegisterKind::Accounting
+                    }
+                },
+                vt_kind: Some(s.kind),
+                view: s.view,
+                has_dates: match &s.rows {
+                    query_ir::lower::RegisterRowsKindL::Accounting(a) => {
+                        a.date_bounds.iter().any(Option::is_some)
+                    }
+                    query_ir::lower::RegisterRowsKindL::Accumulation(_)
+                    | query_ir::lower::RegisterRowsKindL::AccountingTurnovers(_)
+                    | query_ir::lower::RegisterRowsKindL::AccountingBalance(_) => false,
+                },
+            });
+            if let Some(child) = s.chart_input() {
+                steps_of(child, out);
+            }
+        }
         RelL::Slice {
             input,
             totals,
@@ -495,7 +657,9 @@ fn steps_of(r: &query_ir::RelL, out: &mut Vec<TotalsUseStep>) {
             out.push(TotalsUseStep {
                 register: step.register,
                 kind: RegisterKind::Information,
+                vt_kind: None,
                 view: step.view,
+                has_dates: false,
             });
             steps_of(input, out);
             if let Some(t) = totals {
@@ -563,7 +727,7 @@ pub fn check_totals_use(
     src: &dyn DataSource,
     text: &str,
 ) -> Result<Option<query_ir::CompileError>, ExecError> {
-    check_totals_use_impl(stmt, src, text, None)
+    check_totals_use_impl(stmt, src, text, None, None)
 }
 
 fn check_totals_use_impl(
@@ -571,20 +735,38 @@ fn check_totals_use_impl(
     src: &dyn DataSource,
     text: &str,
     observation: Option<&crate::observe::ObservationSession>,
+    env: Option<&crate::ExecEnv<'_>>,
 ) -> Result<Option<query_ir::CompileError>, ExecError> {
     let mut steps = Vec::new();
     steps_of(&stmt.root, &mut steps);
     for s in steps {
-        if s.kind != RegisterKind::Accumulation {
+        if !matches!(
+            s.kind,
+            RegisterKind::Accumulation | RegisterKind::Accounting
+        ) {
             continue;
         }
-        let settings = read_register_settings_with_observation(
-            src,
-            s.register,
-            RegisterKind::Accumulation,
-            observation,
-        )?;
+        if s.kind == RegisterKind::Accounting
+            && let Some(env) = env
+        {
+            crate::ops::check_accounting_cancel(env)?;
+        }
+        let settings =
+            read_register_settings_with_observation(src, s.register, s.kind, observation)?;
+        if s.kind == RegisterKind::Accounting
+            && let Some(env) = env
+        {
+            crate::ops::check_accounting_cancel(env)?;
+        }
         if settings.use_totals {
+            if s.kind == RegisterKind::Accounting && s.vt_kind == Some(query_ir::VtKind::Balance) {
+                crate::ops::check_balance_settings_shape(&settings)?;
+            }
+            if s.kind == RegisterKind::Accounting
+                && s.vt_kind == Some(query_ir::VtKind::DrCrTurnovers)
+            {
+                crate::ops::check_drcr_settings_shape(&settings, s.has_dates)?;
+            }
             continue;
         }
         let cause = totals_off_cause();
@@ -644,11 +826,32 @@ pub fn check_totals_use_observed(
     obs: &crate::observe::ObservationSession,
 ) -> Result<Option<query_ir::CompileError>, ExecError> {
     obs.begin_precheck();
-    let result = check_totals_use_impl(stmt, src, text, Some(obs));
+    let result = check_totals_use_impl(stmt, src, text, Some(obs), None);
     match &result {
         Ok(Some(_)) => obs.terminal(),
         Err(_) => obs.finish(false),
         Ok(None) => {}
+    }
+    result
+}
+
+pub(crate) fn check_totals_use_for_execution(
+    stmt: &query_ir::StmtL,
+    src: &dyn DataSource,
+    text: &str,
+    observation: Option<&crate::observe::ObservationSession>,
+    env: &crate::ExecEnv<'_>,
+) -> Result<Option<query_ir::CompileError>, ExecError> {
+    if let Some(obs) = observation {
+        obs.begin_precheck();
+    }
+    let result = check_totals_use_impl(stmt, src, text, observation, Some(env));
+    if let Some(obs) = observation {
+        match &result {
+            Ok(Some(_)) => obs.terminal(),
+            Err(_) => obs.finish(false),
+            Ok(None) => {}
+        }
     }
     result
 }

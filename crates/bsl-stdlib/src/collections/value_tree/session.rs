@@ -44,6 +44,7 @@ struct Record {
     parent: Option<usize>,
     level: i64,
     active: bool,
+    materialized: bool,
     children: Vec<usize>,
     fields: Vec<u32>,
     hash: i32,
@@ -94,6 +95,7 @@ fn record(record: &Rc<Node>, out: &mut dyn SessionExport) -> Result<Arc<Record>,
                 parent: record.parent,
                 level: record.level,
                 active: record.active.get(),
+                materialized: record.materialized.get(),
                 children: crate::session::copy(&record.children.borrow())
                     .map_err(|_| out.memory_error())?,
                 fields: {
@@ -209,6 +211,7 @@ impl Record {
                 parent: self.parent,
                 level: self.level,
                 active: Cell::new(self.active),
+                materialized: Cell::new(self.materialized),
                 children: RefCell::new(
                     crate::session::copy(&self.children).map_err(|_| ex.out_of_memory())?,
                 ),

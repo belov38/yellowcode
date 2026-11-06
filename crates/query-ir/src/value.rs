@@ -1,9 +1,44 @@
 use crate::QType;
 use std::sync::Arc;
 mod bytes;
+#[doc(hidden)]
+pub mod register_bounds;
 mod shared;
 pub use bytes::QBytes;
 pub use shared::QShared;
+
+#[derive(Clone, Copy, Debug)]
+pub struct SharedBacking {
+    pub identity: usize,
+    pub managed: bool,
+    pub node: std::alloc::Layout,
+    pub buffer: Option<std::alloc::Layout>,
+}
+
+impl SharedBacking {
+    fn arc<T: ?Sized>(value: &Arc<T>) -> Result<Self, std::alloc::LayoutError> {
+        let header = std::alloc::Layout::array::<std::sync::atomic::AtomicUsize>(2)?;
+        let node = header
+            .extend(std::alloc::Layout::for_value(value.as_ref()))?
+            .0
+            .pad_to_align();
+        Ok(Self {
+            identity: Arc::as_ptr(value).cast::<()>() as usize,
+            managed: false,
+            node,
+            buffer: None,
+        })
+    }
+
+    fn managed<T>(value: &memory_budget::Shared<T>) -> Self {
+        Self {
+            identity: std::ptr::from_ref::<T>(value).cast::<()>() as usize,
+            managed: true,
+            node: value.allocation_layout(),
+            buffer: None,
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct QStr(pub QStrData);
@@ -15,6 +50,19 @@ enum QStrBacking {
     Legacy(Arc<[u16]>),
     Managed(memory_budget::Shared<Vec<u16>>),
 }
+impl QStrData {
+    pub fn backing_layout(&self) -> Result<SharedBacking, std::alloc::LayoutError> {
+        match &self.0 {
+            QStrBacking::Legacy(value) => SharedBacking::arc(value),
+            QStrBacking::Managed(value) => {
+                let mut backing = SharedBacking::managed(value);
+                backing.buffer = Some(std::alloc::Layout::array::<u16>(value.capacity())?);
+                Ok(backing)
+            }
+        }
+    }
+}
+
 impl std::ops::Deref for QStrData {
     type Target = [u16];
     fn deref(&self) -> &[u16] {

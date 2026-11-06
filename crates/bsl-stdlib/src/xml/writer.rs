@@ -230,6 +230,71 @@ fn bad_name() -> bsl_vm::CallError {
 }
 
 impl XmlWriterState {
+    pub(crate) fn retained_prefix_bytes(&self, ex: &mut Execution) -> CallResult<u64> {
+        use std::mem::size_of;
+        let settings = self
+            .settings_value
+            .as_object()
+            .and_then(|o| o.as_any().downcast_ref::<SettingsObject>())
+            .ok_or_else(|| HostError::not_implemented("ЗаписьXML", "Учет параметров"))?;
+        let mut bytes = self
+            .w
+            .retained_bytes(|n| ex.charge(n))?
+            .ok_or_else(|| ex.out_of_memory())?;
+        let strings = [
+            &self.settings.encoding,
+            &self.settings.version,
+            &self.settings.indent_chars,
+            &settings.0.encoding,
+            &settings.0.version,
+            &settings.0.indent_chars,
+        ];
+        bytes = bytes.saturating_add(
+            (size_of::<Self>() + size_of::<SettingsObject>() + 2 * size_of::<usize>()) as u64,
+        );
+        for s in strings {
+            bytes = bytes.saturating_add(s.capacity() as u64);
+        }
+        if let Some(declared) = &self.declared {
+            bytes = bytes.saturating_add(declared.capacity() as u64);
+        }
+        if let Some(file) = &self.file {
+            match &file.dest {
+                Dest::File(path) => bytes = bytes.saturating_add(path.capacity() as u64),
+                Dest::Stream(_) => {
+                    return Err(
+                        HostError::not_implemented("ЗаписьXML", "Запись таблицы в поток").into(),
+                    );
+                }
+            }
+        }
+        bytes = bytes.saturating_add((self.attrs.capacity() as u64).saturating_mul(size_of::<(
+            String,
+            String,
+        )>()
+            as u64));
+        bytes = bytes.saturating_add((self.scopes.capacity() as u64).saturating_mul(size_of::<(
+            u64,
+            String,
+            String,
+        )>()
+            as u64));
+        ex.charge((self.attrs.len() as u64).saturating_add(self.scopes.len() as u64))?;
+        for (a, b) in &self.attrs {
+            bytes = bytes
+                .saturating_add(a.capacity() as u64)
+                .saturating_add(b.capacity() as u64);
+        }
+        for (_, a, b) in &self.scopes {
+            bytes = bytes
+                .saturating_add(a.capacity() as u64)
+                .saturating_add(b.capacity() as u64);
+        }
+        if bytes == u64::MAX {
+            return Err(ex.out_of_memory().into());
+        }
+        Ok(bytes)
+    }
     fn new(settings: Settings, settings_value: Value, declared: Option<String>) -> XmlWriterState {
         XmlWriterState {
             w: XmlWriter::new(kernel_options(&settings)),

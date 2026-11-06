@@ -63,12 +63,30 @@ pub(crate) enum Provider<'a> {
         arena: &'a crate::managed::CompileArena,
         params: &'a dyn ManagedParamTypes,
     },
+    ShapeOnlyLegacy(&'a dyn ParamTypes),
+    ShapeOnlyManaged {
+        arena: &'a crate::managed::CompileArena,
+        params: &'a dyn ManagedParamTypes,
+    },
 }
-impl Provider<'_> {
+impl<'a> Provider<'a> {
+    pub(crate) fn shape_only(&self) -> Provider<'a> {
+        match self {
+            Self::Legacy(p) | Self::ShapeOnlyLegacy(p) => Self::ShapeOnlyLegacy(*p),
+            Self::Managed { arena, params } | Self::ShapeOnlyManaged { arena, params } => {
+                Self::ShapeOnlyManaged {
+                    arena,
+                    params: *params,
+                }
+            }
+        }
+    }
     pub(crate) fn shape(&self, name: &str) -> crate::sema::R<Option<ParamView<'_, ParamShape>>> {
         match self {
-            Self::Legacy(params) => Ok(params.shape(name).map(ParamView::Owned)),
-            Self::Managed { arena, params } => {
+            Self::Legacy(params) | Self::ShapeOnlyLegacy(params) => {
+                Ok(params.shape(name).map(ParamView::Owned))
+            }
+            Self::Managed { arena, params } | Self::ShapeOnlyManaged { arena, params } => {
                 let key = crate::managed::NameKey::parameter(Some(arena), name)?;
                 Ok(params
                     .shape_lowercase(key.as_str())
@@ -78,6 +96,7 @@ impl Provider<'_> {
     }
     pub(crate) fn constant(&self, name: &str) -> crate::sema::R<Option<ParamView<'_, ParamConst>>> {
         match self {
+            Self::ShapeOnlyLegacy(_) | Self::ShapeOnlyManaged { .. } => Ok(None),
             Self::Legacy(params) => Ok(params.constant(name).map(ParamView::Owned)),
             Self::Managed { arena, params } => {
                 let key = crate::managed::NameKey::parameter(Some(arena), name)?;

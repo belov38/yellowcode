@@ -230,6 +230,7 @@ pub(crate) struct StdCtx<'a> {
     pub kind: ObjKind,
     pub me: ObjId,
     pub owners: &'a [ObjId],
+    pub recorder_docs: &'a [ObjId],
     pub script: ScriptVariant,
 }
 
@@ -276,6 +277,15 @@ fn std_type(a: StdAttr, b: &Behavior, cx: &StdCtx<'_>) -> TypeSet {
         S::LineNumber => TypeSet::number(9, 0, true),
         S::Order => TypeSet::number(10, 0, true),
         S::SentNo | S::ReceivedNo => TypeSet::number(15, 0, true),
+        S::Recorder if cx.kind != ObjKind::Sequence => TypeSet {
+            atoms: cx
+                .recorder_docs
+                .iter()
+                .copied()
+                .map(TypeAtom::Ref)
+                .collect(),
+            ..TypeSet::default()
+        },
         S::Recorder => one(TypeAtom::AnyRef(Some(ObjKind::Document))),
         S::RecordType => one(TypeAtom::Platform(
             match cx.kind {

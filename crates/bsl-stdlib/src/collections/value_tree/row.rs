@@ -54,6 +54,7 @@ impl TreeRow {
             unreachable!("prepared tree cell disappeared")
         }
         drop(cells);
+        self.record.materialized.set(true);
         self.state.update_bytes(&self.record);
         self.state.bump();
     }
@@ -140,6 +141,7 @@ impl TreeRow {
                 .ok_or_else(changed)?;
             std::mem::replace(cell, adjusted)
         };
+        self.record.materialized.set(true);
         self.state.update_bytes(&self.record);
         self.state.bump();
         super::super::retire::push(&mut retired, old);

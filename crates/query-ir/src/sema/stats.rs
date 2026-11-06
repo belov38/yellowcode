@@ -4,6 +4,16 @@ use crate::tir::{ControlPoint, From, Item, Query, Select, Source, StmtKind, TExp
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct StmtStats {
     pub nodes: u64,
+    pub drcr_dependencies: u64,
+    pub drcr_wildcard_targets: u64,
+    pub drcr_wildcard_fields: u64,
+    pub drcr_nested_nodes: u64,
+    pub accounting_sources: u64,
+    pub accounting_slots: u64,
+    pub accounting_dependencies: u64,
+    pub accounting_wildcard_targets: u64,
+    pub accounting_wildcard_fields: u64,
+    pub accounting_nested_nodes: u64,
     pub columns: u64,
     pub fanout_sum: u64,
     pub joins: u64,
@@ -33,17 +43,18 @@ enum Node<'a> {
     Item(&'a Item),
     Source(&'a Source),
     Expr(&'a TExpr),
+    Dependency(&'a crate::tir::DrCrArgDependency, bool),
 }
 
 pub fn stats(c: &CompiledStmt) -> StmtStats {
     walk(c, &mut |_| {})
 }
 
-pub(crate) fn visit_schema_sources(c: &CompiledStmt, f: &mut dyn FnMut(crate::QTableId)) {
+pub(crate) fn visit_table_sources(c: &CompiledStmt, f: &mut dyn FnMut(&From)) {
     walk(c, f);
 }
 
-fn walk(c: &CompiledStmt, source: &mut dyn FnMut(crate::QTableId)) -> StmtStats {
+fn walk(c: &CompiledStmt, source: &mut dyn FnMut(&From)) -> StmtStats {
     let s = StmtStats {
         columns: columns(&c.columns),
         type_refs: column_refs(&c.columns),
@@ -66,7 +77,7 @@ pub(crate) fn predicate_stats(p: &crate::access::PredicateForm) -> StmtStats {
 fn walk_nodes(
     mut s: StmtStats,
     mut todo: Vec<Node<'_>>,
-    source: &mut dyn FnMut(crate::QTableId),
+    source: &mut dyn FnMut(&From),
 ) -> StmtStats {
     while let Some(node) = todo.pop() {
         match node {
@@ -108,15 +119,76 @@ fn walk_nodes(
                     todo.push(Node::Expr(&j.on));
                 }
                 match &src.from {
-                    From::Table { id, args, .. } => {
-                        source(*id);
+                    From::Table {
+                        args,
+                        drcr,
+                        accounting_dependencies,
+                        ..
+                    } => {
+                        source(&src.from);
                         s.sources += 1;
                         todo.extend(args.iter().flatten().map(Node::Expr));
+                        if let Some(drcr) = drcr {
+                            todo.extend(
+                                drcr.dependencies.iter().map(|d| Node::Dependency(d, false)),
+                            );
+                        }
+                        if let Some(capture) = accounting_dependencies {
+                            s.accounting_sources += 1;
+                            s.accounting_slots += capture.supplied.len() as u64;
+                            todo.extend(
+                                capture
+                                    .dependencies
+                                    .iter()
+                                    .map(|d| Node::Dependency(d, true)),
+                            );
+                        }
                     }
                     From::Temp(_) | From::Param { .. } => s.sources += 1,
                     From::Subquery(q) => {
                         s.subqueries += 1;
                         todo.push(Node::Query(q));
+                    }
+                }
+            }
+            Node::Dependency(d, ordinary) => {
+                use crate::tir::DrCrArgRead;
+                if ordinary {
+                    s.accounting_dependencies += 1;
+                } else {
+                    s.drcr_dependencies += 1;
+                }
+                match &d.read {
+                    DrCrArgRead::Expression(e) => todo.push(Node::Expr(e)),
+                    DrCrArgRead::Wildcard(w) => {
+                        todo.push(Node::Expr(&w.base));
+                        if ordinary {
+                            s.accounting_wildcard_targets += w.targets.len() as u64;
+                        } else {
+                            s.drcr_wildcard_targets += w.targets.len() as u64;
+                        }
+                        for target in &w.targets {
+                            if ordinary {
+                                s.accounting_wildcard_fields += target.fields.len() as u64;
+                            } else {
+                                s.drcr_wildcard_fields += target.fields.len() as u64;
+                            }
+                            s.nodes += target.path.len() as u64;
+                            s.fanout_sum += target
+                                .path
+                                .iter()
+                                .map(|d| d.targets.len() as u64)
+                                .sum::<u64>();
+                        }
+                    }
+                    DrCrArgRead::Nested(n) => {
+                        if ordinary {
+                            s.accounting_nested_nodes += 1;
+                        } else {
+                            s.drcr_nested_nodes += 1;
+                        }
+                        todo.push(Node::Expr(&n.base));
+                        todo.extend(n.dependencies.iter().map(|d| Node::Dependency(d, ordinary)));
                     }
                 }
             }

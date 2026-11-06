@@ -1,11 +1,17 @@
+use std::cell::Cell;
 use std::sync::Arc;
 
+use crate::temp::provenance::OriginAdapter;
 use memory_budget::{Evictor, Reservation, StructureLimit};
+use query_ir::bind::ParamValuesSnapshot;
+use query_ir::bind::temp_provenance::{
+    BoundTempStatement, bind_with_temp_origins, preflight_virtual_with_temp_origins,
+};
 use query_ir::ir::{BuildError, Rel, build_stmt};
 use query_ir::tir::{From as TFrom, Query, Select, StmtKind, TExpr, TKind};
 use query_ir::{
     AnalyzeMode, AnalyzeOptions, BindCtx, CompileError, CompileRefusal, CompiledStmt, ExecError,
-    ParamInfo, ParamTypes, ParamValues, QValue, TempOut,
+    ParamInfo, ParamTypes, ParamValue, ParamValues, QValue, TempOut,
 };
 use query_syntax::{ParseMode, Preflight, PublicParseLimit};
 
@@ -168,22 +174,62 @@ impl CompileModel {
         let dots = pre.dots_per_statement.get(i).copied().unwrap_or(0);
         let chained = pre.chained_dots_per_statement.get(i).copied().unwrap_or(0);
         let stars = pre.stars_per_statement.get(i).copied().unwrap_or(0);
-        self.fixed_sema
+        let staging = u64::from(tokens).saturating_mul(
+            (6 * std::mem::size_of::<query_ir::tir::DrCrArgDependency>()
+                + 16 * std::mem::size_of::<usize>()) as u64,
+        );
+        let targets = u64::from(stars)
+            .saturating_mul(u64::from(max_table_width.max(1)))
+            .saturating_mul(
+                (2 * std::mem::size_of::<query_ir::tir::DrCrWildcardTarget>()
+                    + 4 * std::mem::size_of::<query_ir::QFieldId>()) as u64,
+            );
+        let ordinary = self.fixed_sema
             + self.c_sema * u64::from(tokens)
             + self.c_sema_type * u64::from(tokens) * u64::from(max_ref_fanout).div_ceil(8)
             + self.c_dot * u64::from(dots)
             + self.c_deref * u64::from(chained) * u64::from(max_ref_fanout.max(1))
             + self.c_star * u64::from(stars) * u64::from(max_table_width.max(1))
-            + self.c_temp * temps as u64
+            + self.c_temp * temps as u64;
+        ordinary.saturating_add(staging).saturating_add(targets)
     }
 
     pub fn build(&self, st: &query_ir::sema::stats::StmtStats) -> u64 {
-        self.fixed_build
+        let ordinary = self.fixed_build
             + self.c_build * st.nodes
             + self.c_bfan * st.fanout_sum
             + self.c_bcol * st.columns
             + self.c_bjoin * (st.joins + st.subqueries)
-            + self.c_btype * st.type_refs
+            + self.c_btype * st.type_refs;
+        ordinary
+            .saturating_add(
+                st.drcr_dependencies
+                    .saturating_add(st.accounting_dependencies)
+                    .saturating_mul(
+                        2 * std::mem::size_of::<query_ir::tir::DrCrArgDependency>() as u64,
+                    ),
+            )
+            .saturating_add(
+                st.drcr_wildcard_targets
+                    .saturating_add(st.accounting_wildcard_targets)
+                    .saturating_mul(
+                        2 * std::mem::size_of::<query_ir::tir::DrCrWildcardTarget>() as u64,
+                    ),
+            )
+            .saturating_add(
+                st.drcr_wildcard_fields
+                    .saturating_add(st.accounting_wildcard_fields)
+                    .saturating_mul(2 * std::mem::size_of::<query_ir::QFieldId>() as u64),
+            )
+            .saturating_add(
+                st.drcr_nested_nodes
+                    .saturating_add(st.accounting_nested_nodes)
+                    .saturating_mul(std::mem::size_of::<query_ir::tir::DrCrNested>() as u64),
+            )
+            .saturating_add(st.accounting_sources.saturating_mul(
+                2 * std::mem::size_of::<query_ir::tir::AccountingDependencies>() as u64,
+            ))
+            .saturating_add(st.accounting_slots.saturating_mul(2))
     }
 
     pub fn lower(&self, ir: &query_ir::ir::stats::IrStats, max_predefined_bytes: u64) -> u64 {
@@ -210,8 +256,9 @@ impl CompileModel {
             ..Default::default()
         };
         self.lower(&stats.statement, max_predefined_bytes)
-            + 2 * self.build(p)
-            + self.lower(&policy_ir, max_predefined_bytes)
+            .saturating_add(2 * self.build(p))
+            .saturating_add(self.lower(&policy_ir, max_predefined_bytes))
+            .saturating_add(stats.payload_bytes)
     }
 }
 
@@ -237,6 +284,44 @@ impl BatchMem<'_> {
     }
 }
 
+struct CompileCall<'m, 'a> {
+    mem: &'m BatchMem<'a>,
+    charged: Cell<u64>,
+}
+
+impl<'a> std::ops::Deref for CompileCall<'_, 'a> {
+    type Target = BatchMem<'a>;
+
+    fn deref(&self) -> &Self::Target {
+        self.mem
+    }
+}
+
+impl CompileCall<'_, '_> {
+    fn grow(&self, bytes: u64) -> Result<(), BatchError> {
+        let next = crate::model::size_add(self.charged.get(), bytes).map_err(exec)?;
+        self.mem.grow(bytes)?;
+        self.charged.set(next);
+        Ok(())
+    }
+
+    fn release(&self, bytes: u64) {
+        self.charged.set(self.charged.get() - bytes);
+        self.mem.release(bytes);
+    }
+    fn release_remaining(&self) {
+        self.mem.release(self.charged.replace(0));
+    }
+    fn hand_off_diagnostic(&self) {
+        self.charged.set(0);
+    }
+}
+impl Drop for CompileCall<'_, '_> {
+    fn drop(&mut self) {
+        self.release_remaining();
+    }
+}
+
 pub fn run_batch_budgeted(
     host: &dyn ExecHost,
     text: &str,
@@ -246,6 +331,115 @@ pub fn run_batch_budgeted(
     mem: &BatchMem<'_>,
 ) -> Result<Vec<StmtRun>, BatchError> {
     run_batch_inner(host, text, params, temp, mode, Some(mem), None)
+}
+
+struct SnapshotCharges<'c, 'm, 'a> {
+    call: &'c CompileCall<'m, 'a>,
+    retained: Cell<u64>,
+    copies: Cell<u64>,
+}
+
+impl<'c, 'm, 'a> SnapshotCharges<'c, 'm, 'a> {
+    fn new(call: &'c CompileCall<'m, 'a>) -> Self {
+        Self {
+            call,
+            retained: Cell::new(0),
+            copies: Cell::new(0),
+        }
+    }
+
+    fn admit(
+        &self,
+        name: &str,
+        value: Option<&ParamValue>,
+        new_entry: bool,
+    ) -> Result<(), ExecError> {
+        let (retained, copies) = parameter_snapshot_bytes(name, value)?;
+        let retained = if new_entry { retained } else { 0 };
+        let next_retained = crate::model::size_add(self.retained.get(), retained)?;
+        let next_copies = crate::model::size_add(self.copies.get(), copies)?;
+        let bytes = crate::model::size_add(retained, copies)?;
+        self.call.grow(bytes).map_err(|error| match error {
+            BatchError::Exec(error) => error,
+            _ => ExecError::Fatal("parameter snapshot admission failed".into()),
+        })?;
+        self.retained.set(next_retained);
+        self.copies.set(next_copies);
+        Ok(())
+    }
+
+    fn statement(&self) -> StatementCopiesGuard<'_, 'c, 'm, 'a> {
+        StatementCopiesGuard(self)
+    }
+
+    fn release_copies(&self) {
+        self.call.release(self.copies.replace(0));
+    }
+}
+
+impl Drop for SnapshotCharges<'_, '_, '_> {
+    fn drop(&mut self) {
+        self.release_copies();
+        self.call.release(self.retained.replace(0));
+    }
+}
+
+struct StatementCopiesGuard<'s, 'c, 'm, 'a>(&'s SnapshotCharges<'c, 'm, 'a>);
+
+impl Drop for StatementCopiesGuard<'_, '_, '_, '_> {
+    fn drop(&mut self) {
+        self.0.release_copies();
+    }
+}
+
+fn parameter_snapshot_bytes(
+    name: &str,
+    value: Option<&ParamValue>,
+) -> Result<(u64, u64), ExecError> {
+    use crate::model::{block, size_add, type_model, value_model, vec_block};
+
+    let payload = match value {
+        None => 0,
+        Some(ParamValue::Value(value)) => value_model(value),
+        Some(ParamValue::List(values)) => values.iter().try_fold(
+            vec_block(values.capacity(), std::mem::size_of::<QValue>()),
+            |bytes, value| size_add(bytes, value_model(value)),
+        )?,
+        Some(ParamValue::Table { columns, rows }) => {
+            let mut bytes = size_add(
+                vec_block(
+                    columns.capacity(),
+                    std::mem::size_of::<query_ir::TempColumn>(),
+                ),
+                vec_block(rows.capacity(), std::mem::size_of::<Vec<QValue>>()),
+            )?;
+            for column in columns {
+                bytes = size_add(bytes, block(column.name.capacity() as u64))?;
+                if let Some(ty) = &column.ty {
+                    bytes = size_add(bytes, type_model(ty))?;
+                }
+            }
+            for row in rows {
+                bytes = size_add(
+                    bytes,
+                    vec_block(row.capacity(), std::mem::size_of::<QValue>()),
+                )?;
+                for value in row {
+                    bytes = size_add(bytes, value_model(value))?;
+                }
+            }
+            bytes
+        }
+    };
+    let entry =
+        block(8 * (std::mem::size_of::<(String, Option<Arc<ParamValue>>)>() as u64 + 1) + 128)
+            .saturating_add(block(16 + std::mem::size_of::<ParamValue>() as u64));
+    let names = block((name.len() as u64).saturating_mul(3).saturating_add(16));
+    let metadata = size_add(entry, names)?;
+    Ok((
+        size_add(metadata, payload)?,
+        size_add(metadata, payload.saturating_mul(3))?,
+    ))
 }
 
 fn run_batch_inner(
@@ -258,23 +452,57 @@ fn run_batch_inner(
     observations: Option<&mut Vec<crate::observe::ObservationSession>>,
 ) -> Result<Vec<StmtRun>, BatchError> {
     forget(host, temp);
-    let r = run_batch_leased(host, text, params, temp, mode, mem, observations);
-    if r.as_ref()
-        .is_err_and(|error| !error.retains_compile_storage())
-        && let Some(mem) = mem
-    {
-        mem.release(mem.compile.bytes());
+    let call = mem.map(|mem| CompileCall {
+        mem,
+        charged: Cell::new(0),
+    });
+    let r = {
+        let charges = call.as_ref().map(SnapshotCharges::new);
+        let charge = |name: &str, value: Option<&ParamValue>, new_entry: bool| {
+            if let Some(charges) = &charges {
+                charges.admit(name, value, new_entry)?;
+            }
+            Ok(())
+        };
+        let values = if call.is_some() {
+            ParamValuesSnapshot::with_charge(params, &charge)
+        } else {
+            ParamValuesSnapshot::new(params)
+        };
+        run_batch_leased(
+            host,
+            text,
+            params,
+            &values,
+            temp,
+            mode,
+            call.as_ref(),
+            charges.as_ref(),
+            observations,
+        )
+    };
+    if let Some(call) = &call {
+        if r.as_ref()
+            .is_err_and(|error| error.retains_compile_storage())
+        {
+            call.hand_off_diagnostic();
+        } else {
+            call.release_remaining();
+        }
     }
     r
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_batch_leased(
     host: &dyn ExecHost,
     text: &str,
     params: &dyn ParamSource,
+    values: &ParamValuesSnapshot<'_>,
     temp: &mut TempTables,
     mode: RunMode,
-    mem: Option<&BatchMem<'_>>,
+    mem: Option<&CompileCall<'_, '_>>,
+    snapshot_charges: Option<&SnapshotCharges<'_, '_, '_>>,
     mut observations: Option<&mut Vec<crate::observe::ObservationSession>>,
 ) -> Result<Vec<StmtRun>, BatchError> {
     let (batch, stages) = match mem {
@@ -295,11 +523,19 @@ fn run_batch_leased(
         }
     };
     host.admit_batch(&batch, temp).map_err(exec)?;
-    let mut out = Vec::with_capacity(if mode == RunMode::One {
+    let capacity = if mode == RunMode::One {
         1
     } else {
         batch.stmts.len()
-    });
+    };
+    let metadata_env = host.env();
+    let metadata = mem.map(|_| MemBudget::of_env(&metadata_env));
+    if let Some(metadata) = &metadata {
+        metadata
+            .grow(crate::model::size_vec(capacity, std::mem::size_of::<StmtRun>()).map_err(exec)?)
+            .map_err(exec)?;
+    }
+    let mut out: Vec<StmtRun> = Vec::with_capacity(capacity);
     for i in 0..batch.stmts.len() {
         crate::probe::hit();
         let observation = observations.as_deref_mut().and_then(|sessions| {
@@ -319,14 +555,31 @@ fn run_batch_leased(
             text,
             i,
             params,
+            values,
             temp,
             mode,
             stage.as_ref(),
+            snapshot_charges,
+            metadata.as_ref(),
             observation,
         ) {
             Ok(r) => {
                 if mode == RunMode::One {
+                    let names = out
+                        .iter()
+                        .try_fold(0, |bytes, previous| {
+                            crate::model::size_add(
+                                bytes,
+                                previous.put.as_ref().map_or(Ok(0), |name| {
+                                    crate::model::size_block(name.capacity() as u64)
+                                })?,
+                            )
+                        })
+                        .map_err(exec)?;
                     out.clear();
+                    if let Some(metadata) = &metadata {
+                        metadata.shrink(names);
+                    }
                 }
                 out.push(r);
             }
@@ -341,6 +594,9 @@ fn run_batch_leased(
             }
             Err(Failure { err, .. }) => return Err(err),
         }
+    }
+    if let Some(metadata) = &metadata {
+        metadata.reconcile(metadata.used());
     }
     Ok(out)
 }
@@ -383,15 +639,200 @@ fn build_error(e: BuildError) -> BatchError {
 }
 
 struct Stage<'s, 'a> {
-    mem: &'s BatchMem<'a>,
+    mem: &'s CompileCall<'s, 'a>,
     pre: &'s Preflight,
     i: usize,
+}
+
+struct PolicyInputsGuard<'c, 'm, 'a> {
+    call: Option<&'c CompileCall<'m, 'a>>,
+    bytes: Cell<u64>,
+}
+impl Drop for PolicyInputsGuard<'_, '_, '_> {
+    fn drop(&mut self) {
+        if let Some(call) = self.call {
+            call.release(self.bytes.get());
+        }
+    }
+}
+
+struct OriginCompileOwner<'c, 'm, 'a, 'e> {
+    call: Option<&'c CompileCall<'m, 'a>>,
+    lease: Option<&'e Reservation>,
+    evictor: Option<&'e dyn Evictor>,
+    limit: u64,
+    bytes: Cell<u64>,
+}
+impl OriginCompileOwner<'_, '_, '_, '_> {
+    fn admit(&self, bytes: u64) -> Result<(), ExecError> {
+        let next = crate::model::size_add(self.bytes.get(), bytes)?;
+        if let Some(call) = self.call {
+            call.grow(bytes).map_err(|e| match e {
+                BatchError::Exec(e) => e,
+                _ => ExecError::Fatal("origin admission failed".into()),
+            })?;
+        } else if let Some(lease) = self.lease {
+            match self.evictor {
+                Some(e) => lease.try_grow_or_evict(bytes, e),
+                None => lease.try_grow(bytes),
+            }
+            .map_err(ExecError::Memory)?;
+        } else if next > self.limit {
+            return Err(ExecError::Fatal("origin compile memory limit".into()));
+        }
+        self.bytes.set(next);
+        Ok(())
+    }
+}
+impl Drop for OriginCompileOwner<'_, '_, '_, '_> {
+    fn drop(&mut self) {
+        let bytes = self.bytes.replace(0);
+        if let Some(call) = self.call {
+            call.release(bytes);
+        } else if let Some(lease) = self.lease
+            && bytes != 0
+        {
+            let _ = lease.shrink(bytes);
+        }
+    }
+}
+
+struct PendingResult<'a> {
+    result: Option<QueryResult>,
+    lease: Option<&'a Reservation>,
+    charge: u64,
+}
+impl Drop for PendingResult<'_> {
+    fn drop(&mut self) {
+        drop(self.result.take());
+        if let Some(lease) = self.lease
+            && self.charge != 0
+        {
+            let _ = lease.shrink(self.charge);
+        }
+    }
+}
+
+struct PendingTempWrite<'a> {
+    rows: Option<Vec<crate::Row>>,
+    shown: Option<Vec<crate::Row>>,
+    lease: Option<&'a Reservation>,
+    rows_charge: u64,
+    shown_charge: u64,
+}
+impl Drop for PendingTempWrite<'_> {
+    fn drop(&mut self) {
+        drop(self.rows.take());
+        drop(self.shown.take());
+        if let Some(lease) = self.lease {
+            let _ = lease.shrink(self.rows_charge + self.shown_charge);
+        }
+    }
 }
 
 struct Prepared {
     compiled: Arc<CompiledStmt>,
     ordered: bool,
-    lowered: Option<query_ir::StmtL>,
+    lowered: Option<BoundTempStatement>,
+}
+
+fn drcr_lower_bytes(
+    stmt: &query_ir::ir::StmtS,
+    schema: &query_ir::QuerySchema,
+    stats: &query_ir::ir::stats::IrStats,
+) -> u64 {
+    let sources=stmt.sources.iter().filter(|s|matches!(&s.kind,query_ir::ir::SrcKind::Virtual {table,..} if schema.table(*table).kind==query_ir::schema::TableKind::Virtual(query_ir::VtKind::DrCrTurnovers))).count() as u64;
+    if sources == 0 {
+        return 0;
+    }
+    let entries = stats.exprs.saturating_mul(
+        3 * (std::mem::size_of::<query_ir::lower::DrCrResourceL>()
+            + std::mem::size_of::<query_ir::lower::DrCrSideL>()) as u64,
+    );
+    let area_snapshot = sources.saturating_mul(
+        4 * (std::mem::size_of::<(
+            query_ir::QTableId,
+            (ibschema::storage::FieldId, ibschema::storage::FieldId, i64),
+        )>() as u64
+            + 1)
+            + 64,
+    );
+    entries.saturating_add(area_snapshot).saturating_add(
+        sources
+            .saturating_mul(3 * std::mem::size_of::<query_ir::lower::RegisterRowsL>() as u64 + 96),
+    )
+}
+
+fn turnovers_lower_bytes(
+    stmt: &query_ir::ir::StmtS,
+    schema: &query_ir::QuerySchema,
+    stats: &query_ir::ir::stats::IrStats,
+) -> u64 {
+    let mut sources = 0u64;
+    let mut columns = 0u64;
+    for source in &stmt.sources {
+        if let query_ir::ir::SrcKind::Virtual { table, .. } = &source.kind {
+            let table = schema.table(*table);
+            if table.kind == query_ir::TableKind::Virtual(query_ir::VtKind::Turnovers)
+                && table.owner.is_some_and(|owner| {
+                    matches!(schema.table(owner).kind,
+                    query_ir::TableKind::Object(kind) if kind.as_str() == "AccountingRegister")
+                })
+            {
+                sources = sources.saturating_add(1);
+                columns = columns.saturating_add(table.fields.len() as u64);
+            }
+        }
+    }
+    if sources == 0 {
+        return 0;
+    }
+    let entries = stats.exprs.saturating_mul(
+        3 * (std::mem::size_of::<query_ir::lower::AccountingTurnoversResourceL>()
+            + 3 * std::mem::size_of::<query_ir::lower::AggL>()
+            + 6 * std::mem::size_of::<query_ir::PExpr>()) as u64,
+    );
+    entries
+        .saturating_add(columns.saturating_mul(3 * std::mem::size_of::<query_ir::PExpr>() as u64))
+        .saturating_add(
+            sources.saturating_mul(
+                3 * std::mem::size_of::<query_ir::lower::RegisterRowsL>() as u64 + 96,
+            ),
+        )
+}
+
+fn balance_lower_bytes(
+    stmt: &query_ir::ir::StmtS,
+    schema: &query_ir::QuerySchema,
+    stats: &query_ir::ir::stats::IrStats,
+) -> u64 {
+    let mut sources = 0u64;
+    let mut fields = 0u64;
+    for source in &stmt.sources {
+        let query_ir::ir::SrcKind::Virtual { table, .. } = &source.kind else {
+            continue;
+        };
+        let t = schema.table(*table);
+        if t.kind == query_ir::TableKind::Virtual(query_ir::VtKind::Balance)
+            && t.owner.is_some_and(|owner| matches!(schema.table(owner).kind, query_ir::TableKind::Object(kind) if kind.as_str() == "AccountingRegister")) {
+            sources = sources.saturating_add(1);
+            fields = fields.saturating_add(t.fields.len() as u64);
+        }
+    }
+    if sources == 0 {
+        return 0;
+    }
+    fields
+        .saturating_mul(3 * std::mem::size_of::<query_ir::PExpr>() as u64)
+        .saturating_add(stats.exprs.saturating_mul(
+            3 * (std::mem::size_of::<query_ir::lower::BalanceResourceL>()
+                + 24 * std::mem::size_of::<query_ir::PExpr>()) as u64,
+        ))
+        .saturating_add(
+            sources.saturating_mul(
+                3 * std::mem::size_of::<query_ir::lower::BalanceRowsL>() as u64 + 4096,
+            ),
+        )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -401,10 +842,13 @@ fn prepare(
     text: &str,
     i: usize,
     params: &dyn ParamSource,
+    values: &ParamValuesSnapshot<'_>,
     temp: &TempTables,
     mode: RunMode,
     stage: Option<&Stage<'_, '_>>,
     leased: &mut u64,
+    policy_inputs: &Cell<u64>,
+    origin_owner: &OriginCompileOwner<'_, '_, '_, '_>,
     observation: Option<&crate::observe::ObservationSession>,
 ) -> Result<Prepared, Failure> {
     let schema = host.schema();
@@ -480,29 +924,51 @@ fn prepare(
         schema,
         storage: host.storage(),
         map: host.map(),
-        params,
+        params: values,
         host,
     };
-    query_ir::bind::preflight_virtual(&compiled, &ctx).map_err(exec)?;
+    let adapter = OriginAdapter::new(temp);
+    let preflight = preflight_virtual_with_temp_origins(&compiled, &ctx, &adapter).map_err(exec);
+    values.check().map_err(|error| compile_stage(exec(error)))?;
+    preflight?;
     let ir = build_stmt(&compiled, schema).map_err(build_error)?;
     if let Some(st) = stage {
         let stats = query_ir::ir::stats::stats(&ir);
-        let bytes = st.mem.model.lower(&stats, st.mem.max_predefined_bytes);
+        let bytes = st
+            .mem
+            .model
+            .lower(&stats, st.mem.max_predefined_bytes)
+            .saturating_add(drcr_lower_bytes(&ir, schema, &stats))
+            .saturating_add(turnovers_lower_bytes(&ir, schema, &stats))
+            .saturating_add(balance_lower_bytes(&ir, schema, &stats));
         st.mem.grow(bytes)?;
         *leased += bytes;
     }
-    let lowered = query_ir::bind::bind_with_policy_charge(&ir, &ctx, &mut |stats| {
-        if let Some(st) = stage {
-            let bytes = st.mem.model.policy(stats, st.mem.max_predefined_bytes);
-            st.mem.grow(bytes).map_err(|e| match e {
-                BatchError::Exec(e) => e,
-                _ => ExecError::Fatal("policy lease failed".into()),
-            })?;
-            *leased += bytes;
-        }
-        Ok(())
-    })
-    .map_err(exec)?;
+    let lowered = bind_with_temp_origins(
+        &ir,
+        &ctx,
+        &adapter,
+        compiled.temp_out.as_ref(),
+        &mut |bytes| origin_owner.admit(bytes),
+        &mut |stats| {
+            if let Some(st) = stage {
+                let bytes = st.mem.model.policy(stats, st.mem.max_predefined_bytes);
+                st.mem.grow(bytes).map_err(|e| match e {
+                    BatchError::Exec(e) => e,
+                    _ => ExecError::Fatal("policy lease failed".into()),
+                })?;
+                policy_inputs.set(crate::model::size_add(
+                    policy_inputs.get(),
+                    stats.payload_bytes,
+                )?);
+                *leased += bytes.saturating_sub(stats.payload_bytes);
+            }
+            Ok(())
+        },
+    )
+    .map_err(exec);
+    values.check().map_err(exec)?;
+    let lowered = lowered?;
     Ok(Prepared {
         compiled,
         ordered: is_ordered(&ir.root),
@@ -517,25 +983,33 @@ fn step(
     text: &str,
     i: usize,
     params: &dyn ParamSource,
+    values: &ParamValuesSnapshot<'_>,
     temp: &mut TempTables,
     mode: RunMode,
     stage: Option<&Stage<'_, '_>>,
+    snapshot_charges: Option<&SnapshotCharges<'_, '_, '_>>,
+    metadata: Option<&MemBudget<'_>>,
     observation: Option<&crate::observe::ObservationSession>,
 ) -> Result<StmtRun, Failure> {
     forget(host, temp);
     let mut leased = 0u64;
-    let r = step_prepared(
-        host,
-        batch,
-        text,
-        i,
-        params,
-        temp,
-        mode,
-        stage,
-        &mut leased,
-        observation,
-    );
+    let r = {
+        let _copies = snapshot_charges.map(SnapshotCharges::statement);
+        step_prepared(
+            host,
+            batch,
+            text,
+            i,
+            params,
+            values,
+            temp,
+            mode,
+            stage,
+            &mut leased,
+            metadata,
+            observation,
+        )
+    };
     if let Some(obs) = observation {
         if r.is_ok() {
             obs.finish(true);
@@ -560,22 +1034,39 @@ fn step_prepared(
     text: &str,
     i: usize,
     params: &dyn ParamSource,
+    values: &ParamValuesSnapshot<'_>,
     temp: &mut TempTables,
     mode: RunMode,
     stage: Option<&Stage<'_, '_>>,
     leased: &mut u64,
+    metadata: Option<&MemBudget<'_>>,
     observation: Option<&crate::observe::ObservationSession>,
 ) -> Result<StmtRun, Failure> {
-    let p = prepare(
+    let env = host.env();
+    let origin_owner = OriginCompileOwner {
+        call: stage.map(|s| s.mem),
+        lease: env.lease,
+        evictor: env.evictor,
+        limit: env.mem_limit,
+        bytes: Cell::new(0),
+    };
+    let policy_inputs = PolicyInputsGuard {
+        call: stage.map(|s| s.mem),
+        bytes: Cell::new(0),
+    };
+    let mut p = prepare(
         host,
         batch,
         text,
         i,
         params,
+        values,
         temp,
         mode,
         stage,
         leased,
+        &policy_inputs.bytes,
+        &origin_owner,
         observation,
     )?;
     let ordered = p.ordered;
@@ -590,22 +1081,43 @@ fn step_prepared(
         temp.drop_table(name);
         return done(StmtOutcome::Dropped, None);
     }
-    let Some(lowered) = &p.lowered else {
+    let Some(bound) = &p.lowered else {
         return Err(exec(ExecError::Fatal("statement without a plan".into())).into());
     };
-    let env = host.env();
+    let lowered = bound.statement();
+    let put = p
+        .compiled
+        .temp_out
+        .as_ref()
+        .map(|out| {
+            let name = match out {
+                TempOut::Put(schema) => &schema.name,
+                TempOut::Add(name) => name,
+            };
+            if let Some(metadata) = metadata {
+                metadata
+                    .grow(crate::model::size_block(name.len() as u64).map_err(exec)?)
+                    .map_err(exec)?;
+            }
+            Ok::<_, Failure>(name.clone())
+        })
+        .transpose()?;
     take_locks(host, &p.compiled, lowered)?;
     let res = {
         let src = host.read_source();
-        let refused = match observation {
-            Some(obs) => crate::register::check_totals_use_observed(lowered, &*src, text, obs),
-            None => crate::register::check_totals_use(lowered, &*src, text),
-        }
+        let refused = crate::register::check_totals_use_for_execution(
+            lowered,
+            &*src,
+            text,
+            observation,
+            &env,
+        )
         .map_err(exec)?;
         if let Some(e) = refused {
             return Err(BatchError::Compile(e).into());
         }
-        let mut res = match observation {
+        let mut presentation_mem = (!lowered.present.is_empty()).then(|| MemBudget::of_env(&env));
+        let result = match observation {
             Some(obs) => crate::exec::execute_temps_observed(
                 lowered,
                 &*src,
@@ -617,116 +1129,143 @@ fn step_prepared(
             None => execute_temps(lowered, &*src, &env, Some(&*temp), host.plan_options()),
         }
         .map_err(exec)?;
-        if !lowered.present.is_empty() {
-            let mut mem = MemBudget::of_env(&env);
+        let charge = if env.lease.is_some() {
+            crate::exec::result_model(&result)
+        } else {
+            0
+        };
+        let mut owner = PendingResult {
+            result: Some(result),
+            lease: env.lease,
+            charge,
+        };
+        let res = owner
+            .result
+            .as_mut()
+            .ok_or_else(|| exec(ExecError::Fatal("missing pending result".into())))?;
+        if let Some(mem) = presentation_mem.as_mut() {
+            let before = crate::exec::result_model(res);
             if !mem.is_leased()
                 && let Err(e) = mem.grow(res.rows.iter().map(|r| row_bytes(r)).sum())
             {
                 return Err(exec(e).into());
             }
-            if let Err(e) = present::apply(lowered, &mut res.rows, host, &*src, &mut mem) {
-                if let Some(l) = env.lease {
-                    let _ = l.shrink(crate::exec::result_model(&res) + mem.used());
-                }
-                mem.reconcile(mem.used());
+            if let Err(e) = present::apply(lowered, &mut res.rows, host, &*src, mem) {
                 return Err(exec(e).into());
             }
-            mem.reconcile(mem.used());
+            let after = crate::exec::result_model(res);
+            mem.reconcile(after.saturating_sub(before));
+            if let Some(l) = env.lease {
+                let _ = l.shrink(before.saturating_sub(after));
+            }
+            owner.charge = if env.lease.is_some() { after } else { 0 };
         }
-        res
+        let result = owner
+            .result
+            .take()
+            .ok_or_else(|| exec(ExecError::Fatal("missing pending result".into())))?;
+        owner.charge = 0;
+        result
     };
     let Some(out) = &p.compiled.temp_out else {
         return done(StmtOutcome::Result(Arc::new(res)), None);
     };
-    let put = Some(match out {
-        TempOut::Put(schema) => schema.name.clone(),
-        TempOut::Add(name) => name.clone(),
-    });
+    let proof = p.lowered.take().and_then(|bound| bound.into_parts().1);
     let QueryResult { columns, rows, .. } = res;
     let cols = crate::model::columns_model(&columns);
     drop(columns);
-    if let Some(l) = env.lease {
-        let _ = l.shrink(cols);
+    if let Some(lease) = env.lease {
+        let _ = lease.shrink(cols);
     }
-    let mut rows = rows;
-    let index_sets = put_rules(&p.compiled);
     let mem = MemBudget::of_env(&env);
-    let release_rows = |rows: &Vec<Vec<QValue>>| {
-        if let Some(l) = env.lease {
-            let _ = l.shrink(crate::model::rows_model(rows));
-        }
-    };
-    if let TempOut::Add(name) = out
-        && let Err(e) = convert_added(&mut rows, name, temp, &env, &mem)
-    {
-        release_rows(&rows);
-        return Err(e.into());
-    }
-    let intermediate = mode == RunMode::Intermediate;
-    let cols_model = crate::model::columns_model(&p.compiled.columns);
-    let shown_charge = match out {
-        _ if !intermediate || !mem.is_leased() => 0,
-        TempOut::Put(_) => crate::model::rows_clone_model(&rows) + cols_model,
-        TempOut::Add(name) => match temp.table(name) {
-            Some(table) => {
-                crate::model::rows_clone_model_of(
-                    table.rows.len() + rows.len(),
-                    table.rows.iter().chain(rows.iter()),
-                ) + cols_model
-            }
-            None => 0,
-        },
-    };
-    if shown_charge > 0
-        && let Err(e) = mem.grow(shown_charge)
-    {
-        release_rows(&rows);
-        return Err(exec(e).into());
-    }
-    let shown = (intermediate && matches!(out, TempOut::Put(_))).then(|| rows.clone());
-    mem.reconcile(mem.used());
-    let rows_bytes = if env.lease.is_some() {
+    let rows_charge = if env.lease.is_some() {
         crate::model::rows_model(&rows)
     } else {
         0
     };
-    let put_result = match out {
-        TempOut::Put(schema) => temp.put(schema.clone(), rows, host.txn(), &index_sets, &env),
-        TempOut::Add(name) => temp.append(name, rows, host.txn(), &index_sets, &env),
+    let mut pending = PendingTempWrite {
+        rows: Some(rows),
+        shown: None,
+        lease: env.lease,
+        rows_charge,
+        shown_charge: 0,
     };
-    let n = match put_result {
-        Ok(n) => n,
-        Err(e) => {
-            if let Some(l) = env.lease {
-                let _ = l.shrink(rows_bytes + shown_charge);
+    let index_sets = put_rules(&p.compiled);
+    if let TempOut::Add(name) = out {
+        if let Some(rows) = pending.rows.as_deref_mut() {
+            convert_added(rows, name, temp, &env, &mem)?;
+        }
+        let after = pending.rows.as_ref().map_or(0, |rows| {
+            if env.lease.is_some() {
+                crate::model::rows_model(rows)
+            } else {
+                0
             }
-            return Err(exec(e).into());
+        });
+        mem.reconcile(after.saturating_sub(pending.rows_charge));
+        if let Some(lease) = env.lease {
+            let _ = lease.shrink(pending.rows_charge.saturating_sub(after));
+        }
+        pending.rows_charge = after;
+    }
+    let intermediate = mode == RunMode::Intermediate;
+    let columns_charge = crate::model::columns_model(&p.compiled.columns);
+    let shown_charge = if !intermediate || !mem.is_leased() {
+        0
+    } else {
+        match (out, pending.rows.as_ref()) {
+            (TempOut::Put(_), Some(rows)) => crate::model::rows_clone_model(rows) + columns_charge,
+            (TempOut::Add(name), Some(rows)) => temp.table(name).map_or(0, |table| {
+                crate::model::rows_clone_model_of(
+                    table.rows.len() + rows.len(),
+                    table.rows.iter().chain(rows.iter()),
+                ) + columns_charge
+            }),
+            _ => 0,
         }
     };
-    if let (true, TempOut::Add(name)) = (intermediate, out) {
-        let Some(table) = temp.table(name) else {
-            return Err(exec(ExecError::Fatal("the table of ДОБАВИТЬ is gone".into())).into());
-        };
-        return done(
-            StmtOutcome::Result(Arc::new(QueryResult {
-                columns: p.compiled.columns.clone(),
-                rows: table.rows.clone(),
-                totals: None,
-            })),
-            put,
-        );
+    if shown_charge != 0 {
+        mem.grow(shown_charge).map_err(exec)?;
     }
-    match shown {
-        Some(rows) => done(
-            StmtOutcome::Result(Arc::new(QueryResult {
-                columns: p.compiled.columns.clone(),
-                rows,
-                totals: None,
-            })),
-            put,
-        ),
-        None => done(StmtOutcome::Count(n), put),
+    mem.reconcile(mem.used());
+    pending.shown_charge = shown_charge;
+    if intermediate && matches!(out, TempOut::Put(_)) {
+        pending.shown = pending.rows.clone();
     }
+    let rows = pending
+        .rows
+        .take()
+        .ok_or_else(|| exec(ExecError::Fatal("missing pending rows".into())))?;
+    let n = match out {
+        TempOut::Put(schema) => {
+            temp.put_with_origins(schema.clone(), rows, host.txn(), &index_sets, &env, proof)
+        }
+        TempOut::Add(name) => {
+            temp.append_with_origins(name, rows, host.txn(), &index_sets, &env, proof)
+        }
+    }
+    .map_err(exec)?;
+    pending.rows_charge = 0;
+    let outcome = if let (true, TempOut::Add(name)) = (intermediate, out) {
+        let table = temp
+            .table(name)
+            .ok_or_else(|| exec(ExecError::Fatal("the table of ДОБАВИТЬ is gone".into())))?;
+        StmtOutcome::Result(Arc::new(QueryResult {
+            columns: p.compiled.columns.clone(),
+            rows: table.rows.clone(),
+            totals: None,
+        }))
+    } else if let Some(rows) = pending.shown.take() {
+        StmtOutcome::Result(Arc::new(QueryResult {
+            columns: p.compiled.columns.clone(),
+            rows,
+            totals: None,
+        }))
+    } else {
+        StmtOutcome::Count(n)
+    };
+    pending.shown_charge = 0;
+    done(outcome, put)
 }
 
 fn convert_added(
@@ -958,6 +1497,7 @@ pub fn explain_last(
     temp: &mut TempTables,
 ) -> Result<String, BatchError> {
     forget(host, temp);
+    let values = ParamValuesSnapshot::new(params);
     let batch = query_ir::compile_batch(text, ParseMode::Query, host.schema())
         .map_err(BatchError::Compile)?;
     let n = batch.stmts.len();
@@ -969,23 +1509,37 @@ pub fn explain_last(
             text,
             i,
             params,
+            &values,
             temp,
             RunMode::Batch,
+            None,
+            None,
             None,
             None,
         )
         .map_err(|f| f.err)?;
     }
+    let env = host.env();
+    let origin_owner = OriginCompileOwner {
+        call: None,
+        lease: env.lease,
+        evictor: env.evictor,
+        limit: env.mem_limit,
+        bytes: Cell::new(0),
+    };
     let p = prepare(
         host,
         &batch,
         text,
         n.saturating_sub(1),
         params,
+        &values,
         temp,
         RunMode::Batch,
         None,
         &mut 0,
+        &Cell::new(0),
+        &origin_owner,
         None,
     )
     .map_err(|f| f.err)?;
@@ -994,7 +1548,7 @@ pub fn explain_last(
     };
     let src = host.read_source();
     Ok(explain_temps(
-        lowered,
+        lowered.statement(),
         &*src,
         Some(&*temp),
         host.plan_options(),

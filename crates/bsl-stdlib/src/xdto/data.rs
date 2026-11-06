@@ -20,7 +20,7 @@ pub enum ScalarProjection {
     },
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub enum XdtoData {
     Value {
         projection: Option<ScalarProjection>,
@@ -33,6 +33,148 @@ pub enum XdtoData {
         props: Vec<(String, Vec<XdtoData>)>,
     },
     Nil,
+}
+
+impl Drop for XdtoData {
+    fn drop(&mut self) {
+        let XdtoData::Object { props, .. } = self else {
+            return;
+        };
+        let mut current = std::mem::take(props);
+        let mut parents = XdtoData::Nil;
+        loop {
+            if let Some((_, items)) = current.last_mut() {
+                let Some(mut child) = items.pop() else {
+                    current.pop();
+                    continue;
+                };
+                if let XdtoData::Object { props, .. } = &mut child {
+                    let children = std::mem::take(props);
+                    if !children.is_empty() {
+                        items.push(parents);
+                        parents = XdtoData::Object {
+                            ty: QName::new("", ""),
+                            props: std::mem::replace(&mut current, children),
+                        };
+                    }
+                }
+            } else if let XdtoData::Object { props, .. } = &mut parents {
+                current = std::mem::take(props);
+                let link = current
+                    .last_mut()
+                    .and_then(|(_, items)| items.pop())
+                    .unwrap_or(XdtoData::Nil);
+                parents = link;
+            } else {
+                break;
+            }
+        }
+    }
+}
+
+impl Clone for XdtoData {
+    fn clone(&self) -> XdtoData {
+        struct Open<'a> {
+            ty: &'a QName,
+            props: &'a [(String, Vec<XdtoData>)],
+            prop: usize,
+            item: usize,
+            out: Props,
+        }
+        fn open<'a>(ty: &'a QName, props: &'a [(String, Vec<XdtoData>)]) -> Open<'a> {
+            Open {
+                ty,
+                props,
+                prop: 0,
+                item: 0,
+                out: Vec::with_capacity(props.len()),
+            }
+        }
+        let XdtoData::Object { ty, props } = self else {
+            return self.clone_leaf().unwrap_or(XdtoData::Nil);
+        };
+        let mut stack = vec![open(ty, props)];
+        while let Some(top) = stack.last_mut() {
+            let Some((name, items)) = top.props.get(top.prop) else {
+                let Some(done) = stack.pop() else {
+                    break;
+                };
+                let object = XdtoData::Object {
+                    ty: done.ty.clone(),
+                    props: done.out,
+                };
+                match stack.last_mut().and_then(|parent| parent.out.last_mut()) {
+                    Some((_, items)) => items.push(object),
+                    None => return object,
+                }
+                continue;
+            };
+            if top.item == 0 {
+                top.out
+                    .push((name.clone(), Vec::with_capacity(items.len())));
+            }
+            let Some(item) = items.get(top.item) else {
+                top.prop += 1;
+                top.item = 0;
+                continue;
+            };
+            top.item += 1;
+            match item {
+                XdtoData::Object { ty, props } => stack.push(open(ty, props)),
+                leaf => {
+                    if let (Some((_, out)), Some(copy)) = (top.out.last_mut(), leaf.clone_leaf()) {
+                        out.push(copy);
+                    }
+                }
+            }
+        }
+        XdtoData::Nil
+    }
+}
+
+pub(crate) type Props = Vec<(String, Vec<XdtoData>)>;
+
+impl XdtoData {
+    pub(crate) fn take_value(&mut self) -> Option<(QName, String, Value)> {
+        match self {
+            XdtoData::Value {
+                ty, lexical, value, ..
+            } => Some((
+                std::mem::replace(ty, QName::new("", "")),
+                std::mem::take(lexical),
+                std::mem::replace(value, Value::Undefined),
+            )),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn clone_leaf(&self) -> Option<XdtoData> {
+        match self {
+            XdtoData::Value {
+                projection,
+                ty,
+                lexical,
+                value,
+            } => Some(XdtoData::Value {
+                projection: projection.clone(),
+                ty: ty.clone(),
+                lexical: lexical.clone(),
+                value: value.clone(),
+            }),
+            XdtoData::Nil => Some(XdtoData::Nil),
+            XdtoData::Object { .. } => None,
+        }
+    }
+
+    pub(crate) fn take_object(&mut self) -> Option<(QName, Props)> {
+        match self {
+            XdtoData::Object { ty, props } => Some((
+                std::mem::replace(ty, QName::new("", "")),
+                std::mem::take(props),
+            )),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -634,19 +776,17 @@ pub(crate) fn factory_data_copy(
 pub(crate) fn data_to_value(
     ex: &mut Execution,
     factory: &FactoryRef,
-    d: XdtoData,
+    mut d: XdtoData,
 ) -> Result<Value, bsl_vm::Exception> {
-    Ok(match d {
-        XdtoData::Nil => Value::Undefined,
-        XdtoData::Value {
-            ty, lexical, value, ..
-        } => Value::Object(Rc::new(DataValue {
+    Ok(match d.take_value() {
+        Some((ty, lexical, value)) => Value::Object(Rc::new(DataValue {
             factory: factory.clone(),
             ty,
             lexical,
             value,
         })),
-        XdtoData::Object { .. } => {
+        None if matches!(d, XdtoData::Nil) => Value::Undefined,
+        None => {
             let mut walk = Walk::new();
             Value::Object(data_to_object(ex, factory, d, &mut walk)?)
         }
@@ -656,10 +796,10 @@ pub(crate) fn data_to_value(
 fn data_to_object(
     ex: &mut Execution,
     factory: &FactoryRef,
-    d: XdtoData,
+    mut d: XdtoData,
     walk: &mut Walk,
 ) -> Result<Rc<DataObject>, bsl_vm::Exception> {
-    let XdtoData::Object { ty, props } = d else {
+    let Some((ty, props)) = d.take_object() else {
         return DataObject::new(ex, factory.clone(), any_type()).map_err(|e| ex.call_error(e));
     };
     ex.charge(1)?;
@@ -670,18 +810,16 @@ fn data_to_object(
     let mut slots = Vec::with_capacity(props.len());
     for (name, items) in props {
         let mut v = Vec::with_capacity(items.len());
-        for i in items {
-            v.push(match i {
-                XdtoData::Object { .. } => Item::Obj(data_to_object(ex, factory, i, walk)?),
-                XdtoData::Value {
-                    ty, lexical, value, ..
-                } => Item::Data(XdtoData::Value {
+        for mut i in items {
+            v.push(match i.take_value() {
+                Some((ty, lexical, value)) => Item::Data(XdtoData::Value {
                     projection: None,
                     ty,
                     lexical,
                     value,
                 }),
-                XdtoData::Nil => Item::Data(XdtoData::Nil),
+                None if matches!(i, XdtoData::Nil) => Item::Data(XdtoData::Nil),
+                None => Item::Obj(data_to_object(ex, factory, i, walk)?),
             });
         }
         slots.push((name, v));

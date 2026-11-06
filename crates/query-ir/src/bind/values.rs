@@ -51,6 +51,24 @@ fn storage_tables(
                 constants = constant_tables(stmt, ctx, *q)?;
             }
             constants.clone()
+        } else if crate::lower::is_accounting_balance(ctx.schema, *q) {
+            let inputs = crate::lower::balance_inputs(ctx.schema, ctx.storage, ctx.map, *q)?;
+            vec![inputs.main, inputs.options]
+        } else if crate::lower::is_accounting_turnovers(ctx.schema, *q) {
+            let inputs =
+                crate::lower::turnovers_inputs(ctx.schema, ctx.storage, ctx.map, *q).resolve()?;
+            vec![inputs.main, inputs.options]
+        } else if t.kind == TableKind::Virtual(crate::VtKind::DrCrTurnovers) {
+            let inputs =
+                crate::lower::drcr_inputs(ctx.schema, ctx.storage, ctx.map, *q).resolve()?;
+            vec![inputs.main, inputs.ct, inputs.options]
+        } else if t.kind == TableKind::Virtual(crate::VtKind::ScheduleData) {
+            crate::lower::schedule_inputs(ctx.schema, ctx.storage, ctx.map, *q)?
+                .tables()
+                .to_vec()
+        } else if t.kind == TableKind::Virtual(crate::VtKind::ActualActionPeriod) {
+            let (main, act) = crate::lower::actual_inputs(ctx.schema, ctx.storage, ctx.map, *q)?;
+            vec![main, act]
         } else if ctx.schema.is_unstored(*q) {
             Vec::new()
         } else {
@@ -194,6 +212,9 @@ fn vt_bound_params(r: &Rel, out: &mut BoundParamUsage) {
             if let Some(e) = &v.cond {
                 vt_bound_expr_params(e, false, out);
             }
+            if let Some(k) = &v.order {
+                vt_bound_expr_params(&k.expr, false, out);
+            }
         }
         Rel::ParamScan { param, .. } => {
             out.outside.insert(*param);
@@ -244,29 +265,28 @@ fn vt_bound_params(r: &Rel, out: &mut BoundParamUsage) {
 
 fn ordinary_total_params(e: &crate::totals::TotalsExpr, out: &mut HashSet<u16>) {
     use crate::totals::TotalsExpr;
-    match e {
-        TotalsExpr::Param(i) => {
-            out.insert(*i);
-        }
-        TotalsExpr::Agg(_) | TotalsExpr::Column(_) | TotalsExpr::Const(_) => {}
-        TotalsExpr::Neg(x) | TotalsExpr::Not(x) => ordinary_total_params(x, out),
-        TotalsExpr::Bin(_, l, r) | TotalsExpr::Cmp(_, l, r) | TotalsExpr::IsNull(l, r) => {
-            ordinary_total_params(l, out);
-            ordinary_total_params(r, out);
-        }
-        TotalsExpr::And(xs) | TotalsExpr::Or(xs) => {
-            for x in xs {
-                ordinary_total_params(x, out);
+    let mut pending = vec![e];
+    while let Some(e) = pending.pop() {
+        match e {
+            TotalsExpr::Param(i) => {
+                out.insert(*i);
             }
-        }
-        TotalsExpr::Case { whens, otherwise } => {
-            for (condition, value) in whens {
-                ordinary_total_params(condition, out);
-                ordinary_total_params(value, out);
+            TotalsExpr::Neg(x) | TotalsExpr::Not(x) => pending.push(x.as_ref()),
+            TotalsExpr::Bin(_, l, r) | TotalsExpr::Cmp(_, l, r) | TotalsExpr::IsNull(l, r) => {
+                pending.push(r.as_ref());
+                pending.push(l.as_ref());
             }
-            if let Some(x) = otherwise {
-                ordinary_total_params(x, out);
+            TotalsExpr::And(xs) | TotalsExpr::Or(xs) => pending.extend(xs.iter().rev()),
+            TotalsExpr::Case { whens, otherwise } => {
+                if let Some(x) = otherwise {
+                    pending.push(x.as_ref());
+                }
+                for (condition, value) in whens.iter().rev() {
+                    pending.push(value);
+                    pending.push(condition);
+                }
             }
+            TotalsExpr::Agg(_) | TotalsExpr::Column(_) | TotalsExpr::Const(_) => {}
         }
     }
 }
@@ -594,6 +614,7 @@ pub(crate) fn visit_rel<'e>(r: &'e Rel, f: &mut dyn FnMut(&'e Expr, bool)) {
                 .iter()
                 .chain(v.area.iter().map(|a| &a.pred))
                 .chain(v.access.iter())
+                .chain(v.order.iter().map(|k| &k.expr))
                 .for_each(|c| visit_expr(c, false, f));
         }
         Rel::Subquery { input, .. } | Rel::Distinct(input) | Rel::Top { input, .. } => {
@@ -639,6 +660,7 @@ pub(crate) fn visit_expr<'e>(e: &'e Expr, in_set: bool, f: &mut dyn FnMut(&'e Ex
         | ExprKind::Param(_)
         | ExprKind::Value(_)
         | ExprKind::KeyRef(_)
+        | ExprKind::LocalKey { .. }
         | ExprKind::AggRef(_)
         | ExprKind::OuterKey { .. }
         | ExprKind::Out(_)

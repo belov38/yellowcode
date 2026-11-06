@@ -51,6 +51,11 @@ fn builtins() {
             .chain(super::storage::codecs())
             .chain(super::s4_codecs::codecs())
             .chain(super::typedesc::codecs())
+            .chain(super::textdoc::codecs())
+            .chain(super::valuelist::codecs())
+            .chain(super::valuetable::codecs())
+            .chain(super::valuetree::codecs())
+            .chain(super::boundary::codecs())
         {
             t.entry(idx.0).or_insert(c);
         }
@@ -146,12 +151,30 @@ impl InternalWriter {
     }
 
     pub fn hold(&mut self, ex: &mut Execution, n: usize) -> Result<(), Exception> {
-        self.live = self.live.saturating_add(n as u64);
-        crate::collections::reserve_values(ex, self.live)
+        let live = self.live.saturating_add(n as u64);
+        crate::collections::reserve_values(ex, live)?;
+        self.live = live;
+        Ok(())
     }
 
     pub fn release(&mut self, n: usize) {
         self.live = self.live.saturating_sub(n as u64);
+    }
+
+    pub(crate) fn check_depth(&self, ex: &Execution, levels: usize) -> Result<(), Exception> {
+        self.guard.check(levels).map_err(|_| cycle_fatal(ex))
+    }
+
+    pub(crate) fn with_depth<T>(
+        &mut self,
+        ex: &mut Execution,
+        levels: usize,
+        write: impl FnOnce(&mut Self, &mut Execution) -> Result<T, Exception>,
+    ) -> Result<T, Exception> {
+        self.guard.enter_many(levels).map_err(|_| cycle_fatal(ex))?;
+        let result = write(self, ex);
+        self.guard.leave_many(levels);
+        result
     }
 
     pub fn write_value(&mut self, ex: &mut Execution, v: &Value) -> Result<Node, Exception> {
@@ -181,8 +204,14 @@ impl InternalWriter {
     }
 
     fn number(&mut self, ex: &mut Execution, n: &Number) -> Result<Node, Exception> {
+        self.account(
+            ex,
+            n.size_hint_limbs()
+                .saturating_mul(64)
+                .saturating_add((n.backing_capacity_limbs() as u64).saturating_mul(4))
+                .saturating_add(256),
+        )?;
         let text = n.to_xml_string();
-        self.account(ex, text.len() as u64 + 8)?;
         Ok(typed("N", Node::Atom(text)))
     }
 
@@ -217,10 +246,10 @@ impl InternalWriter {
         }
         let items = self.object_items(ex, o, t);
         self.guard.leave();
-        let items = items?;
+        let items = super::nodes::NodeList(items?);
         self.account(ex, 48)?;
         let mut list = vec![Node::str("#"), Node::Atom(guid_text(&guid))];
-        list.extend(items);
+        list.extend(items.into_vec());
         Ok(Node::List(list))
     }
 
@@ -361,12 +390,34 @@ impl InternalReader {
         let Some(g) = items.get(1).and_then(Node::as_atom).and_then(parse_guid) else {
             return Err(self.format_error(ex));
         };
+        self.guarded_object_data(ex, &g, items.get(2..).unwrap_or_default())
+    }
+
+    pub(crate) fn read_inline_object(
+        &mut self,
+        ex: &mut Execution,
+        ty: TypeIdx,
+        data: &[Node],
+    ) -> Result<Value, Exception> {
+        ex.charge(1)?;
+        let Some(guid) = catalog().type_info(ty).guid else {
+            return Err(self.format_error(ex));
+        };
+        self.guarded_object_data(ex, &guid, data)
+    }
+
+    fn guarded_object_data(
+        &mut self,
+        ex: &mut Execution,
+        guid: &[u8; 16],
+        data: &[Node],
+    ) -> Result<Value, Exception> {
         if self.guard.enter().is_err() {
             return Err(self.format_error(ex));
         }
-        let r = self.object_data(ex, &g, items.get(2..).unwrap_or_default());
+        let result = self.object_data(ex, guid, data);
         self.guard.leave();
-        r
+        result
     }
 
     fn object_data(

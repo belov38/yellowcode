@@ -23,8 +23,186 @@ pub struct BoostMap<K, V> {
     len: usize,
 }
 
+pub struct PreparedInsert<'a, K: BoostKey, V>(PreparedKind<'a, K, V>);
+
+enum PreparedKind<'a, K: BoostKey, V> {
+    Existing(&'a mut V),
+    New {
+        map: &'a mut BoostMap<K, V>,
+        rehash: Option<RehashBuffers>,
+    },
+}
+
+struct RehashBuffers {
+    chain_head: Vec<u32>,
+    chain_next: Vec<u32>,
+    order: Vec<u32>,
+    first: Vec<u32>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct InsertPlan {
+    existing: Option<u32>,
+    len: usize,
+    nodes_len: usize,
+    buckets: usize,
+    rehash_count: Option<usize>,
+    needs_node: bool,
+}
+
+pub struct InsertScratch {
+    plan: InsertPlan,
+    buffers: Option<RehashBuffers>,
+    stage: usize,
+}
+
+impl InsertScratch {
+    pub fn new(plan: InsertPlan) -> Self {
+        let buffers = plan.rehash_count.map(|_| RehashBuffers {
+            chain_head: Vec::new(),
+            chain_next: Vec::new(),
+            order: Vec::new(),
+            first: Vec::new(),
+        });
+        Self {
+            plan,
+            buffers,
+            stage: 0,
+        }
+    }
+    pub fn stage_count(&self) -> usize {
+        if self.buffers.is_some() { 4 } else { 0 }
+    }
+    pub fn stage_bound(&self, plan: InsertPlan) -> Option<u64> {
+        if self.plan != plan {
+            return None;
+        }
+        let count = plan.rehash_count?;
+        let n = match self.stage {
+            0 | 3 => count,
+            1 | 2 => plan.nodes_len,
+            _ => return None,
+        };
+        u64::try_from(n.checked_mul(2)?.checked_mul(std::mem::size_of::<u32>())?).ok()
+    }
+    pub fn backing_bytes(&self) -> Option<u64> {
+        let Some(r) = &self.buffers else {
+            return Some(0);
+        };
+        let n = r
+            .chain_head
+            .capacity()
+            .checked_add(r.chain_next.capacity())?
+            .checked_add(r.order.capacity())?
+            .checked_add(r.first.capacity())?;
+        u64::try_from(n.checked_mul(std::mem::size_of::<u32>())?).ok()
+    }
+    pub fn allocate_next(&mut self, plan: InsertPlan) -> Option<()> {
+        if self.plan != plan {
+            return None;
+        }
+        let r = self.buffers.as_mut()?;
+        let count = plan.rehash_count?;
+        let (v, n, fill) = match self.stage {
+            0 => (&mut r.chain_head, count, true),
+            1 => (&mut r.chain_next, plan.nodes_len, true),
+            2 => (&mut r.order, plan.nodes_len, false),
+            3 => (&mut r.first, count, true),
+            _ => return None,
+        };
+        v.try_reserve_exact(n).ok()?;
+        if fill {
+            v.resize(n, NIL);
+        }
+        self.stage += 1;
+        Some(())
+    }
+}
+
 fn bucket_of(hash: i32, count: usize) -> u32 {
     (mix64(hash as i64 as u64) & (count as u64 - 1)) as u32
+}
+
+impl<K: BoostKey, V> PreparedInsert<'_, K, V> {
+    pub fn commit(self, key: K, value: V, hash: i32) -> (Option<V>, Option<K>) {
+        let (map, rehash) = match self.0 {
+            PreparedKind::Existing(old) => return (Some(std::mem::replace(old, value)), Some(key)),
+            PreparedKind::New { map, rehash } => (map, rehash),
+        };
+        if let Some(mut r) = rehash {
+            let count = r.first.len();
+            let mut n = map.head;
+            while n != NIL {
+                let node = &mut map.nodes[n as usize];
+                let b = bucket_of(node.hash, count);
+                node.bucket = b;
+                if r.chain_head[b as usize] == NIL {
+                    r.order.push(b);
+                }
+                r.chain_next[n as usize] = r.chain_head[b as usize];
+                r.chain_head[b as usize] = n;
+                n = node.next;
+            }
+            let mut last = NIL;
+            map.head = NIL;
+            for b in r.order {
+                r.first[b as usize] = r.chain_head[b as usize];
+                let mut n = r.chain_head[b as usize];
+                while n != NIL {
+                    map.nodes[n as usize].prev = last;
+                    if last == NIL {
+                        map.head = n;
+                    } else {
+                        map.nodes[last as usize].next = n;
+                    }
+                    last = n;
+                    n = r.chain_next[n as usize];
+                }
+            }
+            if last != NIL {
+                map.nodes[last as usize].next = NIL;
+            }
+            map.first = r.first;
+        }
+        let b = bucket_of(hash, map.first.len());
+        let node = Node {
+            entry: Some((key, value)),
+            hash,
+            bucket: b,
+            prev: NIL,
+            next: NIL,
+        };
+        let n = if let Some(i) = map.free.pop() {
+            map.nodes[i as usize] = node;
+            i
+        } else {
+            let i = map.nodes.len() as u32;
+            map.nodes.push(node);
+            i
+        };
+        let first = map.first[b as usize];
+        if first == NIL {
+            let old = map.head;
+            map.nodes[n as usize].next = old;
+            if old != NIL {
+                map.nodes[old as usize].prev = n;
+            }
+            map.head = n;
+        } else {
+            let previous = map.nodes[first as usize].prev;
+            map.nodes[n as usize].prev = previous;
+            map.nodes[n as usize].next = first;
+            map.nodes[first as usize].prev = n;
+            if previous == NIL {
+                map.head = n;
+            } else {
+                map.nodes[previous as usize].next = n;
+            }
+        }
+        map.first[b as usize] = n;
+        map.len += 1;
+        (None, None)
+    }
 }
 
 impl<K: BoostKey, V> Default for BoostMap<K, V> {
@@ -42,6 +220,23 @@ impl<K: BoostKey, V> BoostMap<K, V> {
             first: vec![NIL; MIN_BUCKETS],
             len: 0,
         }
+    }
+
+    pub fn try_new() -> Option<Self> {
+        let mut first = Vec::new();
+        first.try_reserve_exact(MIN_BUCKETS).ok()?;
+        first.resize(MIN_BUCKETS, NIL);
+        Some(Self {
+            nodes: Vec::new(),
+            free: Vec::new(),
+            head: NIL,
+            first,
+            len: 0,
+        })
+    }
+
+    pub fn empty_buffer_bytes() -> usize {
+        MIN_BUCKETS * std::mem::size_of::<u32>()
     }
 
     pub fn len(&self) -> usize {
@@ -85,6 +280,22 @@ impl<K: BoostKey, V> BoostMap<K, V> {
             .saturating_add((self.first.capacity() as u64).saturating_mul(4))
     }
 
+    pub fn checked_backing_bytes(&self) -> Option<u64> {
+        let nodes = self
+            .nodes
+            .capacity()
+            .checked_mul(std::mem::size_of::<Node<K, V>>())?;
+        let free = self
+            .free
+            .capacity()
+            .checked_mul(std::mem::size_of::<u32>())?;
+        let first = self
+            .first
+            .capacity()
+            .checked_mul(std::mem::size_of::<u32>())?;
+        u64::try_from(nodes.checked_add(free)?.checked_add(first)?).ok()
+    }
+
     fn find(&self, k: &K) -> Option<u32> {
         let b = bucket_of(k.boost_hash(), self.first.len());
         let mut n = self.first[b as usize];
@@ -109,6 +320,88 @@ impl<K: BoostKey, V> BoostMap<K, V> {
     pub fn get_mut(&mut self, k: &K) -> Option<&mut V> {
         let n = self.find(k)?;
         self.nodes[n as usize].entry.as_mut().map(|(_, v)| v)
+    }
+
+    pub fn prepared_lookup(&self, key: &K) -> Option<u32> {
+        self.find(key)
+    }
+
+    pub fn plan_insert(&self, existing: Option<u32>) -> Option<InsertPlan> {
+        if let Some(i) = existing {
+            self.nodes.get(i as usize)?.entry.as_ref()?;
+        }
+        let needs_node = existing.is_none() && self.free.is_empty();
+        if needs_node && u32::try_from(self.nodes.len()).ok()? == NIL {
+            return None;
+        }
+        let next = self.len.checked_add(usize::from(existing.is_none()))?;
+        let rehash_count = if existing.is_none() && next > self.first.len() {
+            let need = next
+                .max(self.len.checked_add(self.len / 2)?)
+                .checked_add(1)?;
+            Some(need.max(MIN_BUCKETS).checked_next_power_of_two()?)
+        } else {
+            None
+        };
+        if rehash_count.is_some_and(|count| count > u32::MAX as usize) {
+            return None;
+        }
+        Some(InsertPlan {
+            existing,
+            len: self.len,
+            nodes_len: self.nodes.len(),
+            buckets: self.first.len(),
+            rehash_count,
+            needs_node,
+        })
+    }
+    fn plan_matches(&self, plan: InsertPlan) -> bool {
+        self.len == plan.len
+            && self.nodes.len() == plan.nodes_len
+            && self.first.len() == plan.buckets
+            && (plan.existing.is_some() || plan.needs_node == self.free.is_empty())
+    }
+    pub fn node_reserve_bound(&self, plan: InsertPlan) -> Option<u64> {
+        if !self.plan_matches(plan) {
+            return None;
+        }
+        if !plan.needs_node {
+            return Some(0);
+        }
+        let slots = self.nodes.len().checked_add(1)?.checked_mul(2)?;
+        u64::try_from(slots.checked_mul(std::mem::size_of::<Node<K, V>>())?).ok()
+    }
+    pub fn reserve_prepared_node(&mut self, plan: InsertPlan) -> Option<()> {
+        if !self.plan_matches(plan) {
+            return None;
+        }
+        if plan.needs_node {
+            self.nodes.try_reserve_exact(1).ok()?;
+        }
+        Some(())
+    }
+    pub fn finish_prepared(
+        &mut self,
+        plan: InsertPlan,
+        scratch: InsertScratch,
+    ) -> Option<PreparedInsert<'_, K, V>> {
+        if !self.plan_matches(plan)
+            || scratch.plan != plan
+            || scratch.stage != scratch.stage_count()
+        {
+            return None;
+        }
+        if let Some(i) = plan.existing {
+            let (_, value) = self.nodes.get_mut(i as usize)?.entry.as_mut()?;
+            return Some(PreparedInsert(PreparedKind::Existing(value)));
+        }
+        if plan.needs_node && self.nodes.len() == self.nodes.capacity() {
+            return None;
+        }
+        Some(PreparedInsert(PreparedKind::New {
+            map: self,
+            rehash: scratch.buffers,
+        }))
     }
 
     pub fn insert(&mut self, k: K, v: V) -> Option<V> {

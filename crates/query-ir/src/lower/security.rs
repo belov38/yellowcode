@@ -35,6 +35,11 @@ impl Row {
     }
     pub(super) fn append_signal(&mut self, signal: PExpr) -> R<()> {
         let pos = p16(self.width as i64)?;
+        let signal = if self.signal.is_some() {
+            PExpr::And(vec![self.signal_expr(), signal])
+        } else {
+            signal
+        };
         let mut exprs = (0..pos).map(PExpr::Col).collect::<Vec<_>>();
         exprs.push(signal);
         self.rel = RelL::Project {

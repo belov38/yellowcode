@@ -80,9 +80,12 @@ impl HostObject for CollMgr {
             .into())
     }
 
-    fn call(&self, _: &mut Execution, m: MemberId, _: &mut [Arg]) -> CallResult<Value> {
+    fn call(&self, ex: &mut Execution, m: MemberId, _: &mut [Arg]) -> CallResult<Value> {
         let platform = platform_catalog::catalog();
-        let ru = member_name(platform, self.tidx, m).map_or("", |n| n.1);
+        let (_, ru, en) = member_name(platform, self.tidx, m).unwrap_or((false, "", ""));
+        if en == "AllRefsType" && !matches!(self.kind, ObjKind::BusinessProcess | ObjKind::Task) {
+            return crate::values::typedesc::all_refs(&self.app, ex, self.kind);
+        }
         let type_name = platform.type_info(self.tidx).name_ru.as_str();
         Err(HostError::not_implemented(type_name, ru).into())
     }

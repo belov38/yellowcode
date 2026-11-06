@@ -25,6 +25,7 @@ impl<'c, 'a, 'r, 'w, 't> Builder<'c, 'a, 'r, 'w, 't> {
             anchor: None,
             in_sub: false,
             replace: false,
+            allow_prefix: false,
         }
         .expr(e)
     }

@@ -45,32 +45,31 @@ fn date(b: &Bound<'_>, e: &Option<Expr>) -> Result<Option<bsl_prim::BslDate>, Ex
 }
 
 fn expr(b: &Bound<'_>, e: &TotalsExpr) -> Result<TotalsExpr, ExecError> {
-    let bx = |x: &TotalsExpr| -> Result<Box<TotalsExpr>, ExecError> { Ok(Box::new(expr(b, x)?)) };
-    Ok(match e {
-        TotalsExpr::Param(slot) => TotalsExpr::Const(param(b, *slot)?),
-        TotalsExpr::Agg(_) | TotalsExpr::Column(_) | TotalsExpr::Const(_) => e.clone(),
-        TotalsExpr::Neg(x) => TotalsExpr::Neg(bx(x)?),
-        TotalsExpr::Not(x) => TotalsExpr::Not(bx(x)?),
-        TotalsExpr::Bin(op, l, r) => TotalsExpr::Bin(*op, bx(l)?, bx(r)?),
-        TotalsExpr::IsNull(l, r) => TotalsExpr::IsNull(bx(l)?, bx(r)?),
-        TotalsExpr::Cmp(op, l, r) => TotalsExpr::Cmp(*op, bx(l)?, bx(r)?),
-        TotalsExpr::And(v) => {
-            TotalsExpr::And(v.iter().map(|x| expr(b, x)).collect::<Result<_, _>>()?)
+    let mut result = e.clone();
+    let mut pending = vec![&mut result];
+    while let Some(e) = pending.pop() {
+        match e {
+            TotalsExpr::Param(slot) => *e = TotalsExpr::Const(param(b, *slot)?),
+            TotalsExpr::Neg(x) | TotalsExpr::Not(x) => pending.push(x.as_mut()),
+            TotalsExpr::Bin(_, l, r) | TotalsExpr::Cmp(_, l, r) | TotalsExpr::IsNull(l, r) => {
+                pending.push(r.as_mut());
+                pending.push(l.as_mut());
+            }
+            TotalsExpr::And(xs) | TotalsExpr::Or(xs) => pending.extend(xs.iter_mut().rev()),
+            TotalsExpr::Case { whens, otherwise } => {
+                if let Some(x) = otherwise {
+                    pending.push(x.as_mut());
+                }
+                for (condition, value) in whens.iter_mut().rev() {
+                    pending.push(value);
+                    pending.push(condition);
+                }
+            }
+            TotalsExpr::Agg(_) | TotalsExpr::Column(_) | TotalsExpr::Const(_) => {}
         }
-        TotalsExpr::Or(v) => {
-            TotalsExpr::Or(v.iter().map(|x| expr(b, x)).collect::<Result<_, _>>()?)
-        }
-        TotalsExpr::Case { whens, otherwise } => TotalsExpr::Case {
-            whens: whens
-                .iter()
-                .map(|(c, v)| Ok((expr(b, c)?, expr(b, v)?)))
-                .collect::<Result<_, ExecError>>()?,
-            otherwise: match otherwise {
-                Some(o) => Some(bx(o)?),
-                None => None,
-            },
-        },
-    })
+    }
+    drop(pending);
+    Ok(result)
 }
 
 pub(super) fn lower_totals(

@@ -150,6 +150,113 @@ pub struct Item {
     pub unknown: bool,
 }
 
+pub(crate) fn forwarded_nested_column(item: &Item) -> Option<u16> {
+    match &item.expr.kind {
+        TKind::Field {
+            level: 0,
+            source: 0,
+            col: Col::Column(column),
+            derefs,
+        } if derefs.is_empty() => Some(*column),
+        _ => None,
+    }
+}
+
+pub(crate) fn nested_output_fields<'a>(select: &'a Select, item: &'a Item) -> Option<&'a [Item]> {
+    if let Some(fields) = &item.nested {
+        return Some(fields);
+    }
+    let column = forwarded_nested_column(item)?;
+    let [source] = select.sources.as_slice() else {
+        return None;
+    };
+    if !source.joins.is_empty() {
+        return None;
+    }
+    let From::Subquery(query) = &source.from else {
+        return None;
+    };
+    let [inner] = query.parts.as_slice() else {
+        return None;
+    };
+    inner.items.get(usize::from(column))?.nested.as_deref()
+}
+
+pub(crate) fn nested_from_select(query: &Query) -> Option<&Select> {
+    fn plain(query: &Query) -> Option<&Select> {
+        let [select] = query.parts.as_slice() else {
+            return None;
+        };
+        (query.order.is_empty()
+            && !query.autoorder
+            && query.totals.is_none()
+            && !select.distinct
+            && select.top.is_none()
+            && select.group.is_none()
+            && select.having.is_none())
+        .then_some(select)
+    }
+
+    let outer = plain(query)?;
+    let [source] = outer.sources.as_slice() else {
+        return None;
+    };
+    if !source.joins.is_empty() {
+        return None;
+    }
+    let From::Subquery(query) = &source.from else {
+        return None;
+    };
+    let inner = plain(query)?;
+    if inner.sources.len() > 1
+        || inner.sources.iter().any(|source| {
+            !source.joins.is_empty()
+                || !matches!(&source.from, From::Table { args, records: None, drcr: None, .. } if args.is_empty())
+        })
+        || !inner.items.iter().any(|item| item.nested.is_some())
+        || !outer.items.iter().any(|item| {
+            item.nested.is_none() && nested_output_fields(outer, item).is_some()
+        })
+    {
+        return None;
+    }
+    if !outer.items.iter().all(|item| {
+        item.nested.is_none()
+            && (nested_output_fields(outer, item).is_some()
+                || nested_forward_scalar(&item.expr, 128, false))
+    }) || !inner.items.iter().all(|item| {
+        nested_forward_scalar(&item.expr, 128, item.nested.is_some())
+            && item.nested.iter().flatten().all(|child| {
+                child.nested.is_none() && nested_forward_scalar(&child.expr, 128, false)
+            })
+    }) || outer
+        .where_
+        .iter()
+        .chain(&inner.where_)
+        .any(|expr| !nested_forward_scalar(expr, 128, false))
+    {
+        return None;
+    }
+    Some(inner)
+}
+
+fn nested_forward_scalar(expr: &TExpr, remaining: u16, nested_owner: bool) -> bool {
+    if remaining == 0
+        || matches!(expr.kind, TKind::InQuery { .. } | TKind::Agg { .. })
+        || matches!(expr.kind, TKind::Field { level, .. } if level != 0)
+        || (!nested_owner && expr.ty.others.contains(&crate::Other::QueryResult))
+    {
+        return false;
+    }
+    let mut scalar = true;
+    crate::sema::select::each_child(expr, &mut |child| {
+        if scalar {
+            scalar = nested_forward_scalar(child, remaining - 1, false);
+        }
+    });
+    scalar
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Source {
     pub all_fields: bool,
@@ -158,11 +265,42 @@ pub struct Source {
     pub joins: Vec<Join>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct RecordsOptions {
+    pub order_desc: bool,
+    pub top: Option<u64>,
+    pub deferred: Option<RecordsDeferred>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecordsDeferred {
+    Composition,
+    BoundExpression,
+    OrderShape,
+    TopShape,
+    TopRange,
+}
+impl RecordsDeferred {
+    pub(crate) fn what(self) -> &'static str {
+        match self {
+            Self::Composition => "Q6a-RecordsWithExtDimensionsComposition",
+            Self::BoundExpression => "Q6a-RecordsWithExtDimensionsBoundsExpression",
+            Self::OrderShape => "Q6a-RecordsWithExtDimensionsOrder",
+            Self::TopShape => "Q6a-RecordsWithExtDimensionsTop",
+            Self::TopRange => "Q6a-RecordsWithExtDimensionsTopRange",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum From {
     Table {
         id: QTableId,
         args: Vec<Option<TExpr>>,
+        records: Option<RecordsOptions>,
+        accounting: Option<AccountingArguments>,
+        accounting_dependencies: Option<AccountingDependencies>,
+        drcr: Option<DrCrSource>,
         periodicity: Periodicity,
         complement: Option<crate::schema::Complement>,
         span: Option<query_syntax::Span>,
@@ -174,6 +312,136 @@ pub enum From {
         schema: QShared<TempSchema>,
     },
     Subquery(Box<Query>),
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AccountingArguments {
+    pub date_slots: u8,
+    pub deferred: bool,
+}
+
+impl AccountingArguments {
+    pub(crate) fn plain_date(expression: &TExpr) -> bool {
+        expression.ty.date.is_some_and(|qualifier| {
+            matches!(qualifier, crate::DateQ::Date | crate::DateQ::DateTime)
+                && expression.ty == QType::date(qualifier)
+                && matches!(
+                    &expression.kind,
+                    TKind::Const(QValue::Date(_)) | TKind::Param(_)
+                )
+        })
+    }
+
+    pub(crate) fn supports(self, args: &[Option<TExpr>], periods: usize) -> bool {
+        let mask = (1u8 << periods) - 1;
+        !self.deferred
+            && self.date_slots & !mask == 0
+            && (0..periods).all(|i| {
+                let expression = args.get(i).and_then(Option::as_ref);
+                match expression {
+                    Some(e) => self.date_slots & (1 << i) != 0 && Self::plain_date(e),
+                    None => self.date_slots & (1 << i) == 0,
+                }
+            })
+            && args.iter().skip(periods).all(Option::is_none)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct AccountingDependencies {
+    pub supplied: Vec<u8>,
+    pub dependencies: Vec<DrCrArgDependency>,
+    pub complete: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DrCrSource {
+    pub supplied: Vec<u8>,
+    pub dependencies: Vec<DrCrArgDependency>,
+    pub date_slots: u8,
+}
+
+impl DrCrSource {
+    pub(crate) fn date_argument(&self, argument: usize) -> Option<&TExpr> {
+        if argument >= 2 || self.supplied.get(argument) != Some(&1) {
+            return None;
+        }
+        let mut dependencies = self
+            .dependencies
+            .iter()
+            .filter(|d| usize::from(d.argument) == argument);
+        let dependency = dependencies.next()?;
+        if dependencies.next().is_some()
+            || dependency.ordinal != 0
+            || dependency.scope != DrCrArgScope::NoSources
+        {
+            return None;
+        }
+        let DrCrArgRead::Expression(expression) = &dependency.read else {
+            return None;
+        };
+        let qualifier = expression.ty.date?;
+        if !matches!(qualifier, crate::DateQ::Date | crate::DateQ::DateTime)
+            || expression.ty != QType::date(qualifier)
+            || !matches!(
+                &expression.kind,
+                TKind::Const(QValue::Date(_)) | TKind::Param(_)
+            )
+        {
+            return None;
+        }
+        Some(expression)
+    }
+
+    pub(crate) fn has_unsupported_arguments(&self) -> bool {
+        self.date_slots & !0b11 != 0
+            || (0..2).any(|i| self.date_slots & (1 << i) != 0 && self.date_argument(i).is_none())
+            || self
+                .supplied
+                .iter()
+                .enumerate()
+                .any(|(i, supplied)| *supplied != 0 && (i >= 2 || self.date_slots & (1 << i) == 0))
+    }
+}
+#[derive(Clone, Debug, PartialEq)]
+pub struct DrCrArgDependency {
+    pub argument: u16,
+    pub ordinal: u32,
+    pub scope: DrCrArgScope,
+    pub read: DrCrArgRead,
+}
+#[derive(Clone, Debug, PartialEq)]
+pub enum DrCrArgRead {
+    Expression(TExpr),
+    Wildcard(DrCrWildcard),
+    Nested(DrCrNested),
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DrCrArgScope {
+    NoSources,
+    Condition,
+    Account(crate::schema::StdRole),
+    Nested(QTableId),
+}
+#[derive(Clone, Debug, PartialEq)]
+pub struct DrCrWildcard {
+    pub base: TExpr,
+    pub targets: Vec<DrCrWildcardTarget>,
+    pub span: Span,
+}
+#[derive(Clone, Debug, PartialEq)]
+pub struct DrCrWildcardTarget {
+    pub table: QTableId,
+    pub path: Vec<Deref>,
+    pub fields: Vec<QFieldId>,
+    pub all_fields: bool,
+}
+#[derive(Clone, Debug, PartialEq)]
+pub struct DrCrNested {
+    pub base: TExpr,
+    pub table: QTableId,
+    pub dependencies: Vec<DrCrArgDependency>,
+    pub span: Span,
 }
 
 #[derive(Clone, Debug, PartialEq)]

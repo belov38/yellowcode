@@ -322,6 +322,8 @@ pub(crate) fn with_source<R: Send>(
     let mut out: Option<R> = None;
     let (job_ref, out_ref) = (&mut job, &mut out);
     std::thread::scope(move |s| {
+        #[cfg(test)]
+        agg_bridge_ref.before_spawn()?;
         let spawned = std::thread::Builder::new()
             .stack_size(stack_size(depth))
             .spawn_scoped(s, move || {

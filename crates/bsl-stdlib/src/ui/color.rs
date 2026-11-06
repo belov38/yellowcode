@@ -158,6 +158,10 @@ impl Color {
 }
 
 impl HostObject for Color {
+    fn retained_memory(&self, _: &mut dyn bsl_vm::RetainedMemory) -> Result<bool, Exception> {
+        Ok(true)
+    }
+
     fn type_id(&self) -> TypeId {
         TypeId::of_catalog(types().color)
     }

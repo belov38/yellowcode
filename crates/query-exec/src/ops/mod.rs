@@ -1,4 +1,9 @@
 pub mod access;
+mod accounting;
+mod accounting_turnovers;
+pub(crate) use accounting::{check_cancel as check_accounting_cancel, check_drcr_settings_shape};
+mod accounting_balance;
+pub(crate) use accounting_balance::check_balance_settings_shape;
 mod security;
 pub(crate) use security::CheckAccess;
 pub mod agg;
@@ -16,7 +21,7 @@ pub mod subq;
 pub mod temp;
 
 use std::cell::Cell;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::sync::atomic::Ordering;
 
 use memory_budget::{Category, Evictor, LimitReason, MemoryLimit, Reservation};
@@ -45,11 +50,42 @@ pub type BoxOp<'a> = Box<dyn Op<'a> + 'a>;
 const SLACK_UNIT: u64 = 64 << 10;
 const SLACK_KEEP: u64 = 128 << 10;
 
+#[derive(Clone, Copy, Default)]
+struct Held {
+    persistent: u64,
+    owned: u64,
+}
+
+impl Held {
+    fn total(self) -> u64 {
+        self.persistent.saturating_add(self.owned)
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct OwnedCharge {
+    reservation: Option<Reservation>,
+    held: Weak<Cell<Held>>,
+    bytes: u64,
+}
+
+impl Drop for OwnedCharge {
+    fn drop(&mut self) {
+        if let Some(shared) = self.held.upgrade() {
+            let mut held = shared.get();
+            held.owned = held.owned.saturating_sub(self.bytes);
+            shared.set(held);
+        }
+        self.held = Weak::new();
+        self.reservation = None;
+    }
+}
+
 pub struct MemBudget<'a> {
     used: Cell<u64>,
     peak: Cell<u64>,
     limit: u64,
-    held: Rc<Cell<u64>>,
+    held: Rc<Cell<Held>>,
     lease: Option<&'a Reservation>,
     evictor: Option<&'a dyn Evictor>,
     slack: Cell<u64>,
@@ -63,7 +99,7 @@ impl std::fmt::Debug for MemBudget<'_> {
             .field("used", &self.used.get())
             .field("peak", &self.peak.get())
             .field("limit", &self.limit)
-            .field("held", &self.held.get())
+            .field("held", &self.held.get().total())
             .field("leased", &self.lease.is_some())
             .field("slack", &self.slack.get())
             .field("scratch", &self.scratch.get())
@@ -81,7 +117,7 @@ impl<'a> MemBudget<'a> {
             used: Cell::new(0),
             peak: Cell::new(0),
             limit,
-            held: Rc::new(Cell::new(0)),
+            held: Rc::new(Cell::new(Held::default())),
             lease: None,
             evictor: None,
             slack: Cell::new(0),
@@ -99,7 +135,7 @@ impl<'a> MemBudget<'a> {
             } else {
                 env.mem_limit
             },
-            held: Rc::new(Cell::new(0)),
+            held: Rc::new(Cell::new(Held::default())),
             lease: env.lease,
             evictor: env.evictor,
             slack: Cell::new(0),
@@ -133,7 +169,7 @@ impl<'a> MemBudget<'a> {
                 .used
                 .get()
                 .saturating_add(n)
-                .saturating_add(self.held.get());
+                .saturating_add(self.held.get().total());
             if total > self.limit {
                 self.used.set(self.used.get().saturating_add(n));
                 self.peak.set(self.peak.get().max(total));
@@ -174,7 +210,7 @@ impl<'a> MemBudget<'a> {
         self.take(n)?;
         let used = self.used.get().saturating_add(n);
         self.used.set(used);
-        let total = used.saturating_add(self.held.get());
+        let total = used.saturating_add(self.held.get().total());
         self.peak.set(self.peak.get().max(total));
         Ok(())
     }
@@ -251,14 +287,88 @@ impl<'a> MemBudget<'a> {
 
     pub(crate) fn hold(&self, n: u64) -> Result<(), ExecError> {
         self.take(n)?;
-        self.held.set(self.held.get().saturating_add(n));
-        let total = self.used.get().saturating_add(self.held.get());
+        let mut held = self.held.get();
+        held.persistent = held.persistent.saturating_add(n);
+        self.held.set(held);
+        let total = self.used.get().saturating_add(held.total());
         self.peak.set(self.peak.get().max(total));
         Ok(())
     }
 
+    pub(crate) fn hold_owned(&self, n: u64) -> Result<OwnedCharge, ExecError> {
+        let reservation = if let Some(lease) = self.lease {
+            Some(
+                match self.evictor {
+                    Some(evictor) => {
+                        lease
+                            .budget()
+                            .try_reserve_or_evict(lease.category(), n, evictor)
+                    }
+                    None => lease.budget().try_reserve(lease.category(), n),
+                }
+                .map_err(ExecError::Memory)?,
+            )
+        } else {
+            self.take(n)?;
+            None
+        };
+        let mut held = self.held.get();
+        held.owned = held.owned.saturating_add(n);
+        self.held.set(held);
+        self.peak.set(
+            self.peak
+                .get()
+                .max(self.used.get().saturating_add(held.total())),
+        );
+        Ok(OwnedCharge {
+            reservation,
+            held: Rc::downgrade(&self.held),
+            bytes: n,
+        })
+    }
+
+    pub(crate) fn grow_owned(&self, owner: &mut OwnedCharge, n: u64) -> Result<(), ExecError> {
+        if owner
+            .held
+            .upgrade()
+            .is_none_or(|held| !Rc::ptr_eq(&held, &self.held))
+        {
+            return Err(fatal("input charge belongs to another execution"));
+        }
+        let next = crate::model::size_add(owner.bytes, n)?;
+        let mut held = self.held.get();
+        let owned = crate::model::size_add(held.owned, n)?;
+        if let Some(reservation) = &owner.reservation {
+            match self.evictor {
+                Some(evictor) => reservation.try_grow_or_evict(n, evictor),
+                None => reservation.try_grow(n),
+            }
+            .map_err(ExecError::Memory)?;
+        } else {
+            let total = crate::model::size_add(
+                self.used.get(),
+                crate::model::size_add(held.persistent, owned)?,
+            )?;
+            if total > self.limit {
+                return Err(legacy_limit());
+            }
+        }
+        owner.bytes = next;
+        held.owned = owned;
+        self.held.set(held);
+        self.peak.set(
+            self.peak
+                .get()
+                .max(self.used.get().saturating_add(held.total())),
+        );
+        Ok(())
+    }
+
     pub(crate) fn release_held(&self) {
-        let h = self.held.replace(0);
+        let mut held = self.held.get();
+        let h = held.persistent;
+        held.persistent = 0;
+        self.held.set(held);
         self.give(h);
     }
 
@@ -285,7 +395,11 @@ impl<'a> MemBudget<'a> {
 impl Drop for MemBudget<'_> {
     fn drop(&mut self) {
         let held = if Rc::strong_count(&self.held) == 1 {
-            self.held.replace(0)
+            let mut held = self.held.get();
+            let persistent = held.persistent;
+            held.persistent = 0;
+            self.held.set(held);
+            persistent
         } else {
             0
         };
@@ -310,6 +424,9 @@ pub struct Mark {
 
 pub struct Cx<'a> {
     pub(crate) observation: Option<crate::observe::ObservationSession>,
+    pub(crate) input_payloads:
+        Option<Rc<std::cell::RefCell<crate::accounting_inputs::PaidPayloads>>>,
+    pub(crate) input_structure: Option<OwnedCharge>,
     pub env: &'a ExecEnv<'a>,
     pub coll: crate::coll::ExecCollation<'a>,
     pub src: &'a dyn DataSource,
@@ -334,7 +451,17 @@ impl<'a> Cx<'a> {
             ticks: 0,
             week_start: None,
             observation: None,
+            input_payloads: None,
+            input_structure: None,
         }
+    }
+
+    pub(crate) fn release_inputs(&mut self) {
+        if Rc::strong_count(&self.subs) == 1 {
+            self.subs.clear();
+        }
+        self.input_structure = None;
+        self.input_payloads = None;
     }
 
     pub fn plan_options(&mut self, opts: crate::plan::PlanOptions) {
@@ -353,6 +480,8 @@ impl<'a> Cx<'a> {
             ticks: 0,
             week_start: self.week_start,
             observation: self.observation.clone(),
+            input_payloads: self.input_payloads.clone(),
+            input_structure: None,
         }
     }
 
@@ -527,5 +656,11 @@ impl<'a> Op<'a> for Limit<'a> {
             }
         }
         Ok(r)
+    }
+}
+
+impl Drop for Cx<'_> {
+    fn drop(&mut self) {
+        self.release_inputs();
     }
 }

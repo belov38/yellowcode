@@ -317,7 +317,7 @@ impl CompileArena {
         parts: impl IntoIterator<Item = &'a str>,
         separator: &str,
         cause_msg: query_syntax::MsgId,
-        cause_subst: Option<&str>,
+        cause_subst: impl IntoIterator<Item = &'a str>,
     ) -> query_syntax::QueryError {
         if let Some(error) = self.error() {
             return self.resource_error(error);
@@ -327,7 +327,7 @@ impl CompileArena {
             return self.diagnostic_error(failure);
         }
         let mut cause = Failure::new(Some(&self.budget), cause_msg, None);
-        if let Some(text) = cause_subst {
+        for text in cause_subst {
             cause = cause.with_subst(Argument::Text(text));
         }
         self.diagnostic_error(failure.with_cause(cause))

@@ -1,10 +1,14 @@
 mod refid;
 pub(crate) mod security;
+mod snapshot;
+#[doc(hidden)]
+pub mod temp_provenance;
 mod values;
 
-pub(crate) use values::{fold_chain, visit_expr, visit_stmt};
+pub(crate) use values::{const_value, fold_chain, visit_expr, visit_stmt};
 
 pub use refid::{ref_id, uuid_of};
+pub use snapshot::ParamValuesSnapshot;
 
 use crate::exec_error::ExecError;
 use crate::host::{HostError, PredefinedName};
@@ -92,9 +96,29 @@ pub fn bind(stmt: &StmtS, ctx: &BindCtx<'_>) -> Result<StmtL, ExecError> {
 pub struct PolicyCompileStats {
     pub statement: crate::ir::stats::IrStats,
     pub predicates: crate::sema::stats::StmtStats,
+    pub payload_bytes: u64,
 }
 
 pub fn bind_with_policy_charge(
+    stmt: &StmtS,
+    ctx: &BindCtx<'_>,
+    charge: &mut dyn FnMut(&PolicyCompileStats) -> Result<(), ExecError>,
+) -> Result<StmtL, ExecError> {
+    let params = ParamValuesSnapshot::new(ctx.params);
+    let ctx = BindCtx {
+        params: &params,
+        schema: ctx.schema,
+        storage: ctx.storage,
+        map: ctx.map,
+        host: ctx.host,
+        security: ctx.security,
+    };
+    let result = bind_frozen(stmt, &ctx, charge);
+    params.check()?;
+    result
+}
+
+fn bind_frozen(
     stmt: &StmtS,
     ctx: &BindCtx<'_>,
     charge: &mut dyn FnMut(&PolicyCompileStats) -> Result<(), ExecError>,

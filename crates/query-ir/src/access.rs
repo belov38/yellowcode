@@ -55,8 +55,12 @@ impl AccessPredicate {
                         all_fields: false,
                         alias: String::new(),
                         from: tir::From::Table {
+                            drcr: None,
                             id: self.table,
                             args: Vec::new(),
+                            records: None,
+                            accounting: None,
+                            accounting_dependencies: None,
                             periodicity: crate::schema::Periodicity::Absent,
                             complement: None,
                             span: None,

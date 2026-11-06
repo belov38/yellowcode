@@ -288,6 +288,7 @@ impl TableState {
                 member: Cell::new(true),
                 cells: RefCell::new(cells),
                 bytes: Cell::new(0),
+                materialized: Cell::new(true),
             });
             ex.charge(width)?;
             record.bytes.set(record.calculate_bytes());

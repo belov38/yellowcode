@@ -346,6 +346,9 @@ fn eval_context(
         PExpr::SectionAgg { .. } => {
             return Err(ExprError::Unsupported("aggregate over a tabular section"));
         }
+        PExpr::RecordInInterval { .. } => {
+            return Err(ExprError::Unsupported("accounting record interval"));
+        }
         PExpr::StoredSize { .. } => return Err(ExprError::Unsupported("stored data size")),
         PExpr::InList { l, not, rhs } => {
             let left = arguments(l.iter(), input, outer, coll, max_number_limbs)?;

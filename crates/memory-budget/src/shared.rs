@@ -42,6 +42,10 @@ impl<T> Shared<T> {
     fn node(&self) -> &Node<T> {
         unsafe { self.pointer.as_ref() }
     }
+    pub fn allocation_layout(&self) -> Layout {
+        Layout::new::<Node<T>>()
+    }
+
     pub fn reservation(&self) -> &Reservation {
         &self.node().reservation
     }

@@ -4,6 +4,7 @@ mod columns;
 mod compare;
 mod fill;
 mod fixed;
+mod json_map_numbering;
 mod map;
 mod pair;
 mod retained;
@@ -15,6 +16,7 @@ mod value_tree;
 pub use value_table::ValueTable;
 pub use value_tree::ValueTree;
 mod xdto;
+pub(crate) use value_list::ValueList;
 pub use value_list::{new_value_list, value_list_items};
 
 pub(crate) use array::new_fixed_array;

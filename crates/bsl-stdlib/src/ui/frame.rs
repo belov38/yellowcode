@@ -109,6 +109,10 @@ pub(super) fn border_ctor(ex: &mut Execution, args: &mut [Arg]) -> CallResult<Va
 }
 
 impl HostObject for Border {
+    fn retained_memory(&self, _: &mut dyn bsl_vm::RetainedMemory) -> Result<bool, Exception> {
+        Ok(true)
+    }
+
     fn type_id(&self) -> TypeId {
         TypeId::of_catalog(types().border)
     }
@@ -198,6 +202,10 @@ pub(super) fn line_ctor(ex: &mut Execution, args: &mut [Arg]) -> CallResult<Valu
 }
 
 impl HostObject for Line {
+    fn retained_memory(&self, _: &mut dyn bsl_vm::RetainedMemory) -> Result<bool, Exception> {
+        Ok(true)
+    }
+
     fn type_id(&self) -> TypeId {
         TypeId::of_catalog(types().line)
     }

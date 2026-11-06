@@ -1,4 +1,5 @@
 mod accounting;
+mod serial;
 mod session;
 pub(super) use accounting::object as retained_object;
 mod bridge;
@@ -249,6 +250,7 @@ impl TableState {
             member: Cell::new(true),
             cells: RefCell::new(cells),
             bytes: Cell::new(0),
+            materialized: Cell::new(source.is_some_and(|values| !values.is_empty())),
         });
         record.bytes.set(record.calculate_bytes());
         let handle = self.handle(ex, record.clone())?;
@@ -295,6 +297,7 @@ struct PreparedRows {
     schema: u64,
     cells: Vec<(Rc<RowRecord>, Cells)>,
     clear: bool,
+    materialize: bool,
     retired: Vec<Value>,
 }
 impl PreparedSchemaChange for PreparedRows {
@@ -311,6 +314,9 @@ impl PreparedSchemaChange for PreparedRows {
                 let before = record.bytes.get();
                 std::mem::swap(&mut *record.cells.borrow_mut(), cells);
                 record.bytes.set(record.calculate_bytes());
+                if self.materialize {
+                    record.materialized.set(true);
+                }
                 bytes = bytes
                     .saturating_sub(before)
                     .saturating_add(record.bytes.get());
@@ -360,6 +366,7 @@ impl SchemaRows for TableState {
             schema,
             cells: vec_with_capacity(ex, self.len() as u64)?,
             clear: matches!(change, SchemaChange::Clear),
+            materialize: false,
             retired: Vec::new(),
         };
         if !prepared.clear {

@@ -23,6 +23,34 @@ pub(crate) struct JsonReaderState {
     pub consumed: bool,
 }
 
+impl JsonReaderState {
+    pub(crate) fn current_clone_bound(&self) -> Option<u64> {
+        let backing = match &self.current {
+            Some(Token::String(s) | Token::PropertyName(s)) => {
+                u64::try_from(s.capacity()).ok()?.checked_mul(2)?
+            }
+            Some(Token::Number(n)) => u64::try_from(n.backing_capacity_limbs())
+                .ok()?
+                .checked_mul(4)?,
+            _ => 0,
+        };
+        backing.checked_add(std::mem::size_of::<Token>() as u64)
+    }
+
+    pub(crate) fn retained_bytes(&self) -> Option<u64> {
+        let token = match &self.current {
+            Some(Token::String(s) | Token::PropertyName(s)) => {
+                u64::try_from(s.capacity()).ok()?.checked_mul(2)?
+            }
+            Some(Token::Number(n)) => u64::try_from(n.backing_capacity_limbs())
+                .ok()?
+                .checked_mul(4)?,
+            _ => 0,
+        };
+        self.reader.retained_bytes()?.checked_add(token)
+    }
+}
+
 pub(crate) struct JsonReader {
     st: RefCell<Option<JsonReaderState>>,
 }
@@ -42,6 +70,15 @@ pub(crate) fn json_reader<'a>(
         return Err(crate::bind::type_mismatch(1).into());
     };
     state(r)
+}
+
+pub(crate) fn reader_live_bytes(v: &Value) -> Option<u64> {
+    let reader = v.as_object()?.as_any().downcast_ref::<JsonReader>()?;
+    let state = reader.st.try_borrow().ok()?;
+    match &*state {
+        Some(state) => state.retained_bytes(),
+        None => Some(0),
+    }
 }
 
 fn state(r: &JsonReader) -> CallResult<RefMut<'_, JsonReaderState>> {

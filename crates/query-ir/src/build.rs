@@ -443,6 +443,8 @@ impl<'a> Builder<'a> {
                 kind: v.kind,
                 bounds,
                 cond: pred,
+                order: None,
+                top: None,
                 periodicity: Periodicity::Absent,
                 complement: None,
                 area: None,

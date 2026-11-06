@@ -78,6 +78,10 @@ impl Writer {
         self.out.len()
     }
 
+    pub fn backing_capacity_units(&self) -> usize {
+        self.out.capacity()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.out.is_empty()
     }

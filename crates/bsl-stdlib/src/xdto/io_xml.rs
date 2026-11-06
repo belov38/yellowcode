@@ -22,6 +22,9 @@ struct Out<'a> {
     f: XdtoWriteFlags,
     guard: DepthGuard,
     cache: PropCache,
+    serializer_value_lists: bool,
+    serializer_value_tables: bool,
+    table_types: Vec<Vec<Option<QName>>>,
 }
 
 pub(crate) fn write_xml(
@@ -31,6 +34,39 @@ pub(crate) fn write_xml(
     root: Option<&QName>,
     d: &XdtoData,
     f: XdtoWriteFlags,
+) -> CallResult<()> {
+    write_xml_impl(ex, m, w, root, d, f, false, false)
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "serializer mapping is scoped per invocation"
+)]
+pub(crate) fn write_serializer_xml(
+    ex: &mut Execution,
+    m: &Model,
+    w: &mut XmlWriterState,
+    root: Option<&QName>,
+    d: &XdtoData,
+    f: XdtoWriteFlags,
+    value_tables: bool,
+) -> CallResult<()> {
+    write_xml_impl(ex, m, w, root, d, f, true, value_tables)
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "factory and serializer share the writer"
+)]
+fn write_xml_impl(
+    ex: &mut Execution,
+    m: &Model,
+    w: &mut XmlWriterState,
+    root: Option<&QName>,
+    d: &XdtoData,
+    f: XdtoWriteFlags,
+    serializer_value_lists: bool,
+    serializer_value_tables: bool,
 ) -> CallResult<()> {
     validate_host_typing(ex, m, d, f)?;
     let name = match (root, d) {
@@ -45,8 +81,11 @@ pub(crate) fn write_xml(
         f,
         guard: DepthGuard::new(),
         cache: PropCache::default(),
+        serializer_value_lists,
+        serializer_value_tables,
+        table_types: Vec::new(),
     };
-    out.element(&name.ns, &name.name, None, d, true, None)
+    out.tree(&name.ns, &name.name, d)
 }
 
 fn is_qname_value(m: &Model, ty: &QName, lexical: &str) -> bool {
@@ -187,16 +226,49 @@ impl Out<'_> {
             .map_err(|e| self.wrap(ctx.to_string(), e))
     }
 
+    fn tree<'d>(&mut self, ns: &str, local: &str, d: &'d XdtoData) -> CallResult<()> {
+        let mut open: Vec<Open<'d>> = Vec::new();
+        if let Some(o) = self.start(ns, local, None, d, true, None)? {
+            open.push(o);
+        }
+        while let Some(top) = open.last_mut() {
+            match self.next_child(top)? {
+                Some(child) => {
+                    let ep = &child.eps[child.ep];
+                    let declared = child.declared.as_ref().unwrap_or(&ep.prop.ty);
+                    let started = self.start(
+                        ep.xml_ns().unwrap_or(""),
+                        ep.xml_name(),
+                        Some(declared),
+                        child.item,
+                        false,
+                        Some(ep),
+                    )?;
+                    if let Some(o) = started {
+                        open.try_reserve(1).map_err(|_| self.ex.out_of_memory())?;
+                        open.push(o);
+                    }
+                }
+                None => {
+                    if let Some(done) = open.pop() {
+                        self.finish(done)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
-    fn element(
+    fn start<'d>(
         &mut self,
         ns: &str,
         local: &str,
         declared: Option<&QName>,
-        d: &XdtoData,
+        d: &'d XdtoData,
         root: bool,
         prop: Option<&EProp>,
-    ) -> CallResult<()> {
+    ) -> CallResult<Option<Open<'d>>> {
         self.ex.charge(1)?;
         if self.guard.enter().is_err() {
             return Err(cycle_fatal(self.ex).into());
@@ -251,8 +323,17 @@ impl Out<'_> {
             }
             XdtoData::Object { ty, props } => {
                 let attrs = qn.as_ref().map_or(&[][..], |q| q.attrs.as_slice());
-                self.object_body(ty, props, &ctx, attrs)?
+                return self.open_body(ty, props, ctx, attrs).map(Some);
             }
+        }
+        self.w.end_element(self.ex)?;
+        self.guard.leave();
+        Ok(None)
+    }
+
+    fn finish(&mut self, done: Open<'_>) -> CallResult<()> {
+        if done.table {
+            self.table_types.pop();
         }
         self.w.end_element(self.ex)?;
         self.guard.leave();
@@ -352,7 +433,16 @@ impl Out<'_> {
         attr_names: &[(String, String)],
     ) -> CallResult<std::sync::Arc<Vec<EProp>>> {
         let eps = self.cache.get(self.ex, self.m, ty)?;
-        if object_type(self.m, ty).is_some_and(|o| o.sequenced) {
+        if object_type(self.m, ty).is_some_and(|o| o.sequenced)
+            && !(self.serializer_value_lists
+                && ty.ns == super::value_map::NS_CORE
+                && (ty.name == "ValueListType"
+                    || (self.serializer_value_tables
+                        && matches!(
+                            ty.name.as_str(),
+                            "ValueTable" | "ValueTableColumn" | "ValueTableIndex" | "ValueTableRow"
+                        ))))
+        {
             return Err(unsupported("Последовательность").into());
         }
         for (name, _) in props {
@@ -364,52 +454,161 @@ impl Out<'_> {
         Ok(eps)
     }
 
-    fn object_body(
+    fn open_body<'d>(
         &mut self,
-        ty: &QName,
-        props: &[(String, Vec<XdtoData>)],
-        ctx: &str,
+        ty: &'d QName,
+        props: &'d [(String, Vec<XdtoData>)],
+        ctx: String,
         attr_names: &[(String, String)],
-    ) -> CallResult<()> {
-        let eps = self.prepare_body(ty, props, ctx, attr_names)?;
+    ) -> CallResult<Open<'d>> {
+        let eps = self.prepare_body(ty, props, &ctx, attr_names)?;
+        let table = self.serializer_value_tables
+            && ty.ns == super::value_map::NS_CORE
+            && ty.name == "ValueTable";
+        if table {
+            self.push_table_types(props)?;
+        }
         let ordered = object_type(self.m, ty).is_none_or(|o| o.ordered);
         let len = if ordered { eps.len() } else { props.len() };
-        for i in 0..len {
-            let ep = if ordered {
-                eps.get(i)
-            } else {
-                props
-                    .get(i)
-                    .and_then(|(name, _)| eps.iter().find(|p| &p.prop.name == name))
+        Ok(Open {
+            ty,
+            props,
+            eps,
+            ctx,
+            ordered,
+            len,
+            at: 0,
+            item: 0,
+            table,
+        })
+    }
+
+    #[inline(never)]
+    fn push_table_types(&mut self, props: &[(String, Vec<XdtoData>)]) -> CallResult<()> {
+        let cols = props
+            .iter()
+            .find(|(name, _)| name == "column")
+            .map_or(&[][..], |(_, values)| values.as_slice());
+        self.ex.charge(cols.len() as u64)?;
+        self.ex.reserve((cols.len() as u64).saturating_mul(256))?;
+        let mut types = Vec::new();
+        types
+            .try_reserve_exact(cols.len())
+            .map_err(|_| self.ex.out_of_memory())?;
+        for col in cols {
+            let description = match col {
+                XdtoData::Object { props, .. } => props
+                    .iter()
+                    .find(|(n, _)| n == "ValueType")
+                    .and_then(|(_, v)| v.first()),
+                _ => None,
             };
-            let Some(ep) = ep.filter(|p| p.prop.form != Form::Attribute) else {
-                continue;
+            let ids = match description {
+                Some(XdtoData::Object { props, .. }) => props
+                    .iter()
+                    .find(|(n, _)| n == "Type")
+                    .map(|(_, v)| v.as_slice()),
+                _ => None,
             };
-            let items = props
-                .iter()
-                .find(|(n, _)| n == &ep.prop.name)
-                .map_or(&[][..], |(_, items)| items.as_slice());
-            single_value(self.ex, ep, items.len())?;
-            for it in items {
-                if ep.prop.form == Form::Text {
-                    match it {
-                        XdtoData::Value { lexical, .. } => self.put_text(ctx, lexical)?,
-                        _ => return Err(crate::xdto::data::property_type_error().into()),
-                    }
-                    continue;
-                }
-                self.element(
-                    ep.xml_ns().unwrap_or(""),
-                    ep.xml_name(),
-                    Some(&ep.prop.ty),
-                    it,
-                    false,
-                    Some(ep),
-                )?;
-            }
+            let ty = match ids {
+                Some(
+                    [
+                        XdtoData::Value {
+                            value: bsl_vm::Value::Type(id),
+                            ..
+                        },
+                    ],
+                ) => Some(super::value_map::type_qname(self.ex, *id)),
+                _ => None,
+            };
+            types.push(ty);
         }
+        self.table_types
+            .try_reserve(1)
+            .map_err(|_| self.ex.out_of_memory())?;
+        self.table_types.push(types);
         Ok(())
     }
+
+    fn next_child<'d>(&mut self, o: &mut Open<'d>) -> CallResult<Option<Child<'d>>> {
+        let props = o.props;
+        loop {
+            if o.at >= o.len {
+                return Ok(None);
+            }
+            let ep = if o.ordered {
+                Some(o.at)
+            } else {
+                props
+                    .get(o.at)
+                    .and_then(|(name, _)| o.eps.iter().position(|p| &p.prop.name == name))
+            };
+            let Some(ep) = ep.filter(|&i| o.eps[i].prop.form != Form::Attribute) else {
+                o.at += 1;
+                continue;
+            };
+            let prop = &o.eps[ep];
+            let items = props
+                .iter()
+                .find(|(n, _)| n == &prop.prop.name)
+                .map_or(&[][..], |(_, items)| items.as_slice());
+            if o.item == 0 {
+                single_value(self.ex, prop, items.len())?;
+            }
+            let Some(it) = items.get(o.item) else {
+                o.at += 1;
+                o.item = 0;
+                continue;
+            };
+            let item_index = o.item;
+            o.item += 1;
+            if prop.prop.form == Form::Text {
+                match it {
+                    XdtoData::Value { lexical, .. } => self.put_text(&o.ctx, lexical)?,
+                    _ => return Err(crate::xdto::data::property_type_error().into()),
+                }
+                continue;
+            }
+            let declared = if self.serializer_value_tables
+                && o.ty.ns == super::value_map::NS_CORE
+                && o.ty.name == "ValueTableRow"
+                && prop.prop.name == "Value"
+            {
+                self.table_types
+                    .last()
+                    .and_then(|v| v.get(item_index))
+                    .and_then(Option::as_ref)
+                    .cloned()
+            } else {
+                None
+            };
+            return Ok(Some(Child {
+                eps: o.eps.clone(),
+                ep,
+                item: it,
+                declared,
+            }));
+        }
+    }
+}
+
+struct Open<'d> {
+    ty: &'d QName,
+    props: &'d [(String, Vec<XdtoData>)],
+    eps: std::sync::Arc<Vec<EProp>>,
+    ctx: String,
+    ordered: bool,
+    len: usize,
+    at: usize,
+    item: usize,
+    table: bool,
+}
+
+struct Child<'d> {
+    eps: std::sync::Arc<Vec<EProp>>,
+    ep: usize,
+    item: &'d XdtoData,
+    declared: Option<QName>,
 }
 
 struct Frame {
@@ -437,6 +636,7 @@ struct In<'a> {
     ex: &'a mut Execution,
     m: &'a Model,
     mode: ReadMode,
+    serializer_value_lists: bool,
     r: &'a mut XmlReaderState,
     guard: DepthGuard,
     bytes: u64,
@@ -465,6 +665,27 @@ pub(crate) fn read_xml_mode(
     expect: Option<&QName>,
     mode: ReadMode,
 ) -> CallResult<XdtoData> {
+    read_xml_impl(ex, m, r, expect, mode, false)
+}
+
+pub(crate) fn read_serializer_xml(
+    ex: &mut Execution,
+    m: &Model,
+    r: &mut XmlReaderState,
+    expect: Option<&QName>,
+    platform: bool,
+) -> CallResult<XdtoData> {
+    read_xml_impl(ex, m, r, expect, ReadMode::Values, platform)
+}
+
+fn read_xml_impl(
+    ex: &mut Execution,
+    m: &Model,
+    r: &mut XmlReaderState,
+    expect: Option<&QName>,
+    mode: ReadMode,
+    serializer_value_lists: bool,
+) -> CallResult<XdtoData> {
     r.move_to_content(ex, false)?;
     let (ns, local) = match r.node() {
         Some(XmlEvent::Start { ns, local, .. }) => (ns.clone(), local.clone()),
@@ -485,6 +706,7 @@ pub(crate) fn read_xml_mode(
         ex,
         m,
         mode,
+        serializer_value_lists,
         r,
         guard: DepthGuard::new(),
         bytes: 0,
@@ -817,10 +1039,38 @@ impl In<'_> {
         let m = self.m;
         let eps = self.cache.get(self.ex, m, &ty)?;
         let def = object_type(m, &ty);
-        let open = def.is_some_and(|o| o.open);
+        let list_shape = self.serializer_value_lists
+            && ty.ns == super::value_map::NS_CORE
+            && (ty.name == "ValueListType"
+                || (ty.name == "ValueListItemType"
+                    && self.stack.last().is_some_and(|parent| {
+                        parent.ty.ns == super::value_map::NS_CORE
+                            && parent.ty.name == "ValueListType"
+                    }))
+                || (ty.name == "TypeDescription"
+                    && self.stack.last().is_some_and(|parent| {
+                        parent.ty.ns == super::value_map::NS_CORE
+                            && parent.ty.name == "ValueListType"
+                    }))
+                || (matches!(
+                    ty.name.as_str(),
+                    "NumberQualifiers"
+                        | "StringQualifiers"
+                        | "DateQualifiers"
+                        | "BinaryDataQualifiers"
+                ) && self.stack.len() >= 2
+                    && self.stack[self.stack.len() - 1].ty.name == "TypeDescription"
+                    && self.stack[self.stack.len() - 2].ty.name == "ValueListType"
+                    && self.stack[self.stack.len() - 1].ty.ns == super::value_map::NS_CORE
+                    && self.stack[self.stack.len() - 2].ty.ns == super::value_map::NS_CORE));
+        let open = def.is_some_and(|o| o.open) && !list_shape;
         let ordered = def.is_none_or(|o| o.ordered);
         let mixed = def.is_some_and(|o| o.mixed);
-        if def.is_some_and(|o| o.sequenced) {
+        if def.is_some_and(|o| o.sequenced)
+            && !(self.serializer_value_lists
+                && ty.ns == super::value_map::NS_CORE
+                && ty.name == "ValueListType")
+        {
             return Err(unsupported("Последовательность").into());
         }
         self.grow(eps.len() * 56)?;

@@ -10,6 +10,7 @@
 )]
 
 pub mod app;
+mod current_language;
 pub mod error;
 pub mod errors;
 mod host;
