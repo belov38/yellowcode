@@ -2620,6 +2620,8 @@ pub(crate) fn visit_expr<'e>(e: &'e Expr, rels: bool, f: &mut dyn FnMut(&'e Expr
 }
 
 pub(crate) fn visit_rel<'e>(r: &'e Rel, f: &mut dyn FnMut(&'e Expr)) {
+    #[cfg(test)]
+    crate::bind::security::paths::observe_ir_rel(None);
     match r {
         Rel::Empty | Rel::Scan { .. } | Rel::TempScan { .. } | Rel::ParamScan { .. } => {}
         Rel::Subquery { input, .. } | Rel::Distinct(input) | Rel::Top { input, .. } => {
@@ -2639,6 +2641,8 @@ pub(crate) fn visit_rel<'e>(r: &'e Rel, f: &mut dyn FnMut(&'e Expr)) {
         } => {
             visit_rel(input, f);
             keys.iter().for_each(|k| visit_expr(k, true, f));
+            #[cfg(test)]
+            crate::bind::security::paths::observe_ir_rel(Some(aggs));
             aggs.iter()
                 .filter_map(|a| a.arg.as_ref())
                 .for_each(|a| visit_expr(a, true, f));

@@ -1,5 +1,6 @@
 pub(crate) mod accounting;
 pub(crate) mod calculation;
+pub(crate) mod paths;
 mod payload;
 pub(in crate::bind) mod provenance;
 use super::BindCtx;
@@ -367,7 +368,8 @@ enum Root {
     Opaque(u64),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(not(test), derive(Hash))]
 pub(crate) struct Path {
     root: Root,
     steps: Vec<Vec<(QTableId, crate::schema::QFieldId)>>,
@@ -393,6 +395,7 @@ impl Security {
         let source = collector.semantic_source(slice.inner);
         let mut paths = Vec::new();
         collector.ir_deref_paths(condition, &mut paths);
+        let restricted = paths::RestrictedPaths::new(&self.targets, &self.conditions);
         for path in paths {
             if matches!(path.root, Root::Opaque(_)) {
                 continue;
@@ -412,19 +415,8 @@ impl Security {
             if supported {
                 continue;
             }
-            let mut prefix = Path {
-                root: path.root,
-                steps: Vec::new(),
-            };
-            for step in path.steps {
-                if step.iter().any(|(table, _)| {
-                    self.targets
-                        .get(&(prefix.clone(), *table))
-                        .is_some_and(|source| self.conditions.contains_key(source))
-                }) {
-                    return true;
-                }
-                prefix.steps.push(step);
+            if restricted.hits(&path) {
+                return true;
             }
         }
         false
@@ -741,36 +733,11 @@ impl<'a, 'p> Collector<'a, 'p> {
     }
 
     fn ir_path(&mut self, e: &crate::ir::Expr) -> Path {
-        use crate::ir::ExprKind as E;
-        let root = match &e.kind {
-            E::Col { src, col } => Root::Column(self.semantic_source(*src), *col),
-            E::Param(i) => Root::Param(*i),
-            E::Value(i) => Root::Value(*i),
-            E::Lit(crate::QValue::Ref { table, id }) => Root::Reference(*table, *id),
-            E::Cast { x, .. } => return self.ir_path(x),
-            E::LocalKey { orig, .. } | E::OuterKey { orig, .. } => return self.ir_path(orig),
-            E::Deref { base, steps } => {
-                let mut p = self.ir_path(base);
-                p.steps.extend(steps.iter().map(|s| s.targets.clone()));
-                return p;
-            }
-            _ => return self.opaque(),
-        };
-        Path {
-            root,
-            steps: Vec::new(),
-        }
+        paths::single(self, e)
     }
 
     fn ir_deref_paths(&mut self, e: &crate::ir::Expr, paths: &mut Vec<Path>) {
-        use crate::ir::ExprKind as E;
-        crate::ir::visit_expr_in_place(e, true, &mut |expr| match &expr.kind {
-            E::Deref { .. } => paths.push(self.ir_path(expr)),
-            E::LocalKey { orig, .. } | E::OuterKey { orig, .. } => {
-                self.ir_deref_paths(orig, paths);
-            }
-            _ => {}
-        });
+        paths::collect(self, e, paths);
     }
 
     fn derefs(&mut self, mut path: Path, steps: &[crate::tir::Deref]) -> Result<(), ExecError> {
