@@ -8,9 +8,10 @@ use super::hier::{HierarchyHash, HierarchyKey, hierarchy_copy_model, hierarchy_r
 use super::{BoxOp, Cx, MemBudget, Op, eval, fatal};
 use crate::key::Key;
 use crate::model::{
-    LedgerWork, invalid_size, size_add, size_block, size_vec, totals_payload_model, value_model,
+    LedgerWork, aggregate_payload_model, invalid_size, size_add, size_block, size_vec,
+    totals_payload_model,
 };
-use crate::num::AggState;
+use crate::num::BudgetedAggState;
 use crate::source::Row;
 use crate::totals::payload::{PaidValue, PaidVec};
 
@@ -25,7 +26,7 @@ struct Distinct {
 }
 
 struct ExecState {
-    native: AggState,
+    native: BudgetedAggState,
     distinct: Option<Distinct>,
 }
 
@@ -71,8 +72,12 @@ impl<T: Default> Drop for AggregateOwner<'_, '_, T> {
     fn drop(&mut self) {
         #[cfg(test)]
         payload_admission_tests::snapshot(self.mem);
+        #[cfg(test)]
+        crate::num::accumulator_tests::snapshot(self.mem);
         drop(take(&mut self.value));
         self.mem.shrink(take(&mut self.bytes));
+        #[cfg(test)]
+        crate::num::accumulator_tests::snapshot(self.mem);
         #[cfg(test)]
         payload_admission_tests::snapshot(self.mem);
     }
@@ -220,7 +225,7 @@ fn aggregate_group<'m, 'a>(
             aggregate.f
         };
         states.push(ExecState {
-            native: AggState::new(function, aggregate.arg_dec, false, false)?,
+            native: BudgetedAggState::new(function, aggregate.arg_dec)?,
             distinct: aggregate.distinct.then(|| Distinct {
                 keys: HashSet::new(),
                 model: HierarchyHash::new(),
@@ -303,7 +308,9 @@ impl ExecState {
         product_witnesses::phase(product_witnesses::Role::Native, &cx.mem);
         #[cfg(test)]
         product_witnesses::event(product_witnesses::Point::BeforeNative, &cx.mem, 0, 0, 0);
-        self.native.add_with(value, cx.env, cx.coll)
+        #[cfg(test)]
+        crate::num::accumulator_tests::snapshot(&cx.mem);
+        self.native.add(value, cx.env, cx.coll, &cx.mem, temp)
     }
 }
 
@@ -313,7 +320,6 @@ struct AggregateBuild<'c, 'a> {
     out: Vec<Row>,
     temp: u64,
     output: u64,
-    legacy: u64,
 }
 
 impl<'c, 'a> AggregateBuild<'c, 'a> {
@@ -324,7 +330,6 @@ impl<'c, 'a> AggregateBuild<'c, 'a> {
             out: Vec::new(),
             temp: 0,
             output: 0,
-            legacy: 0,
         }
     }
 
@@ -348,6 +353,7 @@ impl<'c, 'a> AggregateBuild<'c, 'a> {
             #[cfg(test)]
             product_witnesses::phase(product_witnesses::Role::Idx, &self.cx.mem);
             let mut idx = PaidVec::new(count, &self.cx.mem, Some(self.cx.env))?;
+            let mut rep_len = 0;
             for index in 0..count {
                 work.step()?;
                 let index = match set {
@@ -357,6 +363,9 @@ impl<'c, 'a> AggregateBuild<'c, 'a> {
                     ),
                     None => index,
                 };
+                if index < keys {
+                    rep_len += 1;
+                }
                 idx.push(index)?;
             }
             #[cfg(test)]
@@ -368,7 +377,6 @@ impl<'c, 'a> AggregateBuild<'c, 'a> {
                 product_witnesses::work_init();
                 last_position.push(usize::MAX)?;
             }
-            let rep_len = idx.iter().filter(|&&index| index < keys).count();
             for (position, &index) in idx.iter().take(rep_len).enumerate() {
                 work.step()?;
                 #[cfg(test)]
@@ -575,48 +583,67 @@ impl<'c, 'a> AggregateBuild<'c, 'a> {
         payload_admission_tests::phase(payload_admission_tests::Phase::Row, &self.cx.mem);
         #[cfg(test)]
         product_witnesses::phase(product_witnesses::Role::Row, &self.cx.mem);
-        let mut row = PaidVec::new(width, &self.cx.mem, Some(self.cx.env))?;
-        row.resize(keys, QValue::Null);
+        let mut row = AggregateOwner::vector(width, self.cx)?;
+        row.value.resize(keys, QValue::Null);
         for (position, (&index, rep)) in indexes.iter().zip(group.rep).enumerate() {
             work.step()?;
             if index < keys && aggregate_is_last(last_position, index, position)? {
-                *row.get_mut(index)
-                    .ok_or_else(|| fatal("aggregate output index out of range"))? = rep.value;
+                let next_temp = self.temp.checked_sub(rep.bytes).ok_or_else(invalid_size)?;
+                let next_row = size_add(row.bytes, rep.bytes)?;
+                let slot = row
+                    .value
+                    .get_mut(index)
+                    .ok_or_else(|| fatal("aggregate output index out of range"))?;
+                *slot = rep.value;
+                self.temp = next_temp;
+                row.bytes = next_row;
             }
         }
         #[cfg(test)]
         product_witnesses::phase(product_witnesses::Role::Row, &self.cx.mem);
         #[cfg(test)]
+        accumulator_operator_tests::begin_output();
+        #[cfg(test)]
         product_witnesses::checkpoint(
             product_witnesses::Point::BeforeNative,
             &self.cx.mem,
             Some(self.cx.env.cancel),
-            row.as_ptr() as usize,
-            row.capacity(),
+            row.value.as_ptr() as usize,
+            row.value.capacity(),
             0,
         )?;
-        let mut legacy = 0;
         for (state, aggregate) in group.states.into_iter().zip(aggregates) {
+            #[cfg(test)]
+            accumulator_operator_tests::before_finish(
+                &row.value,
+                row.bytes,
+                self.temp,
+                &self.cx.mem,
+                self.cx.env,
+            );
             work.step()?;
             let value = if aggregate.f == Func::GroupedBy {
-                QValue::Bool(grouped_by(aggregate, indexes))
+                PaidValue::from_paid_parts(
+                    QValue::Bool(grouped_by(aggregate, indexes)),
+                    0,
+                    &self.cx.mem,
+                )
             } else {
-                state.native.finish(self.cx.env)?
+                state
+                    .native
+                    .finish(self.cx.env, &self.cx.mem, &mut self.temp)?
             };
-            legacy = size_add(legacy, value_model(&value))?;
-            row.push(value)?;
+            let next_row = size_add(row.bytes, value.bytes())?;
+            self.cx.mem.check_value(next_row)?;
+            if row.value.len() == row.value.capacity() {
+                return Err(invalid_size());
+            }
+            let (value, _) = value.into_parts();
+            row.value.push(value);
+            row.bytes = next_row;
         }
-        let next_legacy = size_add(self.legacy, legacy)?;
-        self.cx.mem.check_value(size_add(bytes, legacy)?)?;
-        self.cx.mem.grow(legacy)?;
-        self.legacy = next_legacy;
-        let next_temp = self
-            .temp
-            .checked_sub(representatives)
-            .ok_or_else(invalid_size)?;
-        let next_output = size_add(self.output, bytes)?;
+        let next_output = size_add(self.output, row.bytes)?;
         let (row, _) = row.into_parts();
-        self.temp = next_temp;
         self.output = next_output;
         self.out.push(row);
         #[cfg(test)]
@@ -663,24 +690,26 @@ impl<'c, 'a> AggregateBuild<'c, 'a> {
         Ok(())
     }
 
-    fn finish(mut self, keys: usize) -> Result<(Vec<Row>, u64, u64), ExecError> {
+    fn finish(mut self, keys: usize) -> Result<(Vec<Row>, u64), ExecError> {
         let mut model = size_vec(self.out.capacity(), size_of::<Row>())?;
         let mut work = LedgerWork::new(self.cx.env);
         for row in &self.out {
             work.step()?;
             let mut bytes = size_vec(row.capacity(), size_of::<QValue>())?;
-            for value in row.iter().take(keys) {
-                bytes = size_add(
-                    bytes,
-                    totals_payload_model(value, &self.cx.mem, Some(self.cx.env))?,
-                )?;
+            for (index, value) in row.iter().enumerate() {
+                work.step()?;
+                let payload = if index < keys {
+                    totals_payload_model(value, &self.cx.mem, Some(self.cx.env))?
+                } else {
+                    aggregate_payload_model(value, &self.cx.mem, self.cx.env)?
+                };
+                bytes = size_add(bytes, payload)?;
             }
             model = size_add(model, bytes)?;
         }
         if model != self.output {
             return Err(invalid_size());
         }
-        size_add(self.output, self.legacy)?;
         #[cfg(test)]
         product_witnesses::phase(product_witnesses::Role::Build, &self.cx.mem);
         #[cfg(test)]
@@ -702,7 +731,7 @@ impl<'c, 'a> AggregateBuild<'c, 'a> {
             0,
         );
         let rows = take(&mut self.out);
-        Ok((rows, take(&mut self.output), take(&mut self.legacy)))
+        Ok((rows, take(&mut self.output)))
     }
 }
 
@@ -723,7 +752,6 @@ impl Drop for AggregateBuild<'_, '_> {
         drop(take(&mut self.out));
         self.cx.mem.shrink(take(&mut self.temp));
         self.cx.mem.shrink(take(&mut self.output));
-        self.cx.mem.shrink(take(&mut self.legacy));
         #[cfg(test)]
         product_witnesses::event(product_witnesses::Point::BuildEnd, &self.cx.mem, 0, 0, 0);
         #[cfg(test)]
@@ -738,7 +766,6 @@ pub struct HashAggregate<'a> {
     aggs: Vec<AggL>,
     out: Option<std::vec::IntoIter<Row>>,
     held: u64,
-    legacy: u64,
 }
 
 impl<'a> HashAggregate<'a> {
@@ -755,7 +782,6 @@ impl<'a> HashAggregate<'a> {
             aggs,
             out: None,
             held: 0,
-            legacy: 0,
         }
     }
 
@@ -767,9 +793,8 @@ impl<'a> HashAggregate<'a> {
             self.sets.as_deref(),
             &self.aggs,
         )?;
-        let (rows, held, legacy) = build.finish(self.keys.len())?;
+        let (rows, held) = build.finish(self.keys.len())?;
         self.held = held;
-        self.legacy = legacy;
         Ok(rows)
     }
 }
@@ -796,7 +821,6 @@ impl<'a> Op<'a> for HashAggregate<'a> {
         #[cfg(test)]
         product_witnesses::event(product_witnesses::Point::HTransfer, &cx.mem, 0, 0, 0);
         cx.mem.shrink(take(&mut self.held));
-        cx.mem.shrink(take(&mut self.legacy));
         #[cfg(test)]
         payload_admission_tests::snapshot(&cx.mem);
         self.input.close(cx);
@@ -828,7 +852,6 @@ impl<'a> Op<'a> for HashAggregate<'a> {
                 #[cfg(test)]
                 product_witnesses::event(product_witnesses::Point::HTransfer, &cx.mem, 0, 0, 0);
                 cx.mem.shrink(take(&mut self.held));
-                cx.mem.shrink(take(&mut self.legacy));
                 #[cfg(test)]
                 payload_admission_tests::snapshot(&cx.mem);
                 Ok(None)

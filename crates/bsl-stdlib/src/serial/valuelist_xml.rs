@@ -46,7 +46,7 @@ fn shape(props: &Props, allowed: &[&str]) -> bool {
         .all(|(i, (name, _))| !props[..i].iter().any(|(other, _)| other == name))
 }
 
-fn policy_shape(data: &XdtoData) -> bool {
+pub(crate) fn policy_shape(data: &XdtoData) -> bool {
     let Some(props) = object(data, "TypeDescription") else {
         return false;
     };

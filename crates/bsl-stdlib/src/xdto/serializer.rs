@@ -142,6 +142,30 @@ impl Serializer {
         }
     }
 
+    fn value_xml_table(
+        &self,
+        ex: &mut Execution,
+        d: &XdtoData,
+        reader: Value,
+    ) -> CallResult<Value> {
+        let projection = crate::serial::valuetable_xml_reader::projection_bytes(ex, d)?;
+        let source =
+            crate::xml::reader_live_bytes(ex, &reader)?.ok_or_else(|| ex.out_of_memory())?;
+        ex.reserve(
+            projection
+                .checked_add(source)
+                .ok_or_else(|| ex.out_of_memory())?,
+        )?;
+        let mut ctx = XdtoCtx::new(self.f.clone(), 1);
+        ctx.wire_read();
+        ctx.xml_read(true);
+        ctx.xml_table_read(reader, projection);
+        match ctx.read_xml_table(ex, d) {
+            Ok(v) => Ok(v),
+            Err(e) => Err(ctx.call_error(e)),
+        }
+    }
+
     fn write_xml(&self, ex: &mut Execution, args: &[Arg], m: MemberId) -> CallResult<Value> {
         let wv = arg_value(ex, args.first())?;
         let item = arg_value(ex, args.get(1))?;
@@ -221,14 +245,16 @@ impl Serializer {
     fn read_xml(&self, ex: &mut Execution, args: &[Arg]) -> CallResult<Value> {
         let rv = arg_value(ex, args.first())?;
         let expect = self.expected(ex, args.get(1))?;
+        let platform = is_platform_model(&self.f.model);
         let mut st = xml_reader(ex, &rv)?;
-        let d = read_serializer_xml(
-            ex,
-            self.model(),
-            &mut st,
-            expect.as_ref(),
-            is_platform_model(&self.f.model),
-        )?;
+        let d = read_serializer_xml(ex, self.model(), &mut st, expect.as_ref(), platform)?;
+        if platform
+            && crate::serial::valuetable_xml_reader::is_root(&d)
+            && !super::value_map::has_codec(&super::value_map::core("ValueTable"))
+        {
+            drop(st);
+            return self.value_xml_table(ex, &d, rv);
+        }
         self.value(ex, &d, true, true, None)
     }
 

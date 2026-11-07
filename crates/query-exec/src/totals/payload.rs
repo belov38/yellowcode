@@ -23,6 +23,8 @@ struct Admission<'m, 'a> {
 
 impl<'m, 'a> Admission<'m, 'a> {
     fn new(mem: &'m MemBudget<'a>, bytes: u64) -> Result<Self, ExecError> {
+        #[cfg(test)]
+        crate::num::accumulator_tests::before_admission(mem, bytes);
         mem.grow(bytes)?;
         #[cfg(test)]
         refusal.accepted();
@@ -77,10 +79,14 @@ impl<'m, 'a, T> PaidVec<'m, 'a, T> {
         #[cfg(test)]
         crate::ops::agg::payload_admission_tests::snapshot(mem);
         #[cfg(test)]
+        crate::num::accumulator_tests::snapshot(mem);
+        #[cfg(test)]
         crate::ops::agg::product_witnesses::allocation_target(
             Layout::array::<T>(capacity).map_err(|_| invalid_size())?,
         );
         let values = Vec::with_capacity(capacity);
+        #[cfg(test)]
+        crate::num::accumulator_tests::buffer_built(mem);
         #[cfg(test)]
         crate::ops::agg::product_witnesses::checkpoint(
             crate::ops::agg::product_witnesses::Point::Built,
@@ -133,6 +139,8 @@ impl<T> Drop for PaidVec<'_, '_, T> {
         #[cfg(test)]
         crate::ops::agg::payload_admission_tests::snapshot(self.mem);
         #[cfg(test)]
+        crate::num::accumulator_tests::snapshot(self.mem);
+        #[cfg(test)]
         crate::ops::agg::product_witnesses::snapshot(self.mem);
         drop(take(&mut self.values));
         self.mem.shrink(self.bytes);
@@ -142,6 +150,8 @@ impl<T> Drop for PaidVec<'_, '_, T> {
         crate::ops::hier::payload_snapshot(self.mem);
         #[cfg(test)]
         crate::ops::agg::payload_admission_tests::snapshot(self.mem);
+        #[cfg(test)]
+        crate::num::accumulator_tests::snapshot(self.mem);
     }
 }
 
@@ -184,6 +194,8 @@ impl<'m, 'a> PaidValue<'m, 'a> {
                         let bytes = size_vec(len, size_of::<u32>())?;
                         mem.check_value(bytes)?;
                         checkpoint(env)?;
+                        #[cfg(test)]
+                        crate::num::accumulator_tests::before_admission(mem, bytes);
                         mem.grow(bytes)?;
                         admission.bytes = bytes;
                         #[cfg(test)]
@@ -193,6 +205,8 @@ impl<'m, 'a> PaidValue<'m, 'a> {
                         crate::ops::hier::payload_snapshot(mem);
                         #[cfg(test)]
                         crate::ops::agg::payload_admission_tests::snapshot(mem);
+                        #[cfg(test)]
+                        crate::num::accumulator_tests::snapshot(mem);
                         Ok(())
                     })
                     .map_err(|error| match error {
@@ -296,6 +310,84 @@ impl<'m, 'a> PaidValue<'m, 'a> {
         }
     }
 
+    pub(crate) fn copy_aggregate(
+        mut value: &QValue,
+        mem: &'m MemBudget<'a>,
+        env: &ExecEnv<'a>,
+    ) -> Result<Self, ExecError> {
+        let mut boundaries = BoundaryCopies {
+            values: Vec::new(),
+            bytes: 0,
+            mem,
+        };
+        let mut work = LedgerWork::new(env);
+        work.check()?;
+        while let QValue::Boundary(boundary) = value {
+            work.step()?;
+            crate::ops::hier::hierarchy_reserve(
+                &mut boundaries.values,
+                1,
+                mem,
+                env,
+                &mut boundaries.bytes,
+            )?;
+            boundaries.values.push(boundary.include);
+            value = &boundary.point;
+        }
+        let retained = crate::model::aggregate_payload_model(value, mem, env)?;
+        let mut result = if let QValue::Type(ty) = value {
+            let mut refs = PaidVec::new(ty.refs.len(), mem, Some(env))?;
+            for atom in &ty.refs {
+                work.step()?;
+                refs.push(*atom)?;
+            }
+            let mut others = PaidVec::new(ty.others.len(), mem, Some(env))?;
+            for atom in &ty.others {
+                work.step()?;
+                others.push(*atom)?;
+            }
+            let bytes = size_add(refs.bytes, others.bytes)?;
+            mem.check_value(bytes)?;
+            let (refs, _) = refs.into_parts();
+            let (others, _) = others.into_parts();
+            Self {
+                value: QValue::Type(query_ir::QType {
+                    null: ty.null,
+                    boolean: ty.boolean,
+                    number: ty.number,
+                    string: ty.string,
+                    date: ty.date,
+                    refs,
+                    others,
+                }),
+                mem,
+                bytes,
+            }
+        } else {
+            Self::copy_validated(value, retained, mem, Some(env))?
+        };
+        while let Some(include) = boundaries.values.pop() {
+            #[cfg(test)]
+            crate::num::accumulator_tests::boundary_copy_step(env);
+            work.step()?;
+            let boxed = size_block(size_of::<query_ir::value::Boundary>() as u64)?;
+            let bytes = size_add(boxed, result.bytes)?;
+            mem.check_value(bytes)?;
+            let admission = Admission::new(mem, boxed)?;
+            work.check()?;
+            let (point, _) = result.into_parts();
+            let value = QValue::Boundary(Box::new(query_ir::value::Boundary { point, include }));
+            let _ = admission.transfer();
+            result = Self { value, mem, bytes };
+        }
+        work.check()?;
+        Ok(result)
+    }
+
+    pub(crate) fn from_paid_parts(value: QValue, bytes: u64, mem: &'m MemBudget<'a>) -> Self {
+        Self { value, mem, bytes }
+    }
+
     pub(crate) fn bytes(&self) -> u64 {
         self.bytes
     }
@@ -330,12 +422,28 @@ impl Drop for PaidValue<'_, '_> {
         crate::ops::hier::payload_snapshot(self.mem);
         #[cfg(test)]
         crate::ops::agg::payload_admission_tests::snapshot(self.mem);
+        #[cfg(test)]
+        crate::num::accumulator_tests::snapshot(self.mem);
         drop(std::mem::replace(&mut self.value, QValue::Null));
         self.mem.shrink(self.bytes);
         #[cfg(test)]
         crate::ops::hier::payload_snapshot(self.mem);
         #[cfg(test)]
         crate::ops::agg::payload_admission_tests::snapshot(self.mem);
+        #[cfg(test)]
+        crate::num::accumulator_tests::snapshot(self.mem);
+    }
+}
+
+struct BoundaryCopies<'m, 'a> {
+    values: Vec<bool>,
+    bytes: u64,
+    mem: &'m MemBudget<'a>,
+}
+impl Drop for BoundaryCopies<'_, '_> {
+    fn drop(&mut self) {
+        drop(take(&mut self.values));
+        self.mem.shrink(self.bytes);
     }
 }
 
@@ -399,7 +507,7 @@ fn number_error(error: NumberOpError<ExecError>) -> ExecError {
     }
 }
 
-pub(super) fn count<'m, 'a>(
+pub(crate) fn count<'m, 'a>(
     mut count: u64,
     mem: &'m MemBudget<'a>,
     env: Option<&ExecEnv<'a>>,
@@ -423,6 +531,68 @@ pub(super) fn count<'m, 'a>(
     .map_err(number_error)?
     .ok_or_else(invalid_size)?;
     Ok(number_result(output, mem))
+}
+
+pub(crate) fn add_numbers<'m, 'a>(
+    left: &Number,
+    right: &Number,
+    mem: &'m MemBudget<'a>,
+    env: &ExecEnv<'a>,
+) -> Result<PaidValue<'m, 'a>, ExecError> {
+    let output = left
+        .try_add_with(
+            right,
+            &Numbers {
+                mem,
+                env: Some(env),
+            },
+        )
+        .map_err(number_error)?;
+    let result = number_result(output, mem);
+    checkpoint(Some(env))?;
+    Ok(result)
+}
+pub(crate) fn divide_numbers<'m, 'a>(
+    left: &Number,
+    right: &Number,
+    mem: &'m MemBudget<'a>,
+    env: &ExecEnv<'a>,
+) -> Result<PaidValue<'m, 'a>, ExecError> {
+    let output = left
+        .try_div_with(
+            right,
+            &Numbers {
+                mem,
+                env: Some(env),
+            },
+        )
+        .map_err(|error| match error {
+            NumberOpError::DivByZero => crate::num::div_by_zero(),
+            other => number_error(other),
+        })?;
+    let result = number_result(output, mem);
+    checkpoint(Some(env))?;
+    Ok(result)
+}
+pub(crate) fn round_number<'m, 'a>(
+    number: &Number,
+    scale: u8,
+    mem: &'m MemBudget<'a>,
+    env: &ExecEnv<'a>,
+) -> Result<PaidValue<'m, 'a>, ExecError> {
+    let output = number
+        .try_round_with(
+            i64::from(scale),
+            bsl_prim::RoundMode::HalfAwayFromZero,
+            &Numbers {
+                mem,
+                env: Some(env),
+            },
+        )
+        .map_err(number_error)?;
+    let result = number_result(output, mem);
+    checkpoint(Some(env))?;
+    Ok(result)
 }
 
 pub(super) fn neg<'m, 'a>(

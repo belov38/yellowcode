@@ -406,22 +406,58 @@ pub(crate) struct HierarchyKey<'m, 'a> {
     retained: u64,
 }
 
-impl<'m, 'a> HierarchyKey<'m, 'a> {
-    pub(crate) fn new(value: &QValue, cx: &'m Cx<'a>) -> Result<Self, ExecError> {
-        let mem = &cx.mem;
-        let mut owner = Self {
-            value: Key(Vec::new()),
-            mem,
-            scratch: 0,
-            retained: 0,
-        };
-        hierarchy_check(cx.env)?;
-        crate::model::try_charge_key(value, cx.coll, &mut |bytes| {
-            let next = size_add(owner.scratch, bytes)?;
-            mem.grow_scratch(bytes)?;
-            #[cfg(test)]
+#[derive(Clone, Copy)]
+enum KeyBuildKind {
+    OrdinaryScratch,
+    TotalsOwned,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_key(
+    value: &QValue,
+    mem: &MemBudget<'_>,
+    coll: crate::coll::ExecCollation<'_>,
+    env: Option<&crate::source::ExecEnv<'_>>,
+    key: &mut Key,
+    temporary: &mut u64,
+    kind: KeyBuildKind,
+) -> Result<(), ExecError> {
+    if let Some(env) = env {
+        hierarchy_check(env)?;
+    }
+    let mut charge = |bytes| {
+        let next = size_add(*temporary, bytes)?;
+        #[cfg(test)]
+        if matches!(kind, KeyBuildKind::TotalsOwned) {
+            crate::totals::distinct_tests::snapshot(
+                crate::totals::distinct_tests::Point::ChargeBefore,
+                mem,
+                bytes,
+                *temporary,
+            );
+            crate::totals::distinct_tests::fault(
+                crate::totals::distinct_tests::Point::ChargeBefore,
+            )?;
+        }
+        match kind {
+            KeyBuildKind::OrdinaryScratch => mem.grow_scratch(bytes)?,
+            KeyBuildKind::TotalsOwned => mem.grow(bytes)?,
+        }
+        #[cfg(test)]
+        if let Some(refusal) = refusal {
             refusal.accepted();
-            owner.scratch = next;
+        }
+        *temporary = next;
+        #[cfg(test)]
+        if matches!(kind, KeyBuildKind::TotalsOwned) {
+            crate::totals::distinct_tests::snapshot(
+                crate::totals::distinct_tests::Point::ChargeAfter,
+                mem,
+                bytes,
+                *temporary,
+            );
+        }
+        if matches!(kind, KeyBuildKind::OrdinaryScratch) {
             hierarchy_snapshot(mem);
             #[cfg(test)]
             payload_admission_tests::key_charge_checkpoint()?;
@@ -429,31 +465,215 @@ impl<'m, 'a> HierarchyKey<'m, 'a> {
             super::agg::product_witnesses::checkpoint(
                 super::agg::product_witnesses::Point::KeyCharge,
                 mem,
-                Some(cx.env.cancel),
+                env.map(|env| env.cancel),
                 0,
                 bytes as usize,
                 0,
             )?;
-            Ok(())
-        })?;
-        #[cfg(test)]
+        }
+        Ok(())
+    };
+    match kind {
+        KeyBuildKind::OrdinaryScratch => {
+            crate::model::try_charge_key(value, coll, &mut charge)?;
+        }
+        KeyBuildKind::TotalsOwned => {
+            crate::model::try_charge_totals_key(value, coll, &mut charge)?;
+        }
+    }
+    #[cfg(test)]
+    if matches!(kind, KeyBuildKind::OrdinaryScratch) {
         payload_admission_tests::key_build_checkpoint(mem)?;
         #[cfg(test)]
         super::agg::product_witnesses::checkpoint(
             super::agg::product_witnesses::Point::KeyBuild,
             mem,
-            Some(cx.env.cancel),
+            env.map(|env| env.cancel),
             0,
             0,
             0,
         )?;
-        owner.value = crate::key::try_key_of(value, cx.coll)?;
-        #[cfg(test)]
-        super::agg::product_witnesses::built(
+    }
+    *key = match kind {
+        KeyBuildKind::OrdinaryScratch => crate::key::try_key_of(value, coll)?,
+        KeyBuildKind::TotalsOwned => crate::key::try_key_of_totals(value, coll)?,
+    };
+    #[cfg(test)]
+    if matches!(kind, KeyBuildKind::OrdinaryScratch) {
+        super::agg::product_witnesses::built(mem, key.0.as_ptr() as usize, key.0.capacity());
+    }
+    #[cfg(test)]
+    if matches!(kind, KeyBuildKind::TotalsOwned) {
+        crate::totals::distinct_tests::key_snapshot(
+            crate::totals::distinct_tests::Point::Built,
             mem,
-            owner.value.0.as_ptr() as usize,
-            owner.value.0.capacity(),
+            key.0.as_ptr() as usize,
+            key.0.capacity(),
+            *temporary,
         );
+    }
+    Ok(())
+}
+
+pub(crate) struct TotalsKey<'m, 'a> {
+    value: Key,
+    mem: &'m MemBudget<'a>,
+    temporary: u64,
+    retained: u64,
+}
+
+impl<'m, 'a> TotalsKey<'m, 'a> {
+    pub(crate) fn new(
+        value: &QValue,
+        mem: &'m MemBudget<'a>,
+        coll: crate::coll::ExecCollation<'_>,
+        env: Option<&crate::source::ExecEnv<'_>>,
+    ) -> Result<Self, ExecError> {
+        let mut owner = Self {
+            value: Key(Vec::new()),
+            mem,
+            temporary: 0,
+            retained: 0,
+        };
+        build_key(
+            value,
+            mem,
+            coll,
+            env,
+            &mut owner.value,
+            &mut owner.temporary,
+            KeyBuildKind::TotalsOwned,
+        )?;
+        Ok(owner)
+    }
+
+    pub(crate) fn as_key(&self) -> &Key {
+        &self.value
+    }
+
+    pub(crate) fn retain(&mut self) -> Result<(), ExecError> {
+        #[cfg(test)]
+        {
+            crate::totals::distinct_tests::snapshot(
+                crate::totals::distinct_tests::Point::RetainBefore,
+                self.mem,
+                self.value.0.capacity() as u64,
+                self.temporary,
+            );
+            crate::totals::distinct_tests::fault(
+                crate::totals::distinct_tests::Point::RetainBefore,
+            )?;
+        }
+        let bytes = size_block(self.value.0.capacity() as u64)?;
+        let residual = self.temporary.checked_sub(bytes).ok_or_else(invalid_size)?;
+        self.temporary = 0;
+        self.retained = bytes;
+        self.mem.shrink(residual);
+        #[cfg(test)]
+        {
+            crate::totals::distinct_tests::snapshot(
+                crate::totals::distinct_tests::Point::RetainAfter,
+                self.mem,
+                self.value.0.capacity() as u64,
+                self.retained,
+            );
+            crate::totals::distinct_tests::fault(
+                crate::totals::distinct_tests::Point::RetainAfter,
+            )?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn bytes(&self) -> u64 {
+        self.retained
+    }
+
+    pub(crate) fn transfer(mut self, destination: &mut u64, next: u64) -> Key {
+        let value = Key(std::mem::take(&mut self.value.0));
+        self.retained = 0;
+        *destination = next;
+        value
+    }
+}
+
+impl Drop for TotalsKey<'_, '_> {
+    fn drop(&mut self) {
+        if self.temporary == 0 && self.retained == 0 {
+            return;
+        }
+        #[cfg(test)]
+        crate::totals::distinct_tests::snapshot(
+            crate::totals::distinct_tests::Point::KeyDropBegin,
+            self.mem,
+            self.retained,
+            self.temporary,
+        );
+        drop(std::mem::take(&mut self.value.0));
+        #[cfg(test)]
+        crate::totals::distinct_tests::key_snapshot(
+            crate::totals::distinct_tests::Point::KeyDestroyed,
+            self.mem,
+            observed_backing.0,
+            observed_backing.1,
+            0,
+        );
+        #[cfg(test)]
+        crate::totals::distinct_tests::snapshot(
+            crate::totals::distinct_tests::Point::KeyRefundBefore,
+            self.mem,
+            self.retained,
+            0,
+        );
+        self.mem.shrink(std::mem::take(&mut self.retained));
+        #[cfg(test)]
+        crate::totals::distinct_tests::snapshot(
+            crate::totals::distinct_tests::Point::KeyRefundAfter,
+            self.mem,
+            self.temporary,
+            0,
+        );
+        #[cfg(test)]
+        crate::totals::distinct_tests::snapshot(
+            crate::totals::distinct_tests::Point::KeyRefundBefore,
+            self.mem,
+            self.temporary,
+            0,
+        );
+        self.mem.shrink(std::mem::take(&mut self.temporary));
+        #[cfg(test)]
+        crate::totals::distinct_tests::snapshot(
+            crate::totals::distinct_tests::Point::KeyRefundAfter,
+            self.mem,
+            0,
+            0,
+        );
+        #[cfg(test)]
+        crate::totals::distinct_tests::snapshot(
+            crate::totals::distinct_tests::Point::KeyDropEnd,
+            self.mem,
+            0,
+            0,
+        );
+    }
+}
+
+impl<'m, 'a> HierarchyKey<'m, 'a> {
+    pub(crate) fn new(value: &QValue, cx: &'m Cx<'a>) -> Result<Self, ExecError> {
+        let mut owner = Self {
+            value: Key(Vec::new()),
+            mem: &cx.mem,
+            scratch: 0,
+            retained: 0,
+        };
+        build_key(
+            value,
+            &cx.mem,
+            cx.coll,
+            Some(cx.env),
+            &mut owner.value,
+            &mut owner.scratch,
+            KeyBuildKind::OrdinaryScratch,
+        )?;
         Ok(owner)
     }
 

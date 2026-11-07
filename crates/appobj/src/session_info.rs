@@ -63,7 +63,19 @@ fn outside_call() -> HostError {
     )
 }
 
+fn run_mode(ex: &mut Execution, _: &mut [Arg]) -> CallResult<Value> {
+    match call_ctx(ex).ok_or_else(outside_call)?.sess.app() {
+        AppKind::HttpService | AppKind::BackgroundJob => Ok(Value::Undefined),
+        AppKind::Cli => Err(HostError::not_implemented(
+            "Глобальный контекст",
+            "ТекущийРежимЗапуска (CLI)",
+        )
+        .into()),
+    }
+}
+
 pub(crate) fn register(reg: &mut Registry) {
+    reg.global_fn("ТекущийРежимЗапуска", "CurrentRunMode", Arc::new(run_mode));
     reg.global_fn(
         "НомерСеансаИнформационнойБазы",
         "InfoBaseSessionNumber",

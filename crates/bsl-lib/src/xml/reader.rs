@@ -139,6 +139,55 @@ impl XmlReader {
         }
     }
 
+    pub fn retained_bytes<E>(
+        &self,
+        mut charge: impl FnMut(u64) -> Result<(), E>,
+    ) -> Result<Option<u64>, E> {
+        use std::mem::size_of;
+        fn add(total: Option<u64>, bytes: usize) -> Option<u64> {
+            total?.checked_add(u64::try_from(bytes).ok()?)
+        }
+        fn vector<T>(total: Option<u64>, capacity: usize) -> Option<u64> {
+            add(total, capacity.checked_mul(size_of::<T>())?)
+        }
+        let mut total = vector::<char>(Some(0), self.src.len());
+        total = add(total, 2 * size_of::<usize>());
+        total = vector::<Open>(total, self.stack.capacity());
+        charge(self.stack.len() as u64)?;
+        for open in &self.stack {
+            for text in [&open.qname, &open.prefix, &open.local, &open.ns] {
+                total = add(total, text.capacity());
+            }
+        }
+        total = vector::<String>(total, self.scope_log.capacity());
+        charge(self.scope_log.len() as u64)?;
+        for prefix in &self.scope_log {
+            total = add(total, prefix.capacity());
+        }
+        charge(self.scope.capacity() as u64)?;
+        total = add(
+            total,
+            self.scope
+                .capacity()
+                .checked_mul(2)
+                .and_then(|n| n.checked_mul(size_of::<(String, Vec<String>)>() + 1))
+                .and_then(|n| n.checked_add(64))
+                .unwrap_or(usize::MAX),
+        );
+        for (prefix, uris) in &self.scope {
+            total = add(total, prefix.capacity());
+            total = vector::<String>(total, uris.capacity());
+            charge(uris.len() as u64)?;
+            for uri in uris {
+                total = add(total, uri.capacity());
+            }
+        }
+        if let Some(failed) = &self.failed {
+            total = add(total, failed.message.capacity());
+        }
+        Ok(total)
+    }
+
     pub fn position(&self) -> (u32, u32) {
         (self.line, self.col)
     }

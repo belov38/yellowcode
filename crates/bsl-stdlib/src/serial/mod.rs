@@ -15,6 +15,7 @@ pub(crate) mod valuelist_json;
 pub(crate) mod valuelist_xml;
 mod valuetable;
 pub(crate) mod valuetable_xml;
+pub(crate) mod valuetable_xml_reader;
 mod valuetree;
 pub(crate) mod xmlvalue;
 

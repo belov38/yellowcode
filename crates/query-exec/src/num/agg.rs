@@ -169,3 +169,181 @@ impl AggState {
         })
     }
 }
+
+fn accumulator_guard(env: &ExecEnv<'_>, number: &Number) -> Result<(), ExecError> {
+    guard(env, number)
+}
+fn accumulator_cant_fit() -> ExecError {
+    cant_fit()
+}
+
+pub(crate) struct BudgetedAggState {
+    native: AggState,
+    payload: u64,
+}
+impl BudgetedAggState {
+    pub(crate) fn new(f: Func, dec: Dec) -> Result<Self, ExecError> {
+        Ok(Self {
+            native: AggState::new(f, dec, false, false)?,
+            payload: 0,
+        })
+    }
+    pub(crate) fn add<'a>(
+        &mut self,
+        value: Option<&QValue>,
+        env: &ExecEnv<'a>,
+        coll: ExecCollation<'_>,
+        mem: &crate::ops::MemBudget<'a>,
+        temp: &mut u64,
+    ) -> Result<(), ExecError> {
+        self.native
+            .add_paid(value, env, coll, mem, &mut self.payload, temp)
+    }
+    pub(crate) fn finish<'m, 'a>(
+        mut self,
+        env: &ExecEnv<'a>,
+        mem: &'m crate::ops::MemBudget<'a>,
+        temp: &mut u64,
+    ) -> Result<crate::totals::payload::PaidValue<'m, 'a>, ExecError> {
+        use crate::model::invalid_size;
+        use crate::totals::payload::{self, PaidValue};
+        let next = temp.checked_sub(self.payload).ok_or_else(invalid_size)?;
+        let value = if matches!(self.native.f, Func::Min | Func::Max) {
+            self.native.rep.take().unwrap_or(QValue::Null)
+        } else {
+            QValue::Number(std::mem::replace(&mut self.native.sum, Number::zero()))
+        };
+        let owned = PaidValue::from_paid_parts(value, self.payload, mem);
+        *temp = next;
+        let state = self.native;
+        if state.f == Func::Count {
+            return payload::count(state.count, mem, Some(env));
+        }
+        if matches!(state.f, Func::Min | Func::Max) {
+            return Ok(owned);
+        }
+        if state.count == 0 {
+            return Ok(PaidValue::from_paid_parts(QValue::Null, 0, mem));
+        }
+        let QValue::Number(sum) = &*owned else {
+            return Err(invalid_size());
+        };
+        if state.f == Func::Sum {
+            if !state.unlimited
+                && state.dec.is_known()
+                && !fits(
+                    sum,
+                    Dec {
+                        p: 38,
+                        s: state.dec.s,
+                    },
+                )
+            {
+                return Err(accumulator_cant_fit());
+            }
+            return Ok(owned);
+        }
+        let denominator = payload::count(state.count, mem, Some(env))?;
+        let QValue::Number(denominator_number) = &*denominator else {
+            return Err(invalid_size());
+        };
+        let quotient = payload::divide_numbers(sum, denominator_number, mem, env)?;
+        let QValue::Number(number) = &*quotient else {
+            return Err(invalid_size());
+        };
+        accumulator_guard(env, number)?;
+        if state.unlimited || !state.dec.is_known() {
+            return Ok(quotient);
+        }
+        let scale = state.dec.s.max(6);
+        let rounded = payload::round_number(number, scale, mem, env)?;
+        let QValue::Number(number) = &*rounded else {
+            return Err(invalid_size());
+        };
+        if !fits(number, Dec { p: 38, s: scale }) {
+            return Err(accumulator_cant_fit());
+        }
+        Ok(rounded)
+    }
+}
+impl AggState {
+    fn add_paid<'a>(
+        &mut self,
+        value: Option<&QValue>,
+        env: &ExecEnv<'a>,
+        coll: ExecCollation<'_>,
+        mem: &crate::ops::MemBudget<'a>,
+        payload: &mut u64,
+        temp: &mut u64,
+    ) -> Result<(), ExecError> {
+        use crate::model::{invalid_size, size_add};
+        use crate::totals::payload::{self, PaidValue};
+        let Some(value) = value else {
+            self.count += 1;
+            return Ok(());
+        };
+        if matches!(value, QValue::Null) {
+            return Ok(());
+        }
+        match self.f {
+            Func::Count => {
+                self.count += 1;
+                return Ok(());
+            }
+            Func::Sum | Func::Avg => {
+                let QValue::Number(number) = value else {
+                    return Err(ExecError::Fatal(
+                        "num: СУММА/СРЕДНЕЕ over a value that is not a number".to_string(),
+                    ));
+                };
+                accumulator_guard(env, number)?;
+                let result = payload::add_numbers(&self.sum, number, mem, env)?;
+                let QValue::Number(number) = &*result else {
+                    return Err(invalid_size());
+                };
+                accumulator_guard(env, number)?;
+                let bytes = result.bytes();
+                let next = size_add(temp.checked_sub(*payload).ok_or_else(invalid_size)?, bytes)?;
+                let (value, _) = result.into_parts();
+                let QValue::Number(number) = value else {
+                    drop(PaidValue::from_paid_parts(value, bytes, mem));
+                    return Err(invalid_size());
+                };
+                let old = std::mem::replace(&mut self.sum, number);
+                let old_bytes = std::mem::replace(payload, bytes);
+                *temp = next;
+                #[cfg(test)]
+                admission_tests::snapshot(mem);
+                drop(old);
+                mem.shrink(old_bytes);
+            }
+            Func::Min | Func::Max => {
+                let want = if self.f == Func::Min {
+                    Ordering::Less
+                } else {
+                    Ordering::Greater
+                };
+                if let Some(current) = &self.rep
+                    && try_cmp(value, current, coll)? != want
+                {
+                    self.count += 1;
+                    return Ok(());
+                }
+                let result = PaidValue::copy_aggregate(value, mem, env)?;
+                let bytes = result.bytes();
+                let next = size_add(temp.checked_sub(*payload).ok_or_else(invalid_size)?, bytes)?;
+                let (value, _) = result.into_parts();
+                let old = self.rep.replace(value);
+                let old_bytes = std::mem::replace(payload, bytes);
+                *temp = next;
+                #[cfg(test)]
+                admission_tests::snapshot(mem);
+                drop(old);
+                mem.shrink(old_bytes);
+            }
+            _ => {}
+        }
+        self.count += 1;
+        Ok(())
+    }
+}

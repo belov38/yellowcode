@@ -188,6 +188,8 @@ pub struct XdtoCtx {
     json_reader: Option<Value>,
     json_roots: Vec<JsonRoot>,
     json_roots_bytes: u64,
+    xml_table_reader: Option<Value>,
+    xml_table_projection: u64,
 }
 
 type JsonRoot = Rc<dyn Fn(&mut dyn bsl_vm::RetainedMemory) -> Result<(), Exception>>;
@@ -216,6 +218,8 @@ impl XdtoCtx {
             json_reader: None,
             json_roots: Vec::new(),
             json_roots_bytes: 0,
+            xml_table_reader: None,
+            xml_table_projection: 0,
             marker: Rc::new(FatalError {
                 kind: FatalKind::StackOverflow,
                 text: String::new(),
@@ -266,6 +270,15 @@ impl XdtoCtx {
         self.json_read_projection = projection;
     }
 
+    pub(crate) fn xml_table_read(&mut self, reader: Value, projection: u64) {
+        self.xml_table_reader = Some(reader);
+        self.xml_table_projection = projection;
+    }
+
+    fn read_census(&self) -> bool {
+        self.json_read || self.xml_table_reader.is_some()
+    }
+
     pub(crate) fn refresh_json_input(&mut self, ex: &mut Execution) -> Result<(), Exception> {
         if let Some(reader) = &self.json_reader {
             let source =
@@ -274,7 +287,22 @@ impl XdtoCtx {
                 .checked_add(self.json_read_projection)
                 .ok_or_else(|| ex.out_of_memory())?;
         }
+        if let Some(reader) = self.xml_table_reader.clone() {
+            let source =
+                crate::xml::reader_live_bytes(ex, &reader)?.ok_or_else(|| ex.out_of_memory())?;
+            self.json_read_input = source
+                .checked_add(self.xml_table_projection)
+                .ok_or_else(|| ex.out_of_memory())?;
+        }
         Ok(())
+    }
+
+    pub(crate) fn read_scratch_outside_roots(
+        &mut self,
+        ex: &mut Execution,
+    ) -> Result<u64, Exception> {
+        self.refresh_json_input(ex)?;
+        Ok(self.read_scratch(0).saturating_sub(self.json_roots_bytes))
     }
 
     pub(crate) fn is_json_read(&self) -> bool {
@@ -326,7 +354,7 @@ impl XdtoCtx {
         ex: &mut Execution,
         value: Option<&Value>,
     ) -> Result<(), Exception> {
-        if !self.json_read || (self.json_roots.is_empty() && value.is_none()) {
+        if !self.read_census() || (self.json_roots.is_empty() && value.is_none()) {
             self.json_roots_bytes = 0;
             return Ok(());
         }
@@ -370,6 +398,16 @@ impl XdtoCtx {
         )
     }
 
+    pub(crate) fn caller_codec_type(q: &QName) -> Option<TypeIdx> {
+        builtins();
+        let tab = table().read().unwrap_or_else(|e| e.into_inner());
+        if tab.reserved_names.contains(q) {
+            return None;
+        }
+        let idx = *tab.by_name.get(q)?;
+        tab.by_type.contains_key(&idx).then_some(TypeIdx(idx))
+    }
+
     pub(crate) fn wire_read(&mut self) {
         self.wire_read = true;
     }
@@ -404,7 +442,7 @@ impl XdtoCtx {
         self.refresh_xml_prefix(ex)?;
         self.refresh_json_input(ex)?;
         self.refresh_json_roots(ex)?;
-        self.bytes = if self.json_read || self.xml_table_writer.is_some() {
+        self.bytes = if self.read_census() || self.xml_table_writer.is_some() {
             self.bytes
                 .checked_add(add)
                 .and_then(|n| n.checked_add(NODE_BYTES))
@@ -413,7 +451,7 @@ impl XdtoCtx {
             self.bytes.saturating_add(add).saturating_add(NODE_BYTES)
         };
         ex.charge(1 + add / 64)?;
-        if self.json_read || self.xml_table_writer.is_some() {
+        if self.read_census() || self.xml_table_writer.is_some() {
             let live = self
                 .bytes
                 .checked_mul(2)
@@ -729,16 +767,48 @@ impl XdtoCtx {
     pub fn from_data(&mut self, ex: &mut Execution, d: &XdtoData) -> Result<Value, Exception> {
         self.refresh_json_input(ex)?;
         self.refresh_json_roots(ex)?;
-        if self.json_read {
+        if self.read_census() {
             ex.reserve(self.read_scratch(0))?;
         }
         let value = self.value_from_data(ex, d)?;
         self.refresh_json_input(ex)?;
         self.refresh_json_roots_with(ex, Some(&value))?;
-        if self.json_read {
+        if self.read_census() {
             ex.reserve(self.read_scratch(0))?;
         }
         Ok(value)
+    }
+
+    pub(crate) fn read_xml_table(
+        &mut self,
+        ex: &mut Execution,
+        d: &XdtoData,
+    ) -> Result<Value, Exception> {
+        self.refresh_json_input(ex)?;
+        self.refresh_json_roots(ex)?;
+        ex.reserve(self.read_scratch(0))?;
+        ex.charge(1)?;
+        self.enter(ex, true)?;
+        let result = crate::serial::valuetable_xml_reader::read_xml_data(ex, d, self);
+        self.leave();
+        let value = result?;
+        self.refresh_json_input(ex)?;
+        self.refresh_json_roots_with(ex, Some(&value))?;
+        ex.reserve(self.read_scratch(0))?;
+        Ok(value)
+    }
+
+    pub(crate) fn scalar_from_text(
+        &mut self,
+        ex: &mut Execution,
+        ty: &QName,
+        text: &str,
+    ) -> Result<XdtoData, Exception> {
+        match super::data::value_from_text(ex, &self.factory.model, ty, text, false) {
+            Ok(d) => Ok(d),
+            Err(CallError::Host(_)) => Err(self.conversion_error(ex, text, ty)),
+            Err(CallError::Exc(e)) => Err(e),
+        }
     }
 
     fn value_from_data(&mut self, ex: &mut Execution, d: &XdtoData) -> Result<Value, Exception> {
@@ -747,7 +817,7 @@ impl XdtoCtx {
             XdtoData::Nil => return Ok(Value::Undefined),
             XdtoData::Value { ty, .. } | XdtoData::Object { ty, .. } => ty,
         };
-        if self.json_read
+        if self.read_census()
             && let XdtoData::Value { lexical, value, .. } = d
         {
             let backing = match value {

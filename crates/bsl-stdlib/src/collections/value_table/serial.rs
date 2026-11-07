@@ -150,6 +150,29 @@ impl ValueTable {
         super::ctor(ex, &mut []).map_err(|e| exception(ex, e))
     }
 
+    pub(crate) fn serial_new_bytes() -> u64 {
+        (std::mem::size_of::<TableState>()
+            + std::mem::size_of::<ValueTable>()
+            + 4 * std::mem::size_of::<usize>()) as u64
+            + Columns::allocation_bytes()
+            + indexes::Indexes::allocation_bytes()
+    }
+
+    pub(crate) fn serial_column_bytes(name_units: usize, title_units: usize) -> Option<u64> {
+        let record = std::mem::size_of::<ColumnRecord>() + 2 * std::mem::size_of::<usize>() + 128;
+        u64::try_from(name_units)
+            .ok()?
+            .checked_mul(12)?
+            .checked_add(u64::try_from(title_units).ok()?.checked_mul(2)?)?
+            .checked_add(record as u64)
+    }
+
+    pub(crate) fn serial_row_bytes(columns: usize) -> Option<u64> {
+        let record = std::mem::size_of::<RowRecord>() + 2 * std::mem::size_of::<usize>() + 1024;
+        let cell = std::mem::size_of::<(u32, Value)>() + std::mem::size_of::<usize>();
+        u64::try_from(columns.checked_mul(cell)?.checked_add(record)?).ok()
+    }
+
     pub(crate) fn serial_names_valid(
         ex: &mut Execution,
         names: &[bsl_prim::Str],

@@ -212,13 +212,19 @@ impl<'a> MemBudget<'a> {
         self.used.set(used);
         let total = used.saturating_add(self.held.get().total());
         self.peak.set(self.peak.get().max(total));
+        #[cfg(test)]
+        crate::num::accumulator_tests::snapshot(self);
         Ok(())
     }
 
     pub fn shrink(&self, n: u64) {
+        #[cfg(test)]
+        crate::num::accumulator_tests::refund(self, n);
         let n = n.min(self.used.get());
         self.used.set(self.used.get() - n);
         self.give(n);
+        #[cfg(test)]
+        crate::num::accumulator_tests::snapshot(self);
     }
 
     pub fn grow_scratch(&self, n: u64) -> Result<(), ExecError> {

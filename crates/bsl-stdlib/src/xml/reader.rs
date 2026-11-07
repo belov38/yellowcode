@@ -150,6 +150,78 @@ impl XmlReaderState {
         }
     }
 
+    pub(crate) fn retained_bytes<E>(
+        &self,
+        mut charge: impl FnMut(u64) -> Result<(), E>,
+    ) -> Result<Option<u64>, E> {
+        fn add(total: Option<u64>, bytes: usize) -> Option<u64> {
+            total?.checked_add(u64::try_from(bytes).ok()?)
+        }
+        let mut total = self.r.retained_bytes(&mut charge)?;
+        match &self.cur {
+            None => {}
+            Some(XmlEvent::Declaration {
+                version, encoding, ..
+            }) => {
+                total = add(total, version.capacity());
+                total = add(total, encoding.as_ref().map_or(0, String::capacity));
+            }
+            Some(XmlEvent::Start {
+                qname,
+                prefix,
+                local,
+                ns,
+                attrs,
+                ..
+            }) => {
+                for text in [qname, prefix, local, ns] {
+                    total = add(total, text.capacity());
+                }
+                total = add(
+                    total,
+                    attrs
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<XmlAttr>()),
+                );
+                charge(attrs.len() as u64)?;
+                for a in attrs {
+                    for text in [&a.qname, &a.prefix, &a.local, &a.ns, &a.value] {
+                        total = add(total, text.capacity());
+                    }
+                }
+            }
+            Some(XmlEvent::End {
+                qname,
+                prefix,
+                local,
+                ns,
+            }) => {
+                for text in [qname, prefix, local, ns] {
+                    total = add(total, text.capacity());
+                }
+            }
+            Some(
+                XmlEvent::Text(text)
+                | XmlEvent::Whitespace(text)
+                | XmlEvent::CData(text)
+                | XmlEvent::Comment(text)
+                | XmlEvent::Doctype(text),
+            ) => total = add(total, text.capacity()),
+            Some(XmlEvent::Pi { target, data }) => {
+                total = add(total, target.capacity());
+                total = add(total, data.capacity());
+            }
+        }
+        if let Some((ns, local)) = &self.stray {
+            total = add(total, ns.capacity());
+            total = add(total, local.capacity());
+        }
+        if let Some(deferred) = &self.deferred {
+            total = add(total, deferred.message.capacity());
+        }
+        Ok(total)
+    }
+
     pub(crate) fn node(&self) -> Option<&XmlEvent> {
         self.cur.as_ref()
     }
@@ -377,6 +449,25 @@ pub(crate) fn xml_reader<'a>(
         return Err(type_mismatch(1).into());
     };
     state_of(r)
+}
+
+pub(crate) fn reader_live_bytes(
+    ex: &mut Execution,
+    v: &Value,
+) -> Result<Option<u64>, bsl_vm::Exception> {
+    let Some(reader) = v
+        .as_object()
+        .and_then(|o| o.as_any().downcast_ref::<XmlReaderObject>())
+    else {
+        return Ok(None);
+    };
+    let Ok(state) = reader.st.try_borrow() else {
+        return Ok(None);
+    };
+    match &*state {
+        Some(state) => state.retained_bytes(|units| ex.charge(units)),
+        None => Ok(Some(0)),
+    }
 }
 
 impl XmlReaderObject {

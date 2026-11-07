@@ -3,7 +3,7 @@ mod reader;
 mod schema;
 mod writer;
 
-pub(crate) use reader::{XmlReaderState, xml_reader};
+pub(crate) use reader::{XmlReaderState, reader_live_bytes, xml_reader};
 pub(crate) use schema::{export_schema_set, schema_set_packages};
 pub(crate) use writer::{XmlWriterState, check_chars, xml_writer};
 

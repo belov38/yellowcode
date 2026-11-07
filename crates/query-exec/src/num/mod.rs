@@ -10,3 +10,7 @@ pub use scale::{
     dec_add, dec_div, dec_mul, dec_of, dec_of_lit, div, div_by_zero, fits, guard, mul, mul_k,
     overflow, round_field, round_to, trunc_field,
 };
+
+pub(crate) use scale::integer_fits;
+
+pub(crate) use agg::BudgetedAggState;

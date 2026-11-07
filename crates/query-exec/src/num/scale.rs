@@ -60,8 +60,41 @@ pub fn div_by_zero() -> ExecError {
 }
 
 pub fn fits(v: &Number, d: Dec) -> bool {
-    let int = v.int_digits();
-    int.trim_start_matches('0').len() <= usize::from(d.int())
+    integer_fits(v, usize::from(d.int()))
+}
+
+pub(crate) fn integer_fits(number: &Number, limit: usize) -> bool {
+    struct Width {
+        significant: usize,
+        limit: usize,
+        overflow: bool,
+    }
+    impl std::fmt::Write for Width {
+        fn write_str(&mut self, text: &str) -> std::fmt::Result {
+            for byte in text.bytes() {
+                match byte {
+                    b'-' => {}
+                    b'.' => return Err(std::fmt::Error),
+                    b'0' if self.significant == 0 => {}
+                    _ => {
+                        self.significant += 1;
+                        if self.significant > self.limit {
+                            self.overflow = true;
+                            return Err(std::fmt::Error);
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
+    }
+    let mut width = Width {
+        significant: 0,
+        limit,
+        overflow: false,
+    };
+    let _ = number.write_xml(&mut width);
+    !width.overflow
 }
 
 fn internal(what: &str) -> ExecError {

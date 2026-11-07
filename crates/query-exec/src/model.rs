@@ -300,17 +300,31 @@ impl TotalsPayloads<'_, '_> {
         if self.seen.contains(&id) {
             return Ok(false);
         }
+        #[cfg(test)]
+        crate::num::accumulator_tests::marker(self.mem, 1);
         self.mem.grow(self.model.growth())?;
+        #[cfg(test)]
+        crate::num::accumulator_tests::marker(self.mem, 2);
         self.seen.insert(id);
+        #[cfg(test)]
+        crate::num::accumulator_tests::marker(self.mem, 3);
         self.mem.shrink(self.model.inserted());
+        #[cfg(test)]
+        crate::num::accumulator_tests::marker(self.mem, 4);
         Ok(true)
     }
 }
 
 impl Drop for TotalsPayloads<'_, '_> {
     fn drop(&mut self) {
+        #[cfg(test)]
+        crate::num::accumulator_tests::marker(self.mem, 5);
         drop(std::mem::take(&mut self.seen));
+        #[cfg(test)]
+        crate::num::accumulator_tests::marker(self.mem, 6);
         self.mem.shrink(self.model.table());
+        #[cfg(test)]
+        crate::num::accumulator_tests::marker(self.mem, 7);
     }
 }
 
@@ -636,6 +650,189 @@ fn validate_totals_payload(
         _ => {}
     }
     Ok(())
+}
+
+type AggregateIdentity = (u8, usize, usize);
+enum AggregateFrame<'v> {
+    Value(&'v QValue),
+    Values(std::slice::Iter<'v, QValue>),
+    Rows(std::slice::Iter<'v, Vec<QValue>>),
+    Columns(std::slice::Iter<'v, ColumnInfo>),
+}
+struct AggregateSizing<'m, 'a, 'v> {
+    frames: Vec<AggregateFrame<'v>>,
+    seen: std::collections::HashSet<AggregateIdentity>,
+    table: crate::ops::hier::HierarchyHash<(AggregateIdentity, ())>,
+    bytes: u64,
+    mem: &'m crate::ops::MemBudget<'a>,
+}
+impl<'v> AggregateSizing<'_, '_, 'v> {
+    fn push(
+        &mut self,
+        frame: AggregateFrame<'v>,
+        env: &crate::source::ExecEnv<'_>,
+    ) -> Result<(), ExecError> {
+        crate::ops::hier::hierarchy_reserve(&mut self.frames, 1, self.mem, env, &mut self.bytes)?;
+        self.frames.push(frame);
+        Ok(())
+    }
+    fn first(&mut self, value: &QValue) -> Result<bool, ExecError> {
+        let Some(identity) = totals_payload_id(value)? else {
+            return Ok(true);
+        };
+        if self.seen.contains(&identity) {
+            return Ok(false);
+        }
+        #[cfg(test)]
+        if self.seen.len() == self.seen.capacity() {
+            crate::num::accumulator_tests::before_admission(self.mem, 1);
+        }
+        let prepared = self.table.prepare(self.mem, &mut self.bytes)?;
+        #[cfg(test)]
+        crate::num::accumulator_tests::snapshot(self.mem);
+        self.seen.insert(identity);
+        self.table
+            .inserted(prepared, self.seen.capacity(), self.mem, &mut self.bytes)?;
+        Ok(true)
+    }
+}
+impl Drop for AggregateSizing<'_, '_, '_> {
+    fn drop(&mut self) {
+        #[cfg(test)]
+        crate::num::accumulator_tests::snapshot(self.mem);
+        drop(std::mem::take(&mut self.frames));
+        drop(std::mem::take(&mut self.seen));
+        self.mem.shrink(self.bytes);
+        #[cfg(test)]
+        crate::num::accumulator_tests::snapshot(self.mem);
+    }
+}
+fn aggregate_scalar_model(value: &QValue) -> Result<Option<u64>, ExecError> {
+    Ok(Some(match value {
+        QValue::Number(number) => {
+            size_vec(number.backing_capacity_limbs(), std::mem::size_of::<u32>())?
+        }
+        QValue::Type(ty) => type_capacity(ty, false)?,
+        QValue::PointInTime(_) => {
+            size_block(std::mem::size_of::<query_ir::value::Moment>() as u64)?
+        }
+        QValue::Boundary(_)
+        | QValue::Nested(_)
+        | QValue::String(_)
+        | QValue::Binary(_)
+        | QValue::Storage(_) => return Ok(None),
+        _ => 0,
+    }))
+}
+
+pub(crate) fn aggregate_payload_model(
+    value: &QValue,
+    mem: &crate::ops::MemBudget<'_>,
+    env: &crate::source::ExecEnv<'_>,
+) -> Result<u64, ExecError> {
+    let mut work = LedgerWork::new(env);
+    work.check()?;
+    if let Some(bytes) = aggregate_scalar_model(value)? {
+        return Ok(bytes);
+    }
+    let mut scratch = AggregateSizing {
+        frames: Vec::new(),
+        seen: std::collections::HashSet::new(),
+        table: crate::ops::hier::HierarchyHash::new(),
+        bytes: 0,
+        mem,
+    };
+    scratch.push(AggregateFrame::Value(value), env)?;
+    let mut bytes = 0;
+    while let Some(frame) = scratch.frames.pop() {
+        work.step()?;
+        #[cfg(test)]
+        aggregate_first_tests::visited_frame(env, &frame, mem);
+        match frame {
+            AggregateFrame::Value(value) => {
+                if let Some(scalar) = aggregate_scalar_model(value)? {
+                    bytes = size_add(bytes, scalar)?;
+                    continue;
+                }
+                if !scratch.first(value)? {
+                    continue;
+                }
+                match value {
+                    QValue::Boundary(boundary) => {
+                        bytes = size_add(
+                            bytes,
+                            size_block(std::mem::size_of::<query_ir::value::Boundary>() as u64)?,
+                        )?;
+                        scratch.push(AggregateFrame::Value(&boundary.point), env)?;
+                    }
+                    QValue::String(text) => {
+                        bytes = size_add(
+                            bytes,
+                            totals_shared_backing(
+                                text.0.backing_layout().map_err(|_| invalid_size())?,
+                            )?,
+                        )?
+                    }
+                    QValue::Binary(data) | QValue::Storage(data) => {
+                        bytes = size_add(
+                            bytes,
+                            totals_shared_backing(
+                                data.backing_layout().map_err(|_| invalid_size())?,
+                            )?,
+                        )?
+                    }
+                    QValue::Nested(nested) => {
+                        bytes = size_add(
+                            bytes,
+                            totals_shared_backing(
+                                nested.backing_layout().map_err(|_| invalid_size())?,
+                            )?,
+                        )?;
+                        bytes = size_add(
+                            bytes,
+                            size_vec(nested.columns.capacity(), std::mem::size_of::<ColumnInfo>())?,
+                        )?;
+                        bytes = size_add(
+                            bytes,
+                            size_vec(nested.rows.capacity(), std::mem::size_of::<Vec<QValue>>())?,
+                        )?;
+                        scratch.push(AggregateFrame::Rows(nested.rows.iter()), env)?;
+                        scratch.push(AggregateFrame::Columns(nested.columns.iter()), env)?;
+                    }
+                    _ => return Err(invalid_size()),
+                }
+            }
+            AggregateFrame::Values(mut values) => {
+                if let Some(value) = values.next() {
+                    scratch.push(AggregateFrame::Values(values), env)?;
+                    scratch.push(AggregateFrame::Value(value), env)?;
+                }
+            }
+            AggregateFrame::Rows(mut rows) => {
+                if let Some(row) = rows.next() {
+                    bytes = size_add(bytes, size_vec(row.capacity(), VALUE_SIZE)?)?;
+                    scratch.push(AggregateFrame::Rows(rows), env)?;
+                    scratch.push(AggregateFrame::Values(row.iter()), env)?;
+                }
+            }
+            AggregateFrame::Columns(mut columns) => {
+                if let Some(column) = columns.next() {
+                    bytes = size_add(bytes, size_block(column.name.capacity() as u64)?)?;
+                    bytes = size_add(bytes, type_capacity(&column.ty, false)?)?;
+                    scratch.push(AggregateFrame::Columns(columns), env)?;
+                    if let Some(nested) = &column.nested {
+                        bytes = size_add(
+                            bytes,
+                            size_vec(nested.capacity(), std::mem::size_of::<ColumnInfo>())?,
+                        )?;
+                        scratch.push(AggregateFrame::Columns(nested.iter()), env)?;
+                    }
+                }
+            }
+        }
+    }
+    work.check()?;
+    Ok(bytes)
 }
 
 pub(crate) fn totals_payload_model(

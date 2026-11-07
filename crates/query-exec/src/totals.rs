@@ -1458,6 +1458,123 @@ pub(crate) fn aggregate<'v>(
     Ok(result)
 }
 
+struct TotalsDistinct<'m, 'a> {
+    keys: HashSet<Key>,
+    model: crate::ops::hier::HierarchyHash<(Key, ())>,
+    mem: &'m MemBudget<'a>,
+    balance: u64,
+}
+
+impl<'m, 'a> TotalsDistinct<'m, 'a> {
+    fn new(mem: &'m MemBudget<'a>) -> Self {
+        #[cfg(test)]
+        distinct_tests::snapshot(distinct_tests::Point::SetNew, mem, 0, 0);
+        Self {
+            keys: HashSet::new(),
+            model: crate::ops::hier::HierarchyHash::new(),
+            mem,
+            balance: 0,
+        }
+    }
+
+    fn insert(
+        &mut self,
+        value: &QValue,
+        coll: ExecCollation<'_>,
+        env: Option<&ExecEnv<'_>>,
+    ) -> Result<bool, ExecError> {
+        #[cfg(test)]
+        distinct_tests::snapshot(
+            distinct_tests::Point::InsertStart,
+            self.mem,
+            self.keys.len() as u64,
+            self.keys.capacity() as u64,
+        );
+        let mut key = { crate::ops::hier::TotalsKey::new(value, self.mem, coll, env)? };
+        if self.keys.contains(key.as_key()) {
+            #[cfg(test)]
+            distinct_tests::snapshot(
+                distinct_tests::Point::Duplicate,
+                self.mem,
+                self.keys.len() as u64,
+                self.keys.capacity() as u64,
+            );
+            return Ok(false);
+        }
+        key.retain()?;
+        #[cfg(test)]
+        {
+            distinct_tests::snapshot(
+                distinct_tests::Point::PrepareBefore,
+                self.mem,
+                self.keys.len() as u64,
+                self.keys.capacity() as u64,
+            );
+            distinct_tests::fault(distinct_tests::Point::PrepareBefore)?;
+        }
+        let prepared = self.model.prepare(self.mem, &mut self.balance)?;
+        #[cfg(test)]
+        {
+            distinct_tests::snapshot(
+                distinct_tests::Point::Prepared,
+                self.mem,
+                prepared.0 as u64,
+                prepared.1,
+            );
+            distinct_tests::fault(distinct_tests::Point::Prepared)?;
+        }
+        let next = crate::model::size_add(self.balance, key.bytes())?;
+        let key = key.transfer(&mut self.balance, next);
+        self.keys.insert(key);
+        #[cfg(test)]
+        {
+            distinct_tests::snapshot(
+                distinct_tests::Point::NativeInserted,
+                self.mem,
+                self.keys.len() as u64,
+                self.keys.capacity() as u64,
+            );
+            distinct_tests::fault(distinct_tests::Point::NativeInserted)?;
+        }
+        self.model
+            .inserted(prepared, self.keys.capacity(), self.mem, &mut self.balance)?;
+        #[cfg(test)]
+        {
+            distinct_tests::snapshot(
+                distinct_tests::Point::InsertedAfter,
+                self.mem,
+                self.keys.len() as u64,
+                self.keys.capacity() as u64,
+            );
+            distinct_tests::fault(distinct_tests::Point::InsertedAfter)?;
+        }
+        Ok(true)
+    }
+}
+
+impl Drop for TotalsDistinct<'_, '_> {
+    fn drop(&mut self) {
+        #[cfg(test)]
+        distinct_tests::snapshot(
+            distinct_tests::Point::SetDropBegin,
+            self.mem,
+            self.balance,
+            0,
+        );
+        drop(std::mem::take(&mut self.keys));
+        #[cfg(test)]
+        distinct_tests::snapshot(
+            distinct_tests::Point::SetDestroyed,
+            self.mem,
+            self.balance,
+            0,
+        );
+        self.mem.shrink(std::mem::take(&mut self.balance));
+        #[cfg(test)]
+        distinct_tests::snapshot(distinct_tests::Point::SetDropEnd, self.mem, 0, 0);
+    }
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "Aggregate inputs and payload ownership share the explicit execution context."
@@ -1485,11 +1602,15 @@ fn aggregate_paid<'v, 'm, 'a>(
             (_, AggArg::Star) => PaidValue::null(mem),
             (AggFunc::Count, _) => {
                 let mut count = 0u64;
-                let mut seen = HashSet::new();
+                let mut seen = agg.distinct.then(|| TotalsDistinct::new(mem));
                 for &r in rows {
                     payload::checkpoint(env)?;
                     if let Some(value) = get(r) {
-                        if agg.distinct && !seen.insert(try_key_of_totals(value, coll)?) {
+                        let unique = match &mut seen {
+                            Some(seen) => seen.insert(value, coll, env)?,
+                            None => true,
+                        };
+                        if !unique {
                             continue;
                         }
                         count = count
@@ -1497,7 +1618,18 @@ fn aggregate_paid<'v, 'm, 'a>(
                             .ok_or_else(crate::model::invalid_size)?;
                     }
                 }
-                payload::count(count, mem, env)?
+                #[cfg(test)]
+                {
+                    distinct_tests::snapshot(distinct_tests::Point::CountBefore, mem, 0, 0);
+                    distinct_tests::fault(distinct_tests::Point::CountBefore)?;
+                }
+                let result = payload::count(count, mem, env)?;
+                #[cfg(test)]
+                {
+                    distinct_tests::inline_result(mem, result.bytes());
+                    distinct_tests::fault(distinct_tests::Point::CountResult)?;
+                }
+                result
             }
             (AggFunc::Sum | AggFunc::Avg, _) => {
                 let mut sum: Option<PaidValue<'m, 'a>> = None;
