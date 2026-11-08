@@ -220,9 +220,21 @@ impl AccessPredicate {
         ctx: &crate::BindCtx<'_>,
         row_id: Option<&QValue>,
     ) -> Result<crate::StmtL, ExecError> {
+        self.bind_check_with_admission(ctx, row_id, None, None)
+    }
+
+    pub fn bind_check_with_admission(
+        &self,
+        ctx: &crate::BindCtx<'_>,
+        row_id: Option<&QValue>,
+        temp_origins: Option<&dyn crate::bind::temp_provenance::TempOriginProvider>,
+        accounting_memory: Option<&memory_budget::RequestMemory>,
+    ) -> Result<crate::StmtL, ExecError> {
+        let phase = crate::bind::PhaseContext::with_admission(temp_origins, accounting_memory);
         let stmt = self.check_stmt(ctx.schema, row_id)?;
-        let bound = crate::bind::resolve(&stmt, ctx)?;
-        crate::lower::lower(&bound, ctx)
+        phase.validate_trusted(&stmt, ctx)?;
+        let bound = crate::bind::resolve(&stmt, ctx, phase)?;
+        crate::lower::lower(&bound, ctx, phase)
     }
 
     fn restricted_id(

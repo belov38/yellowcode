@@ -29,7 +29,7 @@ pub(crate) fn check_balance_settings_shape(s: &RegisterSettings) -> Result<(), E
     Ok(())
 }
 
-pub(super) struct Cursor<'a> {
+pub(super) struct LegacyCursor<'a> {
     accounts: BTreeMap<[u8; 16], (u8, Option<bool>)>,
     ready: bool,
     fields: Vec<FieldId>,
@@ -40,7 +40,7 @@ pub(super) struct Cursor<'a> {
     accounts_charge: Option<OwnedCharge>,
 }
 
-impl<'a> Cursor<'a> {
+impl<'a> LegacyCursor<'a> {
     pub(super) fn new(step: &BalanceRowsL, cx: &Cx<'_>) -> Result<Self, ExecError> {
         let count = step
             .resources
@@ -287,4 +287,97 @@ impl<'a> Cursor<'a> {
 fn value(row: &Row, field: FieldId) -> Result<&QValue, ExecError> {
     row.get(usize::from(field.0))
         .ok_or_else(|| fatal("projected row is too short"))
+}
+
+mod first;
+mod owned;
+
+enum Kind<'a> {
+    Legacy(LegacyCursor<'a>),
+    First(first::FirstCursor<'a>),
+}
+pub(super) struct Cursor<'a> {
+    kind: Kind<'a>,
+}
+impl<'a> Cursor<'a> {
+    pub(super) fn new(step: &BalanceRowsL, cx: &Cx<'_>) -> Result<Self, ExecError> {
+        let kind = match &step.ext1 {
+            Some(_) => first::FirstCursor::new(step, cx).map(Kind::First),
+            None => LegacyCursor::new(step, cx).map(Kind::Legacy),
+        }?;
+        Ok(Self { kind })
+    }
+    pub(super) fn next(
+        &mut self,
+        step: &BalanceRowsL,
+        child: &mut Option<BoxOp<'a>>,
+        cx: &mut Cx<'a>,
+    ) -> Result<Option<Row>, ExecError> {
+        match &mut self.kind {
+            Kind::Legacy(cursor) => cursor.next(step, child, cx),
+            Kind::First(cursor) => cursor.next(step, child, cx),
+        }
+    }
+    pub(super) fn close(&mut self, cx: &Cx<'_>) {
+        match &mut self.kind {
+            Kind::Legacy(cursor) => cursor.close(cx),
+            Kind::First(cursor) => cursor.close(),
+        }
+    }
+}
+
+fn ext1_numeric_fits(number: &Number, qualifier: query_ir::NumQ) -> bool {
+    if qualifier.nonneg && number.is_negative() {
+        return false;
+    }
+    if qualifier.digits == 0 {
+        return qualifier.scale == 0;
+    }
+    if qualifier.digits > 38 || qualifier.scale > qualifier.digits {
+        return false;
+    }
+    struct Digits {
+        integer_limit: u8,
+        fraction_limit: u8,
+        integer: u8,
+        fraction: u8,
+        after_dot: bool,
+        leading_zero: bool,
+    }
+    impl std::fmt::Write for Digits {
+        fn write_str(&mut self, text: &str) -> std::fmt::Result {
+            for byte in text.bytes() {
+                match byte {
+                    b'-' => {}
+                    b'.' => self.after_dot = true,
+                    b'0'..=b'9' if self.after_dot => {
+                        if self.fraction == self.fraction_limit {
+                            return Err(std::fmt::Error);
+                        }
+                        self.fraction += 1;
+                    }
+                    b'0' if self.integer == 0 && !self.leading_zero => {
+                        self.leading_zero = true;
+                    }
+                    b'0'..=b'9' => {
+                        if self.integer == self.integer_limit {
+                            return Err(std::fmt::Error);
+                        }
+                        self.integer += 1;
+                    }
+                    _ => return Err(std::fmt::Error),
+                }
+            }
+            Ok(())
+        }
+    }
+    let mut digits = Digits {
+        integer_limit: qualifier.digits - qualifier.scale,
+        fraction_limit: qualifier.scale,
+        integer: 0,
+        fraction: 0,
+        after_dot: false,
+        leading_zero: false,
+    };
+    number.write_xml(&mut digits).is_ok()
 }

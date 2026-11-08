@@ -11,8 +11,12 @@ use query_syntax::{MsgId, QueryError, with_deep_stack};
 use std::collections::HashSet;
 use std::sync::Arc;
 
-pub(super) fn resolve<'s>(stmt: &'s StmtS, ctx: &BindCtx<'_>) -> Result<Bound<'s>, ExecError> {
-    let (tables, constants) = storage_tables(stmt, ctx)?;
+pub(super) fn resolve<'s>(
+    stmt: &'s StmtS,
+    ctx: &BindCtx<'_>,
+    phase: super::PhaseContext<'_>,
+) -> Result<Bound<'s>, ExecError> {
+    let (tables, constants) = storage_tables(stmt, ctx, phase)?;
     for t in &tables {
         ctx.host.touch_table(*t).map_err(ExecError::Host)?;
     }
@@ -40,11 +44,13 @@ fn unbound(ctx: &BindCtx<'_>, t: crate::schema::QTableId) -> ExecError {
 fn storage_tables(
     stmt: &StmtS,
     ctx: &BindCtx<'_>,
+    phase: super::PhaseContext<'_>,
 ) -> Result<(Vec<TableId>, Vec<TableId>), ExecError> {
     let mut out = Vec::new();
     let mut constants = Vec::new();
     let mut seen = HashSet::new();
     for q in &stmt.tables {
+        let mut dependency = None;
         let t = ctx.schema.table(*q);
         let ids: Vec<TableId> = if t.kind == TableKind::Constants {
             if constants.is_empty() {
@@ -53,6 +59,13 @@ fn storage_tables(
             constants.clone()
         } else if crate::lower::is_accounting_balance(ctx.schema, *q) {
             let inputs = crate::lower::balance_inputs(ctx.schema, ctx.storage, ctx.map, *q)?;
+            if let Some(section) = phase.section(stmt, ctx.schema, *q) {
+                dependency = Some(
+                    ctx.storage
+                        .table(section)
+                        .ok_or_else(|| unbound(ctx, section))?,
+                );
+            }
             vec![inputs.main, inputs.options]
         } else if crate::lower::is_accounting_turnovers(ctx.schema, *q) {
             let inputs =
@@ -74,7 +87,7 @@ fn storage_tables(
         } else {
             vec![ctx.storage.table(*q).ok_or_else(|| unbound(ctx, *q))?]
         };
-        for id in ids {
+        for id in ids.into_iter().chain(dependency) {
             if seen.insert(id) {
                 out.push(id);
             }

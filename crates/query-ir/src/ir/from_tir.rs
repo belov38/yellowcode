@@ -16,10 +16,13 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
 mod autoorder;
+mod autoorder_union;
 mod hierarchy_union;
 mod qr8;
 mod totals;
 
+use autoorder_union::UnionAutoorder;
+pub(crate) use autoorder_union::uniform_union_autoorder;
 pub(crate) use hierarchy_union::hierarchy_union_shape;
 
 type R<T> = Result<T, BuildError>;
@@ -85,148 +88,6 @@ pub(crate) fn distinct_movement_presentation(
                     if raw_source == source && raw_field == field && derefs.is_empty()
             )
     })
-}
-
-pub(crate) fn uniform_union_autoorder(query: &Query, schema: &QuerySchema) -> Option<bool> {
-    if !query.autoorder
-        || query.parts.len() < 2
-        || query.unions.len() != query.parts.len() - 1
-        || query.unions.iter().any(|all| !*all)
-        || query.parts.iter().skip(1).any(|arm| arm.allowed)
-        || query.totals.is_some()
-    {
-        return None;
-    }
-    let [order] = query.order.as_slice() else {
-        return None;
-    };
-    if order.col != Some(0) {
-        return None;
-    }
-    let desc = match order.dir {
-        OrderDir::Asc => false,
-        OrderDir::Desc => true,
-        _ => return None,
-    };
-    let first = query.parts.first()?;
-    let [item] = first.items.as_slice() else {
-        return None;
-    };
-    let [atom] = item.expr.ty.refs.as_slice() else {
-        return None;
-    };
-    let info = schema.ref_info(*atom);
-    let required = match info.kind {
-        mdschema::MdKind::Catalog => StdRole::Description,
-        mdschema::MdKind::Document => StdRole::Date,
-        mdschema::MdKind::Enum => StdRole::Order,
-        _ => return None,
-    };
-    if !schema
-        .table(info.table)
-        .fields
-        .iter()
-        .any(|f| f.role == FieldRole::Std(required))
-    {
-        return None;
-    }
-    for arm in &query.parts {
-        let [item] = arm.items.as_slice() else {
-            return None;
-        };
-        let [source] = arm.sources.as_slice() else {
-            return None;
-        };
-        if arm.distinct
-            || arm.top.is_some()
-            || arm.group.is_some()
-            || arm.having.is_some()
-            || arm.for_update.is_some()
-            || !arm.index_by.is_empty()
-            || !arm.index_unique.is_empty()
-            || item.star
-            || item.unknown
-            || item.nested.is_some()
-            || item.expr.ty.atom_count() != 1
-            || item.expr.ty.refs.as_slice() != [*atom]
-            || source.all_fields
-            || !source.joins.is_empty()
-        {
-            return None;
-        }
-        let TKind::Field {
-            level: 0,
-            source: 0,
-            col: Col::Field(_),
-            derefs,
-        } = &item.expr.kind
-        else {
-            return None;
-        };
-        if !derefs.is_empty() {
-            return None;
-        }
-        let From::Table {
-            id,
-            args,
-            records,
-            drcr,
-            complement,
-            breakdown,
-            ..
-        } = &source.from
-        else {
-            return None;
-        };
-        if !matches!(schema.table(*id).kind, TableKind::Object(_))
-            || !args.is_empty()
-            || records.is_some()
-            || drcr.is_some()
-            || complement.is_some()
-            || !breakdown.is_empty()
-            || arm
-                .where_
-                .as_ref()
-                .is_some_and(|e| !union_autoorder_filter(e, schema, *id))
-        {
-            return None;
-        }
-    }
-    Some(desc)
-}
-
-fn union_autoorder_filter(expr: &TExpr, schema: &QuerySchema, table: QTableId) -> bool {
-    match &expr.kind {
-        TKind::InQuery { .. }
-        | TKind::Agg { .. }
-        | TKind::InList {
-            hierarchy: true, ..
-        } => return false,
-        TKind::Func {
-            f: Func::Presentation | Func::RefPresentation,
-            ..
-        } => return false,
-        TKind::Field {
-            level: 0,
-            source: 0,
-            col: Col::Field(field),
-            derefs,
-        } if derefs.is_empty() => {
-            if schema.field(table, *field).is_none_or(|field| {
-                field.nested.is_some() || field.role == FieldRole::Std(StdRole::Presentation)
-            }) {
-                return false;
-            }
-        }
-        TKind::Field { .. } => return false,
-        TKind::Cast { derefs, .. } if !derefs.is_empty() => return false,
-        _ => {}
-    }
-    let mut scalar = true;
-    crate::sema::select::each_child(expr, &mut |child| {
-        scalar = scalar && union_autoorder_filter(child, schema, table);
-    });
-    scalar
 }
 
 pub(crate) fn uniform_movement_union_presentation(query: &Query) -> Option<(u16, u16)> {
@@ -568,7 +429,7 @@ impl<'a> Builder<'a> {
         &mut self,
         q: &'a Query,
         first: &'a Select,
-        union_auto: Option<bool>,
+        union_auto: Option<UnionAutoorder>,
     ) -> R<(Rel, Vec<QType>)> {
         if self.query_depth == 1 {
             self.single_part = q.parts.len() == 1;
@@ -602,8 +463,13 @@ impl<'a> Builder<'a> {
         let mut auto_sort = Vec::new();
         for (i, p) in q.parts.iter().enumerate() {
             let mut part = self.select(p, None)?;
-            if let Some(desc) = union_auto {
-                self.union_autoorder_part(&mut part, &mut auto_sort, desc)?;
+            if let Some(order) = union_auto {
+                self.union_autoorder_part(
+                    &mut part,
+                    &mut auto_sort,
+                    order.reference_desc,
+                    order.scalar_desc,
+                )?;
             }
             parts.push(part);
             if i > 0 {
@@ -641,33 +507,6 @@ impl<'a> Builder<'a> {
             };
         }
         Ok((rel, types))
-    }
-
-    fn union_autoorder_part(
-        &mut self,
-        part: &mut Rel,
-        sort: &mut Vec<SortKey>,
-        desc: bool,
-    ) -> R<()> {
-        let Rel::Project { exprs, .. } = part else {
-            return internal("an autoordered union arm without a projection");
-        };
-        let [base] = exprs.as_slice() else {
-            return internal("an autoordered union arm without one raw reference");
-        };
-        let automatic = self.auto_keys(base)?;
-        if sort.is_empty() {
-            for (index, key) in automatic.iter().enumerate() {
-                sort.push(SortKey {
-                    expr: out(index + 1, key.ty.clone())?,
-                    desc,
-                });
-            }
-        } else if sort.len() != automatic.len() {
-            return internal("nonuniform automatic union key layout");
-        }
-        exprs.extend(automatic);
-        Ok(())
     }
 
     fn select(&mut self, sel: &'a Select, order: Option<&'a [tir::OrderKey]>) -> R<Rel> {

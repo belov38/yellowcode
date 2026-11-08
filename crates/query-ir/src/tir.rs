@@ -187,8 +187,7 @@ pub(crate) fn nested_from_select(query: &Query) -> Option<&Select> {
         let [select] = query.parts.as_slice() else {
             return None;
         };
-        (query.order.is_empty()
-            && !query.autoorder
+        (!query.autoorder
             && query.totals.is_none()
             && !select.distinct
             && select.top.is_none()
@@ -204,11 +203,12 @@ pub(crate) fn nested_from_select(query: &Query) -> Option<&Select> {
     if !source.joins.is_empty() {
         return None;
     }
-    let From::Subquery(query) = &source.from else {
+    let From::Subquery(inner_query) = &source.from else {
         return None;
     };
-    let inner = plain(query)?;
-    if inner.sources.len() > 1
+    let inner = plain(inner_query)?;
+    if !inner_query.order.is_empty()
+        || inner.sources.len() > 1
         || inner.sources.iter().any(|source| {
             !source.joins.is_empty()
                 || !matches!(&source.from, From::Table { args, records: None, drcr: None, .. } if args.is_empty())
@@ -237,7 +237,81 @@ pub(crate) fn nested_from_select(query: &Query) -> Option<&Select> {
     {
         return None;
     }
+    if !query
+        .order
+        .iter()
+        .all(|key| nested_forward_order(outer, inner, key))
+    {
+        return None;
+    }
     Some(inner)
+}
+
+fn nested_forward_order(outer: &Select, inner: &Select, key: &OrderKey) -> bool {
+    if !matches!(key.dir, OrderDir::Asc | OrderDir::Desc)
+        || !nested_forward_order_type(&key.expr.ty)
+    {
+        return false;
+    }
+    let TKind::Field {
+        level: 0,
+        source: 0,
+        col: Col::Column(column),
+        derefs,
+    } = &key.expr.kind
+    else {
+        return false;
+    };
+    if !derefs.is_empty() {
+        return false;
+    }
+    let Some(origin) = inner.items.get(usize::from(*column)) else {
+        return false;
+    };
+    if origin.nested.is_some() || origin.unknown || origin.expr.ty != key.expr.ty {
+        return false;
+    }
+    let direct = match &origin.expr.kind {
+        TKind::Field {
+            level: 0,
+            source: 0,
+            col: Col::Field(_),
+            derefs,
+        } => inner.sources.len() == 1 && derefs.is_empty(),
+        TKind::Const(
+            QValue::Null
+            | QValue::Bool(_)
+            | QValue::Number(_)
+            | QValue::String(_)
+            | QValue::Date(_),
+        ) => true,
+        _ => false,
+    };
+    if !direct {
+        return false;
+    }
+    let selected = |item: &Item| {
+        item.nested.is_none()
+            && !item.unknown
+            && item.expr.ty == key.expr.ty
+            && forwarded_nested_column(item) == Some(*column)
+            && nested_output_fields(outer, item).is_none()
+    };
+    match key.col {
+        Some(column) => outer.items.get(column).is_some_and(selected),
+        None => outer.items.iter().any(selected),
+    }
+}
+
+fn nested_forward_order_type(ty: &QType) -> bool {
+    ty.refs.is_empty()
+        && ty.others.is_empty()
+        && ty.string.is_none_or(|string| string.len > 0)
+        && (ty.null
+            || ty.boolean
+            || ty.number.is_some()
+            || ty.string.is_some()
+            || ty.date.is_some())
 }
 
 fn nested_forward_scalar(expr: &TExpr, remaining: u16, nested_owner: bool) -> bool {

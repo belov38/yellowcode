@@ -309,6 +309,17 @@ impl Printer<'_> {
                             a.resources,
                             a.date
                         );
+                        if let Some(ext1) = &a.ext1 {
+                            let _ = write!(
+                                self.out,
+                                " ext1-section={} owner={:?} ordinal={:?} turnover-only={:?} values={:?}",
+                                name(ext1.section),
+                                ext1.owner,
+                                ext1.ordinal,
+                                ext1.turnover_only,
+                                ext1.values
+                            );
+                        }
                         if let Some(child) = &a.chart_input {
                             self.w(" chart-input=");
                             self.rel(child);

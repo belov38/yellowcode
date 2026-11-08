@@ -97,8 +97,9 @@ fn check(
     ctx: &BindCtx<'_>,
     keys: &[Occurrence],
     temp_scan_seen: bool,
-    proof: Option<&mut provenance::Proof>,
+    mut proof: Option<&mut provenance::Proof>,
     aliases: &std::collections::HashMap<SrcId, SrcId>,
+    phase: super::PhaseContext<'_>,
 ) -> Result<Vec<Access>, ExecError> {
     let mut decisions = Vec::with_capacity(accesses.len());
     let mut restricted_standard = false;
@@ -138,7 +139,7 @@ fn check(
         &decisions,
         ctx.schema,
         temp_scan_seen,
-        proof,
+        proof.as_deref_mut(),
         aliases,
     )?;
     for (index, ((table, _), decision)) in accesses.iter().zip(&decisions).enumerate() {
@@ -156,6 +157,23 @@ fn check(
             calculation::validate(decision, table.table, code, ctx)?;
         }
     }
+    let ext1_pending = if phase.enabled()
+        && accesses.iter().any(|(source, fields)| {
+            crate::lower::is_accounting_balance(ctx.schema, source.table)
+                && fields.standard.contains(&crate::StdRole::ExtDimension(1))
+        }) {
+        accounting::balance_ext1_pending(
+            accesses,
+            keys,
+            &decisions,
+            ctx.schema,
+            temp_scan_seen,
+            proof,
+            aliases,
+        )?
+    } else {
+        accounting::BalanceExt1Pending::Clear
+    };
     for (index, ((table, fields), decision)) in accesses.iter().zip(&decisions).enumerate() {
         let balance = crate::lower::is_accounting_balance(ctx.schema, table.table);
         if (balance || matches!(keys.get(index), Some(Occurrence::BalanceChart(_))))
@@ -170,7 +188,22 @@ fn check(
                 fields.all,
                 &fields.standard,
                 &fields.fields,
+                phase,
             )?;
+            if phase.enabled() && fields.standard.contains(&crate::StdRole::ExtDimension(1)) {
+                match ext1_pending {
+                    accounting::BalanceExt1Pending::Shape => {
+                        return Err(ExecError::Later {
+                            what: "Q6a-AccountingBalanceExtDimensionChart",
+                            stage: "Q6a",
+                        });
+                    }
+                    accounting::BalanceExt1Pending::Clear
+                    | accounting::BalanceExt1Pending::DeferredPresentation
+                    | accounting::BalanceExt1Pending::DeferredHierarchy
+                    | accounting::BalanceExt1Pending::DeferredOpaque => {}
+                }
+            }
             let inputs =
                 crate::lower::balance_inputs(ctx.schema, ctx.storage, ctx.map, table.table)?;
             if [inputs.main, inputs.options, inputs.chart]
@@ -189,6 +222,16 @@ fn check(
                 &inputs,
                 &fields.fields,
             )?;
+            if phase.enabled() && fields.standard.contains(&crate::StdRole::ExtDimension(1)) {
+                crate::lower::balance_ext1_static_inputs(
+                    ctx.schema,
+                    ctx.storage,
+                    ctx.map,
+                    table.table,
+                    &inputs,
+                    &fields.fields,
+                )?;
+            }
         }
         if ctx.schema.table(table.table).kind == TableKind::Recalculation
             && ctx
@@ -428,6 +471,7 @@ enum Occurrence {
     Direct(crate::ir::SrcId),
     Schedule(Box<Occurrence>),
     BalanceChart(Box<Occurrence>),
+    BalanceExtDimensionTypes(Box<Occurrence>),
     Target(Path, QTableId),
     Presentation(Path, QTableId),
     HierarchyTarget(Path, QTableId),
@@ -444,6 +488,7 @@ struct Use {
 
 struct Collector<'a, 'p> {
     schema: &'a QuerySchema,
+    phase: super::PhaseContext<'a>,
     uses: Vec<Use>,
     index: std::collections::HashMap<Occurrence, usize>,
     opaque: u64,
@@ -460,6 +505,7 @@ impl<'a, 'p> Collector<'a, 'p> {
     fn new(schema: &'a QuerySchema) -> Self {
         Self {
             schema,
+            phase: super::PhaseContext::new(None),
             uses: Vec::new(),
             index: std::collections::HashMap::new(),
             opaque: 0,
@@ -471,6 +517,12 @@ impl<'a, 'p> Collector<'a, 'p> {
             proof: None,
             temp_origins: None,
         }
+    }
+
+    fn with_phase(schema: &'a QuerySchema, phase: super::PhaseContext<'a>) -> Self {
+        let mut collector = Self::new(schema);
+        collector.phase = phase;
+        collector
     }
 
     fn semantic_source(&self, src: SrcId) -> SrcId {
@@ -706,7 +758,7 @@ impl<'a, 'p> Collector<'a, 'p> {
                     && f.role == FieldRole::Virtual)
         });
         let role = f.role;
-        if let Some(i) = self.register(key, table, false)?
+        if let Some(i) = self.register(key.clone(), table, false)?
             && let Some(used) = self.uses.get_mut(i)
         {
             if let Some(md) = md
@@ -719,6 +771,16 @@ impl<'a, 'p> Collector<'a, 'p> {
             {
                 used.fields.standard.push(role);
             }
+        }
+        if self.phase.enabled()
+            && crate::lower::is_accounting_balance(self.schema, table)
+            && role == FieldRole::Std(StdRole::ExtDimension(1))
+            && let Some(section) = crate::lower::balance_ext1_section_identity(self.schema, table)
+        {
+            let dependency = Occurrence::BalanceExtDimensionTypes(Box::new(key));
+            self.role(dependency.clone(), section, StdRole::Ref)?;
+            self.role(dependency.clone(), section, StdRole::LineNumber)?;
+            self.role(dependency, section, StdRole::TurnoversOnly)?;
         }
         Ok(())
     }
@@ -931,6 +993,7 @@ impl<'a, 'p> Collector<'a, 'p> {
             self.temp_scan_seen,
             self.proof,
             &self.aliases,
+            self.phase,
         )?;
         Ok(Discovered {
             decisions: keys
@@ -1149,7 +1212,9 @@ fn turnovers_ir_guards(
         "Q6b-TurnoversStar" => 0,
         "Q6b-TurnoversPeriodFields" => 1,
         "Q6b-TurnoversDimensions" => 2,
-        "Q6b-TurnoversNonBalancedResource" => 3,
+        "Q6b-TurnoversNonBalancedResource"
+        | "Q6b-TurnoversNonBalancedExtDimensionFlag"
+        | "Q6b-TurnoversNonBalancedFlagBinding" => 3,
         "Q6b-TurnoversColumns" => 4,
         _ => 5,
     };
@@ -1185,14 +1250,15 @@ fn turnovers_ir_guards(
 fn discover(
     stmt: &StmtS,
     ctx: &BindCtx<'_>,
-    temps: Option<&dyn crate::bind::temp_provenance::TempOriginProvider>,
+    phase: super::PhaseContext<'_>,
 ) -> Result<Discovered, ExecError> {
+    let temps = phase.temp_origins();
     let schema = ctx.schema;
     let storage = ctx.storage;
-    let mut proof = provenance::Workspace::new();
+    let mut proof = provenance::Workspace::with_phase(phase);
     proof.set_temp_origins(temps, schema.version());
     let mut collector = query_syntax::with_deep_stack(stmt.max_depth, || {
-        let mut c = Collector::new(schema);
+        let mut c = Collector::with_phase(schema, phase);
         c.temp_origins = temps;
         if stmt.totals.is_some() || !stmt.nested.is_empty() {
             proof.disable();

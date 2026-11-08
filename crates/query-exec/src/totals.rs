@@ -1,9 +1,13 @@
+mod builder;
 pub(crate) mod payload;
+use builder::{
+    BuilderHash, BuilderKeyMap, BuilderKeySet, BuilderOrderKeys, BuilderVec, stable_sort_paid,
+};
 
 use payload::{PaidValue, PaidVec};
 use std::cell::Cell;
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
@@ -15,9 +19,7 @@ use query_syntax::ast::CmpOp;
 use crate::coll::{ExecCollation, Keys};
 use crate::eval::try_compare;
 use crate::key::{Key, try_key_of_totals};
-use crate::model::{
-    LedgerWork, SizingStack, VALUE_SIZE, key_model, try_charge_totals_key, vec_block,
-};
+use crate::model::{LedgerWork, SizingStack, VALUE_SIZE, vec_block};
 use crate::ops::MemBudget;
 use crate::source::{DataSource, ExecEnv, Row};
 
@@ -186,32 +188,6 @@ fn record_key_value<'v>(
     }
 }
 
-fn order_value_key(
-    value: &QValue,
-    mem: &MemBudget<'_>,
-    coll: ExecCollation<'_>,
-    temp: &mut u64,
-) -> Result<Key, ExecError> {
-    let mut paid = 0;
-    let charged = try_charge_totals_key(value, coll, &mut |bytes| {
-        mem.grow(bytes)?;
-        paid = crate::model::size_add(paid, bytes)?;
-        Ok(())
-    });
-    *temp = crate::model::size_add(*temp, paid)?;
-    charged?;
-    let key = try_key_of_totals(value, coll)?;
-    let kept = key_model(&key);
-    if kept > paid {
-        mem.grow(kept - paid)?;
-        *temp = crate::model::size_add(*temp, kept - paid)?;
-    } else {
-        mem.shrink(paid - kept);
-        *temp -= paid - kept;
-    }
-    Ok(key)
-}
-
 fn later(what: &'static str) -> ExecError {
     ExecError::Later { what, stage: "Q4" }
 }
@@ -274,14 +250,20 @@ fn reserve_backing<T>(
     let mut charge = ScratchCharge { mem, bytes: 0 };
     let mut replacement = prepaid_vec(capacity, mem, env)?;
     charge.bytes = bytes;
+    #[cfg(test)]
+    builder_tests::checkpoint()?;
     let mut work = LedgerWork::new(env);
     for value in values.drain(..) {
         work.step()?;
         replacement.push(value);
         #[cfg(test)]
+        builder_tests::checkpoint()?;
+        #[cfg(test)]
         accounting_invariants::move_checkpoint();
     }
     work.check()?;
+    #[cfg(test)]
+    builder_tests::checkpoint()?;
     drop(std::mem::replace(values, replacement));
     mem.shrink(old_bytes);
     charge.bytes = 0;
@@ -379,6 +361,93 @@ fn clone_spec_with(
     Ok(copy)
 }
 
+fn all_row_ids<'m, 'a>(
+    n: u32,
+    mem: &'m MemBudget<'a>,
+    env: &ExecEnv<'_>,
+) -> Result<BuilderVec<'m, 'a, u32>, ExecError> {
+    let mut all = BuilderVec::new(n as usize, mem, env)?;
+    let mut work = LedgerWork::new(env);
+    for r in 0..n {
+        work.step()?;
+        all.push(r, env)?;
+    }
+    work.check()?;
+    Ok(all)
+}
+
+fn detail_row_ids<'m, 'a>(
+    capacity: usize,
+    mem: &'m MemBudget<'a>,
+    env: &ExecEnv<'_>,
+) -> Result<BuilderVec<'m, 'a, u32>, ExecError> {
+    BuilderVec::new(capacity, mem, env)
+}
+
+fn overall_row_ids<'m, 'a>(
+    mem: &'m MemBudget<'a>,
+    env: &ExecEnv<'_>,
+    emit: impl FnOnce() -> Result<u32, ExecError>,
+) -> Result<BuilderVec<'m, 'a, u32>, ExecError> {
+    let mut out = BuilderVec::new(1, mem, env)?;
+    out.push(emit()?, env)?;
+    Ok(out)
+}
+
+fn group_stage<'m, 'a, T>(
+    capacity: usize,
+    mem: &'m MemBudget<'a>,
+    env: &ExecEnv<'_>,
+) -> Result<BuilderVec<'m, 'a, T>, ExecError> {
+    BuilderVec::new(capacity, mem, env)
+}
+
+fn group_indices<'m, 'a>(
+    len: usize,
+    mem: &'m MemBudget<'a>,
+    env: &ExecEnv<'_>,
+) -> Result<BuilderVec<'m, 'a, usize>, ExecError> {
+    let mut indices = BuilderVec::new(len, mem, env)?;
+    let mut work = LedgerWork::new(env);
+    for i in 0..len {
+        work.step()?;
+        indices.push(i, env)?;
+    }
+    work.check()?;
+    Ok(indices)
+}
+
+fn reorder_groups<'m, 'a, T>(
+    made: BuilderVec<'m, 'a, T>,
+    idx: BuilderVec<'m, 'a, usize>,
+    mem: &'m MemBudget<'a>,
+    env: &ExecEnv<'_>,
+) -> Result<BuilderVec<'m, 'a, T>, ExecError> {
+    let mut slots = BuilderVec::new(made.len(), mem, env)?;
+    let mut work = LedgerWork::new(env);
+    for value in made {
+        work.step()?;
+        slots.push(Some(value), env)?;
+    }
+    let mut out = BuilderVec::new(idx.len(), mem, env)?;
+    for k in idx {
+        work.step()?;
+        if let Some(value) = slots.get_mut(k).and_then(Option::take) {
+            out.push(value, env)?;
+        }
+    }
+    work.check()?;
+    Ok(out)
+}
+
+fn group_output_ids<'m, 'a>(
+    capacity: usize,
+    mem: &'m MemBudget<'a>,
+    env: &ExecEnv<'_>,
+) -> Result<BuilderVec<'m, 'a, u32>, ExecError> {
+    BuilderVec::new(capacity, mem, env)
+}
+
 pub fn build(
     spec: TotalsSpec,
     rows: &[Row],
@@ -388,11 +457,8 @@ pub fn build(
     mem: &MemBudget<'_>,
 ) -> Result<TotalsTree, ExecError> {
     let n = u32::try_from(rows.len()).map_err(|_| fatal("too many rows"))?;
-    let all: Vec<u32> = (0..n).collect();
-    mem.grow(vec_block(all.len(), 4))?;
-    let r = run(&spec, rows, Some(src), env, coll, mem, &all, &[], 0);
-    mem.shrink(vec_block(all.len(), 4));
-    r
+    let all = all_row_ids(n, mem, env)?;
+    run(&spec, rows, Some(src), env, coll, mem, &all, &[], 0)
 }
 
 pub(crate) fn build_sub(
@@ -464,18 +530,15 @@ fn run(
         links,
         totals,
         ticks: 0,
-        temp: 0,
-        infos: HashMap::new(),
+        infos: BuilderHash::new(mem),
         div_zero: Cell::new(false),
     };
     let r = b
         .level(0, subset, ctx, level)
         .and_then(|roots| b.push_links(&roots));
-    let temp = b.temp;
     let error = b.div_zero.get().then_some(TotalsError::DivisionByZero);
     let (records, links, totals) = (b.records, b.links, b.totals);
     drop(b.infos);
-    mem.shrink(temp);
     let roots = r?;
     let copy_charge = crate::model::totals_spec_copy_model(spec, mem, Some(env))?;
     mem.grow(copy_charge)?;
@@ -503,13 +566,13 @@ struct NodeInfo<'m, 'a> {
 
 struct Group<'m, 'a> {
     value: PaidValue<'m, 'a>,
-    rows: Vec<u32>,
+    rows: BuilderVec<'m, 'a, u32>,
 }
 
 struct Node<'m, 'a> {
     value: PaidValue<'m, 'a>,
     parent: Option<usize>,
-    children: Vec<usize>,
+    children: BuilderVec<'m, 'a, usize>,
     group: Option<usize>,
     first: usize,
     depth: u32,
@@ -532,8 +595,7 @@ struct Builder<'b, 'e> {
     links: Vec<u32>,
     totals: Vec<Row>,
     ticks: u64,
-    temp: u64,
-    infos: HashMap<(u32, [u8; 16]), Option<NodeInfo<'b, 'e>>>,
+    infos: BuilderHash<'b, 'e, (u32, [u8; 16]), Option<NodeInfo<'b, 'e>>>,
     div_zero: Cell<bool>,
 }
 
@@ -561,24 +623,15 @@ impl<'b, 'e> Builder<'b, 'e> {
         Ok(())
     }
 
-    fn temp(&mut self, n: u64) -> Result<(), ExecError> {
-        self.mem.grow(n)?;
-        self.temp += n;
-        Ok(())
-    }
-
     fn record_order_keys(
         &mut self,
         i: usize,
         row: &Row,
         first: Option<&Row>,
-    ) -> Result<Vec<Key>, ExecError> {
-        let spec = self.spec;
-        self.temp(vec_block(spec.order.len(), std::mem::size_of::<Key>()))?;
-        let mut keys = Vec::with_capacity(spec.order.len());
-        for order in &spec.order {
-            let value = record_key_value(order, i, row, first);
-            keys.push(order_value_key(value, self.mem, self.coll, &mut self.temp)?);
+    ) -> Result<BuilderOrderKeys<'b, 'e>, ExecError> {
+        let mut keys = BuilderOrderKeys::new(self.spec.order.len(), self.mem, self.env)?;
+        for order in &self.spec.order {
+            keys.push(record_key_value(order, i, row, first), self.coll, self.env)?;
         }
         Ok(keys)
     }
@@ -651,23 +704,19 @@ impl<'b, 'e> Builder<'b, 'e> {
         rows: &[u32],
         ctx: &[(usize, QValue)],
         level: u32,
-    ) -> Result<Vec<u32>, ExecError> {
+    ) -> Result<BuilderVec<'b, 'e, u32>, ExecError> {
         if rows.is_empty() {
-            return Ok(Vec::new());
+            return BuilderVec::new(0, self.mem, self.env);
         }
         let spec = self.spec;
         let Some(point) = spec.points.get(i) else {
-            self.temp(vec_block(rows.len(), 4))?;
-            let mut out = Vec::with_capacity(rows.len());
+            let mut out = detail_row_ids(rows.len(), self.mem, self.env)?;
             for &r in rows {
                 self.tick()?;
-                out.push(self.push_record(
-                    RecordType::Detail,
-                    None,
-                    level,
-                    RowRef::Detail(r),
-                    &[],
-                )?);
+                out.push(
+                    self.push_record(RecordType::Detail, None, level, RowRef::Detail(r), &[])?,
+                    self.env,
+                )?;
             }
             return Ok(out);
         };
@@ -675,49 +724,39 @@ impl<'b, 'e> Builder<'b, 'e> {
             let row = self.total_row(rows, ctx)?;
             let children = self.level(i + 1, rows, ctx, level + 1)?;
             let row = self.push_total(row)?;
-            return Ok(vec![self.push_record(
-                RecordType::Overall,
-                Some(i),
-                level,
-                row,
-                &children,
-            )?]);
+            return overall_row_ids(self.mem, self.env, || {
+                self.push_record(RecordType::Overall, Some(i), level, row, &children)
+            });
         };
         match point.hierarchy {
             HierarchyMode::No => {
                 let groups = self.group(rows, |b, r| b.cell(r, col))?;
-                let mut made: Vec<(Group<'b, 'e>, PaidRow<'b, 'e>)> =
-                    Vec::with_capacity(groups.len());
+                let mut made = group_stage(groups.len(), self.mem, self.env)?;
                 for g in groups {
                     let inner = payload::context(ctx, col, &g.value, self.mem, Some(self.env))?;
                     let row = self.total_row(&g.rows, &inner)?;
-                    made.push((g, row));
+                    made.push((g, row), self.env)?;
                 }
                 if !spec.order.is_empty() {
-                    self.temp(vec_block(made.len(), std::mem::size_of::<Vec<Key>>()))?;
-                    let mut ordered = Vec::with_capacity(made.len());
+                    let mut ordered = BuilderVec::new(made.len(), self.mem, self.env)?;
                     for (group, row) in &made {
-                        ordered.push(self.record_order_keys(
-                            i,
-                            row,
-                            self.first_row(&group.rows),
-                        )?);
+                        ordered.push(
+                            self.record_order_keys(i, row, self.first_row(&group.rows))?,
+                            self.env,
+                        )?;
                     }
-                    let mut idx: Vec<usize> = (0..made.len()).collect();
-                    idx.sort_by(|a, b| match (ordered.get(*a), ordered.get(*b)) {
-                        (Some(x), Some(y)) => compare_keys(x, y, &spec.order),
-                        _ => Ordering::Equal,
-                    });
-                    let mut slots: Vec<Option<(Group<'b, 'e>, PaidRow<'b, 'e>)>> =
-                        made.into_iter().map(Some).collect();
-                    made = idx
-                        .into_iter()
-                        .filter_map(|k| slots.get_mut(k).and_then(Option::take))
-                        .collect();
+                    let mut idx = group_indices(made.len(), self.mem, self.env)?;
+                    stable_sort_paid(&mut idx, self.mem, self.env, |a, b| {
+                        match (ordered.get(*a), ordered.get(*b)) {
+                            (Some(x), Some(y)) => compare_keys(x, y, &spec.order),
+                            _ => Ordering::Equal,
+                        }
+                    })?;
+                    made = reorder_groups(made, idx, self.mem, self.env)?;
                 }
-                let mut out = Vec::with_capacity(made.len());
+                let mut out = group_output_ids(made.len(), self.mem, self.env)?;
                 for (g, row) in made {
-                    out.push(self.group_record(i, col, &g, row, ctx, level)?);
+                    out.push(self.group_record(i, col, &g, row, ctx, level)?, self.env)?;
                 }
                 Ok(out)
             }
@@ -744,48 +783,41 @@ impl<'b, 'e> Builder<'b, 'e> {
         &mut self,
         rows: &[u32],
         mut value: impl FnMut(&mut Self, u32) -> Result<PaidValue<'b, 'e>, ExecError>,
-    ) -> Result<Vec<Group<'b, 'e>>, ExecError> {
-        let mut index: HashMap<Key, usize> = HashMap::new();
-        let mut groups: Vec<Group<'b, 'e>> = Vec::new();
+    ) -> Result<BuilderVec<'b, 'e, Group<'b, 'e>>, ExecError> {
+        let mut index = BuilderKeyMap::<usize>::new(self.mem);
+        let mut groups: BuilderVec<'b, 'e, Group<'b, 'e>> = BuilderVec::new(0, self.mem, self.env)?;
         for &r in rows {
             self.tick()?;
             let v = value(self, r)?;
-            let k = try_key_of_totals(&v, self.coll)?;
-            match index.get(&k) {
-                Some(&g) => {
-                    self.temp(4)?;
-                    if let Some(g) = groups.get_mut(g) {
-                        g.rows.push(r);
-                    }
-                }
-                None => {
-                    self.temp(
-                        key_model(&k)
-                            + 48
-                            + vec_block(1, std::mem::size_of::<Group<'b, 'e>>())
-                            + vec_block(1, 4),
-                    )?;
-                    index.insert(k, groups.len());
-                    groups.push(Group {
+            let mut key =
+                crate::ops::hier::TotalsKey::new(&v, self.mem, self.coll, Some(self.env))?;
+            if let Some(&g) = index.get(key.as_key()) {
+                let group = groups.get_mut(g).ok_or_else(crate::model::invalid_size)?;
+                group.rows.push(r, self.env)?;
+            } else {
+                key.retain()?;
+                groups.reserve(1, self.env)?;
+                let mut ids = BuilderVec::new(1, self.mem, self.env)?;
+                ids.push(r, self.env)?;
+                index.insert(key, groups.len())?;
+                groups.push(
+                    Group {
                         value: v,
-                        rows: vec![r],
-                    });
-                }
+                        rows: ids,
+                    },
+                    self.env,
+                )?;
             }
         }
         Ok(groups)
     }
 
-    fn table_of(&self, i: usize, v: &QValue) -> Option<HierTableSpec> {
+    fn table_of(&self, i: usize, v: &QValue) -> Option<&'b HierTableSpec> {
         match v {
-            QValue::Ref { table, id } if id.iter().any(|b| *b != 0) => self
-                .spec
-                .points
-                .get(i)?
-                .hier
-                .iter()
-                .find(|t| t.number == *table)
-                .cloned(),
+            QValue::Ref { table, id } if id.iter().any(|b| *b != 0) => {
+                let spec = self.spec;
+                spec.points.get(i)?.hier.iter().find(|t| t.number == *table)
+            }
             _ => None,
         }
     }
@@ -814,9 +846,7 @@ impl<'b, 'e> Builder<'b, 'e> {
                 return Err(later("переход к группировке с иерархией"));
             };
             self.tick()?;
-            let mut fields = vec![table.id, table.parent];
-            fields.extend(table.folder);
-            fields.extend(table.keys.iter().flatten().map(|(field, _)| *field));
+            let fields = hierarchy_fields(table, self.mem, self.env)?;
             let row = source.get_by_id_fields(table.table, v, &fields)?;
             let info = if let Some(row) = row {
                 let at = |field: FieldId| row.get(usize::from(field.0)).unwrap_or(&QValue::Null);
@@ -857,10 +887,17 @@ impl<'b, 'e> Builder<'b, 'e> {
             } else {
                 None
             };
-            self.temp(64)?;
-            self.infos.insert(key, info);
+            self.cache_info(key, info)?;
         }
         Ok(self.infos.get(&key).and_then(Option::as_ref))
+    }
+
+    fn cache_info(
+        &mut self,
+        key: (u32, [u8; 16]),
+        info: Option<NodeInfo<'b, 'e>>,
+    ) -> Result<(), ExecError> {
+        self.infos.insert(key, info)
     }
 
     fn parents_among(
@@ -868,25 +905,19 @@ impl<'b, 'e> Builder<'b, 'e> {
         i: usize,
         col: usize,
         rows: &[u32],
-    ) -> Result<HashSet<Key>, ExecError> {
-        let mut seen: HashSet<Key> = HashSet::new();
-        let mut out: HashSet<Key> = HashSet::new();
+    ) -> Result<BuilderKeySet<'b, 'e>, ExecError> {
+        let mut seen = BuilderKeySet::new(self.mem);
+        let mut out = BuilderKeySet::new(self.mem);
         for &r in rows {
             self.tick()?;
             let v = self.cell(r, col)?;
-            let k = try_key_of_totals(&v, self.coll)?;
-            if seen.contains(&k) {
+            if !seen.insert(&v, self.coll, Some(self.env))? {
                 continue;
             }
-            self.temp(key_model(&k) + 48)?;
-            seen.insert(k);
             let coll = self.coll;
+            let env = self.env;
             if let Some(p) = self.info(i, &v)?.and_then(|n| n.parent.as_ref()) {
-                let pk = try_key_of_totals(p, coll)?;
-                if !out.contains(&pk) {
-                    self.temp(key_model(&pk) + 48)?;
-                    out.insert(pk);
-                }
+                out.insert(p, coll, Some(env))?;
             }
         }
         Ok(out)
@@ -896,7 +927,7 @@ impl<'b, 'e> Builder<'b, 'e> {
         &mut self,
         i: usize,
         v: PaidValue<'b, 'e>,
-        parents: &HashSet<Key>,
+        parents: &BuilderKeySet<'b, 'e>,
     ) -> Result<PaidValue<'b, 'e>, ExecError> {
         if self.empty_of_table(i, &v) {
             return Ok(v);
@@ -912,7 +943,7 @@ impl<'b, 'e> Builder<'b, 'e> {
         };
         let parent_itself = match table.folder {
             Some(_) => info.folder,
-            None => parents.contains(&try_key_of_totals(&v, coll)?),
+            None => parents.contains(&v, coll, Some(env))?,
         };
         if parent_itself {
             return Ok(v);
@@ -936,9 +967,9 @@ impl<'b, 'e> Builder<'b, 'e> {
         value: &QValue,
         row: &Row,
         rows: &[u32],
-    ) -> Result<Vec<Key>, ExecError> {
+    ) -> Result<BuilderOrderKeys<'b, 'e>, ExecError> {
         if self.spec.order.is_empty() {
-            return Ok(Vec::new());
+            return BuilderOrderKeys::new(0, self.mem, self.env);
         }
         let _ = self.info(i, value)?;
         let info = match value {
@@ -947,11 +978,10 @@ impl<'b, 'e> Builder<'b, 'e> {
         };
         let spec = self.spec;
         let first = rows.first().and_then(|r| self.rows.get(*r as usize));
-        let bytes = vec_block(spec.order.len(), std::mem::size_of::<Key>());
-        self.mem.grow(bytes)?;
-        self.temp = crate::model::size_add(self.temp, bytes)?;
-        let mut keys = Vec::with_capacity(spec.order.len());
+        let mut keys = BuilderOrderKeys::new(spec.order.len(), self.mem, self.env)?;
+        let mut work = LedgerWork::new(self.env);
         for (index, order) in spec.order.iter().enumerate() {
+            work.step()?;
             let mut input = record_key_value(order, i, row, first);
             if let KeySource::Point { point, .. } = order.source
                 && point == i
@@ -966,8 +996,9 @@ impl<'b, 'e> Builder<'b, 'e> {
             {
                 input = field;
             }
-            keys.push(order_value_key(input, self.mem, self.coll, &mut self.temp)?);
+            keys.push(input, self.coll, self.env)?;
         }
+        work.check()?;
         Ok(keys)
     }
 
@@ -978,7 +1009,7 @@ impl<'b, 'e> Builder<'b, 'e> {
         rows: &[u32],
         ctx: &[(usize, QValue)],
         level: u32,
-    ) -> Result<Vec<u32>, ExecError> {
+    ) -> Result<BuilderVec<'b, 'e, u32>, ExecError> {
         let only = self
             .spec
             .points
@@ -987,7 +1018,7 @@ impl<'b, 'e> Builder<'b, 'e> {
         let parents = if only {
             self.parents_among(i, col, rows)?
         } else {
-            HashSet::new()
+            BuilderKeySet::new(self.mem)
         };
         let groups = self.group(rows, |b, r| {
             let v = b.cell(r, col)?;
@@ -998,54 +1029,18 @@ impl<'b, 'e> Builder<'b, 'e> {
             }
         })?;
         let mut nodes = self.nodes(i, &groups, only)?;
-        let order = post_order(&nodes);
-        for &k in &order {
-            let first = nodes.get(k).map_or(usize::MAX, |n| {
-                n.children
-                    .iter()
-                    .filter_map(|c| nodes.get(*c).map(|c| c.first))
-                    .fold(n.group.unwrap_or(usize::MAX).min(n.first), usize::min)
-            });
-            if let Some(n) = nodes.get_mut(k) {
-                n.first = first;
-            }
-        }
-        for &k in order.iter().rev() {
-            let d = nodes
-                .get(k)
-                .and_then(|n| n.parent)
-                .and_then(|p| nodes.get(p))
-                .map_or(0, |p| p.depth + 1);
-            if let Some(n) = nodes.get_mut(k) {
-                n.depth = d;
-            }
-        }
-        let mut under: Vec<Vec<u32>> = nodes.iter().map(|_| Vec::new()).collect();
-        for &k in &order {
-            let mut acc: Vec<u32> = nodes
-                .get(k)
-                .and_then(|n| n.group)
-                .and_then(|g| groups.get(g))
-                .map(|g| g.rows.clone())
-                .unwrap_or_default();
-            for c in nodes.get(k).map(|n| n.children.clone()).unwrap_or_default() {
-                if let Some(rows) = under.get(c) {
-                    acc.extend_from_slice(rows);
-                }
-            }
-            acc.sort_unstable();
-            self.temp(vec_block(acc.len(), 4))?;
-            if let Some(slot) = under.get_mut(k) {
-                *slot = acc;
-            }
-        }
-        let mut node_rows: Vec<Option<PaidRow<'b, 'e>>> = nodes.iter().map(|_| None).collect();
-        let mut group_rows: Vec<Option<PaidRow<'b, 'e>>> = groups.iter().map(|_| None).collect();
+        let order = post_order(&nodes, self.mem, self.env)?;
+        hierarchy_first_and_depth(&mut nodes, &order, self.env)?;
+        let under = hierarchy_under(&nodes, &groups, &order, self.mem, self.env)?;
+        let mut node_rows: BuilderVec<'b, 'e, Option<PaidRow<'b, 'e>>> =
+            hierarchy_slots(nodes.len(), self.mem, self.env)?;
+        let mut group_rows: BuilderVec<'b, 'e, Option<PaidRow<'b, 'e>>> =
+            hierarchy_slots(groups.len(), self.mem, self.env)?;
         for k in 0..nodes.len() {
             let Some(node) = nodes.get(k) else { continue };
             let inner = payload::context(ctx, col, &node.value, self.mem, Some(self.env))?;
             if !node.children.is_empty() {
-                let rows = under.get(k).cloned().unwrap_or_default();
+                let rows = hierarchy_total_rows(&under, k, self.mem, self.env)?;
                 let row = self.total_row(&rows, &inner)?;
                 if let Some(slot) = node_rows.get_mut(k) {
                     *slot = Some(row);
@@ -1061,15 +1056,13 @@ impl<'b, 'e> Builder<'b, 'e> {
             }
         }
         let sorted = !self.spec.order.is_empty();
-        let mut node_keys: Vec<Vec<Key>> = Vec::new();
-        let mut group_keys: Vec<Vec<Key>> = Vec::new();
+        let mut node_keys: BuilderVec<'b, 'e, BuilderOrderKeys<'b, 'e>> =
+            hierarchy_list(0, self.mem, self.env)?;
+        let mut group_keys: BuilderVec<'b, 'e, BuilderOrderKeys<'b, 'e>> =
+            hierarchy_list(0, self.mem, self.env)?;
         if sorted {
-            self.temp(
-                vec_block(nodes.len(), std::mem::size_of::<Vec<Key>>())
-                    + vec_block(groups.len(), std::mem::size_of::<Vec<Key>>()),
-            )?;
-            node_keys = Vec::with_capacity(nodes.len());
-            group_keys = Vec::with_capacity(groups.len());
+            node_keys = hierarchy_list(nodes.len(), self.mem, self.env)?;
+            group_keys = hierarchy_list(groups.len(), self.mem, self.env)?;
             for k in 0..nodes.len() {
                 let (value, group, is_hier) = match nodes.get(k) {
                     Some(n) => (&*n.value, n.group, !n.children.is_empty()),
@@ -1082,9 +1075,9 @@ impl<'b, 'e> Builder<'b, 'e> {
                 };
                 let empty = Vec::new();
                 let row_of_node = row_of_node.map_or(&empty, |row| &row.row);
-                let rows = under.get(k).cloned().unwrap_or_default();
+                let rows = hierarchy_order_rows(&under, k, self.mem, self.env)?;
                 let ks = self.node_keys(i, value, row_of_node, &rows)?;
-                node_keys.push(ks);
+                node_keys.push(ks, self.env)?;
             }
             for (g, group) in groups.iter().enumerate() {
                 let empty = Vec::new();
@@ -1093,49 +1086,29 @@ impl<'b, 'e> Builder<'b, 'e> {
                     .and_then(Option::as_ref)
                     .map_or(&empty, |row| &row.row);
                 let ks = self.node_keys(i, &group.value, row, &group.rows)?;
-                group_keys.push(ks);
+                group_keys.push(ks, self.env)?;
             }
         }
-        let spec_order = &self.spec.order;
-        let kid_first = |k: Kid, nodes: &[Node<'_, '_>]| match k {
-            Kid::Node(n) => nodes.get(n).map_or(usize::MAX, |x| x.first),
-            Kid::Own(g) => g,
+        let arranging = HierarchyOrder {
+            nodes: &nodes,
+            only,
+            node_keys: &node_keys,
+            group_keys: &group_keys,
+            spec_order: &self.spec.order,
         };
-        let kid_keys = |k: Kid| -> Option<&Vec<Key>> {
-            match k {
-                Kid::Node(n) => node_keys.get(n),
-                Kid::Own(g) => group_keys.get(g),
+        let mut roots = hierarchy_root_kids(&nodes, self.mem, self.env)?;
+        hierarchy_arrange(&mut roots, &arranging, self.mem, self.env)?;
+        let mut kids_of: BuilderVec<'b, 'e, BuilderVec<'b, 'e, Kid>> =
+            hierarchy_list(nodes.len(), self.mem, self.env)?;
+        for node in nodes.iter() {
+            let mut kids = hierarchy_child_kids(node, self.mem, self.env)?;
+            if !node.children.is_empty() {
+                hierarchy_arrange(&mut kids, &arranging, self.mem, self.env)?;
             }
-        };
-        let arrange = |kids: &mut Vec<Kid>, nodes: &[Node<'_, '_>]| {
-            kids.sort_by_key(|k| (only && matches!(k, Kid::Own(_)), kid_first(*k, nodes)));
-            if sorted {
-                kids.sort_by(|a, b| match (kid_keys(*a), kid_keys(*b)) {
-                    (Some(x), Some(y)) => compare_keys(x, y, spec_order),
-                    _ => Ordering::Equal,
-                });
-            }
-        };
-        let mut roots: Vec<Kid> = (0..nodes.len())
-            .filter(|k| nodes.get(*k).is_some_and(|n| n.parent.is_none()))
-            .map(Kid::Node)
-            .collect();
-        arrange(&mut roots, &nodes);
-        let mut kids_of: Vec<Vec<Kid>> = Vec::with_capacity(nodes.len());
-        for k in 0..nodes.len() {
-            let mut kids: Vec<Kid> = Vec::new();
-            if let Some(n) = nodes.get(k)
-                && !n.children.is_empty()
-            {
-                if let Some(g) = n.group {
-                    kids.push(Kid::Own(g));
-                }
-                kids.extend(n.children.iter().map(|c| Kid::Node(*c)));
-                arrange(&mut kids, &nodes);
-            }
-            kids_of.push(kids);
+            kids_of.push(kids, self.env)?;
         }
-        let mut ids: Vec<Option<u32>> = nodes.iter().map(|_| None).collect();
+        let mut ids: BuilderVec<'b, 'e, Option<u32>> =
+            hierarchy_slots(nodes.len(), self.mem, self.env)?;
         for &k in &order {
             let Some(node) = nodes.get(k) else { continue };
             let lvl = level + node.depth;
@@ -1150,25 +1123,24 @@ impl<'b, 'e> Builder<'b, 'e> {
                     .ok_or_else(|| fatal("missing total row"))?;
                 self.group_record(i, col, g, row, ctx, lvl)?
             } else {
-                let mut children: Vec<u32> = Vec::new();
-                for kid in kids_of.get(k).cloned().unwrap_or_default() {
-                    match kid {
+                let children = hierarchy_child_ids(
+                    kids_of.get(k).map_or(&[], |kids| kids.as_slice()),
+                    self.mem,
+                    self.env,
+                    |kid| match kid {
                         Kid::Own(gi) => {
                             if let Some(g) = groups.get(gi) {
                                 let row = group_rows
                                     .get_mut(gi)
                                     .and_then(Option::take)
                                     .ok_or_else(|| fatal("missing total row"))?;
-                                children.push(self.group_record(i, col, g, row, ctx, lvl + 1)?);
+                                return self.group_record(i, col, g, row, ctx, lvl + 1).map(Some);
                             }
+                            Ok(None)
                         }
-                        Kid::Node(c) => {
-                            if let Some(Some(id)) = ids.get(c) {
-                                children.push(*id);
-                            }
-                        }
-                    }
-                }
+                        Kid::Node(c) => Ok(ids.get(c).copied().flatten()),
+                    },
+                )?;
                 let row = node_rows
                     .get_mut(k)
                     .and_then(Option::take)
@@ -1181,13 +1153,7 @@ impl<'b, 'e> Builder<'b, 'e> {
             }
         }
         nodes.clear();
-        Ok(roots
-            .into_iter()
-            .filter_map(|r| match r {
-                Kid::Node(n) => ids.get(n).copied().flatten(),
-                Kid::Own(_) => None,
-            })
-            .collect())
+        hierarchy_root_ids(roots, &ids, self.mem, self.env)
     }
 
     fn nodes(
@@ -1195,31 +1161,42 @@ impl<'b, 'e> Builder<'b, 'e> {
         i: usize,
         groups: &[Group<'b, 'e>],
         only: bool,
-    ) -> Result<Vec<Node<'b, 'e>>, ExecError> {
-        let mut nodes: Vec<Node<'b, 'e>> = Vec::new();
-        let mut index: HashMap<Key, usize> = HashMap::new();
-        let node_bytes =
-            |k: &Key| key_model(k) + 48 + vec_block(1, std::mem::size_of::<Node<'b, 'e>>());
+    ) -> Result<BuilderVec<'b, 'e, Node<'b, 'e>>, ExecError> {
+        let mut nodes: BuilderVec<'b, 'e, Node<'b, 'e>> = BuilderVec::new(0, self.mem, self.env)?;
+        let mut index = BuilderKeyMap::<usize>::new(self.mem);
         for (gi, g) in groups.iter().enumerate() {
-            let k = try_key_of_totals(&g.value, self.coll)?;
-            let at = match index.get(&k) {
-                Some(&n) => n,
-                None => {
-                    self.temp(node_bytes(&k))?;
-                    index.insert(k, nodes.len());
-                    nodes.push(Node {
-                        value: PaidValue::copy(&g.value, self.mem, Some(self.env))?,
-                        parent: None,
-                        children: Vec::new(),
-                        group: None,
-                        first: gi,
-                        depth: 0,
-                    });
-                    nodes.len() - 1
+            let at = {
+                let mut key = crate::ops::hier::TotalsKey::new(
+                    &g.value,
+                    self.mem,
+                    self.coll,
+                    Some(self.env),
+                )?;
+                if let Some(&n) = index.get(key.as_key()) {
+                    n
+                } else {
+                    key.retain()?;
+                    nodes.reserve(1, self.env)?;
+                    let value = PaidValue::copy(&g.value, self.mem, Some(self.env))?;
+                    let children = BuilderVec::new(0, self.mem, self.env)?;
+                    let at = nodes.len();
+                    index.insert(key, at)?;
+                    nodes.push(
+                        Node {
+                            value,
+                            parent: None,
+                            children,
+                            group: None,
+                            first: gi,
+                            depth: 0,
+                        },
+                        self.env,
+                    )?;
+                    at
                 }
             };
-            if let Some(n) = nodes.get_mut(at) {
-                n.group = Some(gi);
+            if let Some(node) = nodes.get_mut(at) {
+                node.group = Some(gi);
             }
             let mut cur = at;
             loop {
@@ -1236,83 +1213,50 @@ impl<'b, 'e> Builder<'b, 'e> {
                     break;
                 };
                 let parent = PaidValue::copy(parent, mem, Some(env))?;
-                let pk = try_key_of_totals(&parent, coll)?;
-                match index.get(&pk) {
-                    Some(&p) => {
-                        if !is_ancestor_or_self(&nodes, cur, p)
-                            && let Some(n) = nodes.get_mut(cur)
-                        {
-                            n.parent = Some(p);
-                        }
-                        break;
+                let mut key = crate::ops::hier::TotalsKey::new(&parent, mem, coll, Some(env))?;
+                if let Some(&p) = index.get(key.as_key()) {
+                    if !is_ancestor_or_self(&nodes, cur, p)
+                        && let Some(node) = nodes.get_mut(cur)
+                    {
+                        node.parent = Some(p);
                     }
-                    None => {
-                        self.temp(node_bytes(&pk))?;
-                        index.insert(pk, nodes.len());
-                        nodes.push(Node {
-                            value: parent,
-                            parent: None,
-                            children: Vec::new(),
-                            group: None,
-                            first: gi,
-                            depth: 0,
-                        });
-                        let p = nodes.len() - 1;
-                        if let Some(n) = nodes.get_mut(cur) {
-                            n.parent = Some(p);
-                        }
-                        cur = p;
-                    }
+                    break;
                 }
+                key.retain()?;
+                nodes.reserve(1, env)?;
+                let children = BuilderVec::new(0, mem, env)?;
+                let p = nodes.len();
+                index.insert(key, p)?;
+                nodes.push(
+                    Node {
+                        value: parent,
+                        parent: None,
+                        children,
+                        group: None,
+                        first: gi,
+                        depth: 0,
+                    },
+                    env,
+                )?;
+                if let Some(node) = nodes.get_mut(cur) {
+                    node.parent = Some(p);
+                }
+                cur = p;
             }
         }
         if only {
-            let folders: Vec<u32> = self
+            let tables = self
                 .spec
                 .points
                 .get(i)
-                .map(|p| {
-                    p.hier
-                        .iter()
-                        .filter(|t| t.folder.is_some())
-                        .map(|t| t.number)
-                        .collect()
-                })
-                .unwrap_or_default();
-            let empties: Vec<(u32, usize)> = nodes
-                .iter()
-                .enumerate()
-                .filter(|(_, n)| {
-                    self.empty_of_table(i, &n.value)
-                        && matches!(&*n.value, QValue::Ref { table, .. } if folders.contains(table))
-                })
-                .filter_map(|(k, n)| match &*n.value {
-                    QValue::Ref { table, .. } => Some((*table, k)),
-                    _ => None,
-                })
-                .collect();
-            for (table, e) in empties {
-                for k in 0..nodes.len() {
-                    let link = k != e
-                        && nodes.get(k).is_some_and(|n| {
-                            n.parent.is_none()
-                                && !is_empty_ref(&n.value)
-                                && matches!(&*n.value, QValue::Ref { table: t, .. } if *t == table)
-                        });
-                    if link && let Some(n) = nodes.get_mut(k) {
-                        n.parent = Some(e);
-                    }
-                }
-            }
+                .map_or(&[][..], |p| p.hier.as_slice());
+            let folders = hierarchy_folders(tables, self.mem, self.env)?;
+            let empties = hierarchy_empties(&nodes, &folders, self.mem, self.env, |value| {
+                self.empty_of_table(i, value)
+            })?;
+            hierarchy_link_empties(&mut nodes, empties, self.env)?;
         }
-        for k in 0..nodes.len() {
-            if let Some(p) = nodes.get(k).and_then(|n| n.parent) {
-                self.temp(4)?;
-                if let Some(pn) = nodes.get_mut(p) {
-                    pn.children.push(k);
-                }
-            }
-        }
+        hierarchy_children(&mut nodes, self.env)?;
         Ok(nodes)
     }
 
@@ -1974,21 +1918,395 @@ fn is_ancestor_or_self(nodes: &[Node<'_, '_>], a: usize, b: usize) -> bool {
     false
 }
 
-fn post_order(nodes: &[Node<'_, '_>]) -> Vec<usize> {
-    let mut out = Vec::with_capacity(nodes.len());
-    let mut stack: Vec<(usize, bool)> = (0..nodes.len())
-        .filter(|k| nodes.get(*k).is_some_and(|n| n.parent.is_none()))
-        .map(|k| (k, false))
-        .collect();
-    while let Some((k, done)) = stack.pop() {
-        if done {
-            out.push(k);
-            continue;
-        }
-        stack.push((k, true));
-        if let Some(n) = nodes.get(k) {
-            stack.extend(n.children.iter().map(|c| (*c, false)));
+fn hierarchy_under_slots<'m, 'a>(
+    nodes: &[Node<'_, '_>],
+    mem: &'m MemBudget<'a>,
+    env: &ExecEnv<'_>,
+) -> Result<BuilderVec<'m, 'a, BuilderVec<'m, 'a, u32>>, ExecError> {
+    let mut under = BuilderVec::new(nodes.len(), mem, env)?;
+    for _ in nodes {
+        under.push(BuilderVec::new(0, mem, env)?, env)?;
+    }
+    Ok(under)
+}
+
+fn hierarchy_slots<'m, 'a, T>(
+    len: usize,
+    mem: &'m MemBudget<'a>,
+    env: &ExecEnv<'_>,
+) -> Result<BuilderVec<'m, 'a, Option<T>>, ExecError> {
+    let mut out = BuilderVec::new(len, mem, env)?;
+    let mut work = LedgerWork::new(env);
+    for _ in 0..len {
+        work.step()?;
+        out.push(None, env)?;
+    }
+    work.check()?;
+    Ok(out)
+}
+fn hierarchy_list<'m, 'a, T>(
+    capacity: usize,
+    mem: &'m MemBudget<'a>,
+    env: &ExecEnv<'_>,
+) -> Result<BuilderVec<'m, 'a, T>, ExecError> {
+    BuilderVec::new(capacity, mem, env)
+}
+fn hierarchy_root_kids<'m, 'a>(
+    nodes: &[Node<'_, '_>],
+    mem: &'m MemBudget<'a>,
+    env: &ExecEnv<'_>,
+) -> Result<BuilderVec<'m, 'a, Kid>, ExecError> {
+    let mut roots = BuilderVec::new(nodes.len(), mem, env)?;
+    let mut work = LedgerWork::new(env);
+    for (index, node) in nodes.iter().enumerate() {
+        work.step()?;
+        if node.parent.is_none() {
+            roots.push(Kid::Node(index), env)?;
         }
     }
-    out
+    work.check()?;
+    Ok(roots)
+}
+fn hierarchy_child_kids<'m, 'a>(
+    node: &Node<'_, '_>,
+    mem: &'m MemBudget<'a>,
+    env: &ExecEnv<'_>,
+) -> Result<BuilderVec<'m, 'a, Kid>, ExecError> {
+    let capacity = if node.children.is_empty() {
+        0
+    } else {
+        node.children
+            .len()
+            .checked_add(usize::from(node.group.is_some()))
+            .ok_or_else(crate::model::invalid_size)?
+    };
+    let mut kids = BuilderVec::new(capacity, mem, env)?;
+    let mut work = LedgerWork::new(env);
+    if !node.children.is_empty() {
+        if let Some(group) = node.group {
+            kids.push(Kid::Own(group), env)?;
+        }
+        for child in node.children.iter() {
+            work.step()?;
+            kids.push(Kid::Node(*child), env)?;
+        }
+    }
+    work.check()?;
+    Ok(kids)
+}
+fn hierarchy_child_ids<'m, 'a>(
+    kids: &[Kid],
+    mem: &'m MemBudget<'a>,
+    env: &ExecEnv<'_>,
+    mut emit: impl FnMut(Kid) -> Result<Option<u32>, ExecError>,
+) -> Result<BuilderVec<'m, 'a, u32>, ExecError> {
+    let mut children = BuilderVec::new(kids.len(), mem, env)?;
+    let copied = BuilderVec::copy_from(kids, mem, env)?;
+    let mut work = LedgerWork::new(env);
+    for kid in copied {
+        work.step()?;
+        if let Some(id) = emit(kid)? {
+            children.push(id, env)?;
+        }
+    }
+    work.check()?;
+    Ok(children)
+}
+struct HierarchyOrder<'s, 'm, 'a> {
+    nodes: &'s [Node<'m, 'a>],
+    only: bool,
+    node_keys: &'s [BuilderOrderKeys<'m, 'a>],
+    group_keys: &'s [BuilderOrderKeys<'m, 'a>],
+    spec_order: &'s [OrderKey],
+}
+fn hierarchy_arrange(
+    kids: &mut [Kid],
+    order: &HierarchyOrder<'_, '_, '_>,
+    mem: &MemBudget<'_>,
+    env: &ExecEnv<'_>,
+) -> Result<(), ExecError> {
+    let HierarchyOrder {
+        nodes,
+        only,
+        node_keys,
+        group_keys,
+        spec_order,
+    } = order;
+    let kid_first = |kid: &Kid| match kid {
+        Kid::Node(n) => nodes.get(*n).map_or(usize::MAX, |node| node.first),
+        Kid::Own(group) => *group,
+    };
+    let kid_keys = |kid: &Kid| match kid {
+        Kid::Node(n) => node_keys.get(*n).map(|keys| &keys[..]),
+        Kid::Own(group) => group_keys.get(*group).map(|keys| &keys[..]),
+    };
+    stable_sort_paid(kids, mem, env, |a, b| {
+        (*only && matches!(a, Kid::Own(_)), kid_first(a))
+            .cmp(&(*only && matches!(b, Kid::Own(_)), kid_first(b)))
+    })?;
+    if !spec_order.is_empty() {
+        stable_sort_paid(kids, mem, env, |a, b| match (kid_keys(a), kid_keys(b)) {
+            (Some(x), Some(y)) => compare_keys(x, y, spec_order),
+            _ => Ordering::Equal,
+        })?;
+    }
+    Ok(())
+}
+
+fn hierarchy_fields<'m, 'a>(
+    table: &HierTableSpec,
+    mem: &'m MemBudget<'a>,
+    env: &ExecEnv<'_>,
+) -> Result<BuilderVec<'m, 'a, FieldId>, ExecError> {
+    let mut capacity = 2usize + usize::from(table.folder.is_some());
+    let mut count_work = LedgerWork::new(env);
+    for key in &table.keys {
+        count_work.step()?;
+        if key.is_some() {
+            capacity = capacity
+                .checked_add(1)
+                .ok_or_else(crate::model::invalid_size)?;
+        }
+    }
+    count_work.check()?;
+    let mut fields = BuilderVec::new(capacity, mem, env)?;
+    fields.push(table.id, env)?;
+    fields.push(table.parent, env)?;
+    if let Some(folder) = table.folder {
+        fields.push(folder, env)?;
+    }
+    let mut work = LedgerWork::new(env);
+    for (field, _) in table.keys.iter().flatten() {
+        work.step()?;
+        fields.push(*field, env)?;
+    }
+    work.check()?;
+    Ok(fields)
+}
+fn hierarchy_folders<'m, 'a>(
+    tables: &[HierTableSpec],
+    mem: &'m MemBudget<'a>,
+    env: &ExecEnv<'_>,
+) -> Result<BuilderVec<'m, 'a, u32>, ExecError> {
+    let mut out = BuilderVec::new(tables.len(), mem, env)?;
+    let mut work = LedgerWork::new(env);
+    for table in tables {
+        work.step()?;
+        if table.folder.is_some() {
+            out.push(table.number, env)?;
+        }
+    }
+    work.check()?;
+    Ok(out)
+}
+fn hierarchy_empties<'m, 'a>(
+    nodes: &[Node<'_, '_>],
+    folders: &[u32],
+    mem: &'m MemBudget<'a>,
+    env: &ExecEnv<'_>,
+    mut empty: impl FnMut(&QValue) -> bool,
+) -> Result<BuilderVec<'m, 'a, (u32, usize)>, ExecError> {
+    let mut out = BuilderVec::new(nodes.len(), mem, env)?;
+    let mut work = LedgerWork::new(env);
+    for (index, node) in nodes.iter().enumerate() {
+        work.step()?;
+        if empty(&node.value)
+            && let QValue::Ref { table, .. } = &*node.value
+            && folders.contains(table)
+        {
+            out.push((*table, index), env)?;
+        }
+    }
+    work.check()?;
+    Ok(out)
+}
+fn hierarchy_children(nodes: &mut [Node<'_, '_>], env: &ExecEnv<'_>) -> Result<(), ExecError> {
+    let mut work = LedgerWork::new(env);
+    for k in 0..nodes.len() {
+        work.step()?;
+        if let Some(p) = nodes.get(k).and_then(|n| n.parent)
+            && let Some(parent) = nodes.get_mut(p)
+        {
+            parent.children.push(k, env)?;
+        }
+    }
+    work.check()
+}
+fn hierarchy_first_and_depth(
+    nodes: &mut [Node<'_, '_>],
+    order: &[usize],
+    env: &ExecEnv<'_>,
+) -> Result<(), ExecError> {
+    let mut work = LedgerWork::new(env);
+    for &k in order {
+        work.step()?;
+        let Some(n) = nodes.get(k) else { continue };
+        let mut first = n.group.unwrap_or(usize::MAX).min(n.first);
+        for &c in &n.children {
+            work.step()?;
+            if let Some(c) = nodes.get(c) {
+                first = first.min(c.first);
+            }
+        }
+        if let Some(n) = nodes.get_mut(k) {
+            n.first = first;
+        }
+    }
+    for &k in order.iter().rev() {
+        work.step()?;
+        let d = nodes
+            .get(k)
+            .and_then(|n| n.parent)
+            .and_then(|p| nodes.get(p))
+            .map_or(0, |p| p.depth + 1);
+        if let Some(n) = nodes.get_mut(k) {
+            n.depth = d;
+        }
+    }
+    work.check()
+}
+fn hierarchy_link_empties(
+    nodes: &mut [Node<'_, '_>],
+    empties: BuilderVec<'_, '_, (u32, usize)>,
+    env: &ExecEnv<'_>,
+) -> Result<(), ExecError> {
+    let mut work = LedgerWork::new(env);
+    for (table, e) in empties {
+        for k in 0..nodes.len() {
+            work.step()?;
+            let link = k != e
+                && nodes.get(k).is_some_and(|n| {
+                    n.parent.is_none()
+                        && !is_empty_ref(&n.value)
+                        && matches!(&*n.value, QValue::Ref { table: t, .. } if *t == table)
+                });
+            if link && let Some(n) = nodes.get_mut(k) {
+                n.parent = Some(e);
+            }
+        }
+    }
+    work.check()
+}
+fn hierarchy_root_ids<'m, 'a>(
+    roots: BuilderVec<'m, 'a, Kid>,
+    ids: &[Option<u32>],
+    mem: &'m MemBudget<'a>,
+    env: &ExecEnv<'_>,
+) -> Result<BuilderVec<'m, 'a, u32>, ExecError> {
+    let mut out = BuilderVec::new(roots.len(), mem, env)?;
+    let mut work = LedgerWork::new(env);
+    for root in roots {
+        work.step()?;
+        if let Kid::Node(n) = root
+            && let Some(id) = ids.get(n).copied().flatten()
+        {
+            out.push(id, env)?;
+        }
+    }
+    work.check()?;
+    Ok(out)
+}
+
+fn hierarchy_acc<'m, 'a>(
+    nodes: &[Node<'_, '_>],
+    groups: &[Group<'_, '_>],
+    under: &[BuilderVec<'m, 'a, u32>],
+    k: usize,
+    mem: &'m MemBudget<'a>,
+    env: &ExecEnv<'_>,
+) -> Result<BuilderVec<'m, 'a, u32>, ExecError> {
+    let own = nodes
+        .get(k)
+        .and_then(|n| n.group)
+        .and_then(|g| groups.get(g));
+    let mut acc = BuilderVec::copy_from(own.map_or(&[], |g| g.rows.as_slice()), mem, env)?;
+    let children = BuilderVec::copy_from(
+        nodes.get(k).map_or(&[], |n| n.children.as_slice()),
+        mem,
+        env,
+    )?;
+    for &c in &children {
+        if let Some(rows) = under.get(c) {
+            acc.extend_copy(rows, env)?;
+        }
+    }
+    LedgerWork::new(env).check()?;
+    acc.sort_unstable();
+    LedgerWork::new(env).check()?;
+    Ok(acc)
+}
+
+fn hierarchy_under<'m, 'a>(
+    nodes: &[Node<'_, '_>],
+    groups: &[Group<'_, '_>],
+    order: &[usize],
+    mem: &'m MemBudget<'a>,
+    env: &ExecEnv<'_>,
+) -> Result<BuilderVec<'m, 'a, BuilderVec<'m, 'a, u32>>, ExecError> {
+    let mut under = hierarchy_under_slots(nodes, mem, env)?;
+    for &k in order {
+        let acc = hierarchy_acc(nodes, groups, &under, k, mem, env)?;
+        if let Some(slot) = under.get_mut(k) {
+            *slot = acc;
+        }
+    }
+    Ok(under)
+}
+
+fn hierarchy_total_rows<'m, 'a>(
+    under: &[BuilderVec<'m, 'a, u32>],
+    k: usize,
+    mem: &'m MemBudget<'a>,
+    env: &ExecEnv<'_>,
+) -> Result<BuilderVec<'m, 'a, u32>, ExecError> {
+    BuilderVec::copy_from(under.get(k).map_or(&[], |v| v.as_slice()), mem, env)
+}
+
+fn hierarchy_order_rows<'m, 'a>(
+    under: &[BuilderVec<'m, 'a, u32>],
+    k: usize,
+    mem: &'m MemBudget<'a>,
+    env: &ExecEnv<'_>,
+) -> Result<BuilderVec<'m, 'a, u32>, ExecError> {
+    BuilderVec::copy_from(under.get(k).map_or(&[], |v| v.as_slice()), mem, env)
+}
+
+fn post_order<'m, 'a>(
+    nodes: &[Node<'_, '_>],
+    mem: &'m MemBudget<'a>,
+    env: &ExecEnv<'_>,
+) -> Result<BuilderVec<'m, 'a, usize>, ExecError> {
+    let mut out = BuilderVec::new(nodes.len(), mem, env)?;
+    let mut work = LedgerWork::new(env);
+    let mut roots = 0usize;
+    for node in nodes {
+        work.step()?;
+        if node.parent.is_none() {
+            roots += 1;
+        }
+    }
+    let mut stack = BuilderVec::new(roots, mem, env)?;
+    for k in 0..nodes.len() {
+        work.step()?;
+        if nodes.get(k).is_some_and(|n| n.parent.is_none()) {
+            stack.push((k, false), env)?;
+        }
+    }
+    while !stack.is_empty() {
+        work.step()?;
+        let (k, done) = stack.pop().ok_or_else(crate::model::invalid_size)?;
+        if done {
+            out.push(k, env)?;
+            continue;
+        }
+        stack.push((k, true), env)?;
+        if let Some(n) = nodes.get(k) {
+            for &c in &n.children {
+                work.step()?;
+                stack.push((c, false), env)?;
+            }
+        }
+    }
+    work.check()?;
+    Ok(out)
 }

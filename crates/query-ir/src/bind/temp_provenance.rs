@@ -105,7 +105,7 @@ pub fn preflight_virtual_with_temp_origins(
     ctx: &BindCtx<'_>,
     temps: &dyn TempOriginProvider,
 ) -> Result<(), ExecError> {
-    super::security::typed::preflight_with_origins(stmt, ctx, Some(temps))
+    super::preflight_virtual_with_admission(stmt, ctx, Some(temps), None)
 }
 
 #[doc(hidden)]
@@ -117,6 +117,24 @@ pub fn bind_with_temp_origins(
     charge_origins: &mut dyn FnMut(u64) -> Result<(), ExecError>,
     charge_policy: &mut dyn FnMut(&PolicyCompileStats) -> Result<(), ExecError>,
 ) -> Result<BoundTempStatement, ExecError> {
+    super::bind_with_policy_charge_with_admission(
+        stmt,
+        ctx,
+        charge_policy,
+        Some((temps, output, charge_origins)),
+        None,
+    )
+}
+
+pub(super) fn bind_with_phase(
+    stmt: &StmtS,
+    ctx: &BindCtx<'_>,
+    output: Option<&TempOut>,
+    charge_origins: &mut dyn FnMut(u64) -> Result<(), ExecError>,
+    charge_policy: &mut dyn FnMut(&PolicyCompileStats) -> Result<(), ExecError>,
+    phase: super::PhaseContext<'_>,
+) -> Result<BoundTempStatement, ExecError> {
+    let temps = phase.temp_origins();
     let params = super::ParamValuesSnapshot::new(ctx.params);
     let ctx = BindCtx {
         params: &params,
@@ -127,13 +145,13 @@ pub fn bind_with_temp_origins(
         security: ctx.security,
     };
     let result = (|| {
-        let (secured, security) =
-            super::security::prepare::prepare_with_origins(stmt, &ctx, charge_policy, Some(temps))?;
-        let origins = export_output(stmt, ctx.schema, Some(temps), output, charge_origins)?;
+        let (secured, security) = super::security::prepare(stmt, &ctx, charge_policy, phase)?;
+        let origins =
+            export_output_with_phase(stmt, ctx.schema, temps, output, charge_origins, phase)?;
         let selected = secured.as_ref().unwrap_or(stmt);
-        let mut bound = super::resolve(selected, &ctx)?;
+        let mut bound = super::resolve(selected, &ctx, phase)?;
         bound.security = security;
-        let statement = crate::lower::lower(&bound, &ctx)?;
+        let statement = crate::lower::lower(&bound, &ctx, phase)?;
         Ok(BoundTempStatement { statement, origins })
     })();
     params.check()?;
@@ -365,13 +383,14 @@ pub(in crate::bind) fn import_columns(
         && scratch.valid_header(schema, generation, rows, version)
 }
 
-fn output_flags(
+fn output_flags_with_phase(
     stmt: &StmtS,
     schema: &crate::QuerySchema,
     temps: Option<&dyn TempOriginProvider>,
     width: usize,
+    phase: super::PhaseContext<'_>,
 ) -> Result<Vec<u8>, ExecError> {
-    let mut workspace = super::security::provenance::Workspace::new();
+    let mut workspace = super::security::provenance::Workspace::with_phase(phase);
     workspace.set_temp_origins(temps, schema.version());
     if stmt.totals.is_some() || !stmt.nested.is_empty() {
         workspace.disable();
@@ -390,12 +409,14 @@ fn output_flags(
     }
     Ok(flags)
 }
-fn export_output(
+
+fn export_output_with_phase(
     stmt: &StmtS,
     schema: &crate::QuerySchema,
     temps: Option<&dyn TempOriginProvider>,
     output: Option<&TempOut>,
     charge: &mut dyn FnMut(u64) -> Result<(), ExecError>,
+    phase: super::PhaseContext<'_>,
 ) -> Result<Option<MaterializedOrigins>, ExecError> {
     let Some(output) = output else {
         return Ok(None);
@@ -437,7 +458,7 @@ fn export_output(
         bytes
     };
     charge(bytes)?;
-    let flags = output_flags(stmt, schema, temps, destination.columns.len())?;
+    let flags = output_flags_with_phase(stmt, schema, temps, destination.columns.len(), phase)?;
     let generation = existing
         .cloned()
         .unwrap_or_else(|| TempGeneration::new(schema.version()));

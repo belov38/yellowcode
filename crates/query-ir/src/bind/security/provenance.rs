@@ -79,6 +79,7 @@ pub(in crate::bind) struct Proof {
     exhausted: bool,
     disabled: bool,
     ordering: bool,
+    balance_columns: bool,
     temp_enabled: bool,
     temp_complete: bool,
 }
@@ -113,6 +114,11 @@ impl<'s> Workspace<'s> {
             temps: None,
             version: 0,
         }
+    }
+    pub(in crate::bind) fn with_phase(phase: crate::bind::PhaseContext<'_>) -> Self {
+        let mut workspace = Self::new();
+        workspace.proof.balance_columns = phase.enabled();
+        workspace
     }
     fn push(&mut self, work: Work<'s>) {
         if self.work_count + 1 >= NODE_LIMIT {
@@ -283,6 +289,7 @@ impl Proof {
             exhausted: false,
             disabled: false,
             ordering: false,
+            balance_columns: false,
             temp_enabled: false,
             temp_complete: true,
         }
@@ -455,6 +462,11 @@ impl Proof {
         let turnovers = crate::lower::is_accounting_turnovers(schema, table);
         if (balance || turnovers) && f.role == FieldRole::Std(StdRole::Account) {
             self.account(key, src, balance);
+        } else if self.balance_columns
+            && balance
+            && f.role == FieldRole::Std(StdRole::ExtDimension(1))
+        {
+            self.unknown(key);
         } else {
             self.safe(key);
         }

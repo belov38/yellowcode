@@ -150,32 +150,34 @@ impl SelectedRegister {
             | RegisterRowsKindL::AccountingBalance(_) => (None, None, None),
         };
         let (parts, accounting) = match &self.parts {
-            SelectedParts::Accumulation(parts) => (parts.as_slice(), [None, None]),
+            SelectedParts::Accumulation(parts) => (parts.as_slice(), [None, None, None]),
             SelectedParts::AccountingTurnoversMain => {
                 let table = match &step.rows {
                     RegisterRowsKindL::AccountingTurnovers(a) => Some(a.inputs.main),
                     _ => None,
                 };
-                (&[][..], [table, None])
+                (&[][..], [table, None, None])
             }
             SelectedParts::AccountingBalance => {
                 let tables = match &step.rows {
-                    RegisterRowsKindL::AccountingBalance(a) => {
-                        [Some(a.inputs.main), Some(a.inputs.chart)]
-                    }
-                    _ => [None, None],
+                    RegisterRowsKindL::AccountingBalance(a) => [
+                        Some(a.inputs.main),
+                        Some(a.inputs.chart),
+                        a.ext1.as_ref().map(|e| e.section),
+                    ],
+                    _ => [None, None, None],
                 };
                 (&[][..], tables)
             }
             SelectedParts::Accounting(mode) => {
                 let tables = match (&step.rows, mode) {
                     (RegisterRowsKindL::Accounting(a), DrCrSelection::Main) => {
-                        [Some(a.inputs.main), None]
+                        [Some(a.inputs.main), None, None]
                     }
                     (RegisterRowsKindL::Accounting(a), DrCrSelection::CtAndMain { .. }) => {
-                        [Some(a.inputs.ct), Some(a.inputs.main)]
+                        [Some(a.inputs.ct), Some(a.inputs.main), None]
                     }
-                    _ => [None, None],
+                    _ => [None, None, None],
                 };
                 (&[][..], tables)
             }
@@ -465,7 +467,7 @@ impl<'a> RegisterRows<'a> {
                 RegisterRowsKindL::Accumulation(a) => a.dims.len(),
                 RegisterRowsKindL::Accounting(a) => a.keys.len(),
                 RegisterRowsKindL::AccountingTurnovers(a) => usize::from(a.account),
-                RegisterRowsKindL::AccountingBalance(_) => 2,
+                RegisterRowsKindL::AccountingBalance(a) => 2 + usize::from(a.ext1.is_some()),
             },
             r,
             c,
@@ -736,6 +738,8 @@ impl<'a> Op<'a> for RegisterRows<'a> {
         }
         if let Some(cursor) = self.balance.as_mut() {
             cursor.close(cx);
+        }
+        if matches!(&self.step.rows, RegisterRowsKindL::AccountingBalance(_)) {
             self.selected = None;
         }
         if let Some(cursor) = self.turnovers.as_mut() {
@@ -789,11 +793,12 @@ impl<'a> RegisterRows<'a> {
                 parts: SelectedParts::AccountingBalance,
                 _charge: Some(charge),
             });
+            let cursor = accounting_balance::Cursor::new(step, cx)?;
             if let (Some(observation), Some(session)) = (&self.observation, &cx.observation) {
                 observation.publish(session, &self.step, selected.clone());
             }
             self.selected = Some(selected);
-            self.balance = Some(accounting_balance::Cursor::new(step, cx)?);
+            self.balance = Some(cursor);
         }
         self.balance
             .as_mut()
@@ -916,7 +921,10 @@ impl<'a> RegisterRows<'a> {
 pub fn tables_read(step: &RegisterRowsL, s: &RegisterSettings) -> Vec<TableId> {
     if let RegisterRowsKindL::AccountingBalance(a) = &step.rows {
         return if s.use_totals && accounting_balance::check_balance_settings_shape(s).is_ok() {
-            vec![a.inputs.main, a.inputs.chart]
+            match &a.ext1 {
+                None => vec![a.inputs.main, a.inputs.chart],
+                Some(ext) => vec![a.inputs.main, a.inputs.chart, ext.section],
+            }
         } else {
             Vec::new()
         };

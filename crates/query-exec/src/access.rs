@@ -73,6 +73,14 @@ fn fatal(what: &str) -> ExecError {
     ExecError::Fatal(format!("access check: {what}"))
 }
 
+fn managed_root(env: &ExecEnv<'_>) -> Result<(), ExecError> {
+    if crate::batch::managed_execution_root(env, env) {
+        Ok(())
+    } else {
+        Err(fatal("managed request/lease scope invariant"))
+    }
+}
+
 fn leftmost_scan(mut r: &mut RelL) -> Option<&mut RelL> {
     loop {
         if matches!(r, RelL::Scan { .. }) {
@@ -148,11 +156,23 @@ pub fn eval_access(
         let id = q
             .get(usize::from(id_field.0))
             .ok_or_else(|| fatal("the row has no ID"))?;
-        let l = p.bind_check(&bctx, Some(id))?;
+        let l = match env.memory {
+            Some(memory) => {
+                managed_root(env)?;
+                p.bind_check_with_admission(&bctx, Some(id), None, Some(memory))?
+            }
+            None => p.bind_check(&bctx, Some(id))?,
+        };
         let r = execute(&l, &src, env)?;
         return Ok(Some(!r.rows.is_empty()));
     }
-    let mut l = p.bind_check(&bctx, None)?;
+    let mut l = match env.memory {
+        Some(memory) => {
+            managed_root(env)?;
+            p.bind_check_with_admission(&bctx, None, None, Some(memory))?
+        }
+        None => p.bind_check(&bctx, None)?,
+    };
     let leaf =
         leftmost_scan(&mut l.root).ok_or_else(|| fatal("no scan of the restricted table"))?;
     let RelL::Scan { table: t, fields } = &*leaf else {

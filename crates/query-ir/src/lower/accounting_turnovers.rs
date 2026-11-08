@@ -3,12 +3,13 @@ use super::rel::Lower;
 use super::{AggL, Dec, PExpr, RegisterRowsKindL, RegisterRowsL, RelL};
 use crate::ir::{RegisterVtS, raw_layout as raw};
 use crate::schema::{
-    FieldRole, QFieldId, QTableId, QuerySchema, StdRole, StorageBinding, TableKind, VtKind,
+    AccountingFlagBinding, FieldRole, Item, QFieldId, QTableId, QuerySchema, StdRole,
+    StorageBinding, TableKind, VtKind,
 };
 use crate::{ExecError, QValue};
 use brace::Guid;
 use ibschema::logical::{LType, TypeCode};
-use ibschema::names::{StdField, role};
+use ibschema::names::{Side, StdField, role};
 use ibschema::storage::{FieldId, StorageMap, TableId, TableInfo};
 use mdschema::MdKind;
 use query_syntax::{Func, ast::CmpOp};
@@ -39,7 +40,8 @@ pub struct AccountingTurnoversInputsL {
 #[derive(Clone, Debug, PartialEq)]
 pub struct AccountingTurnoversResourceL {
     pub metadata: Guid,
-    pub main: FieldId,
+    pub main: [FieldId; 2],
+    pub null_zero: [bool; 2],
     pub dec: Dec,
     pub outputs: [QFieldId; 3],
 }
@@ -50,6 +52,23 @@ fn fatal(message: impl std::fmt::Display) -> ExecError {
 
 fn later(what: &'static str) -> ExecError {
     ExecError::Later { what, stage: "Q6b" }
+}
+
+fn nonbalanced_refusal(item: &Item) -> Option<&'static str> {
+    if item.balance {
+        return None;
+    }
+    let facts = item.accounting_flags;
+    if !facts.parent_valid
+        || facts.accounting == AccountingFlagBinding::Unresolved
+        || facts.ext_dimension == AccountingFlagBinding::Unresolved
+    {
+        return Some("Q6b-TurnoversNonBalancedFlagBinding");
+    }
+    if matches!(facts.ext_dimension, AccountingFlagBinding::Present { .. }) {
+        return Some("Q6b-TurnoversNonBalancedExtDimensionFlag");
+    }
+    None
 }
 
 pub(crate) fn is_accounting_turnovers(schema: &QuerySchema, table: QTableId) -> bool {
@@ -292,6 +311,7 @@ impl TurnoversInputs<'_> {
         let owner = self.schema.table(self.table).owner?;
         let meta = self.schema.meta(owner)?;
         let mut rank = usize::MAX;
+        let mut resource_refusal = None;
         let mut resources = false;
         for id in used {
             let Some(field) = self.schema.field(self.table, *id) else {
@@ -309,12 +329,17 @@ impl TurnoversInputs<'_> {
                 rank = 0;
             } else if let Some(item) = meta.resources.iter().find(|item| Some(item.id) == field.md)
             {
-                if !item.balance {
-                    rank = rank.min(2)
-                } else if self.component(*id).is_some() {
-                    resources = true
+                if self.component(*id).is_some() {
+                    if let Some(what) = nonbalanced_refusal(item) {
+                        if rank > 2 {
+                            rank = 2;
+                            resource_refusal = Some(what);
+                        }
+                    } else {
+                        resources = true;
+                    }
                 } else {
-                    rank = rank.min(3)
+                    rank = rank.min(3);
                 }
             } else if field.md.is_some()
                 || field.nested.is_some()
@@ -331,7 +356,7 @@ impl TurnoversInputs<'_> {
         match rank {
             0 => Some("Q6b-TurnoversPeriodFields"),
             1 => Some("Q6b-TurnoversDimensions"),
-            2 => Some("Q6b-TurnoversNonBalancedResource"),
+            2 => resource_refusal,
             3 => Some("Q6b-TurnoversColumns"),
             _ if !resources => Some("Q6b-TurnoversNoResource"),
             _ => None,
@@ -349,38 +374,86 @@ impl TurnoversInputs<'_> {
             .meta(owner)
             .and_then(|meta| meta.resources.iter().find(|item| item.id == metadata))
             .ok_or_else(|| fatal("unknown resource UUID"))?;
-        if !item.balance {
-            return Err(later("Q6b-TurnoversNonBalancedResource"));
-        }
         let numeric = item
             .ty
             .number
             .ok_or_else(|| later("Q6b-TurnoversStorageShape"))?;
-        if numeric.digits == 0 || numeric.digits > 38 || numeric.scale > numeric.digits {
+        if item.ty.atom_count() != 1
+            || numeric.digits == 0
+            || numeric.digits > 38
+            || numeric.scale > numeric.digits
+        {
             return Err(later("Q6b-TurnoversStorageShape"));
+        }
+        if let Some(what) = nonbalanced_refusal(item) {
+            return Err(later(what));
         }
         let info = self
             .map
             .try_table(inputs.main)
             .ok_or_else(|| fatal("missing resource descriptor"))?;
-        let mut fields = info
-            .fields
-            .iter()
-            .enumerate()
-            .filter(|(_, field)| field.md == Some(metadata) && field.side.is_none());
-        let (index, _) = fields
-            .next()
-            .ok_or_else(|| fatal("missing balanced resource UUID"))?;
-        if fields.next().is_some() {
-            return Err(fatal("ambiguous balanced resource UUID"));
-        }
-        let main = FieldId(u16::try_from(index).map_err(|_| fatal("resource field overflow"))?);
-        let ty = one_type(info, main)?;
-        if ty.code != TypeCode::N
-            || ty.length != u32::from(numeric.digits)
-            || ty.precision != u32::from(numeric.scale)
-        {
-            return Err(fatal("stored resource type contradicts metadata"));
+        let (main, null_zero) = if item.balance {
+            let mut fields = info
+                .fields
+                .iter()
+                .enumerate()
+                .filter(|(_, field)| field.md == Some(metadata) && field.side.is_none());
+            let (index, _) = fields
+                .next()
+                .ok_or_else(|| fatal("missing balanced resource UUID"))?;
+            if fields.next().is_some() {
+                return Err(fatal("ambiguous balanced resource UUID"));
+            }
+            let common =
+                FieldId(u16::try_from(index).map_err(|_| fatal("resource field overflow"))?);
+            ([common, common], [false; 2])
+        } else {
+            let mut slots = [None; 2];
+            for (index, field) in info
+                .fields
+                .iter()
+                .enumerate()
+                .filter(|(_, field)| field.md == Some(metadata))
+            {
+                let slot = match field.side {
+                    Some(Side::Dr) => &mut slots[0],
+                    Some(Side::Cr) => &mut slots[1],
+                    None => return Err(fatal("unsided nonbalanced resource UUID")),
+                };
+                let field =
+                    FieldId(u16::try_from(index).map_err(|_| fatal("resource field overflow"))?);
+                if slot.replace(field).is_some() {
+                    return Err(fatal("ambiguous nonbalanced resource side"));
+                }
+            }
+            let [Some(dr), Some(cr)] = slots else {
+                return Err(fatal("missing nonbalanced resource side"));
+            };
+            if dr == cr {
+                return Err(fatal("aliased nonbalanced resource sides"));
+            }
+            let nullable = matches!(
+                item.accounting_flags.accounting,
+                AccountingFlagBinding::Present { .. }
+            );
+            for field in [dr, cr] {
+                if info
+                    .field(field)
+                    .is_none_or(|field| field.nullable != nullable)
+                {
+                    return Err(fatal("resource nullability contradicts flag provenance"));
+                }
+            }
+            ([dr, cr], [nullable; 2])
+        };
+        for field in main {
+            let ty = one_type(info, field)?;
+            if ty.code != TypeCode::N
+                || ty.length != u32::from(numeric.digits)
+                || ty.precision != u32::from(numeric.scale)
+            {
+                return Err(fatal("stored resource type contradicts metadata"));
+            }
         }
         let mut outputs = [None; 3];
         for (index, field) in self.schema.table(self.table).fields.iter().enumerate() {
@@ -396,6 +469,7 @@ impl TurnoversInputs<'_> {
                 .get_mut(component)
                 .ok_or_else(|| fatal("resource component offset"))?;
             if slot.replace(output).is_some()
+                || field.ty.atom_count() != 1
                 || field
                     .ty
                     .number
@@ -410,6 +484,7 @@ impl TurnoversInputs<'_> {
         Ok(AccountingTurnoversResourceL {
             metadata,
             main,
+            null_zero,
             dec: Dec {
                 p: numeric.digits,
                 s: numeric.scale,

@@ -326,3 +326,154 @@ pub(super) fn user_dereference_guard(
     }
     Ok(())
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum BalanceExt1Pending {
+    Clear,
+    Shape,
+    DeferredPresentation,
+    DeferredHierarchy,
+    DeferredOpaque,
+}
+
+pub(super) fn balance_ext1_pending(
+    accesses: &[(SourceTable, FieldSet)],
+    keys: &[Occurrence],
+    decisions: &[Access],
+    schema: &QuerySchema,
+    temp_scan_seen: bool,
+    mut proof: Option<&mut super::provenance::Proof>,
+    aliases: &std::collections::HashMap<SrcId, SrcId>,
+) -> Result<BalanceExt1Pending, ExecError> {
+    for (key, access) in keys.iter().zip(decisions) {
+        if !matches!(access, Access::Restricted(_)) {
+            continue;
+        }
+        match key {
+            Occurrence::Presentation(..) => {
+                return Ok(BalanceExt1Pending::DeferredPresentation);
+            }
+            Occurrence::HierarchyTarget(..) => {
+                return Ok(BalanceExt1Pending::DeferredHierarchy);
+            }
+            Occurrence::Target(path, _) if matches!(path.root, Root::Opaque(_)) => {
+                return Ok(BalanceExt1Pending::DeferredOpaque);
+            }
+            _ => {}
+        }
+    }
+    let statement_has_accounting_vt = accesses.iter().any(|(source, _)| {
+        matches!(source.part, TablePart::Virtual(_))
+            && schema.table(source.table).owner.is_some_and(|owner| {
+                schema.table(owner).kind == TableKind::Object(mdschema::MdKind::AccountingRegister)
+            })
+    });
+    let accounting_context = statement_has_accounting_vt || temp_scan_seen;
+    let restricted_accounting =
+        keys.iter()
+            .zip(accesses)
+            .zip(decisions)
+            .any(|((key, (source, _)), access)| {
+                matches!(access, Access::Restricted(_))
+                    && (crate::lower::is_accounting_balance(schema, source.table)
+                        || crate::lower::is_accounting_turnovers(schema, source.table)
+                        || matches!(key, Occurrence::BalanceChart(_)))
+            });
+    for (index, key) in keys.iter().enumerate() {
+        let (path, target, is_target) = match key {
+            Occurrence::Target(path, target) => (path, *target, true),
+            Occurrence::Presentation(path, target) | Occurrence::HierarchyTarget(path, target) => {
+                (path, *target, false)
+            }
+            _ => continue,
+        };
+        let Some((_, fields)) = accesses.get(index) else {
+            return Err(ExecError::Fatal(
+                "accounting Balance: discovery width".into(),
+            ));
+        };
+        if !ext1_chart_capable_read(schema, target, fields) {
+            continue;
+        }
+        let chart_target =
+            schema.table(target).kind == TableKind::Object(mdschema::MdKind::ChartOfAccounts);
+        let direct_owner = match path.root {
+            Root::Column(src, _) | Root::Standard(src, _) => keys
+                .iter()
+                .position(|k| matches!(k,Occurrence::Direct(id) if *id==src)),
+            _ => None,
+        };
+        let unproved_root = match path.root {
+            Root::Opaque(_) => true,
+            Root::Column(..) | Root::Standard(..) => direct_owner.is_none(),
+            _ => false,
+        };
+        let target_access_is_restricted =
+            matches!(decisions.get(index), Some(Access::Restricted(_)));
+        let legacy_permitted = is_target
+            && chart_target
+            && unproved_root
+            && (restricted_accounting || (target_access_is_restricted && accounting_context));
+        let ext1_owner = direct_owner.or_else(|| match &path.root {
+            Root::Column(src, _) | Root::Standard(src, _) => {
+                let src = aliases.get(src).copied().unwrap_or(*src);
+                keys.iter()
+                    .position(|key| matches!(key, Occurrence::Direct(id) if *id == src))
+            }
+            _ => None,
+        });
+        let independent = match &path.root {
+            Root::Column(_, crate::ir::ColSel::Field(field)) => ext1_owner
+                .and_then(|owner| accesses.get(owner))
+                .and_then(|(source, _)| {
+                    schema.field(source.table, *field).map(|field| {
+                        !(crate::lower::is_accounting_balance(schema, source.table)
+                            && field.role == FieldRole::Std(crate::StdRole::ExtDimension(1)))
+                    })
+                })
+                .unwrap_or(false),
+            Root::Standard(_, role) => ext1_owner
+                .and_then(|owner| accesses.get(owner))
+                .is_some_and(|(source, _)| {
+                    !(crate::lower::is_accounting_balance(schema, source.table)
+                        && *role == crate::StdRole::ExtDimension(1))
+                }),
+            Root::Column(_, crate::ir::ColSel::Column(_)) => {
+                legacy_permitted
+                    || proof.as_deref_mut().is_some_and(|proof| {
+                        proof.permits(
+                            &path.root,
+                            chart_target && target_access_is_restricted,
+                            keys,
+                            decisions,
+                            aliases,
+                        )
+                    })
+            }
+            Root::Param(_) | Root::Value(_) | Root::Reference(..) => true,
+            Root::Opaque(_) => false,
+        };
+        if !independent {
+            return Ok(BalanceExt1Pending::Shape);
+        }
+    }
+    Ok(BalanceExt1Pending::Clear)
+}
+
+fn ext1_chart_capable_read(schema: &QuerySchema, target: QTableId, used: &FieldSet) -> bool {
+    let table = schema.table(target);
+    if table.kind == TableKind::Object(mdschema::MdKind::ChartOfAccounts) {
+        return true;
+    }
+    table.fields.iter().any(|field| {
+        let selected = used.all
+            || field.md.is_some_and(|id| used.fields.contains(&id))
+            || matches!(field.role, FieldRole::Std(role) if used.standard.contains(&role));
+        selected
+            && field
+                .ty
+                .refs
+                .iter()
+                .any(|atom| schema.ref_info(*atom).kind == mdschema::MdKind::ChartOfAccounts)
+    })
+}

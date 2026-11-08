@@ -1,3 +1,5 @@
+mod phase;
+pub(crate) use phase::PhaseContext;
 mod refid;
 pub(crate) mod security;
 mod snapshot;
@@ -84,8 +86,12 @@ pub struct Bound<'s> {
     pub constants: Vec<TableId>,
 }
 
-pub(crate) fn resolve<'s>(stmt: &'s StmtS, ctx: &BindCtx<'_>) -> Result<Bound<'s>, ExecError> {
-    values::resolve(stmt, ctx)
+pub(crate) fn resolve<'s>(
+    stmt: &'s StmtS,
+    ctx: &BindCtx<'_>,
+    phase: PhaseContext<'_>,
+) -> Result<Bound<'s>, ExecError> {
+    values::resolve(stmt, ctx, phase)
 }
 
 pub fn bind(stmt: &StmtS, ctx: &BindCtx<'_>) -> Result<StmtL, ExecError> {
@@ -104,32 +110,55 @@ pub fn bind_with_policy_charge(
     ctx: &BindCtx<'_>,
     charge: &mut dyn FnMut(&PolicyCompileStats) -> Result<(), ExecError>,
 ) -> Result<StmtL, ExecError> {
-    let params = ParamValuesSnapshot::new(ctx.params);
-    let ctx = BindCtx {
-        params: &params,
-        schema: ctx.schema,
-        storage: ctx.storage,
-        map: ctx.map,
-        host: ctx.host,
-        security: ctx.security,
-    };
-    let result = bind_frozen(stmt, &ctx, charge);
-    params.check()?;
-    result
+    bind_with_policy_charge_with_admission(stmt, ctx, charge, None, None)
+        .map(|bound| bound.into_parts().0)
 }
 
-fn bind_frozen(
+#[allow(clippy::type_complexity)]
+pub fn bind_with_policy_charge_with_admission(
     stmt: &StmtS,
     ctx: &BindCtx<'_>,
     charge: &mut dyn FnMut(&PolicyCompileStats) -> Result<(), ExecError>,
-) -> Result<StmtL, ExecError> {
-    let (secured, security) = security::prepare(stmt, ctx, charge)?;
-    let stmt = secured.as_ref().unwrap_or(stmt);
-    let mut bound = resolve(stmt, ctx)?;
-    bound.security = security;
-    crate::lower::lower(&bound, ctx)
+    temp_origins: Option<(
+        &dyn temp_provenance::TempOriginProvider,
+        Option<&crate::TempOut>,
+        &mut dyn FnMut(u64) -> Result<(), ExecError>,
+    )>,
+    accounting_memory: Option<&memory_budget::RequestMemory>,
+) -> Result<temp_provenance::BoundTempStatement, ExecError> {
+    match temp_origins {
+        Some((provider, output, charge_origins)) => temp_provenance::bind_with_phase(
+            stmt,
+            ctx,
+            output,
+            charge_origins,
+            charge,
+            PhaseContext::with_admission(Some(provider), accounting_memory),
+        ),
+        None => temp_provenance::bind_with_phase(
+            stmt,
+            ctx,
+            None,
+            &mut |_| Ok(()),
+            charge,
+            PhaseContext::with_admission(None, accounting_memory),
+        ),
+    }
 }
 
 pub fn preflight_virtual(stmt: &crate::CompiledStmt, ctx: &BindCtx<'_>) -> Result<(), ExecError> {
-    security::preflight_virtual(stmt, ctx)
+    preflight_virtual_with_admission(stmt, ctx, None, None)
+}
+
+pub fn preflight_virtual_with_admission(
+    stmt: &crate::CompiledStmt,
+    ctx: &BindCtx<'_>,
+    temp_origins: Option<&dyn temp_provenance::TempOriginProvider>,
+    accounting_memory: Option<&memory_budget::RequestMemory>,
+) -> Result<(), ExecError> {
+    security::preflight_virtual(
+        stmt,
+        ctx,
+        PhaseContext::with_admission(temp_origins, accounting_memory),
+    )
 }

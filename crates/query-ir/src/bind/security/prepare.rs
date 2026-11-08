@@ -79,17 +79,18 @@ pub(in crate::bind) fn prepare(
     stmt: &StmtS,
     ctx: &BindCtx<'_>,
     charge: &mut dyn FnMut(&crate::bind::PolicyCompileStats) -> Result<(), ExecError>,
+    phase: crate::bind::PhaseContext<'_>,
 ) -> Result<(Option<StmtS>, Security), ExecError> {
-    prepare_with_origins(stmt, ctx, charge, None)
+    prepare_with_admission(stmt, ctx, charge, phase)
 }
 
-pub(in crate::bind) fn prepare_with_origins(
+pub(in crate::bind) fn prepare_with_admission(
     stmt: &StmtS,
     ctx: &BindCtx<'_>,
     charge: &mut dyn FnMut(&crate::bind::PolicyCompileStats) -> Result<(), ExecError>,
-    temps: Option<&dyn crate::bind::temp_provenance::TempOriginProvider>,
+    phase: crate::bind::PhaseContext<'_>,
 ) -> Result<(Option<StmtS>, Security), ExecError> {
-    let Discovered { decisions, aliases } = discover(stmt, ctx, temps)?;
+    let Discovered { decisions, aliases } = discover(stmt, ctx, phase)?;
     let schema = ctx.schema;
     query_syntax::with_deep_stack(stmt.max_depth, || {
         super::calculation::membership_guard(stmt, &decisions, &aliases)

@@ -1,3 +1,4 @@
+mod accounting_flags;
 pub mod atoms;
 mod bind;
 mod managed;
@@ -287,6 +288,24 @@ impl std::fmt::Display for SchemaError {
 
 impl std::error::Error for SchemaError {}
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub(crate) enum AccountingFlagBinding {
+    #[default]
+    Absent,
+    Present {
+        chart: Guid,
+        child: Guid,
+    },
+    Unresolved,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub(crate) struct AccountingFlags {
+    pub parent_valid: bool,
+    pub accounting: AccountingFlagBinding,
+    pub ext_dimension: AccountingFlagBinding,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct Item {
     pub id: Guid,
@@ -294,6 +313,7 @@ pub(crate) struct Item {
     pub ty: QType,
     pub balance: bool,
     pub main_filter: bool,
+    pub accounting_flags: AccountingFlags,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -421,12 +441,35 @@ impl QuerySchema {
         cfg: &md_model::Configuration,
         cat: &platform_catalog::Catalog,
     ) -> Result<Arc<QuerySchema>, SchemaError> {
-        let mut b = Builder::new(cfg, cat);
-        let commons = objects::build(&mut b)?;
-        registers::build(&mut b, &commons)?;
-        misc::build(&mut b, &commons)?;
-        qr8::build(&mut b);
-        b.finish().map(Arc::new)
+        build_core(cfg, cat, &mut accounting_flags::Legacy).map(Arc::new)
+    }
+
+    pub fn build_admitted(
+        cfg: &md_model::Configuration,
+        cat: &platform_catalog::Catalog,
+        metadata: &memory_budget::Reservation,
+        evictor: std::sync::Weak<dyn memory_budget::Evictor + Send>,
+    ) -> Result<Result<Arc<QuerySchema>, SchemaError>, memory_budget::BudgetError> {
+        use memory_budget::{BudgetError, Category, LimitReason, MemoryLimit};
+        if metadata.category() != Category::Metadata {
+            return Err(BudgetError::Limit(MemoryLimit {
+                category: Category::Metadata,
+                requested: 0,
+                reason: LimitReason::InvalidSize,
+            }));
+        }
+        let budget = metadata.budget().try_with_evictor(evictor)?;
+        let mut proof = accounting_flags::Admitted::new(&budget)?;
+        let built = build_core(cfg, cat, &mut proof);
+        drop(proof);
+        drop(budget);
+        #[cfg(test)]
+        item_calibration_trace::mark("proof-closed-before-Arc", 0, [Default::default(); 3]);
+        match built {
+            Ok(schema) => Ok(Ok(Arc::new(schema))),
+            Err(accounting_flags::Failure::Schema(error)) => Ok(Err(error)),
+            Err(accounting_flags::Failure::Budget(error)) => Err(error),
+        }
     }
 
     pub fn version(&self) -> u64 {
@@ -726,6 +769,19 @@ impl QuerySchema {
     }
 }
 
+fn build_core<'cfg, P: accounting_flags::Proof<'cfg>>(
+    cfg: &'cfg md_model::Configuration,
+    cat: &'cfg platform_catalog::Catalog,
+    proof: &mut P,
+) -> Result<QuerySchema, P::Error> {
+    let mut b = Builder::new(cfg, cat);
+    let commons = objects::build(&mut b)?;
+    registers::build(&mut b, &commons, proof)?;
+    misc::build(&mut b, &commons)?;
+    qr8::build(&mut b);
+    b.finish().map_err(P::Error::from)
+}
+
 pub(crate) struct Builder<'a> {
     pub cfg: &'a md_model::Configuration,
     pub cat: &'a platform_catalog::Catalog,
@@ -796,6 +852,15 @@ impl<'a> Builder<'a> {
     }
 
     fn finish(self) -> Result<QuerySchema, SchemaError> {
+        #[cfg(test)]
+        for (&table, meta) in &self.meta {
+            let backs = [
+                item_calibration_trace::Backing::of(&meta.dims),
+                item_calibration_trace::Backing::of(&meta.resources),
+                item_calibration_trace::Backing::of(&meta.attrs),
+            ];
+            item_calibration_trace::mark("retained-before-finish", table.0, backs);
+        }
         let mut by_name = HashMap::with_capacity(self.aliases.len());
         for (n, id) in self.aliases {
             by_name.entry(fold_name(&n)).or_insert(id);

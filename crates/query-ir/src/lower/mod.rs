@@ -1,12 +1,15 @@
 mod accounting;
 pub(crate) use accounting::drcr_inputs;
 mod accounting_balance;
+pub(crate) mod accounting_balance_payload;
+pub use accounting_balance_payload::{BalanceExt1L, BalanceFieldCheckL, BalanceValueCheckL};
 mod accounting_security;
 pub use accounting_balance::{
     AccountingChartLayoutL, BalanceInputsL, BalanceResourceL, BalanceRowsL,
 };
 pub(crate) use accounting_balance::{
-    balance_chart, balance_form, balance_inputs, balance_resources, is_accounting_balance,
+    balance_chart, balance_ext1_section_identity, balance_ext1_static_inputs, balance_form,
+    balance_inputs, balance_resources, is_accounting_balance,
 };
 mod accounting_turnovers;
 pub use accounting_turnovers::{
@@ -308,12 +311,16 @@ pub enum SizeKind {
     Composite,
 }
 
-pub(crate) fn lower(b: &Bound<'_>, ctx: &BindCtx<'_>) -> Result<StmtL, ExecError> {
+pub(crate) fn lower(
+    b: &Bound<'_>,
+    ctx: &BindCtx<'_>,
+    phase: crate::bind::PhaseContext<'_>,
+) -> Result<StmtL, ExecError> {
     let (schema, storage, map) = (ctx.schema, ctx.storage, ctx.map);
     let mut names = std::collections::HashMap::new();
     loop {
         let (out, wanted) = with_deep_stack(b.stmt.max_depth, || {
-            let mut l = rel::Lower::new(schema, storage, map, b, names.clone());
+            let mut l = rel::Lower::new(schema, storage, map, b, names.clone(), phase);
             let root = l.run().and_then(|root| {
                 let requires_calculation_admission = l.requires_calculation_admission;
                 let nested = l.run_nested()?;

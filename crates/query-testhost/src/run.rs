@@ -1,3 +1,5 @@
+mod balance_columns_scope;
+
 use crate::FailureChain;
 use crate::batch_memory::BatchMemory;
 use crate::exec_host::TestHost;
@@ -25,6 +27,72 @@ pub enum CaseOutcome {
     Ok(Value),
     Err(Vec<String>),
     Unsupported(&'static str),
+}
+
+fn explain_snapshot_overflow() -> ExecError {
+    ExecError::Memory(memory_budget::MemoryLimit {
+        category: memory_budget::Category::Execution,
+        requested: u64::MAX,
+        reason: memory_budget::LimitReason::InvalidSize,
+    })
+}
+
+fn explain_snapshot_bytes(
+    name: &str,
+    value: Option<&query_ir::ParamValue>,
+) -> Result<(u64, u64), ExecError> {
+    use query_exec::model::{block, type_model, value_model, vec_block};
+    fn size_add(first: u64, second: u64) -> Result<u64, ExecError> {
+        first
+            .checked_add(second)
+            .ok_or_else(explain_snapshot_overflow)
+    }
+
+    let payload = match value {
+        None => 0,
+        Some(query_ir::ParamValue::Value(value)) => value_model(value),
+        Some(query_ir::ParamValue::List(values)) => values.iter().try_fold(
+            vec_block(values.capacity(), std::mem::size_of::<QValue>()),
+            |bytes, value| size_add(bytes, value_model(value)),
+        )?,
+        Some(query_ir::ParamValue::Table { columns, rows }) => {
+            let mut bytes = size_add(
+                vec_block(
+                    columns.capacity(),
+                    std::mem::size_of::<query_ir::TempColumn>(),
+                ),
+                vec_block(rows.capacity(), std::mem::size_of::<Vec<QValue>>()),
+            )?;
+            for column in columns {
+                bytes = size_add(bytes, block(column.name.capacity() as u64))?;
+                if let Some(ty) = &column.ty {
+                    bytes = size_add(bytes, type_model(ty))?;
+                }
+            }
+            for row in rows {
+                bytes = size_add(
+                    bytes,
+                    vec_block(row.capacity(), std::mem::size_of::<QValue>()),
+                )?;
+                for value in row {
+                    bytes = size_add(bytes, value_model(value))?;
+                }
+            }
+            bytes
+        }
+    };
+    let entry = block(
+        8 * (std::mem::size_of::<(String, Option<Arc<query_ir::ParamValue>>)>() as u64 + 1) + 128,
+    )
+    .saturating_add(block(
+        16 + std::mem::size_of::<query_ir::ParamValue>() as u64,
+    ));
+    let names = block((name.len() as u64).saturating_mul(3).saturating_add(16));
+    let metadata = size_add(entry, names)?;
+    Ok((
+        size_add(metadata, payload)?,
+        size_add(metadata, payload.saturating_mul(3))?,
+    ))
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -799,14 +867,29 @@ pub fn explain_text_budgeted(
                 .model
                 .build(&query_ir::sema::stats::stats(&statement)),
         )?;
-        let built = build_stmt(&statement, base.schema()).map_err(build_error)?;
-        grow(memory.model.lower(
-            &query_ir::ir::stats::stats(&built),
-            memory.max_predefined_bytes,
-        ))?;
-        let lowered = query_ir::bind(
-            &built,
-            &query_ir::BindCtx {
+        let used_ext1 = balance_columns_scope::used(&statement, base.schema());
+        let origin_source = used_ext1.then(|| unsafe { temp.origin_provider() });
+        let (admitted, legacy) = if used_ext1 {
+            let provider = origin_source.as_ref().ok_or_else(|| {
+                RunFailure::err(vec![
+                    "internal: used Ext1 has no final manager provider".to_string(),
+                ])
+            })?;
+            assert!(memory.memory.budget.same_scope(memory.exec.budget()));
+            assert_eq!(memory.exec.category(), memory_budget::Category::Execution);
+            let charge_snapshot =
+                |name: &str, value: Option<&query_ir::ParamValue>, new_entry: bool| {
+                    let (retained, copies) = explain_snapshot_bytes(name, value)?;
+                    let bytes = copies
+                        .checked_add(if new_entry { retained } else { 0 })
+                        .ok_or_else(explain_snapshot_overflow)?;
+                    memory
+                        .outer
+                        .try_grow_or_evict(bytes, memory.evictor())
+                        .map_err(ExecError::Memory)
+                };
+            let values = query_ir::bind::ParamValuesSnapshot::with_charge(params, &charge_snapshot);
+            let ctx = query_ir::BindCtx {
                 security: query_ir::host::SecurityCtx {
                     access: host.access(),
                     session: host.session(),
@@ -814,13 +897,82 @@ pub fn explain_text_budgeted(
                 schema: base.schema(),
                 storage: host.storage(),
                 map: host.map(),
-                params,
+                params: &values,
                 host: &host,
-            },
-        )
-        .map_err(|error| failure(BatchError::Exec(error)))?;
+            };
+            let preflight = query_ir::bind::preflight_virtual_with_admission(
+                &statement,
+                &ctx,
+                Some(provider),
+                Some(&memory.memory),
+            );
+            values
+                .check()
+                .map_err(|error| failure(BatchError::Exec(error)))?;
+            preflight.map_err(|error| failure(BatchError::Exec(error)))?;
+            let built = build_stmt(&statement, base.schema()).map_err(build_error)?;
+            grow(memory.model.lower(
+                &query_ir::ir::stats::stats(&built),
+                memory.max_predefined_bytes,
+            ))?;
+            let mut charge_origins = |bytes| {
+                memory
+                    .outer
+                    .try_grow_or_evict(bytes, memory.evictor())
+                    .map_err(ExecError::Memory)
+            };
+            let lowered = query_ir::bind::bind_with_policy_charge_with_admission(
+                &built,
+                &ctx,
+                &mut |stats| {
+                    memory
+                        .outer
+                        .try_grow_or_evict(
+                            memory.model.policy(stats, memory.max_predefined_bytes),
+                            memory.evictor(),
+                        )
+                        .map_err(ExecError::Memory)
+                },
+                Some((provider, statement.temp_out.as_ref(), &mut charge_origins)),
+                Some(&memory.memory),
+            );
+            values
+                .check()
+                .map_err(|error| failure(BatchError::Exec(error)))?;
+            let lowered = lowered.map_err(|error| failure(BatchError::Exec(error)))?;
+            (Some(lowered), None)
+        } else {
+            let built = build_stmt(&statement, base.schema()).map_err(build_error)?;
+            grow(memory.model.lower(
+                &query_ir::ir::stats::stats(&built),
+                memory.max_predefined_bytes,
+            ))?;
+            let lowered = query_ir::bind(
+                &built,
+                &query_ir::BindCtx {
+                    security: query_ir::host::SecurityCtx {
+                        access: host.access(),
+                        session: host.session(),
+                    },
+                    schema: base.schema(),
+                    storage: host.storage(),
+                    map: host.map(),
+                    params,
+                    host: &host,
+                },
+            )
+            .map_err(|error| failure(BatchError::Exec(error)))?;
+            (None, Some(lowered))
+        };
+        let lowered = admitted
+            .as_ref()
+            .map(|bound| bound.statement())
+            .or(legacy.as_ref())
+            .ok_or_else(|| {
+                RunFailure::err(vec!["internal: no budgeted explain plan".to_string()])
+            })?;
         let source = host.read_source();
-        query_exec::plan::explain_temps(&lowered, &*source, Some(&temp), host.plan_options())
+        query_exec::plan::explain_temps(lowered, &*source, Some(&temp), host.plan_options())
     };
     Ok(ExplainRun {
         ir,

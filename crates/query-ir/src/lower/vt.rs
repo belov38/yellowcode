@@ -125,7 +125,7 @@ impl RegisterRowsL {
             RegisterRowsKindL::Accumulation(a) => raw::width(a.dims.len(), a.resources.len()),
             RegisterRowsKindL::Accounting(a) => raw::width(a.keys.len(), a.resources.len()),
             RegisterRowsKindL::AccountingBalance(a) => {
-                raw::width(2, a.resources.len())
+                raw::width(2 + usize::from(a.ext1.is_some()), a.resources.len())
                     + a.policy_fields.len()
                     + usize::from(a.chart_layout.is_some_and(|l| l.signal.is_some()))
             }

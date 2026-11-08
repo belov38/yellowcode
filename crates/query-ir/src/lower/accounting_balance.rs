@@ -50,6 +50,79 @@ pub(crate) fn balance_chart(schema: &QuerySchema, table: QTableId) -> R<QTableId
     Ok(chart)
 }
 
+pub(crate) fn balance_ext1_section_identity(
+    schema: &QuerySchema,
+    table: QTableId,
+) -> Option<QTableId> {
+    if !is_accounting_balance(schema, table) {
+        return None;
+    }
+    let mut accounts = schema
+        .table(table)
+        .fields
+        .iter()
+        .filter(|field| field.role == FieldRole::Std(StdRole::Account));
+    let account = accounts.next()?;
+    if accounts.next().is_some() || account.ty.atom_count() != 1 || account.ty.refs.len() != 1 {
+        return None;
+    }
+    let account_reference = schema.ref_info(*account.ty.refs.first()?);
+    if account_reference.kind != MdKind::ChartOfAccounts {
+        return None;
+    }
+    let chart = account_reference.table;
+    let owner = schema.table(chart);
+    if owner.kind != TableKind::Object(MdKind::ChartOfAccounts) {
+        return None;
+    }
+    let reference = schema.ref_info(owner.reference?);
+    if reference.kind != MdKind::ChartOfAccounts
+        || reference.table != chart
+        || Some(reference.object) != owner.object
+    {
+        return None;
+    }
+    let mut fields = owner
+        .fields
+        .iter()
+        .filter(|field| field.role == FieldRole::Std(StdRole::ExtDimensionTypes));
+    let field = fields.next()?;
+    if fields.next().is_some() || field.name_en != "ExtDimensionTypes" {
+        return None;
+    }
+    let section = field.nested?;
+    let nested = schema.table(section);
+    if nested.owner != Some(chart)
+        || nested.kind != TableKind::Tabular
+        || nested.object.is_some()
+        || nested
+            .name_en
+            .strip_prefix(owner.name_en.as_str())
+            .and_then(|suffix| suffix.strip_prefix('.'))
+            != Some("ExtDimensionTypes")
+        || owner
+            .fields
+            .iter()
+            .filter(|field| field.nested == Some(section))
+            .count()
+            != 1
+    {
+        return None;
+    }
+    Some(section)
+}
+
+fn balance_ext1_declares_chart(schema: &QuerySchema, table: QTableId) -> bool {
+    schema.table(table).fields.iter().any(|field| {
+        field.role == FieldRole::Std(StdRole::ExtDimension(1))
+            && field
+                .ty
+                .refs
+                .iter()
+                .any(|atom| schema.ref_info(*atom).kind == MdKind::ChartOfAccounts)
+    })
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct BalanceInputsL {
     pub main: TableId,
@@ -78,6 +151,7 @@ pub struct AccountingChartLayoutL {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct BalanceRowsL {
+    pub ext1: Option<crate::QShared<super::BalanceExt1L>>,
     pub chart_input: Option<Box<RelL>>,
     pub chart_layout: Option<AccountingChartLayoutL>,
     pub policy_fields: Vec<FieldId>,
@@ -300,6 +374,7 @@ pub(crate) fn balance_form(
     all: bool,
     standard: &[StdRole],
     resources: &[brace::Guid],
+    phase: crate::bind::PhaseContext<'_>,
 ) -> R<()> {
     if all {
         return Err(balance_later("Q6a-AccountingBalanceStar"));
@@ -322,7 +397,7 @@ pub(crate) fn balance_form(
                 | StdRole::AccountCr
                 | StdRole::Active
                 | StdRole::Period
-        )
+        ) && !(phase.enabled() && *s == StdRole::ExtDimension(1))
     }) {
         return Err(balance_later("Q6a-AccountingBalanceColumns"));
     }
@@ -331,6 +406,12 @@ pub(crate) fn balance_form(
     }
     if resources.is_empty() {
         return Err(balance_later("Q6a-AccountingBalanceNoResource"));
+    }
+    if phase.enabled()
+        && standard.contains(&StdRole::ExtDimension(1))
+        && balance_ext1_declares_chart(schema, table)
+    {
+        return Err(balance_later("Q6a-AccountingBalanceExtDimensionChart"));
     }
     Ok(())
 }
@@ -385,7 +466,11 @@ impl Lower<'_> {
                 .is_some_and(|s| s.all_fields),
             &roles,
             &ids,
+            self.phase,
         )?;
+        let first = roles.contains(&StdRole::ExtDimension(1));
+        let dims = 2 + usize::from(first);
+        let keys = 1 + usize::from(first);
         let inputs = balance_inputs(self.schema, self.storage, self.map, v.table)?;
         let dates = self.accounting_date_bounds(&v.bounds)?;
         let date = dates[0];
@@ -399,7 +484,17 @@ impl Lower<'_> {
             None
         };
         let resources = balance_resources(self.schema, self.map, v.table, &inputs, &ids)?;
-        p16(raw::width(2, resources.len()) as i64)?;
+        if first {
+            balance_ext1_static_inputs(
+                self.schema,
+                self.storage,
+                self.map,
+                v.table,
+                &inputs,
+                &ids,
+            )?;
+        }
+        p16(raw::width(dims, resources.len()) as i64)?;
         let zero = || PExpr::Lit(QValue::Number(bsl_prim::Number::zero()));
         let compare = |op, a, b| PExpr::Compare(op, Box::new(a), Box::new(b));
         let case = |pred, yes| PExpr::Case {
@@ -407,7 +502,7 @@ impl Lower<'_> {
             whens: vec![(pred, yes)],
             else_: Some(Box::new(zero())),
         };
-        let kind = PExpr::Col(1);
+        let kind = PExpr::Col(p16(keys as i64)?);
         let mut aggs = vec![AggL {
             f: Func::Max,
             distinct: false,
@@ -423,7 +518,9 @@ impl Lower<'_> {
             aggs.push(AggL {
                 f: Func::Sum,
                 distinct: false,
-                arg: Some(PExpr::Col(p16(raw::component(2, i, raw::BALANCE) as i64)?)),
+                arg: Some(PExpr::Col(p16(
+                    raw::component(dims, i, raw::BALANCE) as i64
+                )?)),
                 ty: QType::num(NumQ {
                     digits: 38,
                     scale: resource.dec.s,
@@ -441,6 +538,8 @@ impl Lower<'_> {
                 .ok_or_else(|| fatal("missing field"))?;
             let expr = if field.role == FieldRole::Std(StdRole::Account) {
                 PExpr::Col(0)
+            } else if field.role == FieldRole::Std(StdRole::ExtDimension(1)) {
+                PExpr::Col(1)
             } else {
                 let md = field
                     .md
@@ -456,7 +555,7 @@ impl Lower<'_> {
                     .ok_or_else(|| fatal("unknown resource"))?;
                 let c = component(&field.name_ru, &item.name)
                     .ok_or_else(|| balance_later("Q6a-AccountingBalanceColumns"))?;
-                let b = PExpr::Col(p16((index + 2) as i64)?);
+                let b = PExpr::Col(p16((index + keys + 1) as i64)?);
                 let positive = compare(CmpOp::Gt, b.clone(), zero());
                 let negative = compare(CmpOp::Lt, b.clone(), zero());
                 let is_kind = |n| {
@@ -487,7 +586,13 @@ impl Lower<'_> {
         }
         let having = PExpr::Or(
             (0..resources.len())
-                .map(|i| Ok(compare(CmpOp::Ne, PExpr::Col(p16((i + 2) as i64)?), zero())))
+                .map(|i| {
+                    Ok(compare(
+                        CmpOp::Ne,
+                        PExpr::Col(p16((i + keys + 1) as i64)?),
+                        zero(),
+                    ))
+                })
                 .collect::<R<Vec<_>>>()?,
         );
         let register = self
@@ -496,11 +601,58 @@ impl Lower<'_> {
             .object
             .ok_or_else(|| fatal("missing register UUID"))?;
         let (chart_input, chart_layout) = self.accounting_chart(v, &inputs)?;
-        let base = raw::width(2, resources.len());
+        let base = raw::width(dims, resources.len());
         let policy_fields = self.accounting_policy_fields(
             v,
             base + usize::from(chart_layout.is_some_and(|l| l.signal.is_some())),
         )?;
+        let ext1 = if let (true, Some(memory)) = (first, self.phase.memory()) {
+            let identity =
+                balance_ext1_storage(self.schema, self.storage, self.map, v.table, &inputs)?;
+            let mut fields = table
+                .fields
+                .iter()
+                .filter(|f| f.role == FieldRole::Std(StdRole::ExtDimension(1)));
+            let field = fields
+                .next()
+                .ok_or_else(|| fatal("missing semantic ExtDimension1"))?;
+            if fields.next().is_some() {
+                return Err(fatal("duplicate semantic ExtDimension1"));
+            }
+            let resource_types = resources.iter().map(|resource| {
+                meta.resources
+                    .iter()
+                    .find(|item| item.id == resource.metadata)
+                    .map(|item| (resource.main, &item.ty))
+                    .ok_or_else(|| fatal("missing semantic resource"))
+            });
+            let policy_types = policy_fields.iter().map(|field| {
+                super::accounting_balance_payload::policy_type(
+                    self.schema,
+                    self.storage,
+                    v.register,
+                    *field,
+                )
+                .map(|ty| (*field, ty))
+            });
+            Some(super::accounting_balance_payload::build(
+                (
+                    identity.section,
+                    identity.owner,
+                    identity.ordinal,
+                    identity.turnover_only,
+                    identity.values,
+                ),
+                &field.ty,
+                inputs.main,
+                resource_types.chain(policy_types),
+                self.storage,
+                self.map,
+                memory,
+            )?)
+        } else {
+            None
+        };
         let secured = self.b.security.accounting_sources.contains_key(&v.src);
         let chart_signal = chart_layout
             .and_then(|l| l.signal)
@@ -511,6 +663,7 @@ impl Lower<'_> {
             kind: v.kind,
             view: v.span,
             rows: RegisterRowsKindL::AccountingBalance(BalanceRowsL {
+                ext1,
                 inputs,
                 resources,
                 date,
@@ -523,7 +676,7 @@ impl Lower<'_> {
         }));
         let rows = self.accounting_secure(v, rows, base, chart_signal)?;
         if let Some(signal) = rows.signal {
-            projection.push(PExpr::Col(p16((1 + aggs.len()) as i64)?));
+            projection.push(PExpr::Col(p16((keys + aggs.len()) as i64)?));
             aggs.push(super::security::min(signal));
         }
         let signal = rows
@@ -532,7 +685,14 @@ impl Lower<'_> {
             .transpose()?;
         let grouped = RelL::Aggregate {
             input: Box::new(rows.rel),
-            keys: vec![PExpr::Col(p16(raw::DIMS as i64)?)],
+            keys: if first {
+                vec![
+                    PExpr::Col(p16(raw::DIMS as i64)?),
+                    PExpr::Col(p16((raw::DIMS + 2) as i64)?),
+                ]
+            } else {
+                vec![PExpr::Col(p16(raw::DIMS as i64)?)]
+            },
             sets: None,
             aggs,
         };
@@ -552,4 +712,195 @@ impl Lower<'_> {
             keys: None,
         })
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BalanceExt1Storage {
+    section: TableId,
+    owner: FieldId,
+    ordinal: FieldId,
+    turnover_only: FieldId,
+    values: [FieldId; 2],
+}
+
+fn balance_ext1_storage(
+    schema: &QuerySchema,
+    storage: &StorageBinding,
+    map: &StorageMap,
+    table: QTableId,
+    inputs: &BalanceInputsL,
+) -> R<BalanceExt1Storage> {
+    let logical = balance_ext1_section_identity(schema, table)
+        .ok_or_else(|| fatal("missing required first subconto section identity"))?;
+    let chart = schema
+        .table(logical)
+        .owner
+        .ok_or_else(|| fatal("missing first subconto logical owner"))?;
+    let chart_md = schema
+        .table(chart)
+        .object
+        .ok_or_else(|| fatal("missing chart metadata identity"))?;
+    let object = map
+        .object(chart_md)
+        .ok_or_else(|| fatal("missing chart storage object"))?;
+    let mut lists = object
+        .lists
+        .iter()
+        .filter(|(kind, _)| *kind == ibschema::storage::StdList::ExtDimensionTypes);
+    let section = lists
+        .next()
+        .map(|(_, id)| *id)
+        .ok_or_else(|| fatal("missing required first subconto storage list"))?;
+    if lists.next().is_some()
+        || object.main != inputs.chart
+        || storage.table(chart) != Some(inputs.chart)
+        || storage.table(logical) != Some(section)
+        || [inputs.main, inputs.options, inputs.chart].contains(&section)
+        || object
+            .tabular
+            .iter()
+            .filter(|(_, id)| *id == section)
+            .count()
+            != 1
+        || !object
+            .tabular
+            .iter()
+            .any(|(md, id)| *md == chart_md && *id == section)
+    {
+        return Err(fatal("ambiguous or aliased first subconto storage binding"));
+    }
+    let section_info = map
+        .try_table(section)
+        .ok_or_else(|| fatal("missing first subconto storage table"))?;
+    if section_info.owner != Some(inputs.chart)
+        || section_info.md != Some(chart_md)
+        || section_info.purpose != role::TABULAR_SECTION
+        || section_info.query_name != schema.table(logical).name_en
+    {
+        return Err(fatal("contradictory first subconto storage ownership"));
+    }
+    for id in [inputs.main, inputs.options, inputs.chart, section] {
+        let info = map
+            .try_table(id)
+            .ok_or_else(|| fatal("missing required input"))?;
+        if !info.separators.is_empty() {
+            return Err(ExecError::Later {
+                what: "Q6a-AccountingBalanceAreas",
+                stage: "Q7c",
+            });
+        }
+    }
+    let owner = standard(section_info, StdField::Id, TypeCode::R)?;
+    let owner_ty = ty(section_info, owner)?;
+    if owner_ty.ref_kind != 2 || map.table_by_name(&owner_ty.ref_table) != Some(inputs.chart) {
+        return Err(fatal("first subconto owner reference mismatch"));
+    }
+    let ordinal = standard(section_info, StdField::LineNo, TypeCode::N)?;
+    let ordinal_ty = ty(section_info, ordinal)?;
+    if (ordinal_ty.length, ordinal_ty.precision) != (5, 0) {
+        return Err(fatal("first subconto ordinal qualifiers mismatch"));
+    }
+    let turnover_only = standard(section_info, StdField::TurnoverOnly, TypeCode::L)?;
+    for field in [owner, ordinal, turnover_only] {
+        if section_info
+            .field(field)
+            .is_none_or(|field| field.nullable || field.side.is_some())
+        {
+            return Err(fatal("invalid required section field flags"));
+        }
+    }
+    let main = map
+        .try_table(inputs.main)
+        .ok_or_else(|| fatal("missing main table"))?;
+    fn exact_value(info: &TableInfo, std: StdField, name: &str) -> R<FieldId> {
+        let mut fields = info
+            .fields
+            .iter()
+            .enumerate()
+            .filter(|(_, field)| field.name == name);
+        let (index, field) = fields
+            .next()
+            .ok_or_else(|| fatal("missing required first subconto value"))?;
+        if fields.next().is_some() || field.std != Some(std) || field.side.is_some() {
+            return Err(fatal("contradictory first subconto value identity"));
+        }
+        u16::try_from(index)
+            .map(FieldId)
+            .map_err(|_| fatal("field index overflow"))
+    }
+    let values = [
+        exact_value(main, StdField::ValueDt, "ValueDt1")?,
+        exact_value(main, StdField::ValueCt, "ValueCt1")?,
+    ];
+    Ok(BalanceExt1Storage {
+        section,
+        owner,
+        ordinal,
+        turnover_only,
+        values,
+    })
+}
+
+pub(crate) fn balance_ext1_static_inputs(
+    schema: &QuerySchema,
+    storage: &StorageBinding,
+    map: &StorageMap,
+    table: QTableId,
+    inputs: &BalanceInputsL,
+    used: &[brace::Guid],
+) -> R<()> {
+    let owner = schema
+        .table(table)
+        .owner
+        .ok_or_else(|| fatal("missing owner"))?;
+    let meta = schema
+        .meta(owner)
+        .ok_or_else(|| fatal("missing accounting metadata"))?;
+    for (ext, what) in [
+        (false, "Q6a-AccountingBalanceAccountingFlag"),
+        (true, "Q6a-AccountingBalanceExtDimensionAccountingFlag"),
+    ] {
+        for id in used {
+            let item = meta
+                .resources
+                .iter()
+                .find(|r| r.id == *id)
+                .ok_or_else(|| fatal("missing selected resource metadata"))?;
+            let flag = if ext {
+                item.accounting_flags.ext_dimension
+            } else {
+                item.accounting_flags.accounting
+            };
+            if !matches!(flag, crate::schema::AccountingFlagBinding::Absent) {
+                return Err(balance_later(what));
+            }
+        }
+    }
+    let identity = balance_ext1_storage(schema, storage, map, table, inputs)?;
+    let mut fields = schema
+        .table(table)
+        .fields
+        .iter()
+        .filter(|f| f.role == FieldRole::Std(StdRole::ExtDimension(1)));
+    let field = fields
+        .next()
+        .ok_or_else(|| fatal("missing semantic ExtDimension1"))?;
+    if fields.next().is_some() {
+        return Err(fatal("duplicate semantic ExtDimension1"));
+    }
+    let main = map
+        .try_table(inputs.main)
+        .ok_or_else(|| fatal("missing main"))?;
+    let dr = main
+        .field(identity.values[0])
+        .ok_or_else(|| fatal("missing Dt1"))?;
+    let cr = main
+        .field(identity.values[1])
+        .ok_or_else(|| fatal("missing Ct1"))?;
+    super::accounting_balance_payload::validate_shape(&field.ty, dr, storage, map)?;
+    super::accounting_balance_payload::validate_shape(&field.ty, cr, storage, map)?;
+    if dr.nullable != cr.nullable {
+        return Err(fatal("side nullable mismatch"));
+    }
+    Ok(())
 }

@@ -249,7 +249,11 @@ impl Reg<'_> {
     }
 }
 
-pub(super) fn build(b: &mut Builder<'_>, commons: &[Common]) -> Result<(), SchemaError> {
+pub(super) fn build<'cfg, P: super::accounting_flags::Proof<'cfg>>(
+    b: &mut Builder<'cfg>,
+    commons: &[Common],
+    proof: &mut P,
+) -> Result<(), P::Error> {
     let cfg = b.cfg;
     let objs = ObjIndex::new(cfg);
     let recorders = recorders(b, &objs);
@@ -259,13 +263,36 @@ pub(super) fn build(b: &mut Builder<'_>, commons: &[Common]) -> Result<(), Schem
         .iter()
         .filter(|o| REGISTER_KINDS.contains(&o.kind))
     {
-        if let Some(r) = declare(b, o, commons, &objs, &recorders)? {
+        if let Some(mut r) = declare(b, o, commons, &objs, &recorders)? {
+            super::accounting_flags::populate(cfg, o, &mut r.meta, proof)?;
             regs.push(r);
         }
     }
     for r in &regs {
         main_table(b, r)?;
+        #[cfg(test)]
+        super::item_calibration_trace::mark(
+            "original-before-real-clone",
+            r.table.0,
+            [
+                super::item_calibration_trace::Backing::of(&r.meta.dims),
+                super::item_calibration_trace::Backing::of(&r.meta.resources),
+                super::item_calibration_trace::Backing::of(&r.meta.attrs),
+            ],
+        );
         b.meta.insert(r.table, r.meta.clone());
+        #[cfg(test)]
+        if let Some(m) = b.meta.get(&r.table) {
+            super::item_calibration_trace::mark(
+                "actual-retained-clone",
+                r.table.0,
+                [
+                    super::item_calibration_trace::Backing::of(&m.dims),
+                    super::item_calibration_trace::Backing::of(&m.resources),
+                    super::item_calibration_trace::Backing::of(&m.attrs),
+                ],
+            );
+        }
     }
     for r in &regs {
         if r.obj.kind == MdKind::CalculationRegister {
@@ -281,6 +308,18 @@ pub(super) fn build(b: &mut Builder<'_>, commons: &[Common]) -> Result<(), Schem
             }
             _ => {}
         }
+    }
+    #[cfg(test)]
+    for r in &regs {
+        super::item_calibration_trace::mark(
+            "before-original-drop",
+            r.table.0,
+            [
+                super::item_calibration_trace::Backing::of(&r.meta.dims),
+                super::item_calibration_trace::Backing::of(&r.meta.resources),
+                super::item_calibration_trace::Backing::of(&r.meta.attrs),
+            ],
+        );
     }
     Ok(())
 }
@@ -312,13 +351,34 @@ pub(super) fn items(b: &mut Builder<'_>, o: &MdObject, tag: ChildTag, owner: &st
     for c in o.children.iter().filter(|c| c.tag == tag) {
         let ty = b.child_type(c, owner);
         let flag = |n: &str| !matches!(c.prop(n), Some(Value::Bool(false)));
+        #[cfg(test)]
+        super::item_calibration_trace::mark(
+            "item-push-before",
+            u32::MAX,
+            [
+                super::item_calibration_trace::Backing::of(&out),
+                Default::default(),
+                Default::default(),
+            ],
+        );
         out.push(Item {
             id: c.id,
             name: c.name.clone(),
             ty,
             balance: flag("Balance"),
             main_filter: flag("MainFilter"),
+            accounting_flags: super::AccountingFlags::default(),
         });
+        #[cfg(test)]
+        super::item_calibration_trace::mark(
+            "item-push-after",
+            u32::MAX,
+            [
+                super::item_calibration_trace::Backing::of(&out),
+                Default::default(),
+                Default::default(),
+            ],
+        );
     }
     out
 }
@@ -1268,6 +1328,7 @@ fn recalculations(b: &mut Builder<'_>, r: &Reg<'_>) -> Result<(), SchemaError> {
                 ty,
                 balance: true,
                 main_filter: true,
+                accounting_flags: super::AccountingFlags::default(),
             };
             f.item(&it, FieldRole::Dimension);
         }

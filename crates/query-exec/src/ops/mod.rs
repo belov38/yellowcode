@@ -173,6 +173,8 @@ impl<'a> MemBudget<'a> {
             if total > self.limit {
                 self.used.set(self.used.get().saturating_add(n));
                 self.peak.set(self.peak.get().max(total));
+                #[cfg(test)]
+                crate::totals::builder_tests::legacy_refused(self, n);
                 return Err(legacy_limit());
             }
             return Ok(());
@@ -214,17 +216,23 @@ impl<'a> MemBudget<'a> {
         self.peak.set(self.peak.get().max(total));
         #[cfg(test)]
         crate::num::accumulator_tests::snapshot(self);
+        #[cfg(test)]
+        builder_attempt.accepted();
         Ok(())
     }
 
     pub fn shrink(&self, n: u64) {
         #[cfg(test)]
         crate::num::accumulator_tests::refund(self, n);
+        #[cfg(test)]
+        crate::totals::builder_tests::refund(self, n, false);
         let n = n.min(self.used.get());
         self.used.set(self.used.get() - n);
         self.give(n);
         #[cfg(test)]
         crate::num::accumulator_tests::snapshot(self);
+        #[cfg(test)]
+        crate::totals::builder_tests::refund(self, n, true);
     }
 
     pub fn grow_scratch(&self, n: u64) -> Result<(), ExecError> {

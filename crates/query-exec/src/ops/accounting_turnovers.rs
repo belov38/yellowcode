@@ -3,7 +3,7 @@ use crate::source::{Row, RowIter};
 use bsl_prim::Number;
 use ibschema::storage::FieldId;
 use query_ir::ir::raw_layout as raw;
-use query_ir::lower::AccountingTurnoversL;
+use query_ir::lower::{AccountingTurnoversL, AccountingTurnoversResourceL};
 use query_ir::{ExecError, QValue};
 
 fn fatal(message: impl std::fmt::Display) -> ExecError {
@@ -26,6 +26,29 @@ fn account(row: &Row, field: FieldId, target: u32) -> Result<&QValue, ExecError>
     }
 }
 
+fn stored_number<'row>(
+    row: &'row Row,
+    resource: &AccountingTurnoversResourceL,
+    side: usize,
+) -> Result<Option<&'row Number>, ExecError> {
+    let field = resource
+        .main
+        .get(side)
+        .copied()
+        .ok_or_else(|| fatal("resource side offset"))?;
+    match value(row, field)? {
+        QValue::Number(number) => Ok(Some(number)),
+        QValue::Null if resource.null_zero.get(side) == Some(&true) => Ok(None),
+        QValue::Null if resource.main[0] == resource.main[1] => Err(ExecError::Later {
+            what: "Q6b-TurnoversNullResource",
+            stage: "Q6b",
+        }),
+        QValue::Null => Err(fatal("nonnullable resource is NULL")),
+        _ if resource.main[0] == resource.main[1] => Err(fatal("balanced resource is not Number")),
+        _ => Err(fatal("nonbalanced resource is not Number")),
+    }
+}
+
 pub(super) struct Cursor<'a> {
     fields: Vec<FieldId>,
     fields_charge: Option<OwnedCharge>,
@@ -40,7 +63,8 @@ impl<'a> Cursor<'a> {
         let capacity = step
             .resources
             .len()
-            .checked_add(3)
+            .checked_mul(2)
+            .and_then(|count| count.checked_add(3))
             .and_then(|count| count.checked_add(usize::from(step.period.is_some())))
             .and_then(|count| count.checked_add(step.policy_fields.len()))
             .ok_or_else(|| fatal("field count overflow"))?;
@@ -55,8 +79,10 @@ impl<'a> Cursor<'a> {
         fields.extend(step.period);
         fields.extend(step.inputs.accounts);
         for resource in &step.resources {
-            if !fields.contains(&resource.main) {
-                fields.push(resource.main);
+            for field in resource.main {
+                if !fields.contains(&field) {
+                    fields.push(field);
+                }
             }
         }
         fields.extend(&step.policy_fields);
@@ -113,15 +139,13 @@ impl<'a> Cursor<'a> {
                     account(&row, field, step.inputs.ref_table)?;
                 }
                 for resource in &step.resources {
-                    match value(&row, resource.main)? {
-                        QValue::Number(number) => crate::num::guard(cx.env, number)?,
-                        QValue::Null => {
-                            return Err(ExecError::Later {
-                                what: "Q6b-TurnoversNullResource",
-                                stage: "Q6b",
-                            });
+                    for side in 0..2 {
+                        if side == 1 && resource.main[0] == resource.main[1] {
+                            continue;
                         }
-                        _ => return Err(fatal("balanced resource is not Number")),
+                        if let Some(number) = stored_number(&row, resource, side)? {
+                            crate::num::guard(cx.env, number)?;
+                        }
                     }
                 }
                 let charge = cx.mem.hold_owned(row_cap_bytes(&row))?;
@@ -162,13 +186,20 @@ impl<'a> Cursor<'a> {
                 u64::try_from(bytes).map_err(|_| fatal("raw allocation overflow"))?,
             );
             for resource in &step.resources {
-                charge = charge
-                    .checked_add(
-                        crate::model::value_model(value(row, resource.main)?)
-                            .checked_mul(2)
-                            .ok_or_else(|| fatal("numeric allocation overflow"))?,
-                    )
-                    .ok_or_else(|| fatal("raw model overflow"))?;
+                if stored_number(row, resource, side)?.is_some() {
+                    let field = resource
+                        .main
+                        .get(side)
+                        .copied()
+                        .ok_or_else(|| fatal("resource side offset"))?;
+                    charge = charge
+                        .checked_add(
+                            crate::model::value_model(value(row, field)?)
+                                .checked_mul(2)
+                                .ok_or_else(|| fatal("numeric allocation overflow"))?,
+                        )
+                        .ok_or_else(|| fatal("raw model overflow"))?;
+                }
             }
             for field in &step.policy_fields {
                 charge =
@@ -184,8 +215,8 @@ impl<'a> Cursor<'a> {
                     .ok_or_else(|| fatal("raw account offset"))? = key.clone();
             }
             for (r, resource) in step.resources.iter().enumerate() {
-                let QValue::Number(number) = value(row, resource.main)? else {
-                    return Err(fatal("invalid held numeric value"));
+                let Some(number) = stored_number(row, resource, side)? else {
+                    continue;
                 };
                 let net = if side == 0 {
                     number.clone()
@@ -212,10 +243,29 @@ impl<'a> Cursor<'a> {
     }
 
     pub(super) fn close(&mut self) {
+        #[cfg(test)]
+        crate::ordinary_calibration_trace::mark(
+            "ordinary-cursor-before-close",
+            0,
+            [
+                crate::ordinary_calibration_trace::Backing::of(&self.fields),
+                self.pending
+                    .as_ref()
+                    .map(|(row, _)| crate::ordinary_calibration_trace::Backing::of(row))
+                    .unwrap_or_default(),
+                Default::default(),
+            ],
+        );
         self.iter = None;
         self.pending = None;
         self.fields = Vec::new();
         drop(self.fields_charge.take());
         self.done = true;
+        #[cfg(test)]
+        crate::ordinary_calibration_trace::mark(
+            "ordinary-cursor-closed",
+            0,
+            [Default::default(); 3],
+        );
     }
 }

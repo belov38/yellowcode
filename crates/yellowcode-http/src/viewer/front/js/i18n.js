@@ -2,7 +2,7 @@ const L = {
   ru: {
     queryConsole: "Консоль запросов", notImplemented: "Не реализовано в Yellowcode", skin: "Скин", actions: "Действия",
     codeCompletionNote: "Подсказки: серверный API 1С; поддержка выполнения может быть неполной. Ctrl+Space — список",
-    codeConsole: "Консоль кода", codeRun: "Выполнить", codeCancel: "Отменить", codeMode: "Режим", codeSandbox: "Песочница",
+    codeConsole: "Консоль встроенного языка", codeRun: "Выполнить", codeCancel: "Отменить", codeMode: "Режим", codeSandbox: "Песочница",
     codeReal: "Реальный", codeRealHint: "Запись в базу ещё не реализована", codeSessionFull: "Сеанс: полный",
     codeSessionBare: "Сеанс без УстановкаПараметровСеанса: ", codeRights: "Права не проверяются", codeStarting: "Запуск сеанса…",
     codeRunning: "Выполняется…", codeOpenFailed: "База не открыта: ", codeReopen: "Открыть заново", codeDone: "Выполнено",
@@ -57,7 +57,7 @@ const L = {
   en: {
     queryConsole: "Query console", notImplemented: "Not implemented in Yellowcode", skin: "Skin", actions: "Actions",
     codeCompletionNote: "Suggestions: 1C server API; execution support may be incomplete. Ctrl+Space opens the list",
-    codeConsole: "Code console", codeRun: "Run", codeCancel: "Cancel", codeMode: "Mode", codeSandbox: "Sandbox",
+    codeConsole: "Built-in language console", codeRun: "Run", codeCancel: "Cancel", codeMode: "Mode", codeSandbox: "Sandbox",
     codeReal: "Real", codeRealHint: "Writing to the base is not implemented yet", codeSessionFull: "Session: full",
     codeSessionBare: "Session without УстановкаПараметровСеанса: ", codeRights: "Rights are not checked", codeStarting: "Starting the session…",
     codeRunning: "Running…", codeOpenFailed: "The base is not open: ", codeReopen: "Open again", codeDone: "Done",

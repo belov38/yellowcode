@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 pub(super) struct Lower<'a> {
     pub schema: &'a QuerySchema,
+    pub phase: crate::bind::PhaseContext<'a>,
     pub storage: &'a StorageBinding,
     pub map: &'a StorageMap,
     pub b: &'a Bound<'a>,
@@ -106,9 +107,11 @@ impl<'a> Lower<'a> {
         map: &'a StorageMap,
         b: &'a Bound<'a>,
         predef_names: HashMap<QTableId, Vec<([u8; 16], String)>>,
+        phase: crate::bind::PhaseContext<'a>,
     ) -> Lower<'a> {
         let n = b.stmt.sources.len();
         Lower {
+            phase,
             schema,
             storage,
             map,

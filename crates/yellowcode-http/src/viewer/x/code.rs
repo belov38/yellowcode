@@ -146,11 +146,16 @@ fn analysis(state: &State, req: &Request) -> Response {
 
 fn source_state(state: &State) -> Result<(), String> {
     infobase_source(state).map_err(|kind| match kind {
-        NotBase::Cf => "Консоль кода работает на базе: откройте файл 1Cv8.1CD (сейчас открыта конфигурация из файла .cf)"
+        NotBase::Cf => {
+            "Консоль встроенного языка работает на базе: откройте файл 1Cv8.1CD (сейчас открыта конфигурация из файла .cf)"
+                .to_string()
+        }
+        NotBase::Dt => "DT открыт только для просмотра метаданных CONFIG; консоль встроенного языка требует восстановленную базу 1Cv8.1CD"
             .to_string(),
-        NotBase::Dt => "DT открыт только для просмотра метаданных CONFIG; консоль кода требует восстановленную базу 1Cv8.1CD".to_string(),
-        NotBase::XmlDir => "Консоль кода работает на базе: откройте файл 1Cv8.1CD (сейчас открыт каталог выгрузки)"
-            .to_string(),
+        NotBase::XmlDir => {
+            "Консоль встроенного языка работает на базе: откройте файл 1Cv8.1CD (сейчас открыт каталог выгрузки)"
+                .to_string()
+        }
         NotBase::Unknown(e) => format!("Источник не определён: {e}"),
     })
 }

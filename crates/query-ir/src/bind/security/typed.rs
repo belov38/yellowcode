@@ -881,15 +881,17 @@ impl Typed<'_> {
 pub(in crate::bind) fn preflight_virtual(
     stmt: &crate::CompiledStmt,
     ctx: &BindCtx<'_>,
+    phase: crate::bind::PhaseContext<'_>,
 ) -> Result<(), ExecError> {
-    preflight_with_origins(stmt, ctx, None)
+    preflight_with_admission(stmt, ctx, phase)
 }
 
-pub(in crate::bind) fn preflight_with_origins(
+pub(in crate::bind) fn preflight_with_admission(
     stmt: &crate::CompiledStmt,
     ctx: &BindCtx<'_>,
-    temps: Option<&dyn crate::bind::temp_provenance::TempOriginProvider>,
+    phase: crate::bind::PhaseContext<'_>,
 ) -> Result<(), ExecError> {
+    let temps = phase.temp_origins();
     let mut unsupported = false;
     let mut has_accounting = false;
     let mut has_calculation = false;
@@ -983,9 +985,9 @@ pub(in crate::bind) fn preflight_with_origins(
     }
     let schema = ctx.schema;
     let storage = ctx.storage;
-    let mut proof = super::provenance::Workspace::new();
+    let mut proof = super::provenance::Workspace::with_phase(phase);
     let mut collector = query_syntax::with_deep_stack(stmt.typed.max_depth, || {
-        let mut collector = Collector::new(schema);
+        let mut collector = Collector::with_phase(schema, phase);
         proof.enable_temp_origins(temps.is_some());
         collector.temp_origins = temps;
         collector.proof = Some(&mut proof.proof);

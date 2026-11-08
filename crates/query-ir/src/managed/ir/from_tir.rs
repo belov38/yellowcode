@@ -3,6 +3,7 @@ use crate::managed::{Index, NameKey, NativeOwned, ScratchVec};
 use crate::{QuerySchema, ir, tir};
 use query_syntax::ast::JoinKind;
 mod autoorder;
+mod autoorder_union;
 mod hierarchy_union;
 mod nested;
 mod presentation;
@@ -301,8 +302,9 @@ impl<'c, 'a, 'r, 'w, 't> Builder<'c, 'a, 'r, 'w, 't> {
         };
         for (index, part) in query.parts.iter().enumerate() {
             let mut rel = self.select(part, None, false)?;
-            if let (Some(desc), Some(keys)) = (union_auto, auto_sort.as_mut()) {
-                rel = self.union_autoorder_part(rel, keys, desc)?;
+            if let (Some(order), Some(keys)) = (union_auto, auto_sort.as_mut()) {
+                rel =
+                    self.union_autoorder_part(rel, keys, order.reference_desc, order.scalar_desc)?;
             }
             ctx.parent_depth(std::iter::once(rel.depth()))?;
             ctx.push(&mut parts, rel)?;
@@ -345,60 +347,6 @@ impl<'c, 'a, 'r, 'w, 't> Builder<'c, 'a, 'r, 'w, 't> {
             root = ctx.sort(root, keys.finish(), None)?;
         }
         Ok((root, types))
-    }
-
-    fn union_autoorder_part(
-        &mut self,
-        part: NativeOwned<'a, ir::Rel>,
-        sort: &mut crate::managed::NativeVec<'a, ir::SortKey>,
-        desc: bool,
-    ) -> BuildResult<NativeOwned<'a, ir::Rel>> {
-        let ctx = self.ctx;
-        let ir::Rel::Project { exprs, .. } = part.trusted_borrow() else {
-            return Err(BuildProblem::Internal(
-                "an autoordered union arm without a projection",
-            ));
-        };
-        let [base] = exprs.as_slice() else {
-            return Err(BuildProblem::Internal(
-                "an autoordered union arm without one raw reference",
-            ));
-        };
-        let mut automatic = self.auto_keys(base)?;
-        let first = sort.items().is_empty();
-        if !first && sort.items().len() != automatic.len() {
-            return Err(BuildProblem::Internal(
-                "nonuniform automatic union key layout",
-            ));
-        }
-        let capacity = automatic
-            .len()
-            .checked_add(1)
-            .ok_or_else(|| ctx.refuse(memory_budget::BudgetError::Overflow))?;
-        let mut output = ctx.vector(capacity)?;
-        ctx.push(&mut output, self.copy_expr(base)?)?;
-        automatic.reverse();
-        while let Some(key) = automatic.pop() {
-            if first {
-                let ty = ctx.copy(&key.trusted_borrow().ty)?;
-                let expr = self.out(output.items().len(), ty)?;
-                ctx.parent_depth(std::iter::once(expr.depth()))?;
-                ctx.push(sort, expr.map(|expr| ir::SortKey { expr, desc }))?;
-            }
-            ctx.push(&mut output, key)?;
-        }
-        let output = output.finish();
-        let input_depth = part.depth().checked_sub(1).ok_or(BuildProblem::Internal(
-            "an autoordered union arm without project depth",
-        ))?;
-        let depth = ctx.parent_depth([input_depth, output.depth()].into_iter())?;
-        let replacement = ctx.allocated(part.zip(output))?;
-        Ok(ctx
-            .allocated(replacement.try_map(|(part, exprs)| match part {
-                ir::Rel::Project { input, .. } => Ok(ir::Rel::Project { input, exprs }),
-                _ => Err(memory_budget::BudgetError::Overflow),
-            }))?
-            .set_depth(depth))
     }
 
     fn out(

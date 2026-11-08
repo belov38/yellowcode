@@ -8,7 +8,7 @@ use serde::Serialize;
 use yellowcode_core::viewer::body::ViewerBody;
 const QUERY: &str = "DT открыт только для просмотра метаданных CONFIG; консоль запросов требует восстановленную базу 1Cv8.1CD";
 const DATA: &str = "DT открыт только для просмотра метаданных CONFIG; данные открываются на восстановленной базе 1Cv8.1CD";
-const CODE: &str = "DT открыт только для просмотра метаданных CONFIG; консоль кода требует восстановленную базу 1Cv8.1CD";
+const CODE: &str = "DT открыт только для просмотра метаданных CONFIG; консоль встроенного языка требует восстановленную базу 1Cv8.1CD";
 #[derive(Serialize)]
 struct QueryInfo<'a> {
     enabled: bool,

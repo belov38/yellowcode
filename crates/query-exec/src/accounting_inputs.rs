@@ -6,6 +6,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 pub(crate) fn clone_register_step_without_chart(step: &RegisterRowsL) -> RegisterRowsL {
+    #[cfg(test)]
+    crate::ordinary_calibration::capture_step("actual-original-step", step);
     let rows = match &step.rows {
         RegisterRowsKindL::AccountingBalance(a) => {
             RegisterRowsKindL::AccountingBalance(query_ir::lower::BalanceRowsL {
@@ -15,18 +17,22 @@ pub(crate) fn clone_register_step_without_chart(step: &RegisterRowsL) -> Registe
                 period: a.period,
                 chart_layout: a.chart_layout,
                 chart_input: None,
+                ext1: a.ext1.clone(),
                 policy_fields: a.policy_fields.clone(),
                 secured: a.secured,
             })
         }
         other => other.clone(),
     };
-    RegisterRowsL {
+    let cloned = RegisterRowsL {
         register: step.register,
         kind: step.kind,
         view: step.view,
         rows,
-    }
+    };
+    #[cfg(test)]
+    crate::ordinary_calibration::capture_step("actual-cloned-step", &cloned);
+    cloned
 }
 
 #[derive(Clone, Copy)]
@@ -220,6 +226,19 @@ pub(crate) fn walk<'a>(
         Ok(())
     }
     rel(r, 1, f)
+}
+
+pub(crate) fn has_balance_columns(r: &RelL) -> Result<bool, ExecError> {
+    let mut found = false;
+    walk(r, &mut |node, _| {
+        if let Node::Rel(RelL::RegisterRows(step)) = node
+            && let RegisterRowsKindL::AccountingBalance(balance) = &step.rows
+        {
+            found |= balance.ext1.is_some();
+        }
+        Ok(())
+    })?;
+    Ok(found)
 }
 
 pub(crate) fn protected(r: &RelL) -> Result<bool, ExecError> {

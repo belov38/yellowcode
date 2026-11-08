@@ -120,11 +120,25 @@ impl TestBase {
         let upper = inputs.query_schema();
         infobase::open::probe("host:query_schema");
         grow(upper)?;
-        let schema = QuerySchema::build(&cfg, platform_catalog::catalog())
-            .map_err(|e| format!("query schema: {e:?}"))?;
+        let built = match &metadata {
+            Some(lease) => {
+                let evictor: std::sync::Weak<dyn memory_budget::Evictor + Send> =
+                    Arc::<onecd::Database>::downgrade(&db);
+                #[cfg(test)]
+                schema_build_seam::before_admitted(lease, upper);
+                QuerySchema::build_admitted(&cfg, platform_catalog::catalog(), lease, evictor)
+                    .map_err(infobase::Error::Memory)?
+            }
+            None => QuerySchema::build(&cfg, platform_catalog::catalog()),
+        };
+        let schema = built.map_err(|e| format!("query schema: {e:?}"))?;
+        #[cfg(test)]
+        schema_build_seam::completed();
         let exact = inputs.query_schema_with(crate::open_model::HostInputs::fanout_of(&schema));
         shrink(upper.saturating_sub(exact))?;
         grow(exact.saturating_sub(upper))?;
+        #[cfg(test)]
+        schema_build_seam::before_bind();
         infobase::open::probe("host:bind_storage");
         grow(inputs.binding())?;
         let storage = schema

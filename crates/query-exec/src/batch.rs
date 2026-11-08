@@ -4,9 +4,8 @@ use std::sync::Arc;
 use crate::temp::provenance::OriginAdapter;
 use memory_budget::{Evictor, Reservation, StructureLimit};
 use query_ir::bind::ParamValuesSnapshot;
-use query_ir::bind::temp_provenance::{
-    BoundTempStatement, bind_with_temp_origins, preflight_virtual_with_temp_origins,
-};
+use query_ir::bind::temp_provenance::{BoundTempStatement, TempOriginProvider};
+use query_ir::bind::{bind_with_policy_charge_with_admission, preflight_virtual_with_admission};
 use query_ir::ir::{BuildError, Rel, build_stmt};
 use query_ir::tir::{From as TFrom, Query, Select, StmtKind, TExpr, TKind};
 use query_ir::{
@@ -835,6 +834,44 @@ fn balance_lower_bytes(
         )
 }
 
+fn checked_batch_origins<'a>(
+    temp_origins: Option<&'a dyn TempOriginProvider>,
+    accounting_memory: Option<&memory_budget::RequestMemory>,
+) -> Result<Option<&'a dyn TempOriginProvider>, ExecError> {
+    if accounting_memory.is_some() && temp_origins.is_none() {
+        return Err(ExecError::Fatal(
+            "managed batch: authenticated temp origins required".into(),
+        ));
+    }
+    Ok(temp_origins)
+}
+
+pub(crate) fn managed_execution_root(
+    selected: &crate::source::ExecEnv<'_>,
+    execution: &crate::source::ExecEnv<'_>,
+) -> bool {
+    selected
+        .memory
+        .zip(execution.memory)
+        .zip(execution.lease)
+        .is_some_and(|((selected, current), lease)| {
+            selected.row_limit == current.row_limit
+                && selected.budget.same_scope(&current.budget)
+                && selected.budget.same_scope(lease.budget())
+                && lease.category() == memory_budget::Category::Execution
+        })
+}
+
+pub(crate) fn assert_managed_execution_root(
+    selected: &crate::source::ExecEnv<'_>,
+    execution: &crate::source::ExecEnv<'_>,
+) {
+    assert!(
+        managed_execution_root(selected, execution),
+        "managed request/lease scope invariant"
+    );
+}
+
 #[allow(clippy::too_many_arguments)]
 fn prepare(
     host: &dyn ExecHost,
@@ -850,6 +887,7 @@ fn prepare(
     policy_inputs: &Cell<u64>,
     origin_owner: &OriginCompileOwner<'_, '_, '_, '_>,
     observation: Option<&crate::observe::ObservationSession>,
+    accounting_memory: Option<&memory_budget::RequestMemory>,
 ) -> Result<Prepared, Failure> {
     let schema = host.schema();
     let opts = AnalyzeOptions {
@@ -928,7 +966,10 @@ fn prepare(
         host,
     };
     let adapter = OriginAdapter::new(temp);
-    let preflight = preflight_virtual_with_temp_origins(&compiled, &ctx, &adapter).map_err(exec);
+    let temp_origins = checked_batch_origins(Some(&adapter), accounting_memory).map_err(exec)?;
+    let preflight =
+        preflight_virtual_with_admission(&compiled, &ctx, temp_origins, accounting_memory)
+            .map_err(exec);
     values.check().map_err(|error| compile_stage(exec(error)))?;
     preflight?;
     let ir = build_stmt(&compiled, schema).map_err(build_error)?;
@@ -944,27 +985,35 @@ fn prepare(
         st.mem.grow(bytes)?;
         *leased += bytes;
     }
-    let lowered = bind_with_temp_origins(
+    let mut policy_charge = |stats: &query_ir::bind::PolicyCompileStats| {
+        if let Some(st) = stage {
+            let bytes = st.mem.model.policy(stats, st.mem.max_predefined_bytes);
+            st.mem.grow(bytes).map_err(|e| match e {
+                BatchError::Exec(e) => e,
+                _ => ExecError::Fatal("policy lease failed".into()),
+            })?;
+            policy_inputs.set(crate::model::size_add(
+                policy_inputs.get(),
+                stats.payload_bytes,
+            )?);
+            *leased += bytes.saturating_sub(stats.payload_bytes);
+        }
+        Ok(())
+    };
+    let mut origin_charge = |bytes| origin_owner.admit(bytes);
+    let origins = temp_origins.map(|provider| {
+        (
+            provider,
+            compiled.temp_out.as_ref(),
+            &mut origin_charge as &mut dyn FnMut(u64) -> Result<(), ExecError>,
+        )
+    });
+    let lowered = bind_with_policy_charge_with_admission(
         &ir,
         &ctx,
-        &adapter,
-        compiled.temp_out.as_ref(),
-        &mut |bytes| origin_owner.admit(bytes),
-        &mut |stats| {
-            if let Some(st) = stage {
-                let bytes = st.mem.model.policy(stats, st.mem.max_predefined_bytes);
-                st.mem.grow(bytes).map_err(|e| match e {
-                    BatchError::Exec(e) => e,
-                    _ => ExecError::Fatal("policy lease failed".into()),
-                })?;
-                policy_inputs.set(crate::model::size_add(
-                    policy_inputs.get(),
-                    stats.payload_bytes,
-                )?);
-                *leased += bytes.saturating_sub(stats.payload_bytes);
-            }
-            Ok(())
-        },
+        &mut policy_charge,
+        origins,
+        accounting_memory,
     )
     .map_err(exec);
     values.check().map_err(exec)?;
@@ -1068,6 +1117,7 @@ fn step_prepared(
         &policy_inputs.bytes,
         &origin_owner,
         observation,
+        env.memory,
     )?;
     let ordered = p.ordered;
     let done = |outcome, put| {
@@ -1085,6 +1135,14 @@ fn step_prepared(
         return Err(exec(ExecError::Fatal("statement without a plan".into())).into());
     };
     let lowered = bound.statement();
+    if env.memory.is_some()
+        && query_syntax::with_deep_stack(lowered.max_depth, || {
+            crate::accounting_inputs::has_balance_columns(&lowered.root)
+        })
+        .map_err(exec)?
+    {
+        assert_managed_execution_root(&env, &env);
+    }
     let put = p
         .compiled
         .temp_out
@@ -1541,11 +1599,20 @@ pub fn explain_last(
         &Cell::new(0),
         &origin_owner,
         None,
+        env.memory,
     )
     .map_err(|f| f.err)?;
     let Some(lowered) = &p.lowered else {
         return Ok(String::new());
     };
+    if env.memory.is_some()
+        && query_syntax::with_deep_stack(lowered.statement().max_depth, || {
+            crate::accounting_inputs::has_balance_columns(&lowered.statement().root)
+        })
+        .map_err(exec)?
+    {
+        assert_managed_execution_root(&env, &env);
+    }
     let src = host.read_source();
     Ok(explain_temps(
         lowered.statement(),
