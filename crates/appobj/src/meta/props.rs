@@ -5,7 +5,7 @@ use crate::model::{FieldDef, FieldRole, ObjId};
 use bsl_prim::{BslDate, Number, fold_name};
 use bsl_vm::{CallResult, Execution, HostError, TypeId, Value};
 use md_model::{Codec, MdKind, MdRef, Prop, TypedValue, Value as Mv};
-use platform_catalog::{TypeIdx, TypeKind, messages::Lang};
+use platform_catalog::{Member, TypeIdx, TypeKind, messages::Lang};
 use std::sync::Arc;
 
 pub(crate) fn type_mismatch(n: usize) -> HostError {
@@ -86,6 +86,20 @@ pub(crate) fn obj_get(
         {
             return Err(not_implemented(ru).into());
         }
+    }
+    if let MdPath::Subsystem(k) = path {
+        match f.as_str() {
+            "подсистемы" => return super::subsystems::nested(cx, k),
+            "состав" => return super::subsystems::content(cx, k),
+            _ if super::subsystems::is_refused(&f) => return Err(not_implemented(ru).into()),
+            _ => {}
+        }
+    }
+    if let MdPath::Object(o) = path
+        && f == "состав"
+        && model.obj(o).kind == crate::model::ObjKind::ExchangePlan
+    {
+        return super::plan_content::content(cx, o);
     }
     match f.as_str() {
         "имя" => return Ok(Value::from(inf.name)),
@@ -259,6 +273,7 @@ pub(crate) fn root_get(
     }
     let props = &cx.model().config.props;
     match f.as_str() {
+        "свойстваобъектов" => return super::objprops::root(cx),
         "имя" => return Ok(Value::from(root_text(cx, "Name").as_str())),
         "синоним" => {
             return Ok(match prop_of(props, "Synonym").map(|p| &p.value) {
@@ -270,6 +285,40 @@ pub(crate) fn root_get(
     }
     let p = prop_of(props, en).ok_or_else(|| no_field(ru))?;
     convert(cx, ex, None, ru, p)
+}
+
+pub(crate) fn root_index(cx: &Arc<MdCtx>, key: &Value) -> CallResult<Value> {
+    let Value::String(s) = key else {
+        return Err(not_implemented("[ключ не строка]").into());
+    };
+    let name = s.to_string_lossy();
+    let kind = match cx.catalog.find_member(cx.root.idx, &name) {
+        Some(Member::Property(p)) => root_kind(&p.name_en),
+        _ => None,
+    };
+    match kind {
+        Some(kind) => Ok(coll::root_coll(cx, kind)),
+        None => Err(not_implemented(&format!("{name}[не коллекция]")).into()),
+    }
+}
+
+pub(crate) fn std_synonym(cx: &Arc<MdCtx>, obj: ObjId, fd: &FieldDef) -> String {
+    let def = cx.model().obj(obj);
+    let declared = cx
+        .cfg_index
+        .get(&def.md)
+        .and_then(|i| cx.model().config.objects.get(*i))
+        .and_then(|m| {
+            let want = fd.std.map(|s| fold_name(s.names().1))?;
+            m.standard_attributes()
+                .iter()
+                .find(|a| fold_name(&a.name) == want)
+        })
+        .and_then(|a| prop_of(&a.props, "Synonym"));
+    match declared.map(|p| &p.value) {
+        Some(Mv::LStr(s)) => synonym_text(s, &cx.model().lang_code),
+        _ => synonym_text(&fd.synonym, &cx.model().lang_code),
+    }
 }
 
 pub(crate) fn std_get(
@@ -295,13 +344,7 @@ pub(crate) fn std_get(
     let xml = sa.and_then(|a| prop_of(&a.props, en));
     match f.as_str() {
         "имя" => Ok(Value::from(fd.name.as_str())),
-        "синоним" => {
-            let s = match xml.map(|p| &p.value) {
-                Some(Mv::LStr(s)) => synonym_text(s, &cx.model().lang_code),
-                _ => synonym_text(&fd.synonym, &cx.model().lang_code),
-            };
-            Ok(Value::from(s.as_str()))
-        }
+        "синоним" => Ok(Value::from(std_synonym(cx, obj, fd).as_str())),
         "комментарий" => Ok(Value::from(match xml.map(|p| &p.value) {
             Some(Mv::Text(t)) => t.as_str(),
             _ => "",
@@ -327,7 +370,7 @@ fn enum_by_name(cx: &MdCtx, type_ru: &str, literal: &str) -> Option<Value> {
     bsl_stdlib::enums::enum_value(t, literal)
 }
 
-const ENUM_TYPES: [(&str, &str, &str); 40] = [
+const ENUM_TYPES: [(&str, &str, &str); 39] = [
     (
         "РежимИспользованияПараметра",
         "Команда",
@@ -396,7 +439,6 @@ const ENUM_TYPES: [(&str, &str, &str); 40] = [
     ),
     ("Использование", "", "ИспользованиеРеквизита"),
     ("ВидРегистра", "", "ВидРегистраНакопления"),
-    ("ОперативноеПроведение", "", "Проведение"),
     (
         "Периодичность",
         "РегистрСведений",
@@ -450,6 +492,31 @@ const ENUM_TYPES: [(&str, &str, &str); 40] = [
     ),
 ];
 
+const DECLARED_TYPES: [(&str, &str); 7] = [
+    ("АвтоИспользование", "АвтоИспользованиеОбщегоРеквизита"),
+    (
+        "ИспользованиеРазделяемыхДанных",
+        "ИспользованиеРазделяемыхДанныхОбщегоРеквизита",
+    ),
+    (
+        "РазделениеАутентификации",
+        "РазделениеАутентификацииОбщегоРеквизита",
+    ),
+    ("РазделениеДанных", "РазделениеДанныхОбщегоРеквизита"),
+    (
+        "РазделениеПользователей",
+        "РазделениеПользователейОбщегоРеквизита",
+    ),
+    (
+        "РазделениеРасширенийКонфигурации",
+        "РазделениеРасширенийКонфигурацииОбщегоРеквизита",
+    ),
+    (
+        "ЗависимостьОтВидовРасчета",
+        "ИспользованиеБазыПланаВидовРасчета",
+    ),
+];
+
 fn enum_type(cx: &MdCtx, kind: Option<&str>, ru: &str, literal: &str) -> Option<TypeIdx> {
     let ok = |t: TypeIdx| {
         cx.catalog.type_info(t).kind == TypeKind::Enum
@@ -458,6 +525,13 @@ fn enum_type(cx: &MdCtx, kind: Option<&str>, ru: &str, literal: &str) -> Option<
     for (prop, k, en) in ENUM_TYPES {
         if prop == ru
             && (k.is_empty() || Some(k) == kind)
+            && let Some(t) = cx.catalog.find_type(en).filter(|t| ok(*t))
+        {
+            return Some(t);
+        }
+    }
+    for (prop, en) in DECLARED_TYPES {
+        if prop == ru
             && let Some(t) = cx.catalog.find_type(en).filter(|t| ok(*t))
         {
             return Some(t);
@@ -482,6 +556,11 @@ pub(crate) fn convert(
     ru: &str,
     p: &Prop,
 ) -> CallResult<Value> {
+    if p.codec == Codec::StyleValue
+        && let Mv::Xml(e) = &p.value
+    {
+        return crate::style::value(ex, e);
+    }
     match &p.value {
         Mv::Bool(b) => Ok(Value::Bool(*b)),
         Mv::LStr(s) => Ok(Value::from(synonym_text(s, &cx.model().lang_code).as_str())),
@@ -590,7 +669,7 @@ fn parse_date(s: &str) -> Option<Value> {
     BslDate::from_parts(y, mo, da, h, mi, se).map(Value::Date)
 }
 
-fn resolve_ref(cx: &MdCtx, r: &MdRef) -> Option<MdPath> {
+pub(super) fn resolve_ref(cx: &MdCtx, r: &MdRef) -> Option<MdPath> {
     let model = cx.model();
     if let Some(id) = r.id {
         if let Some(o) = model.by_uuid(id) {
@@ -604,6 +683,9 @@ fn resolve_ref(cx: &MdCtx, r: &MdRef) -> Option<MdPath> {
         }
         if let Some(i) = model.subscriptions.iter().position(|m| m.md == id) {
             return Some(MdPath::Subscription(i));
+        }
+        if let Some(k) = model.subsystem_by_uuid(id) {
+            return Some(MdPath::Subsystem(k));
         }
         if let Some(i) = cx.cfg_index.get(&id) {
             return Some(MdPath::Other(*i));
@@ -626,6 +708,7 @@ pub(crate) fn resolve_full(cx: &MdCtx, full: &str) -> Option<MdPath> {
     let w = fold_name(word);
     let kind = MdKind::all().iter().copied().find(|k| {
         fold_name(k.as_str()) == w
+            || super::shared_type(*k).is_some_and(|(_, word)| fold_name(word) == w)
             || cx
                 .catalog
                 .find_type(&format!("MetadataObject: {}", k.as_str()))
@@ -638,6 +721,9 @@ pub(crate) fn resolve_full(cx: &MdCtx, full: &str) -> Option<MdPath> {
                 })
                 .is_some_and(|ru| ru == w)
     })?;
+    if kind == MdKind::Subsystem {
+        return None;
+    }
     let n = fold_name(name);
     cx.model()
         .config

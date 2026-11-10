@@ -233,6 +233,25 @@ pub(super) fn transfer_prepared(
     prepared: u64,
     visit: impl FnOnce(&mut dyn RetainedMemory) -> Result<(), Exception>,
 ) -> Result<u64, Exception> {
+    run_census(ex, scratch, include_live, prepared, false, visit)
+}
+
+pub(crate) fn transfer_lenient(
+    ex: &mut Execution,
+    scratch: u64,
+    visit: impl FnOnce(&mut dyn RetainedMemory) -> Result<(), Exception>,
+) -> Result<u64, Exception> {
+    run_census(ex, scratch, false, 0, true, visit)
+}
+
+fn run_census(
+    ex: &mut Execution,
+    scratch: u64,
+    include_live: bool,
+    prepared: u64,
+    lenient: bool,
+    visit: impl FnOnce(&mut dyn RetainedMemory) -> Result<(), Exception>,
+) -> Result<u64, Exception> {
     let (result, work) = {
         let mut census = Census {
             ex,
@@ -260,7 +279,7 @@ pub(super) fn transfer_prepared(
             }
             visit(&mut census)?;
             while let Some(object) = census.todo.pop() {
-                if !object.retained_memory(&mut census)? {
+                if !object.retained_memory(&mut census)? && !lenient {
                     return Err(ex.out_of_memory());
                 }
             }

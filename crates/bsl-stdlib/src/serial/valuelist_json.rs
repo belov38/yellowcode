@@ -30,7 +30,8 @@ pub(crate) fn json_data(
     let (bytes, revision) = list.serial_json_snapshot_admission(ex)?;
     ctx.account(ex, bytes)?;
     let source = Value::Object(object.clone());
-    let retained = ex.measure_retained(ctx.read_scratch(0), |visit| visit.value(&source))?;
+    let retained =
+        ex.measure_retained_lenient(ctx.read_scratch(0), |visit| visit.value(&source))?;
     list.serial_check_revision(ex, revision)?;
     ctx.account(ex, retained.saturating_mul(2))?;
     let mut snapshot = list.serial_snapshot(ex)?;
@@ -465,7 +466,7 @@ pub(crate) fn data_envelope(
             ((stack.capacity().saturating_add(objects.capacity())) as u64).saturating_mul(32),
         ))?;
     }
-    let retained = ex.measure_retained(bytes, |visit| {
+    let retained = ex.measure_retained_lenient(bytes, |visit| {
         visit.work((objects.len() as u64).saturating_add(1))?;
         visit.value(source)?;
         for value in &objects {

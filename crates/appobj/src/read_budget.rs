@@ -33,6 +33,10 @@ pub(crate) fn stored_row(row: &[FieldValue]) -> u64 {
     })
 }
 
+pub(crate) fn storage_copy(bytes: &[u8]) -> u64 {
+    (bytes.len() as u64).saturating_add(64)
+}
+
 pub(crate) fn rows(rows: &[Vec<Value>], capacity: usize) -> u64 {
     rows.iter().fold(slots::<Vec<Value>>(capacity), |n, row| {
         row.iter()

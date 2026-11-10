@@ -37,6 +37,7 @@ pub struct AppOptions {
     pub query_mem_limit: u64,
     pub locale: String,
     pub file_system: Option<Arc<dyn bsl_vm::FileSystem>>,
+    pub connection_string: Option<String>,
 }
 
 impl Default for AppOptions {
@@ -50,6 +51,7 @@ impl Default for AppOptions {
             query_mem_limit: 1 << 30,
             locale: "ru_RU".to_string(),
             file_system: None,
+            connection_string: None,
         }
     }
 }
@@ -65,6 +67,8 @@ pub enum ModuleTarget {
 pub struct Application {
     model: Arc<AppModel>,
     store: Arc<dyn ibschema::store::Store>,
+    unscoped_store: Arc<dyn ibschema::store::Store>,
+    extensions: OnceLock<crate::extensions::Presence>,
     names: Arc<AppNamesImpl>,
     modules: Modules,
     types: OnceLock<AppTypes>,
@@ -90,6 +94,7 @@ pub(crate) struct QueryCtx {
 
 impl Application {
     pub fn open(mut o: AppOpen) -> Result<Arc<Application>> {
+        let unscoped_store = o.store.clone();
         if let Some(scope) = &o.options.read_only_scope {
             o.store = scope.bind(o.store)?;
         }
@@ -105,6 +110,8 @@ impl Application {
         Ok(Arc::new_cyclic(|me| Application {
             model,
             store: o.store,
+            unscoped_store,
+            extensions: OnceLock::new(),
             names,
             modules,
             types: OnceLock::new(),
@@ -201,6 +208,11 @@ impl Application {
         &self.store
     }
 
+    pub(crate) fn extensions(&self) -> &crate::extensions::Presence {
+        self.extensions
+            .get_or_init(|| crate::extensions::presence(self.unscoped_store.as_ref()))
+    }
+
     pub fn names(&self) -> &Arc<AppNamesImpl> {
         &self.names
     }
@@ -246,9 +258,18 @@ impl Application {
         crate::meta::register(self, reg)?;
         crate::current_language::register(self, reg);
         crate::managers::register(self, reg);
+        crate::kind_managers::register(self, reg);
+        crate::xml_strings::register(reg);
+        crate::platform_values::register(reg);
         crate::rights::register(self, reg);
-        crate::session_info::register(reg);
+        crate::access_right::register(reg);
+        crate::functional_option::register(self, reg);
+        crate::users::register(self, reg)?;
+        crate::session_info::register(self, reg);
+        crate::settings_storage::register(self, reg);
+        crate::extensions::register(self, reg);
         crate::predefined::register(self, reg);
+        crate::style::register(self, reg);
         query::register(reg, query);
         Ok(())
     }
@@ -300,7 +321,8 @@ impl Application {
             .map_err(SessionError::GlobalModule)?;
         self.begin_call(ex, state, CallOptions::default());
         let r = self.run_session_module(ex);
-        let (state, _) = self.end_call(ex);
+        let (mut state, _) = self.end_call(ex);
+        state.safe_mode_disabled = false;
         r.map(|()| state).map_err(SessionError::SessionModule)
     }
 

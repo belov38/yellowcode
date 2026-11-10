@@ -3,13 +3,18 @@ use std::{
     io::{self, BufWriter, Read, Write},
     path::{Path, PathBuf},
     process::Command,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
-use crate::{sql_config, sql_server::SqlPlan};
+use crate::{config_cf::CfOptions, dynamic_update::Summary, sql_config, sql_server::SqlPlan};
 
+mod cleaned;
+mod diag;
 mod lifecycle;
+mod tracing;
+mod unfinished;
 
+#[derive(Clone)]
 pub struct Request {
     pub backup_path: String,
     pub server: String,
@@ -23,6 +28,7 @@ pub struct Request {
 #[derive(Debug)]
 pub struct Report {
     pub rows: usize,
+    pub dynamic_update: Option<Summary>,
 }
 
 #[derive(Debug)]
@@ -33,16 +39,115 @@ pub struct DtReport {
     pub users: u64,
 }
 
+pub use process_containment::interrupt::{Kind as Interrupt, Watch as InterruptWatch};
+
+pub fn end_process(kind: Interrupt) -> ! {
+    process_containment::interrupt::end_process(kind)
+}
+
+pub fn watch_interrupts() -> io::Result<InterruptWatch> {
+    process_containment::interrupt::watch()
+}
+
 #[derive(Debug, thiserror::Error)]
-#[error("{0}")]
-pub struct Error(String);
+#[error("{message}")]
+pub struct Error {
+    message: String,
+    interrupted: Option<Interrupt>,
+}
+
+impl Error {
+    pub fn interrupted(&self) -> Option<Interrupt> {
+        self.interrupted
+    }
+}
 
 fn err(message: impl Into<String>) -> Error {
-    Error(message.into())
+    Error {
+        message: message.into(),
+        interrupted: None,
+    }
+}
+
+fn interrupted_error(kind: Interrupt, message: impl Into<String>) -> Error {
+    Error {
+        message: message.into(),
+        interrupted: Some(kind),
+    }
+}
+
+fn requested() -> Option<Interrupt> {
+    process_containment::interrupt::armed()
+        .then(process_containment::interrupt::requested)
+        .flatten()
+}
+
+fn announce(progress: &mut dyn Write, kind: Interrupt, plan: &SqlPlan) {
+    let _ = writeln!(
+        progress,
+        "yellowcode: interrupted by {}; stopping the SQL client and removing the temporary database {}; further signals are ignored until this ends",
+        kind.name(),
+        plan.database_name()
+    );
 }
 
 fn valid_arg(value: &str) -> bool {
     !value.is_empty() && !value.starts_with('-') && !value.chars().any(char::is_control)
+}
+
+const CLEANUP_BUDGET: Duration = Duration::from_secs(120);
+
+fn cleanup_request(request: &Request) -> Request {
+    Request {
+        lifecycle_timeout: Some(
+            request
+                .lifecycle_timeout
+                .map_or(CLEANUP_BUDGET, |own| own.min(CLEANUP_BUDGET)),
+        ),
+        ..request.clone()
+    }
+}
+
+fn say(progress: &mut dyn Write, text: &str) {
+    let _ = writeln!(progress, "yellowcode: {text}");
+}
+
+fn cleanup_seconds(request: &Request) -> u64 {
+    cleanup_request(request)
+        .lifecycle_timeout
+        .unwrap_or(CLEANUP_BUDGET)
+        .as_secs()
+}
+
+fn say_removing(progress: &mut dyn Write, request: &Request, plan: &SqlPlan) {
+    say(
+        progress,
+        &format!(
+            "removing the unfinished temporary database {} from the server (waiting at most {} s)",
+            plan.database_name(),
+            cleanup_seconds(request)
+        ),
+    );
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum After {
+    Failure,
+    Success,
+}
+
+fn say_checking(progress: &mut dyn Write, request: &Request, plan: &SqlPlan, after: After) {
+    let limit = match after {
+        After::Failure => format!(" (waiting at most {} s)", cleanup_seconds(request)),
+        After::Success => String::new(),
+    };
+    say(
+        progress,
+        &format!(
+            "checking that the temporary database {} is gone, and removing it if it is not{limit}",
+            plan.database_name()
+        ),
+    );
 }
 
 fn token() -> Result<String, Error> {
@@ -61,40 +166,106 @@ fn parent(path: &Path) -> &Path {
         .unwrap_or_else(|| Path::new("."))
 }
 
+pub use tracing::{failure_kind, failure_refusal};
+
 struct RunError {
     started: bool,
     message: String,
 }
 
-fn redact_diagnostic(bytes: &[u8], secret: &[u8], truncated: bool) -> String {
-    let mut redacted = Vec::with_capacity(bytes.len());
-    let mut remaining = bytes;
-    while !remaining.is_empty() {
-        if !secret.is_empty() && remaining.starts_with(secret) {
-            redacted.extend_from_slice(b"[redacted]");
-            remaining = remaining.get(secret.len()..).unwrap_or_default();
-        } else if let Some((&byte, rest)) = remaining.split_first() {
-            redacted.push(byte);
-            remaining = rest;
+const REDACTED: &[u8] = b"[redacted]";
+
+fn covered_by_secret(bytes: &[u8], secret: &[u8], cut_start: bool, cut_end: bool) -> Vec<bool> {
+    let mut covered = vec![false; bytes.len()];
+    let width = secret.len();
+    if width == 0 {
+        return covered;
+    }
+    for start in 0..bytes.len() {
+        if bytes
+            .get(start..)
+            .is_some_and(|rest| rest.starts_with(secret))
+        {
+            covered
+                .iter_mut()
+                .skip(start)
+                .take(width)
+                .for_each(|c| *c = true);
         }
     }
-    if truncated && secret.len() > 1 {
-        let max = (secret.len() - 1).min(redacted.len());
-        if let Some(length) = (1..=max).rev().find(|&length| {
-            secret
-                .get(..length)
-                .is_some_and(|prefix| redacted.ends_with(prefix))
-        }) {
-            redacted.truncate(redacted.len() - length);
-            redacted.extend_from_slice(b"[redacted]");
+    if cut_start
+        && let Some(length) = (1..=width.min(bytes.len()))
+            .rev()
+            .find(|&length| bytes.get(..length) == secret.get(width - length..))
+    {
+        covered.iter_mut().take(length).for_each(|c| *c = true);
+    }
+    if cut_end
+        && let Some(length) = (1..=(width - 1).min(bytes.len()))
+            .rev()
+            .find(|&length| bytes.get(bytes.len() - length..) == secret.get(..length))
+    {
+        covered
+            .iter_mut()
+            .skip(bytes.len() - length)
+            .for_each(|c| *c = true);
+    }
+    covered
+}
+
+fn redact_cut(bytes: &[u8], secret: &[u8], cut_start: bool, cut_end: bool) -> String {
+    let covered = covered_by_secret(bytes, secret, cut_start, cut_end);
+    let mut redacted = Vec::with_capacity(bytes.len());
+    let mut in_run = false;
+    for (&byte, &hidden) in bytes.iter().zip(covered.iter()) {
+        if hidden {
+            if !in_run {
+                redacted.extend_from_slice(REDACTED);
+            }
+        } else {
+            redacted.push(byte);
         }
+        in_run = hidden;
     }
     String::from_utf8_lossy(&redacted).trim().to_owned()
 }
 
+fn redact_diagnostic(bytes: &[u8], secret: &[u8], truncated: bool) -> String {
+    redact_cut(bytes, secret, false, truncated)
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_PASSWORD: std::cell::RefCell<Option<Vec<u8>>> = const { std::cell::RefCell::new(None) };
+}
+
+fn password_bytes() -> Vec<u8> {
+    #[cfg(test)]
+    if let Some(secret) = TEST_PASSWORD.with(|p| p.borrow().clone()) {
+        return secret;
+    }
+    let Some(value) = std::env::var_os("SQLCMDPASSWORD") else {
+        return Vec::new();
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        value.as_bytes().to_vec()
+    }
+    #[cfg(not(unix))]
+    {
+        value.to_string_lossy().into_owned().into_bytes()
+    }
+}
+
 fn diagnostic(bytes: &[u8], truncated: bool) -> String {
-    let password = std::env::var("SQLCMDPASSWORD").unwrap_or_default();
-    redact_diagnostic(bytes, password.as_bytes(), truncated)
+    redact_diagnostic(bytes, &password_bytes(), truncated)
+}
+
+fn query_timeout_seconds(lifecycle: Option<Duration>) -> u64 {
+    let budget = lifecycle.unwrap_or(Duration::from_secs(1920));
+    let reserve = Duration::from_secs(120).min(budget / 4);
+    (budget - reserve).as_secs().clamp(1, 65_534)
 }
 
 fn run<T>(
@@ -106,8 +277,9 @@ fn run<T>(
     command
         .args([
             "-b", "-r1", "-I", "-x", "-w", "65535", "-y", "0", "-f", "65001", "-l", "15", "-t",
-            "1800", "-d", "master", "-S",
         ])
+        .arg(query_timeout_seconds(request.lifecycle_timeout).to_string())
+        .args(["-d", "master", "-S"])
         .arg(&request.server)
         .arg("-N");
     if request.trust_server_certificate {
@@ -129,36 +301,444 @@ fn run<T>(
     })
 }
 
-fn marker(request: &Request, script: &str, expected: &str) -> Result<(), RunError> {
-    run(request, script, |stdout| {
+enum Restored {
+    Ready,
+    Refused(String),
+}
+
+fn valid_refusal(code: &str) -> bool {
+    let (name, detail) = code
+        .split_once(':')
+        .map_or((code, None), |(n, d)| (n, Some(d)));
+    !name.is_empty()
+        && name.len() <= 32
+        && name.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
+        && detail
+            .is_none_or(|d| !d.is_empty() && d.len() <= 9 && d.bytes().all(|b| b.is_ascii_digit()))
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Phase {
+    Unreached,
+    Inspecting,
+    Restoring,
+}
+
+struct Parsed {
+    phase: Phase,
+    restored: Option<Restored>,
+}
+
+fn parse_restore_output(text: &str) -> Parsed {
+    let mut phase = Phase::Unreached;
+    let mut terminal = None;
+    let mut unexpected = false;
+    for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        match line {
+            "YC_BAK_INSPECTING" if terminal.is_none() => {
+                phase = phase.max_stage(Phase::Inspecting);
+            }
+            "YC_BAK_RESTORING" if terminal.is_none() => phase = phase.max_stage(Phase::Restoring),
+            other if terminal.is_none() => terminal = Some(other),
+            _ => unexpected = true,
+        }
+    }
+    let restored = match terminal {
+        _ if unexpected => None,
+        Some("YC_BAK_READY") => Some(Restored::Ready),
+        Some(other) if phase != Phase::Restoring => other
+            .strip_prefix("YC_BAK_REFUSED:")
+            .filter(|code| valid_refusal(code))
+            .map(|code| Restored::Refused(code.to_owned())),
+        _ => None,
+    };
+    Parsed { phase, restored }
+}
+
+impl Phase {
+    fn max_stage(self, other: Phase) -> Phase {
+        if (other as u8) > (self as u8) {
+            other
+        } else {
+            self
+        }
+    }
+}
+
+fn restore(request: &Request, plan: &SqlPlan) -> Result<Restored, (RunError, Phase)> {
+    let phase = std::cell::Cell::new(Phase::Unreached);
+    run(request, &plan.restore_script(), |stdout| {
         let mut bytes = Vec::new();
         stdout
             .take(8193)
             .read_to_end(&mut bytes)
             .map_err(|e| format!("reading SQL response: {e}"))?;
-        if bytes.len() > 8192 || std::str::from_utf8(&bytes).ok().map(str::trim) != Some(expected) {
-            return Err("unexpected SQL response".into());
-        }
-        Ok(())
+        let text = if bytes.len() > 8192 {
+            None
+        } else {
+            std::str::from_utf8(&bytes).ok()
+        };
+        let parsed = text.map_or(
+            Parsed {
+                phase: Phase::Unreached,
+                restored: None,
+            },
+            parse_restore_output,
+        );
+        phase.set(parsed.phase);
+        parsed
+            .restored
+            .ok_or_else(|| "unexpected SQL response".to_owned())
+    })
+    .map_err(|failure| (failure, phase.get()))
+}
+
+fn unreadable_hint(diagnostics: &str) -> &'static str {
+    let has = |number: &str| diagnostics.contains(&format!("Msg {number},"));
+    if ["3287", "3241", "3242", "3243"].iter().any(|n| has(n)) {
+        "the file is not a complete, readable SQL Server backup (truncated, damaged or not a backup); "
+    } else if has("3201") {
+        "SQL Server cannot open the file (check that the path exists on the SQL Server machine and that its service account can read it); "
+    } else if has("3203") {
+        "SQL Server hit a read error on the file; "
+    } else {
+        ""
+    }
+}
+
+fn is_own_check_failure(detail: &str) -> bool {
+    detail.contains("Msg 51000,")
+        && [
+            "temporary database already exists",
+            "unsupported server data path",
+        ]
+        .iter()
+        .any(|text| detail.contains(text))
+}
+
+fn has_server_error(text: &str) -> bool {
+    text.match_indices("Msg ").any(|(at, _)| {
+        let rest = text.get(at + 4..).unwrap_or_default();
+        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+        digits > 0
+            && rest
+                .get(digits..)
+                .is_some_and(|after| after.starts_with(','))
     })
 }
 
-fn cleanup(request: &Request, plan: &SqlPlan) -> Result<(), RunError> {
-    marker(request, &plan.cleanup_script(), "YC_BAK_GONE")
+fn login_refused(text: &str) -> bool {
+    text.contains("Login failed") || text.contains("Login timeout expired")
 }
 
-fn fail_with_cleanup(request: &Request, plan: &SqlPlan, message: String) -> Error {
-    let message = format!(
-        "{message}; temporary database {} (server-side completion/cancellation unproven)",
-        plan.database_name()
-    );
+fn inspection_failure(detail: &str) -> String {
+    if is_own_check_failure(detail) {
+        format!("SQL restore script stopped before RESTORE: {detail}")
+    } else if detail.contains("Msg 213,") {
+        format!(
+            "SQL restore script stopped before RESTORE: this SQL Server returns a result layout that Yellowcode does not expect (verified: SQL Server 2022); {detail}"
+        )
+    } else if has_server_error(detail) {
+        format!(
+            "SQL Server could not read the backup: {}{detail}",
+            unreadable_hint(detail)
+        )
+    } else {
+        format!("SQL command stopped before RESTORE, which says nothing about the backup: {detail}")
+    }
+}
+
+fn fail_unreadable(
+    request: &Request,
+    plan: &SqlPlan,
+    raw: &str,
+    progress: &mut dyn Write,
+) -> Error {
+    let server_answered = has_server_error(raw);
+    let detail = if server_answered {
+        raw.replace(
+            "; SQL client exchange uncertain; server-side completion/cancellation unproven",
+            "",
+        )
+    } else {
+        raw.to_owned()
+    };
+    let message = inspection_failure(&detail);
+    say_checking(progress, request, plan, After::Failure);
     match cleanup(request, plan) {
-        Ok(()) => err(message),
+        Ok(()) if server_answered => err(format!("{message}; no temporary database remains")),
+        Ok(()) => err(format!(
+            "{message}; when the cleanup ran, no temporary database remained"
+        )),
         Err(cleanup) => err(format!(
             "{message}; could not safely clean temporary database {}: {}",
             plan.database_name(),
-            cleanup.message
+            cleaned::complete(plan.database_name(), &cleanup.message)
         )),
+    }
+}
+
+const NOT_SYSADMIN_MESSAGE: &str = "the login must have the sysadmin role on the test server: the product restores a temporary database and must be able to remove it; no temporary database was created";
+
+fn refusal_message(code: &str, backup_set: u32) -> String {
+    if code == "not_sysadmin" {
+        return NOT_SYSADMIN_MESSAGE.to_owned();
+    }
+    let (name, detail) = code.split_once(':').unwrap_or((code, ""));
+    let reason = match name {
+        "not_full" => format!(
+            "backup set {backup_set} is not a full database backup (differential, log, file and partial backups cannot be restored on their own)"
+        ),
+        "encrypted" => "the backup is encrypted".to_owned(),
+        "tde" => "the database uses transparent data encryption (TDE)".to_owned(),
+        "striped" => "the backup is striped across several files or devices".to_owned(),
+        "snapshot" | "snapshot_url" => "the backup is a snapshot backup".to_owned(),
+        "damaged" => "the backup is marked as damaged".to_owned(),
+        "incomplete" => {
+            "the backup has incomplete metadata (for example a tail-log backup)".to_owned()
+        }
+        "layout" => "the backup set must hold exactly one data file and one log file, all present in the set".to_owned(),
+        "header_shape" => "this SQL Server returns a backup header layout that Yellowcode has not been verified with (verified: SQL Server 2022)".to_owned(),
+        "set_not_found" => format!("backup set {backup_set} is not on the media (the media holds {detail} sets)"),
+        _ => "the backup cannot be restored by this command".to_owned(),
+    };
+    format!("unsupported backup [{code}]: {reason}; no temporary database was created")
+}
+
+fn cleanup(request: &Request, plan: &SqlPlan) -> Result<(), RunError> {
+    cleanup_with(&cleanup_request(request), plan)
+}
+
+fn cleanup_after_success(request: &Request, plan: &SqlPlan) -> Result<(), RunError> {
+    cleanup_with(request, plan)
+}
+
+fn final_cleanup(
+    request: &Request,
+    plan: &SqlPlan,
+    worked: bool,
+    progress: &mut dyn Write,
+) -> Result<(), RunError> {
+    if worked {
+        say_checking(progress, request, plan, After::Success);
+        cleanup_after_success(request, plan)
+    } else {
+        say_checking(progress, request, plan, After::Failure);
+        cleanup(request, plan)
+    }
+}
+
+fn cleanup_with(request: &Request, plan: &SqlPlan) -> Result<(), RunError> {
+    let _cleaning = lifecycle::OrdinaryCleanup::enter(
+        plan.database_name(),
+        request
+            .lifecycle_timeout
+            .unwrap_or(Duration::from_secs(1920))
+            .as_secs(),
+    );
+    let wait = unfinished::wait_seconds(query_timeout_seconds(request.lifecycle_timeout));
+    let answer = run(request, &plan.cleanup_script_with_wait(wait), |stdout| {
+        let mut bytes = Vec::new();
+        stdout
+            .take(8193)
+            .read_to_end(&mut bytes)
+            .map_err(|e| format!("reading SQL response: {e}"))?;
+        if bytes.len() > 8192 {
+            return Err("unexpected SQL response".to_owned());
+        }
+        std::str::from_utf8(&bytes)
+            .ok()
+            .and_then(cleaned::parse_answer)
+            .ok_or_else(|| "unexpected SQL response".to_owned())
+    })?;
+    match answer {
+        cleaned::Cleaned::Gone => Ok(()),
+        cleaned::Cleaned::NotRemoved(failed) => Err(RunError {
+            started: true,
+            message: cleaned::message(plan.database_name(), &failed),
+        }),
+    }
+}
+
+fn fail_with_cleanup(
+    request: &Request,
+    plan: &SqlPlan,
+    message: &str,
+    skip_removal: bool,
+    progress: &mut dyn Write,
+) -> String {
+    let started = Instant::now();
+    let window = cleanup_request(request)
+        .lifecycle_timeout
+        .unwrap_or(CLEANUP_BUDGET);
+    let mut again = false;
+    loop {
+        let step = if skip_removal {
+            Ok(unfinished::Step::NotTried)
+        } else {
+            if !again {
+                say_removing(progress, request, plan);
+            }
+            unfinished::attempt(request, plan)
+        };
+        if !again {
+            say_checking(progress, request, plan, After::Failure);
+        }
+        let confirmed = cleanup(request, plan).map_err(|failure| failure.message);
+        if still_recovering(&step) && started.elapsed() < window && !lifecycle::stop_waiting() {
+            if !again {
+                say(
+                    progress,
+                    &format!(
+                        "the temporary database {} is still being recovered by the server; trying again (for at most {} s in all)",
+                        plan.database_name(),
+                        window.as_secs()
+                    ),
+                );
+                again = true;
+            }
+            std::thread::sleep(RECOVERY_PAUSE);
+            continue;
+        }
+        return unfinished::verdict(message, plan.database_name(), &step, &confirmed);
+    }
+}
+
+const RECOVERY_PAUSE: Duration = Duration::from_secs(1);
+
+fn still_recovering(step: &Result<unfinished::Step, String>) -> bool {
+    matches!(step, Ok(unfinished::Step::Kept(state)) if state == "RECOVERING")
+}
+
+fn settle(error: Error) -> Error {
+    if error.interrupted.is_some() {
+        return error;
+    }
+    match requested() {
+        Some(kind) => interrupted_error(
+            kind,
+            format!("interrupted by {}; {}", kind.name(), error.message),
+        ),
+        None => error,
+    }
+}
+
+fn interrupted_restore(
+    request: &Request,
+    plan: &SqlPlan,
+    kind: Interrupt,
+    started: bool,
+    progress: &mut dyn Write,
+) -> Error {
+    let base = format!("interrupted by {}", kind.name());
+    if !started {
+        return interrupted_error(kind, format!("{base}; no temporary database was created"));
+    }
+    announce(progress, kind, plan);
+    let _after_interrupt = lifecycle::InterruptCleanup::enter();
+    interrupted_error(
+        kind,
+        fail_with_cleanup(request, plan, &base, false, progress),
+    )
+}
+
+fn interrupted_export(
+    request: &Request,
+    plan: &SqlPlan,
+    kind: Interrupt,
+    progress: &mut dyn Write,
+    caller_keeps: bool,
+) -> Error {
+    let base = format!("interrupted by {}", kind.name());
+    if caller_keeps {
+        return interrupted_error(
+            kind,
+            format!(
+                "{base}; temporary database {} was left to the caller",
+                plan.database_name()
+            ),
+        );
+    }
+    announce(progress, kind, plan);
+    let _after_interrupt = lifecycle::InterruptCleanup::enter();
+    let removed = final_cleanup(request, plan, false, progress).map_err(|failure| failure.message);
+    interrupted_error(
+        kind,
+        unfinished::verdict(
+            &base,
+            plan.database_name(),
+            &Ok(unfinished::Step::NotTried),
+            &removed,
+        ),
+    )
+}
+
+fn wrong_client_message(request: &Request, failure: &RunError) -> Option<String> {
+    let said = failure
+        .message
+        .split("sqlcmd diagnostics: ")
+        .nth(1)
+        .unwrap_or(&failure.message)
+        .split("; sqlcmd exited")
+        .next()
+        .unwrap_or_default();
+    said.contains("Unknown Option").then(|| {
+        format!(
+            "{} does not accept the options of the Microsoft ODBC sqlcmd that Yellowcode uses (go-sqlcmd is one such program); install the ODBC sqlcmd (mssql-tools18) and pass its path with --sqlcmd; the client said: {said}",
+            request.sqlcmd.display()
+        )
+    })
+}
+
+fn restore_failure_message(failure: &RunError) -> String {
+    format!(
+        "SQL restore failed: {}{}",
+        unreadable_hint(&failure.message),
+        failure.message
+    )
+}
+
+fn restore_or_explain(
+    request: &Request,
+    plan: &SqlPlan,
+    backup_set: u32,
+    progress: &mut dyn Write,
+) -> Result<(), Error> {
+    let outcome = restore(request, plan);
+    if let Err((failure, _)) = &outcome
+        && let Some(kind) = requested()
+    {
+        return Err(interrupted_restore(
+            request,
+            plan,
+            kind,
+            failure.started,
+            progress,
+        ));
+    }
+    match outcome {
+        Ok(Restored::Ready) => Ok(()),
+        Ok(Restored::Refused(code)) => Err(err(refusal_message(&code, backup_set))),
+        Err((failure, Phase::Inspecting)) if failure.started => Err(settle(fail_unreadable(
+            request,
+            plan,
+            &failure.message,
+            progress,
+        ))),
+        Err((failure, Phase::Unreached)) if wrong_client_message(request, &failure).is_some() => {
+            Err(err(
+                wrong_client_message(request, &failure).unwrap_or_default()
+            ))
+        }
+        Err((failure, phase)) => {
+            let message = restore_failure_message(&failure);
+            let never_logged_in = phase == Phase::Unreached && login_refused(&failure.message);
+            Err(settle(err(if failure.started {
+                fail_with_cleanup(request, plan, &message, never_logged_in, progress)
+            } else {
+                message
+            })))
+        }
     }
 }
 
@@ -169,6 +749,15 @@ pub fn convert_cf(request: &Request, progress: &mut dyn Write) -> Result<Report,
 pub fn convert_cf_with_backup_set(
     request: &Request,
     backup_set: u32,
+    progress: &mut dyn Write,
+) -> Result<Report, Error> {
+    convert_cf_with_options(request, backup_set, &CfOptions::default(), progress)
+}
+
+pub fn convert_cf_with_options(
+    request: &Request,
+    backup_set: u32,
+    options: &CfOptions,
     progress: &mut dyn Write,
 ) -> Result<Report, Error> {
     if !valid_arg(&request.server) || request.user.as_deref().is_some_and(|u| !valid_arg(u)) {
@@ -196,14 +785,7 @@ pub fn convert_cf_with_backup_set(
         plan.database_name()
     )
     .map_err(|e| err(format!("writing progress: {e}")))?;
-    if let Err(failure) = marker(request, &plan.restore_script(), "YC_BAK_READY") {
-        let message = format!("SQL restore failed: {}", failure.message);
-        return Err(if failure.started {
-            fail_with_cleanup(request, &plan, message)
-        } else {
-            err(message)
-        });
-    }
+    restore_or_explain(request, &plan, backup_set, progress)?;
     let result = (|| {
         let year_offset = run(request, &plan.year_offset_script(), |stdout| {
             sql_config::read_year_offset(stdout).map_err(|e| e.to_string())
@@ -225,25 +807,48 @@ pub fn convert_cf_with_backup_set(
         .map_err(|e| err(format!("SQL configuration export failed: {}", e.message)))?;
         let rows = config.part_count();
         let mut writer = BufWriter::new(output.as_file_mut());
-        config
-            .write_cf(&mut writer)
+        let dynamic_update = config
+            .write_cf_with(options, &mut writer)
             .map_err(|e| err(e.to_string()))?;
         writer
             .flush()
             .map_err(|e| err(format!("writing CF: {e}")))?;
-        Ok(Report { rows })
+        Ok(Report {
+            rows,
+            dynamic_update,
+        })
     })();
-    let removed = cleanup(request, &plan);
+    if let Some(kind) = requested() {
+        return Err(interrupted_export(request, &plan, kind, progress, false));
+    }
+    let removed = final_cleanup(request, &plan, result.is_ok(), progress);
     if let Err(failure) = removed {
         let cleanup = format!(
             "could not safely clean temporary database {}: {}",
             plan.database_name(),
-            failure.message
+            cleaned::complete(plan.database_name(), &failure.message)
         );
-        return Err(match result {
+        return Err(settle(match result {
             Err(export) => err(format!("{export}; {cleanup}")),
             Ok(_) => err(cleanup),
-        });
+        }));
+    }
+    if let Some(kind) = requested() {
+        return Err(interrupted_error(
+            kind,
+            match result {
+                Ok(_) => format!(
+                    "interrupted by {}; temporary database {} (cleanup confirmed that it is gone); nothing was published",
+                    kind.name(),
+                    plan.database_name()
+                ),
+                Err(export) => format!(
+                    "interrupted by {}; {export}; temporary database {} (cleanup confirmed that it is gone)",
+                    kind.name(),
+                    plan.database_name()
+                ),
+            },
+        ));
     }
     let report = result?;
     output
@@ -475,15 +1080,8 @@ fn convert_dt_inner_owned(
         plan.database_name()
     )
     .map_err(|e| err(format!("writing progress: {e}")))?;
-    if task_token.is_none()
-        && let Err(failure) = marker(request, &plan.restore_script(), "YC_BAK_READY")
-    {
-        let message = format!("SQL restore failed: {}", failure.message);
-        return Err(if failure.started {
-            fail_with_cleanup(request, &plan, message)
-        } else {
-            err(message)
-        });
+    if task_token.is_none() {
+        restore_or_explain(request, &plan, backup_set, progress)?;
     }
     let result = (|| {
         let legacy = matches!(mode, DtMode::Legacy(_) | DtMode::LegacyFramed(_));
@@ -909,22 +1507,49 @@ fn convert_dt_inner_owned(
             users,
         })
     })();
-    let result = match cleanup_policy {
-        SqlCleanup::CallerOwned => result,
-        SqlCleanup::Automatic => match cleanup(request, &plan) {
-            Ok(()) => result,
-            Err(failure) => {
-                let cleanup = format!(
-                    "could not safely clean temporary database {}: {}",
-                    plan.database_name(),
-                    failure.message
-                );
-                match result {
-                    Err(export) => Err(err(format!("{export}; {cleanup}"))),
-                    _ => Err(err(cleanup)),
+    let result = match (cleanup_policy, requested()) {
+        (policy, Some(kind)) => Err(interrupted_export(
+            request,
+            &plan,
+            kind,
+            progress,
+            matches!(policy, SqlCleanup::CallerOwned),
+        )),
+        (SqlCleanup::CallerOwned, None) => result,
+        (SqlCleanup::Automatic, None) => {
+            match final_cleanup(request, &plan, result.is_ok(), progress) {
+                Ok(()) => match (requested(), result) {
+                    (Some(kind), Ok(_)) => Err(interrupted_error(
+                        kind,
+                        format!(
+                            "interrupted by {}; temporary database {} (cleanup confirmed that it is gone); nothing was published",
+                            kind.name(),
+                            plan.database_name()
+                        ),
+                    )),
+                    (Some(kind), Err(export)) => Err(interrupted_error(
+                        kind,
+                        format!(
+                            "interrupted by {}; {export}; temporary database {} (cleanup confirmed that it is gone)",
+                            kind.name(),
+                            plan.database_name()
+                        ),
+                    )),
+                    (None, result) => result,
+                },
+                Err(failure) => {
+                    let cleanup = format!(
+                        "could not safely clean temporary database {}: {}",
+                        plan.database_name(),
+                        cleaned::complete(plan.database_name(), &failure.message)
+                    );
+                    match result {
+                        Err(export) => Err(settle(err(format!("{export}; {cleanup}")))),
+                        _ => Err(settle(err(cleanup))),
+                    }
                 }
             }
-        },
+        }
     };
     let report = match result {
         Ok(report) => report,
@@ -949,14 +1574,18 @@ fn convert_dt_inner_owned(
 
 fn retain_incomplete(file: tempfile::NamedTempFile, path: Option<&Path>, failure: Error) -> Error {
     let Some(path) = path else { return failure };
+    let noted = |failure: &Error, note: String| Error {
+        message: format!("{failure}; {note}"),
+        interrupted: failure.interrupted,
+    };
     if let Err(e) = file.as_file().sync_all() {
-        return err(format!("{failure}; could not sync incomplete DT: {e}"));
+        return noted(&failure, format!("could not sync incomplete DT: {e}"));
     }
     if let Err(e) = file.persist_noclobber(path) {
-        return err(format!(
-            "{failure}; could not retain incomplete DT: {}",
-            e.error
-        ));
+        return noted(
+            &failure,
+            format!("could not retain incomplete DT: {}", e.error),
+        );
     }
     failure
 }
@@ -965,6 +1594,24 @@ fn retain_incomplete(file: tempfile::NamedTempFile, path: Option<&Path>, failure
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn retaining_an_incomplete_dt_keeps_an_interrupt_an_interrupt() {
+        let dir = tempfile::tempdir().unwrap();
+        let taken = dir.path().join("taken");
+        std::fs::write(&taken, b"x").unwrap();
+        let file = tempfile::NamedTempFile::new_in(dir.path()).unwrap();
+        let cut = interrupted_error(Interrupt::Interrupt, "interrupted by SIGINT; cut");
+        let error = retain_incomplete(file, Some(&taken), cut);
+        assert_eq!(error.interrupted(), Some(Interrupt::Interrupt));
+        assert!(
+            error
+                .to_string()
+                .starts_with("interrupted by SIGINT; cut; could not retain incomplete DT: "),
+            "{error}"
+        );
+        assert_eq!(std::fs::read(&taken).unwrap(), b"x");
+    }
 
     #[test]
     fn truncated_sql_diagnostics_hide_password_prefixes() {

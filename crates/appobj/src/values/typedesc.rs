@@ -61,6 +61,19 @@ pub(crate) fn all_refs(app: &Application, ex: &mut Execution, kind: ObjKind) -> 
     from_set(app, ex, &set)
 }
 
+pub(crate) fn all_route_points(app: &Application, ex: &mut Execution) -> CallResult<Value> {
+    let refs = app.types().ok_or_else(unsupported)?;
+    let ids = app
+        .model()
+        .of_kind(ObjKind::BusinessProcess)
+        .map(|o| {
+            refs.type_of(o.id, Category::RoutePointRef)
+                .ok_or_else(unsupported)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    from_ids(ex, &ids, &TypeSet::default())
+}
+
 fn platform_type(ex: &Execution, name: &str) -> Option<TypeId> {
     let name = name.strip_prefix("v8:").unwrap_or(name);
     ex.runtime().types().by_name(name).or_else(|| {
@@ -90,7 +103,9 @@ fn from_set(app: &Application, ex: &mut Execution, set: &TypeSet) -> CallResult<
             TypeAtom::Platform(n) => platform_type(ex, n).ok_or_else(unsupported)?,
             TypeAtom::Ref(obj) => refs.type_of(*obj, Category::Ref).ok_or_else(unsupported)?,
             TypeAtom::AnyRef(kind) => {
-                let start = ids.len();
+                if kind.is_some_and(|k| !k.is_reference()) {
+                    return Err(unsupported().into());
+                }
                 for obj in &app.model().objects {
                     if obj.kind.is_reference() && kind.is_none_or(|k| k == obj.kind) {
                         ids.push(
@@ -98,15 +113,25 @@ fn from_set(app: &Application, ex: &mut Execution, set: &TypeSet) -> CallResult<
                                 .ok_or_else(unsupported)?,
                         );
                     }
-                }
-                if ids.len() == start {
-                    return Err(unsupported().into());
+                    if kind.is_none()
+                        && obj.kind == ObjKind::BusinessProcess
+                        && let Some(t) = refs.type_of(obj.id, Category::RoutePointRef)
+                    {
+                        ids.push(t);
+                    }
                 }
                 continue;
             }
         };
         ids.push(id);
     }
+    if ids.is_empty() && !set.atoms.is_empty() {
+        return Err(unsupported().into());
+    }
+    from_ids(ex, &ids, set)
+}
+
+fn from_ids(ex: &mut Execution, ids: &[TypeId], set: &TypeSet) -> CallResult<Value> {
     ex.reserve((ids.len() as u64).saturating_mul(32).saturating_add(256))?;
     let number = set.number.map(|q| NumberQualifiers {
         digits: q.digits,
@@ -139,9 +164,9 @@ fn from_set(app: &Application, ex: &mut Execution, set: &TypeSet) -> CallResult<
         length: q.length,
         allowed: length(q.fixed),
     });
-    let td = TypeDescription::new(&ids, number, string, date, binary, ex.runtime());
+    let td = TypeDescription::new(ids, number, string, date, binary, ex.runtime());
     let td = if td.types().len() > 1 || ids.contains(&TypeId::UNDEFINED) {
-        TypeDescription::from_type_array(&ids, number, string, date, binary, ex.runtime())
+        TypeDescription::from_type_array(ids, number, string, date, binary, ex.runtime())
     } else {
         td
     };

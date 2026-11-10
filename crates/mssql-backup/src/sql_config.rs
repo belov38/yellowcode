@@ -1,4 +1,4 @@
-use crate::config_cf::ConfigRow;
+use crate::config_cf::{self, ConfigRow};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::{
     Deserialize,
@@ -37,6 +37,8 @@ pub enum Error {
     Json(#[from] serde_json::Error),
     #[error("invalid SQL configuration parts: {0}")]
     InvalidParts(&'static str),
+    #[error("invalid SQL configuration parts: part {part} of a file: {reason}")]
+    InvalidPart { part: i64, reason: String },
 }
 
 pub fn read_year_offset(input: impl Read) -> Result<i32, Error> {
@@ -71,8 +73,8 @@ pub fn normalize_multipart(config: SqlConfig, limits: Limits) -> Result<SqlConfi
     const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
     const MAX_PARTS: i64 = 1024;
     struct Group {
-        row: ConfigRow,
-        parts: BTreeMap<i64, Vec<u8>>,
+        name: String,
+        parts: BTreeMap<i64, (ConfigRow, Vec<u8>)>,
     }
     if config.rows.is_empty()
         || config.rows.len() != config.payloads.len()
@@ -80,6 +82,7 @@ pub fn normalize_multipart(config: SqlConfig, limits: Limits) -> Result<SqlConfi
     {
         return Err(Error::InvalidParts("row and payload counts"));
     }
+    let year_offset = config.year_offset;
     let mut names = HashMap::new();
     let mut groups: Vec<Group> = Vec::new();
     let mut total = 0_u64;
@@ -87,12 +90,9 @@ pub fn normalize_multipart(config: SqlConfig, limits: Limits) -> Result<SqlConfi
         if row.name.is_empty()
             || !row.name.is_ascii()
             || row.name.chars().any(char::is_control)
-            || row.attributes != 0
             || !(0..MAX_PARTS).contains(&row.part_no)
         {
-            return Err(Error::InvalidParts(
-                "unsupported name, attributes or part number",
-            ));
+            return Err(Error::InvalidParts("unsupported name or part number"));
         }
         let stored = u64::try_from(bytes.len()).map_err(|_| Error::Limit)?;
         if row.stored_size != stored || row.data_size > MAX_FILE_BYTES {
@@ -108,48 +108,92 @@ pub fn normalize_multipart(config: SqlConfig, limits: Limits) -> Result<SqlConfi
             let group: &mut Group = groups
                 .get_mut(index)
                 .ok_or(Error::InvalidParts("group index"))?;
-            if group.row.name != row.name
-                || group.row.creation != row.creation
-                || group.row.modified != row.modified
-                || group.row.attributes != row.attributes
-                || group.row.data_size != row.data_size
-            {
-                return Err(Error::InvalidParts("inconsistent multipart metadata"));
+            if group.name != row.name {
+                return Err(Error::InvalidParts("file names differ only in case"));
             }
-            if group.parts.insert(part, bytes).is_some() {
+            if group.parts.insert(part, (row, bytes)).is_some() {
                 return Err(Error::InvalidParts("duplicate part"));
             }
         } else {
             names.insert(key, groups.len());
+            let name = row.name.clone();
             let mut parts = BTreeMap::new();
-            parts.insert(part, bytes);
-            groups.push(Group { row, parts });
+            parts.insert(part, (row, bytes));
+            groups.push(Group { name, parts });
         }
     }
     let mut rows = Vec::with_capacity(groups.len());
     let mut payloads = Vec::with_capacity(groups.len());
-    for Group { mut row, parts } in groups {
-        let size = usize::try_from(row.data_size).map_err(|_| Error::Limit)?;
+    for Group { parts, .. } in groups {
+        let Some(reference) = parts.values().next().map(|(row, _)| row.clone()) else {
+            return Err(Error::InvalidParts("empty group"));
+        };
+        let size = usize::try_from(reference.data_size).map_err(|_| Error::Limit)?;
         let mut data = Vec::new();
         data.try_reserve_exact(size).map_err(|_| Error::Limit)?;
-        for (expected, (number, bytes)) in parts.into_iter().enumerate() {
-            if i64::try_from(expected).ok() != Some(number)
-                || data.len().checked_add(bytes.len()).is_none_or(|n| n > size)
-            {
-                return Err(Error::InvalidParts("missing part or excessive data"));
+        let mut creation_of_part_zero = None;
+        let mut modified_before = None;
+        let mut last = 0;
+        for (expected, (number, (part_row, bytes))) in parts.into_iter().enumerate() {
+            let refuse = |reason: String| Error::InvalidPart {
+                part: number,
+                reason,
+            };
+            if i64::try_from(expected).ok() != Some(number) {
+                return Err(refuse(format!("part {expected} is missing")));
             }
+            let creation = config_cf::timestamp(&part_row.creation, year_offset)
+                .map_err(|_| refuse("Creation is not a valid timestamp".into()))?;
+            let modified = config_cf::timestamp(&part_row.modified, year_offset)
+                .map_err(|_| refuse("Modified is not a valid timestamp".into()))?;
+            if expected == 0 {
+                if part_row.attributes != 0 {
+                    return Err(refuse("Attributes is not 0".into()));
+                }
+                creation_of_part_zero = Some(creation);
+            } else {
+                if Some(creation) != creation_of_part_zero {
+                    return Err(refuse("Creation differs from part 0".into()));
+                }
+                if part_row.attributes != reference.attributes {
+                    return Err(refuse("Attributes differs from part 0".into()));
+                }
+                if part_row.data_size != reference.data_size {
+                    return Err(refuse("DataSize differs from part 0".into()));
+                }
+                if Some(modified) < modified_before {
+                    return Err(refuse(format!(
+                        "Modified is earlier than part {}",
+                        number.saturating_sub(1)
+                    )));
+                }
+            }
+            if data.len().checked_add(bytes.len()).is_none_or(|n| n > size) {
+                return Err(refuse(format!(
+                    "the parts add up to more than DataSize ({size})"
+                )));
+            }
+            modified_before = Some(modified);
+            last = number;
             data.extend_from_slice(&bytes);
         }
         if data.len() != size {
-            return Err(Error::InvalidParts("incomplete data"));
+            return Err(Error::InvalidPart {
+                part: last,
+                reason: format!(
+                    "the parts add up to {} bytes, fewer than DataSize ({size})",
+                    data.len()
+                ),
+            });
         }
+        let mut row = reference;
         row.part_no = 0;
         row.stored_size = row.data_size;
         rows.push(row);
         payloads.push(data);
     }
     Ok(SqlConfig {
-        year_offset: config.year_offset,
+        year_offset,
         rows,
         payloads,
     })

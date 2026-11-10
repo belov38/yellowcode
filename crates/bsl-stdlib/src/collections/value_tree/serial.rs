@@ -141,3 +141,151 @@ impl ValueTree {
         })
     }
 }
+
+fn exception(ex: &mut Execution, error: bsl_vm::CallError) -> Exception {
+    match error {
+        bsl_vm::CallError::Host(error) => ex.error(error),
+        bsl_vm::CallError::Exc(error) => error,
+    }
+}
+impl ValueTree {
+    pub(crate) fn serial_reserve(
+        &self,
+        ex: &mut Execution,
+        columns: usize,
+        next_column: u32,
+        arena: usize,
+        roots: usize,
+    ) -> Result<(), Exception> {
+        let state = &self.state;
+        state
+            .columns
+            .serial_reserve_entries(ex, columns)
+            .map_err(|e| exception(ex, e))?;
+        state.columns.serial_set_next(next_column);
+        let mut slots: Vec<Option<Rc<Node>>> = vec_with_capacity(ex, arena as u64)?;
+        ex.charge(arena as u64 / 64 + 1)?;
+        slots.resize_with(arena, || None);
+        let ids = vec_with_capacity(ex, roots as u64)?;
+        *state.arena.borrow_mut() = slots;
+        *state.roots.borrow_mut() = ids;
+        Ok(())
+    }
+    pub(crate) fn serial_restore_column(
+        &self,
+        ex: &mut Execution,
+        id: u32,
+        name: Str,
+        value_type: Value,
+        title: Str,
+        width: i64,
+    ) -> Result<(), Exception> {
+        let column = SerialColumn {
+            id,
+            name,
+            value_type,
+            title,
+            width,
+        };
+        let restored = self.state.columns.serial_restore_column(ex, column);
+        restored.map_err(|e| exception(ex, e))
+    }
+    pub(crate) fn serial_restore_row(
+        &self,
+        ex: &mut Execution,
+        id: usize,
+        parent: Option<usize>,
+        children: usize,
+        materialized: bool,
+    ) -> Result<bool, Exception> {
+        let state = &self.state;
+        let parent = match parent {
+            Some(p) => Some(state.node(p).ok_or_else(|| ex.error(changed()))?),
+            None => None,
+        };
+        let level = parent.as_ref().map_or(Some(0), |p| p.level.checked_add(1));
+        let level = level.ok_or_else(|| ex.out_of_memory())?;
+        let full = |ids: &Vec<usize>| ids.len() == ids.capacity();
+        if parent.as_ref().map_or_else(
+            || full(&state.roots.borrow()),
+            |p| full(&p.children.borrow()),
+        ) {
+            return Err(ex.out_of_memory());
+        }
+        let mut live = state
+            .live(ex)
+            .map_err(|e| exception(ex, e))?
+            .saturating_add((std::mem::size_of::<Node>() + 4 * std::mem::size_of::<usize>()) as u64)
+            .saturating_add((children as u64).saturating_mul(std::mem::size_of::<usize>() as u64));
+        let columns = state
+            .columns
+            .records(ex, live)
+            .map_err(|e| exception(ex, e))?;
+        live = live.saturating_add(
+            (columns.len() as u64).saturating_mul(std::mem::size_of::<(u32, Value)>() as u64),
+        );
+        ex.reserve(live)?;
+        let mut cells = Cells(vec_with_capacity(ex, columns.len() as u64)?);
+        for column in &columns {
+            let value = if materialized {
+                Value::Undefined
+            } else {
+                adjust(ex, &column.value_type(), Value::Undefined, live)
+                    .map_err(|e| exception(ex, e))?
+            };
+            live = live.saturating_add(value_bytes(&value));
+            ex.reserve(live)?;
+            cells.0.push((column.id, value));
+        }
+        let mut grandchildren = Vec::new();
+        grandchildren
+            .try_reserve_exact(children)
+            .map_err(|_| ex.out_of_memory())?;
+        let record = Rc::new(Node {
+            id,
+            parent: parent.as_ref().map(|p| p.id),
+            level,
+            active: Cell::new(true),
+            materialized: Cell::new(materialized),
+            children: RefCell::new(grandchildren),
+            cells: RefCell::new(cells),
+            bytes: Cell::new(0),
+            hash: creation_number(),
+            rows_hash: creation_number(),
+        });
+        let mut arena = state.arena.borrow_mut();
+        let Some(slot) = arena.get_mut(id).filter(|slot| slot.is_none()) else {
+            return Ok(false);
+        };
+        *slot = Some(record.clone());
+        drop(arena);
+        match &parent {
+            Some(p) => p.children.borrow_mut().push(id),
+            None => state.roots.borrow_mut().push(id),
+        }
+        state.update_bytes(&record);
+        Ok(true)
+    }
+    pub(crate) fn serial_restore_cell(
+        &self,
+        ex: &mut Execution,
+        id: usize,
+        position: usize,
+        value: Value,
+    ) -> Result<(), Exception> {
+        let state = &self.state;
+        let live = state.live(ex).map_err(|e| exception(ex, e))?;
+        ex.reserve(live.saturating_add(value_bytes(&value)))?;
+        let node = state.node(id).ok_or_else(|| ex.error(changed()))?;
+        ex.charge(node.cells.borrow().0.len() as u64 + 1)?;
+        let mut cells = node.cells.borrow_mut();
+        let cell = cells
+            .0
+            .get_mut(position)
+            .ok_or_else(|| ex.error(changed()))?;
+        cell.1 = value;
+        drop(cells);
+        state.update_bytes(&node);
+        Ok(())
+    }
+}

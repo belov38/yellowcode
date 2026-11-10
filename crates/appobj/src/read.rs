@@ -72,7 +72,7 @@ pub(crate) fn store_error(e: &StoreError) -> HostError {
     .caused_by(Cause::Host(Box::new(HostError::text(&text, &text))))
 }
 
-fn internal(text: &str) -> HostError {
+pub(crate) fn internal(text: &str) -> HostError {
     HostError::text(&format!("internal: {text}"), &format!("internal: {text}"))
 }
 

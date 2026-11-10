@@ -42,7 +42,7 @@ fn live(
     scratch: u64,
 ) -> Result<u64, Exception> {
     let settings = ex.env().ib_regional_settings();
-    let bytes = ex.measure_retained(scratch, |visit| {
+    let bytes = ex.measure_retained_lenient(scratch, |visit| {
         visit.bytes(crate::collections::accounting::retained_rc_size::<Regional>())?;
         for value in values {
             visit.value(value)?;

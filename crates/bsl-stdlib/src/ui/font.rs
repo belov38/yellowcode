@@ -1,3 +1,4 @@
+use super::style::{self, item_text};
 use super::{
     NS_STYLE, NS_UI, SharedOf, data_bool, data_decimal, data_text, enum_val, prop, prop_text,
     tenths, to_tenths, types,
@@ -32,6 +33,7 @@ pub(crate) enum FontKind {
 pub(crate) struct StyleRef {
     name: Option<&'static str>,
     id: Option<i32>,
+    item: Option<u32>,
 }
 
 const STYLE_FONT_IDS: &[(&str, i32)] = &[("NormalTextFont", -31)];
@@ -54,6 +56,7 @@ fn style_of(name: &'static str) -> StyleRef {
     StyleRef {
         name: Some(name),
         id: style_font_id(name),
+        item: None,
     }
 }
 
@@ -168,7 +171,7 @@ pub(super) fn comparison_resources(value: &Value) -> Option<(u64, u64)> {
 
 pub(super) fn presentation_input_len(value: &Value) -> Option<u64> {
     let data = font_data(value)?;
-    Some(if data.kind == FontKind::Absolute {
+    Some(if data.kind == FontKind::Absolute || data.face.is_some() {
         (data.face.as_ref().map_or(0, String::len) as u64).saturating_add(512)
     } else {
         0
@@ -207,6 +210,17 @@ pub(crate) fn style_member(t: TypeIdx, i: usize) -> Option<Value> {
     d.kind = FontKind::Style;
     d.style = Some(style_of(name));
     Some(new_font(d))
+}
+
+pub(super) fn item_font(k: u32) -> Value {
+    let mut d = FontData::auto();
+    d.kind = FontKind::Style;
+    d.style = Some(StyleRef {
+        name: None,
+        id: None,
+        item: Some(k),
+    });
+    new_font(d)
 }
 
 fn opt_bool(ex: &mut Execution, a: Option<&Arg>, param: usize) -> CallResult<Option<bool>> {
@@ -376,13 +390,24 @@ impl HostObject for Font {
 
     fn presentation(&self, ex: &mut Execution) -> CallResult<Option<Str>> {
         let d = &self.data;
-        if d.kind != FontKind::Absolute {
-            return Ok(None);
-        }
         let lang = ex.lang();
         let mut parts: Vec<String> = Vec::new();
-        if let Some(f) = d.face.as_deref().filter(|f| !f.is_empty()) {
-            parts.push(f.to_string());
+        match (d.kind, &d.style) {
+            (FontKind::Absolute, _) => {
+                if let Some(f) = d.face.as_deref().filter(|f| !f.is_empty()) {
+                    parts.push(f.to_string());
+                }
+            }
+            (FontKind::Style, Some(st)) => {
+                match item_text(ex, st.name, st.item) {
+                    Some(text) => parts.push(text),
+                    None => return Ok(None),
+                }
+                if let Some(f) = d.face.as_deref().filter(|f| !f.is_empty()) {
+                    parts.push(f.to_string());
+                }
+            }
+            _ => return Ok(None),
         }
         if let Some(s) = d.size {
             parts.push(tenths(s).to_xml_string());
@@ -398,6 +423,9 @@ impl HostObject for Font {
                     platform_catalog::messages::render_key(key, &[], "", lang).unwrap_or_default(),
                 );
             }
+        }
+        if d.kind == FontKind::Style && d.scale != 100 {
+            parts.push(format!("{}%", d.scale));
         }
         Ok(Some(Str::from(parts.join(", ").as_str())))
     }
@@ -471,11 +499,15 @@ impl ValueCodec for FontCodec {
             ],
             FontKind::Auto => vec![int(8), int(3), int(0), int(1), int(d.scale)],
             FontKind::Style => {
-                let id = d
-                    .style
-                    .as_ref()
-                    .and_then(|s| s.id.or_else(|| s.name.and_then(style_font_id)));
-                let Some(id) = id else {
+                let reference = match d.style.as_ref() {
+                    Some(StyleRef { item: Some(k), .. }) => style::item_ref(ex, *k),
+                    Some(s) => {
+                        s.id.or_else(|| s.name.and_then(style_font_id))
+                            .map(|id| vec![int(i64::from(id))])
+                    }
+                    None => None,
+                };
+                let Some(reference) = reference else {
                     return Err(unsupported(ex));
                 };
                 if d.face.is_some()
@@ -489,7 +521,7 @@ impl ValueCodec for FontCodec {
                     int(8),
                     int(2),
                     int(i64::from(d.mask())),
-                    Node::List(vec![int(i64::from(id))]),
+                    Node::List(reference),
                 ];
                 if let Some(s) = d.size {
                     b.push(int(s));
@@ -512,14 +544,14 @@ impl ValueCodec for FontCodec {
         items: &[Node],
         r: &mut InternalReader,
     ) -> Result<Value, Exception> {
-        match read_internal(items) {
+        match read_internal(ex, items) {
             Some(d) => Ok(new_font(d)),
             None => Err(r.format_error(ex)),
         }
     }
 }
 
-fn read_internal(items: &[Node]) -> Option<FontData> {
+fn read_internal(ex: &Execution, items: &[Node]) -> Option<FontData> {
     let b = items.iter().find_map(Node::as_list)?;
     let int = |i: usize| b.get(i).and_then(Node::as_i64);
     if int(0)? != 8 {
@@ -549,16 +581,21 @@ fn read_internal(items: &[Node]) -> Option<FontData> {
         }
         2 => {
             d.kind = FontKind::Style;
-            let id = i32::try_from(
-                b.get(3)
-                    .and_then(Node::as_list)
-                    .and_then(|l| l.first())
-                    .and_then(Node::as_i64)?,
-            )
-            .ok()?;
-            d.style = Some(StyleRef {
-                name: style_font_name(id),
-                id: Some(id),
+            let reference = b.get(3).and_then(Node::as_list)?;
+            let id = i32::try_from(reference.first().and_then(Node::as_i64)?).ok()?;
+            d.style = Some(if id == 0 && reference.len() > 1 {
+                let uuid = reference.get(1).and_then(Node::text)?;
+                StyleRef {
+                    name: None,
+                    id: None,
+                    item: Some(style::item_by_uuid(ex, uuid)?),
+                }
+            } else {
+                StyleRef {
+                    name: style_font_name(id),
+                    id: Some(id),
+                    item: None,
+                }
             });
             if mask & !(BIT_SIZE | BIT_BOLD) != 0 {
                 return None;

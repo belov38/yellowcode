@@ -23,7 +23,7 @@ use windows_sys::Win32::{
             CreateNamedPipeW, PIPE_NOWAIT, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS,
             PIPE_TYPE_BYTE,
         },
-        Threading::{CREATE_SUSPENDED, WaitForSingleObject},
+        Threading::{CREATE_NEW_PROCESS_GROUP, CREATE_SUSPENDED, WaitForSingleObject},
     },
 };
 
@@ -109,17 +109,38 @@ fn pipe(input: bool) -> io::Result<(Pipe, File)> {
 }
 
 pub(super) fn spawn(command: &mut Command, deadline: Instant) -> Result<Spawned, SpawnError> {
+    spawn_in(command, deadline, false)
+}
+
+pub(super) fn spawn_apart(command: &mut Command, deadline: Instant) -> Result<Spawned, SpawnError> {
+    spawn_in(command, deadline, true)
+}
+
+fn spawn_in(
+    command: &mut Command,
+    deadline: Instant,
+    own_console_group: bool,
+) -> Result<Spawned, SpawnError> {
     let owner = job().map_err(|error| SpawnError {
         started: false,
         error,
     })?;
-    spawn_owned(command, owner, deadline)
+    spawn_owned(command, owner, deadline, own_console_group)
+}
+
+const fn creation_flags(own_console_group: bool) -> u32 {
+    if own_console_group {
+        CREATE_SUSPENDED | CREATE_NEW_PROCESS_GROUP
+    } else {
+        CREATE_SUSPENDED
+    }
 }
 
 fn spawn_owned(
     command: &mut Command,
     owner: Owner,
     deadline: Instant,
+    own_console_group: bool,
 ) -> Result<Spawned, SpawnError> {
     let prepare = || {
         let (stdin, input) = pipe(true)?;
@@ -133,7 +154,7 @@ fn spawn_owned(
             error,
         })?;
     let child = command
-        .creation_flags(CREATE_SUSPENDED)
+        .creation_flags(creation_flags(own_console_group))
         .stdin(Stdio::from(input))
         .stdout(Stdio::from(output))
         .stderr(Stdio::from(diagnostic))

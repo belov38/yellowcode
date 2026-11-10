@@ -105,5 +105,5 @@ fn main() {
             }
         }
     };
-    std::process::exit(code);
+    yellowcode_cli::exit(code);
 }

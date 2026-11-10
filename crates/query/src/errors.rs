@@ -1,4 +1,6 @@
-use bsl_vm::{CallError, Cause, Exception, Execution, FatalError, FatalKind, HostError};
+use bsl_vm::{
+    CallError, Category, CategorySet, Cause, Exception, Execution, FatalError, FatalKind, HostError,
+};
 use query_exec::{BatchError, ExecError};
 use query_syntax::ScriptVariant;
 use std::rc::Rc;
@@ -25,6 +27,11 @@ fn chain(messages: impl IntoIterator<Item = String>) -> HostError {
         out = Some(e);
     }
     out.unwrap_or_else(|| HostError::text("Ошибка выполнения запроса", "Query execution error"))
+}
+fn query_text_error(text: &str) -> HostError {
+    let mut e = HostError::text(text, text);
+    e.categories = Some(CategorySet::of(&[Category::OtherError]));
+    e
 }
 pub(crate) fn host_error(e: query_ir::HostError) -> HostError {
     let mut messages = vec![e.message];
@@ -53,7 +60,7 @@ pub(crate) fn batch_error(ex: &Execution, text: &str, e: BatchError) -> CallErro
             {
                 return fatal(FatalKind::Internal, s);
             }
-            HostError::text(&s, &s).into()
+            query_text_error(&s).into()
         }
         BatchError::Exec(ExecError::Runtime(e) | ExecError::Rights(e)) => {
             chain(e.messages(lang, script)).into()

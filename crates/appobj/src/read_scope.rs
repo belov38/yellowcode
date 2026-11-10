@@ -1,5 +1,7 @@
 use crate::{AppError, Result};
+use ibschema::Numeric;
 use ibschema::fields::{FieldValue, encode};
+use ibschema::logical::{LType, TypeCode};
 use ibschema::storage::{FieldId, IndexId, StorageMap, TableId, TableInfo};
 use ibschema::store::{
     Direction, ReadTxn, Row, RowHandle, RowIter, Store, StoreError, StoreResult, WriteTxn,
@@ -17,6 +19,54 @@ pub struct ReadOnlyScope {
 
 fn invalid() -> AppError {
     AppError::Unsupported("P1ro: incomplete or invalid read-only separator scope".into())
+}
+
+fn no_zero(why: String) -> AppError {
+    AppError::Unsupported(format!("P1ro: no zero read-only scope: {why}"))
+}
+
+fn type_text(types: &[LType]) -> String {
+    if types.is_empty() {
+        return "no type".into();
+    }
+    types
+        .iter()
+        .map(|t| format!("{:?}({},{})", t.code, t.length, t.precision))
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
+struct Found<'a> {
+    id: Uuid16,
+    table: &'a str,
+    field: &'a str,
+    types: &'a [LType],
+}
+
+fn zero_area<'a>(found: impl IntoIterator<Item = Found<'a>>) -> Result<Vec<(Uuid16, FieldValue)>> {
+    let mut values: Vec<(Uuid16, FieldValue)> = Vec::new();
+    for f in found {
+        if f.id == Uuid16::NIL {
+            return Err(no_zero(format!(
+                "the separator field {} of table {} has no common attribute",
+                f.field, f.table
+            )));
+        }
+        if !matches!(f.types, [t] if t.code == TypeCode::N) {
+            return Err(no_zero(format!(
+                "separator {} (field {} of table {}) has type {}; only a single number type is supported",
+                f.id,
+                f.field,
+                f.table,
+                type_text(f.types)
+            )));
+        }
+        if !values.iter().any(|(id, _)| *id == f.id) {
+            values.push((f.id, FieldValue::Number(Numeric::from_i64(0))));
+        }
+    }
+    values.sort_by_key(|(id, _)| *id);
+    Ok(values)
 }
 
 impl ReadOnlyScope {
@@ -38,6 +88,27 @@ impl ReadOnlyScope {
             }
         }
         Ok(Self { values })
+    }
+
+    pub fn zero_from_schema(map: &StorageMap) -> Result<Self> {
+        let mut found = Vec::new();
+        for table in map.tables() {
+            for separator in &table.separators {
+                let field = table.field(separator.field).ok_or_else(|| {
+                    no_zero(format!(
+                        "table {} has a separator on the missing field {}",
+                        table.logical, separator.field.0
+                    ))
+                })?;
+                found.push(Found {
+                    id: separator.common_attribute,
+                    table: &table.logical,
+                    field: &field.name,
+                    types: &field.types,
+                });
+            }
+        }
+        Self::new(zero_area(found)?)
     }
 
     pub(crate) fn area(&self, table: &TableInfo) -> Result<Vec<FieldValue>> {

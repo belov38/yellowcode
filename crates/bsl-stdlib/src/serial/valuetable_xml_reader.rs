@@ -122,7 +122,7 @@ pub(crate) fn projection_bytes(ex: &mut Execution, root: &XdtoData) -> Result<u6
                     Value::Number(n) => add(ex, total, mul(ex, n.backing_capacity_limbs(), 4)?)?,
                     Value::String(s) => add(ex, total, mul(ex, s.backing_capacity_units(), 2)?)?,
                     Value::Object(_) => {
-                        let own = ex.measure_retained(total, |visit| visit.value(value))?;
+                        let own = ex.measure_retained_lenient(total, |visit| visit.value(value))?;
                         total.checked_add(own).ok_or_else(|| ex.out_of_memory())?
                     }
                     _ => total,

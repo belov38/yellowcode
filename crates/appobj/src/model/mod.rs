@@ -89,8 +89,10 @@ pub struct ObjDef {
     pub md: Uuid16,
     pub name: String,
     pub synonym: LocalString,
+    pub object_presentation: LocalString,
     pub comment: String,
     pub fields: Vec<FieldDef>,
+    pub value: Option<FieldDef>,
     pub tabular: Vec<TabDef>,
     pub enum_values: Vec<EnumValueDef>,
     pub behavior: Behavior,
@@ -106,12 +108,14 @@ pub struct AppModel {
     pub common_modules: Vec<CommonModuleDef>,
     pub session_params: Vec<SessionParamDef>,
     pub subscriptions: Vec<SubscriptionDef>,
+    pub subsystems: Vec<SubsystemDef>,
     pub storage: Option<ModelStorage>,
     pub diagnostics: Vec<String>,
     by_uuid: HashMap<Uuid16, ObjId>,
     by_name: HashMap<(ObjKind, String), ObjId>,
     common_by_name: HashMap<String, usize>,
     param_by_name: HashMap<String, usize>,
+    subsystem_by_id: HashMap<Uuid16, usize>,
     kind_ranges: Vec<std::ops::Range<usize>>,
     empty: ObjDef,
 }
@@ -153,6 +157,24 @@ impl Ctx<'_> {
             usage: text(&c.props, "Use").map_or(Usage::ForItem, |t| parse_usage(&t)),
             fill_check: text(&c.props, "FillChecking").is_some_and(|t| t == "ShowError"),
             indexed: text(&c.props, "Indexing").is_some_and(|t| t != "DontIndex"),
+        }
+    }
+
+    fn constant_value(&mut self, o: &MdObject) -> FieldDef {
+        let td = match o.prop("Type") {
+            Some(Value::Type(t)) => Some(t),
+            _ => None,
+        };
+        FieldDef {
+            md: Some(o.id),
+            name: o.name.clone(),
+            synonym: o.synonym.clone(),
+            std: None,
+            role: FieldRole::Attribute,
+            types: self.types(td),
+            usage: Usage::ForItem,
+            fill_check: false,
+            indexed: false,
         }
     }
 }
@@ -288,14 +310,20 @@ impl AppModel {
                 }
             }
             let has = |k| o.module(k).is_some();
+            let value = (*kind == ObjKind::Constant).then(|| cx.constant_value(o));
             objects.push(ObjDef {
                 id,
                 kind: *kind,
                 md: o.id,
                 name: o.name.clone(),
                 synonym: o.synonym.clone(),
+                object_presentation: match o.prop("ObjectPresentation") {
+                    Some(Value::LStr(s)) => s.clone(),
+                    _ => LocalString::default(),
+                },
                 comment: o.comment.clone(),
                 fields,
+                value,
                 tabular,
                 enum_values,
                 behavior,
@@ -402,6 +430,13 @@ impl AppModel {
                 _ => {}
             }
         }
+        let subsystems = extra::subsystem_tree(cfg);
+        let mut subsystem_by_id = HashMap::new();
+        for (k, def) in subsystems.iter().enumerate() {
+            if let Some(o) = extra::subsystem_object(cfg, def) {
+                subsystem_by_id.entry(o.id).or_insert(k);
+            }
+        }
         diagnostics.extend(cx.diag);
         diagnostics.sort();
         diagnostics.dedup();
@@ -412,8 +447,10 @@ impl AppModel {
             md: Uuid16::NIL,
             name: String::new(),
             synonym: LocalString::default(),
+            object_presentation: LocalString::default(),
             comment: String::new(),
             fields: Vec::new(),
+            value: None,
             tabular: Vec::new(),
             enum_values: Vec::new(),
             behavior: Behavior::default(),
@@ -436,12 +473,14 @@ impl AppModel {
             common_modules,
             session_params,
             subscriptions,
+            subsystems,
             storage: None,
             diagnostics,
             by_uuid,
             by_name,
             common_by_name,
             param_by_name,
+            subsystem_by_id,
             kind_ranges,
             empty,
         })
@@ -476,6 +515,45 @@ impl AppModel {
     pub fn session_param(&self, name: &str) -> Option<(usize, &SessionParamDef)> {
         let i = *self.param_by_name.get(&fold_name(name))?;
         self.session_params.get(i).map(|p| (i, p))
+    }
+
+    pub fn subsystem(&self, k: usize) -> Option<&MdObject> {
+        extra::subsystem_object(&self.config, self.subsystems.get(k)?)
+    }
+
+    pub fn subsystem_by_uuid(&self, md: Uuid16) -> Option<usize> {
+        self.subsystem_by_id.get(&md).copied()
+    }
+
+    fn find_subsystem(&self, seg: &[&str]) -> Option<MdPath> {
+        let (pairs, rest) = seg.as_chunks::<2>();
+        if !rest.is_empty() {
+            return None;
+        }
+        let mut at: Option<usize> = None;
+        for [word, name] in pairs {
+            if !matches!(fold_name(word).as_str(), "подсистема" | "subsystem") {
+                return None;
+            }
+            let want = fold_name(name);
+            let named = |k: usize| {
+                self.subsystem(k)
+                    .is_some_and(|o| fold_name(&o.name) == want)
+            };
+            at = Some(match at {
+                None => (0..self.subsystems.len()).find(|&k| {
+                    self.subsystems.get(k).is_some_and(|d| d.parent.is_none()) && named(k)
+                })?,
+                Some(parent) => self
+                    .subsystems
+                    .get(parent)?
+                    .children
+                    .iter()
+                    .copied()
+                    .find(|&k| named(k))?,
+            });
+        }
+        at.map(MdPath::Subsystem)
     }
 
     pub fn find_full_name(&self, full: &str) -> Option<MdPath> {
@@ -552,6 +630,9 @@ impl AppModel {
                 .iter()
                 .position(|c| c.tag == ChildTag::Parameter && fold_name(&c.name) == name)
                 .map(|m| MdPath::WebParameter(s, u, m));
+        }
+        if matches!(word.as_str(), "подсистема" | "subsystem") {
+            return self.find_subsystem(&seg);
         }
         match (word.as_str(), seg.len()) {
             ("конфигурация" | "configuration", 1) => {

@@ -2,6 +2,7 @@ use super::{of_object, same_name};
 use crate::Application;
 use crate::meta::{member_name, no_field};
 use crate::model::{ObjId, ObjKind};
+use bsl_prim::Str;
 use bsl_vm::{
     Arg, CallError, CallResult, Execution, HostError, HostObject, MemberId, MemberKind, TypeId,
     Value,
@@ -55,6 +56,16 @@ impl CollMgr {
         let id = self.at(i).ok_or_else(|| no_field(&i.to_string()))?;
         of_object(&self.app, ex, id).map_err(CallError::Exc)
     }
+
+    fn may_have_master_node(&self) -> bool {
+        let model = self.app.model();
+        model.config.of_kind(self.kind.md_kind()).any(|plan| {
+            !matches!(
+                plan.prop("DistributedInfoBase"),
+                Some(md_model::Value::Bool(false))
+            )
+        })
+    }
 }
 
 impl HostObject for CollMgr {
@@ -64,6 +75,10 @@ impl HostObject for CollMgr {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+
+    fn presentation(&self, ex: &mut Execution) -> CallResult<Option<Str>> {
+        Ok(Some(super::kind_manager_string(ex, self.ty)))
     }
 
     fn get(&self, ex: &mut Execution, m: MemberId) -> CallResult<Value> {
@@ -83,11 +98,19 @@ impl HostObject for CollMgr {
     fn call(&self, ex: &mut Execution, m: MemberId, _: &mut [Arg]) -> CallResult<Value> {
         let platform = platform_catalog::catalog();
         let (_, ru, en) = member_name(platform, self.tidx, m).unwrap_or((false, "", ""));
-        if en == "AllRefsType" && !matches!(self.kind, ObjKind::BusinessProcess | ObjKind::Task) {
-            return crate::values::typedesc::all_refs(&self.app, ex, self.kind);
+        match (en, self.kind) {
+            ("AllRefsType", _) => crate::values::typedesc::all_refs(&self.app, ex, self.kind),
+            ("RoutePointsAllRefsType", ObjKind::BusinessProcess) => {
+                crate::values::typedesc::all_route_points(&self.app, ex)
+            }
+            ("MasterNode", ObjKind::ExchangePlan) if !self.may_have_master_node() => {
+                Ok(Value::Undefined)
+            }
+            _ => {
+                let type_name = platform.type_info(self.tidx).name_ru.as_str();
+                Err(HostError::not_implemented(type_name, ru).into())
+            }
         }
-        let type_name = platform.type_info(self.tidx).name_ru.as_str();
-        Err(HostError::not_implemented(type_name, ru).into())
     }
 
     fn find_member(&self, name: &str) -> Option<MemberId> {
@@ -107,9 +130,7 @@ impl HostObject for CollMgr {
 
     fn index_get(&self, ex: &mut Execution, key: &Value) -> CallResult<Value> {
         let Value::String(s) = key else {
-            return Err(HostError::key(bsl_stdlib::bind::msg::INDEX_OFFBOUND)
-                .raw()
-                .into());
+            return Err(super::not_indexed().into());
         };
         let name = s.to_string_lossy();
         match self.position(&name) {

@@ -225,7 +225,7 @@ impl HostObject for RefObject {
             .into())
     }
 
-    fn call(&self, ex: &mut Execution, m: MemberId, _args: &mut [Arg]) -> CallResult<Value> {
+    fn call(&self, ex: &mut Execution, m: MemberId, args: &mut [Arg]) -> CallResult<Value> {
         if m == INDEX_MEMBER {
             let i = self.enum_index().and_then(|i| i64::try_from(i).ok());
             return Ok(Value::from(i.unwrap_or(-1)));
@@ -237,6 +237,11 @@ impl HostObject for RefObject {
             ),
             Some((true, "ПолучитьОбъект")) if !self.is_enum() => {
                 crate::objects::get_object(ex, &self.app, self.r)
+            }
+            Some((true, ru @ ("Уровень" | "ПолныйКод" | "ПринадлежитЭлементу")))
+                if !self.is_enum() =>
+            {
+                crate::hierarchy::call(ex, &self.app, self.r, ru, args)
             }
             Some((true, "Метаданные")) => {
                 use crate::meta::{MdKey, MdPath, value_of};

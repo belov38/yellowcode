@@ -1,3 +1,4 @@
+use crate::Application;
 use crate::session::{AppKind, call_ctx};
 use bsl_vm::{
     Arg, CallResult, Execution, HostError, HostObject, MemberId, Registry, TypeId, Value,
@@ -44,8 +45,27 @@ impl HostObject for SessionInfo {
             .raw()
             .into())
     }
-    fn call(&self, _: &mut Execution, _: MemberId, _: &mut [Arg]) -> CallResult<Value> {
-        Err(HostError::not_implemented("InfoBaseSession", "method").into())
+    fn call(&self, _: &mut Execution, member: MemberId, _: &mut [Arg]) -> CallResult<Value> {
+        match crate::meta::member_name(catalog(), self.ty, member) {
+            Some((true, _, "GetBackgroundJob")) => background_job(self.app),
+            other => Err(HostError::not_implemented(
+                "InfoBaseSession",
+                other.map_or("?", |(_, _, en)| en),
+            )
+            .into()),
+        }
+    }
+}
+
+fn background_job(app: AppKind) -> CallResult<Value> {
+    match app {
+        AppKind::HttpService => Ok(Value::Undefined),
+        AppKind::BackgroundJob => {
+            Err(HostError::not_implemented("InfoBaseSession", "GetBackgroundJob").into())
+        }
+        AppKind::Cli => {
+            Err(HostError::not_implemented("InfoBaseSession", "GetBackgroundJob (CLI)").into())
+        }
     }
 }
 
@@ -56,7 +76,7 @@ fn number(ex: &mut Execution, _: &mut [Arg]) -> CallResult<Value> {
     ))))
 }
 
-fn outside_call() -> HostError {
+pub(crate) fn outside_call() -> HostError {
     HostError::text(
         "internal: session information outside of a call",
         "internal: session information outside of a call",
@@ -74,8 +94,60 @@ fn run_mode(ex: &mut Execution, _: &mut [Arg]) -> CallResult<Value> {
     }
 }
 
-pub(crate) fn register(reg: &mut Registry) {
+fn refused(name: &str, what: &str) -> HostError {
+    HostError::not_implemented("Глобальный контекст", &format!("{name} ({what})"))
+}
+
+fn set_safe_mode_disabled(ex: &mut Execution, args: &mut [Arg]) -> CallResult<Value> {
+    const NAME: &str = "УстановитьОтключениеБезопасногоРежима";
+    let value = match args.first() {
+        None | Some(Arg::Omitted) => return Err(refused(NAME, "без параметра").into()),
+        Some(Arg::Val(v)) => v.clone(),
+        Some(Arg::Place(p)) => p.get(ex)?,
+    };
+    let Value::Bool(disabled) = value else {
+        return Err(refused(NAME, "параметр не Булево").into());
+    };
+    call_ctx(ex)
+        .ok_or_else(outside_call)?
+        .sess
+        .safe_mode_disabled = disabled;
+    Ok(Value::Undefined)
+}
+
+fn get_safe_mode_disabled(ex: &mut Execution, _: &mut [Arg]) -> CallResult<Value> {
+    let flag = call_ctx(ex)
+        .ok_or_else(outside_call)?
+        .sess
+        .safe_mode_disabled;
+    Ok(Value::Bool(flag && !ex.effective_flags().safe_mode))
+}
+
+pub(crate) fn register(app: &Application, reg: &mut Registry) {
     reg.global_fn("ТекущийРежимЗапуска", "CurrentRunMode", Arc::new(run_mode));
+    reg.global_fn(
+        "УстановитьОтключениеБезопасногоРежима",
+        "SetSafeModeDisabled",
+        Arc::new(set_safe_mode_disabled),
+    );
+    reg.global_fn(
+        "ПолучитьОтключениеБезопасногоРежима",
+        "GetSafeModeDisabled",
+        Arc::new(get_safe_mode_disabled),
+    );
+    let connection_string = app.options().connection_string.clone();
+    reg.global_fn(
+        "СтрокаСоединенияИнформационнойБазы",
+        "InfoBaseConnectionString",
+        Arc::new(move |_, _| match &connection_string {
+            Some(text) => Ok(Value::from(text.as_str())),
+            None => Err(HostError::not_implemented(
+                "Глобальный контекст",
+                "СтрокаСоединенияИнформационнойБазы",
+            )
+            .into()),
+        }),
+    );
     reg.global_fn(
         "НомерСеансаИнформационнойБазы",
         "InfoBaseSessionNumber",

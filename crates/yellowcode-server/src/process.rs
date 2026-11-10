@@ -145,6 +145,15 @@ impl RuntimeProcess {
         directory: UserDirectory,
         config: ProcessConfig,
     ) -> Result<Self, ProcessError> {
+        Self::open_with(open, directory, config, |_| {})
+    }
+
+    pub fn open_with(
+        open: AppOpen,
+        directory: UserDirectory,
+        config: ProcessConfig,
+        extend: impl FnOnce(&mut Registry),
+    ) -> Result<Self, ProcessError> {
         catch_unwind(AssertUnwindSafe(|| {
             let catalog = open.catalog;
             let services = crate::service::ServiceTable::from_config(&open.config)?;
@@ -154,6 +163,7 @@ impl RuntimeProcess {
             app.register(&mut registry)
                 .map_err(|_| ProcessError::Open)?;
             crate::service::objects::register(&mut registry);
+            extend(&mut registry);
             let runtime = Runtime::new(catalog, registry, app.host());
             Ok(Self {
                 app,

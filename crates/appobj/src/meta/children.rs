@@ -44,6 +44,9 @@ pub(super) fn admit(cx: &MdCtx, path: MdPath) -> Result<(), HostError> {
         {
             Err(not_implemented("WebСервис"))
         }
+        MdPath::Subsystem(k) if super::subsystems::object(cx, k).is_none() => {
+            Err(not_implemented("Подсистема"))
+        }
         _ => Ok(()),
     }
 }

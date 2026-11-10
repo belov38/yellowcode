@@ -30,6 +30,7 @@ pub(crate) struct ExecState {
     pub entry_weight: u64,
     pub frame_weight: Option<u64>,
     pub fragments: crate::fragment::FragmentCache,
+    pub host_code_ran: bool,
 }
 
 pub(crate) fn fatal(kind: FatalKind, text: String) -> Exception {

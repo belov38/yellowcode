@@ -2,8 +2,11 @@ mod children;
 mod coll;
 mod http;
 mod object;
+mod objprops;
+mod plan_content;
 mod props;
 mod stdtab;
+mod subsystems;
 mod web;
 
 use crate::errors::{self, keys};
@@ -23,6 +26,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 pub(crate) use crate::model::MdPath;
+pub(crate) use object::{full_name, synonym_text, type_idx};
 pub(crate) use props::type_mismatch;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -115,6 +119,10 @@ impl MdKey {
                     put(idx(o));
                     put(idx(p));
                 }
+                MdPath::Subsystem(k) => {
+                    put(18);
+                    put(idx(k));
+                }
                 MdPath::Configuration => put(9),
             },
             MdKey::Std(o, t, i) => {
@@ -138,6 +146,7 @@ pub(crate) struct MdCtx {
     pub app: Arc<Application>,
     pub catalog: &'static Catalog,
     pub t_obj: TypeId,
+    pub t_prop: TypeId,
     pub root: Ty,
     pub std: Ty,
     pub coll: Ty,
@@ -170,22 +179,28 @@ pub(crate) fn register(app: &Arc<Application>, reg: &mut Registry) -> Result<()>
             })
             .ok_or_else(|| AppError::Unsupported(format!("the catalog has no type {name}")))
     };
-    let m = errors::msg(keys::MD_OBJECT_TYPE).ok_or_else(|| {
-        AppError::Unsupported(format!("internal: no message {}", keys::MD_OBJECT_TYPE))
-    })?;
-    let (ru, en) = (m.ru, m.en);
-    let guid: [u8; 16] = {
-        let d = Sha256::digest(b"MetadataObject");
-        let mut g = [0u8; 16];
-        g.copy_from_slice(d.get(..16).unwrap_or(&[0; 16]));
-        g
+    let message = |key: &str| {
+        errors::msg(key).ok_or_else(|| AppError::Unsupported(format!("internal: no message {key}")))
     };
+    let m = message(keys::MD_OBJECT_TYPE)?;
+    let (ru, en) = (m.ru, m.en);
     let t_obj = reg.register_app_type(AppTypeInfo {
         name_ru: "ОбъектМетаданных".into(),
         name_en: "MetadataObject".into(),
         presentation_ru: ru.into(),
         presentation_en: en.into(),
-        guid,
+        guid: type_guid("MetadataObject"),
+        xdto: None,
+        template: None,
+        default_value: None,
+    });
+    let m = message(keys::ENUMERATED_PROPERTY_TYPE)?;
+    let t_prop = reg.register_app_type(AppTypeInfo {
+        name_ru: objprops::PROPERTY_NAME_RU.into(),
+        name_en: objprops::PROPERTY_NAME_EN.into(),
+        presentation_ru: m.ru.into(),
+        presentation_en: m.en.into(),
+        guid: type_guid(objprops::PROPERTY_NAME_EN),
         xdto: None,
         template: None,
         default_value: None,
@@ -194,6 +209,7 @@ pub(crate) fn register(app: &Arc<Application>, reg: &mut Registry) -> Result<()>
         app: app.clone(),
         catalog,
         t_obj,
+        t_prop,
         root: find("ОбъектМетаданныхКонфигурация")?,
         std: find("ОписаниеСтандартногоРеквизита")?,
         coll: find("КоллекцияОбъектовМетаданных")?,
@@ -215,6 +231,13 @@ pub(crate) fn register(app: &Arc<Application>, reg: &mut Registry) -> Result<()>
         Arc::new(move |ex| Ok(value_of(&cx, ex, MdKey::Path(MdPath::Configuration)))),
     );
     Ok(())
+}
+
+fn type_guid(name_en: &str) -> [u8; 16] {
+    let d = Sha256::digest(name_en.as_bytes());
+    let mut g = [0u8; 16];
+    g.copy_from_slice(d.get(..16).unwrap_or(&[0; 16]));
+    g
 }
 
 pub(crate) fn value_of(cx: &Arc<MdCtx>, ex: &mut Execution, key: MdKey) -> Value {
@@ -353,6 +376,14 @@ pub(crate) fn root_kind(en: &str) -> Option<MdKind> {
         .iter()
         .copied()
         .find(|k| k.folder().is_some_and(|d| fold_name(d) == f))
+}
+
+pub(crate) fn shared_type(kind: MdKind) -> Option<(&'static str, &'static str)> {
+    match kind {
+        MdKind::CommonForm => Some(("Form", "ОбщаяФорма")),
+        MdKind::CommonTemplate => Some(("Template", "ОбщийМакет")),
+        _ => None,
+    }
 }
 
 pub(crate) fn is_model_kind(k: MdKind) -> Option<ObjKind> {

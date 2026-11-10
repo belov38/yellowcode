@@ -9,7 +9,8 @@ use brace::Node;
 use bsl_lib::xdto::QName;
 use bsl_prim::Str;
 use bsl_vm::{
-    Arg, CallResult, Exception, Execution, HostObject, MemberId, ObjRef, SharedValue, TypeId, Value,
+    Arg, CallResult, Exception, Execution, HostError, HostObject, MemberId, ObjRef, SharedValue,
+    TypeId, Value,
 };
 use std::any::Any;
 use std::rc::Rc;
@@ -17,6 +18,7 @@ use std::sync::Arc;
 
 pub(crate) struct Formatted {
     markup: String,
+    unobserved: bool,
 }
 
 pub(super) fn presentation_input_len(value: &Value) -> Option<u64> {
@@ -24,28 +26,73 @@ pub(super) fn presentation_input_len(value: &Value) -> Option<u64> {
     Some(formatted.markup.len() as u64)
 }
 
-fn new_formatted(markup: String) -> Value {
-    Value::Object(Rc::new(Formatted { markup }))
+fn new_formatted(markup: String, unobserved: bool) -> Value {
+    Value::Object(Rc::new(Formatted { markup, unobserved }))
+}
+
+fn not_serializable(ex: &mut Execution) -> Exception {
+    ex.error(HostError::not_implemented(
+        "ФорматированнаяСтрока",
+        "Сериализация",
+    ))
 }
 
 pub(super) fn ctor(ex: &mut Execution, args: &mut [Arg]) -> CallResult<Value> {
     let unsupported =
         || -> CallResult<Value> { Err(ctor_not_implemented(types().formatted).into()) };
-    if args.len() != 2 {
-        return unsupported();
-    }
-    let (Value::String(text), font) = (arg_value(ex, args.first())?, arg_value(ex, args.get(1))?)
-    else {
-        return unsupported();
+    let plain = |s: &Str| {
+        let text = s.to_string_lossy();
+        (!text.contains(['<', '>', '&'])).then_some(text)
     };
-    let text = text.to_string_lossy();
-    if text.contains(['<', '>', '&']) {
-        return unsupported();
+    let first = arg_value(ex, args.first())?;
+    match (args.len(), &first) {
+        (5, Value::String(s)) => {
+            for i in 1..5 {
+                if !matches!(arg_value(ex, args.get(i))?, Value::Undefined) {
+                    return unsupported();
+                }
+            }
+            let Some(text) = plain(s) else {
+                return unsupported();
+            };
+            Ok(new_formatted(text, true))
+        }
+        (1, v) => {
+            let Some(items) = crate::collections::array_items(v) else {
+                return unsupported();
+            };
+            let mut markup = String::new();
+            for item in &items {
+                let part = match item {
+                    Value::String(s) => plain(s),
+                    other => other
+                        .as_object()
+                        .and_then(|o| o.as_any().downcast_ref::<Formatted>())
+                        .map(|f| f.markup.clone()),
+                };
+                let Some(part) = part else {
+                    return unsupported();
+                };
+                ex.reserve((markup.len() + part.len()) as u64 * 3)?;
+                markup.push_str(&part);
+            }
+            Ok(new_formatted(markup, true))
+        }
+        (2, Value::String(text)) => {
+            let font = arg_value(ex, args.get(1))?;
+            let Some(text) = plain(text) else {
+                return unsupported();
+            };
+            let Some(id) = font_data(&font).and_then(|f| f.normal_bold_only()) else {
+                return unsupported();
+            };
+            Ok(new_formatted(
+                format!("<fontstyle {id}><b>{text}</></>"),
+                false,
+            ))
+        }
+        _ => unsupported(),
     }
-    let Some(id) = font_data(&font).and_then(|f| f.normal_bold_only()) else {
-        return unsupported();
-    };
-    Ok(new_formatted(format!("<fontstyle {id}><b>{text}</></>")))
 }
 
 impl HostObject for Formatted {
@@ -100,8 +147,8 @@ impl HostObject for Formatted {
 
     fn to_shared(&self) -> Option<SharedValue> {
         Some(SharedValue::Object(Arc::new(SharedOf::new(
-            self.markup.clone(),
-            |m| new_formatted(m.clone()),
+            (self.markup.clone(), self.unobserved),
+            |(m, u)| new_formatted(m.clone(), *u),
         ))))
     }
 }
@@ -118,6 +165,9 @@ impl ValueCodec for FormattedCodec {
         let Some(f) = v.as_any().downcast_ref::<Formatted>() else {
             return Ok(None);
         };
+        if f.unobserved {
+            return Err(not_serializable(ex));
+        }
         w.account(ex, f.markup.len() as u64 * 3)?;
         let u: Vec<u16> = f.markup.encode_utf16().collect();
         Ok(Some(vec![Node::int(1), encode_str(&u)]))
@@ -133,7 +183,7 @@ impl ValueCodec for FormattedCodec {
             ex.reserve((text.len() as u64).saturating_mul(4))?;
         }
         match items.get(1).and_then(decode_str) {
-            Some(u) => Ok(new_formatted(String::from_utf16_lossy(&u))),
+            Some(u) => Ok(new_formatted(String::from_utf16_lossy(&u), false)),
             None => Err(r.format_error(ex)),
         }
     }
@@ -153,6 +203,12 @@ impl XdtoCodec for FormattedCodec {
         let Some(f) = v.as_any().downcast_ref::<Formatted>() else {
             return Err(s.mismatch(ex));
         };
+        if f.unobserved {
+            return Err(s.fail(HostError::not_implemented(
+                "ФорматированнаяСтрока",
+                "Сериализация",
+            )));
+        }
         s.account(ex, f.markup.len() as u64)?;
         Ok(data_text(ui_type(), &f.markup))
     }
@@ -166,7 +222,7 @@ impl XdtoCodec for FormattedCodec {
         match d {
             XdtoData::Value { lexical, .. } => {
                 ex.reserve(lexical.len() as u64 * 2)?;
-                Ok(new_formatted(lexical.clone()))
+                Ok(new_formatted(lexical.clone(), false))
             }
             _ => Err(s.lexical_error(ex, "", &ui_type())),
         }

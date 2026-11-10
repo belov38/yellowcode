@@ -7,6 +7,7 @@ use crate::types::TypeId;
 use crate::value::Value;
 use bsl_prim::{Str, fold_name};
 use platform_catalog::{Catalog, TypeIdx, XdtoName};
+use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -39,6 +40,7 @@ pub struct Registry {
     pub(crate) system_enums: HashMap<TypeIdx, GlobalProp>,
     pub(crate) app_types: Vec<AppTypeInfo>,
     pub(crate) presenter: Option<Presenter>,
+    data: HashMap<std::any::TypeId, Arc<dyn Any + Send + Sync>>,
 }
 
 fn put<T: Clone>(map: &mut HashMap<String, T>, name_ru: &str, name_en: &str, v: T, what: &str) {
@@ -65,7 +67,18 @@ impl Registry {
             system_enums: HashMap::new(),
             app_types: Vec::new(),
             presenter: None,
+            data: HashMap::new(),
         }
+    }
+
+    pub fn set_data<T: Any + Send + Sync>(&mut self, data: T) {
+        self.data
+            .insert(std::any::TypeId::of::<T>(), Arc::new(data));
+    }
+
+    pub(crate) fn data<T: Any + Send + Sync>(&self) -> Option<Arc<T>> {
+        let data = self.data.get(&std::any::TypeId::of::<T>())?.clone();
+        data.downcast::<T>().ok()
     }
 
     pub fn catalog(&self) -> &'static Catalog {

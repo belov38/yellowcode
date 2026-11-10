@@ -235,7 +235,8 @@ pub(crate) fn read_data(
         _ => return Err(ctx.mismatch(ex)),
     };
     let policy = ctx.from_data(ex, policy_data)?;
-    let policy_retained = ex.measure_retained(ctx.read_scratch(0), |visit| visit.value(&policy))?;
+    let policy_retained =
+        ex.measure_retained_lenient(ctx.read_scratch(0), |visit| visit.value(&policy))?;
     let description = policy
         .as_object()
         .and_then(|o| o.as_any().downcast_ref::<TypeDescription>())
@@ -291,7 +292,7 @@ pub(crate) fn read_data(
                 })?;
             } else {
                 let scratch = ctx.read_scratch(held);
-                let retained = ex.measure_retained(scratch, |visit| {
+                let retained = ex.measure_retained_lenient(scratch, |visit| {
                     visit.value(&Value::Object(list.clone()))?;
                     visit.value(&value)?;
                     visit.string(&presentation)

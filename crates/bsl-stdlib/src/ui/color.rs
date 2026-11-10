@@ -1,4 +1,5 @@
-use super::{NS_STYLE, NS_UI, NS_WEB, SharedOf, data_text, enum_val, types};
+use super::style::{self, item_text, web_text};
+use super::{NS_STYLE, NS_UI, NS_WEB, SharedOf, data_text, enum_presentation, enum_val, types};
 use crate::bind::{arg_number, msg, value_mismatch};
 use crate::collections::{
     ctor_not_implemented, method_name, not_implemented, property_name, property_ru,
@@ -26,11 +27,35 @@ pub(crate) enum ColorKind {
         name: Option<&'static str>,
         id: Option<i32>,
     },
+    Item(u32),
+    Palette(u8),
     Auto,
 }
 
 pub(crate) struct Color {
     pub(crate) kind: ColorKind,
+}
+
+const PALETTE_IDS: &[(&str, u8)] = &[
+    ("FirstBrand", 0),
+    ("SecondBrand", 1),
+    ("Red", 2),
+    ("Orange", 3),
+    ("Yellow", 4),
+    ("Green", 5),
+    ("LightBlue", 6),
+    ("Blue", 7),
+    ("Violet", 8),
+    ("Purple", 9),
+    ("Pink", 10),
+    ("Gray", 15),
+];
+
+fn palette_id(name: &str) -> Option<u8> {
+    PALETTE_IDS
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, i)| *i)
 }
 
 const STYLE_COLOR_IDS: &[(&str, i32)] = &[
@@ -120,6 +145,15 @@ pub(crate) fn style_member(t: platform_catalog::TypeIdx, i: usize) -> Option<Val
     }))
 }
 
+pub(crate) fn palette_member(t: platform_catalog::TypeIdx, i: usize) -> Option<Value> {
+    let name = names_of(t).get(i)?.name_en.as_str();
+    palette_id(name).map(|id| new_color(ColorKind::Palette(id)))
+}
+
+pub(super) fn item_color(k: u32) -> Value {
+    new_color(ColorKind::Item(k))
+}
+
 pub(super) fn ctor(ex: &mut Execution, args: &mut [Arg]) -> CallResult<Value> {
     match args.len() {
         0 => Ok(new_color(ColorKind::Auto)),
@@ -151,7 +185,8 @@ impl Color {
         match self.kind {
             ColorKind::Abs(..) => "Absolute",
             ColorKind::Web(_) => "WebColor",
-            ColorKind::Style { .. } => "StyleItem",
+            ColorKind::Style { .. } | ColorKind::Item(_) => "StyleItem",
+            ColorKind::Palette(_) => "PaletteColor",
             ColorKind::Auto => "AutoColor",
         }
     }
@@ -200,20 +235,32 @@ impl HostObject for Color {
         }
     }
 
-    fn presentation(&self, _ex: &mut Execution) -> CallResult<Option<Str>> {
+    fn presentation(&self, ex: &mut Execution) -> CallResult<Option<Str>> {
+        let text = |s: String| Str::from(s.as_str());
         Ok(match &self.kind {
             ColorKind::Abs(r, g, b) => Some(Str::from(format!("{r}, {g}, {b}").as_str())),
             ColorKind::Web(n) | ColorKind::Style { name: Some(n), .. } => {
-                let t = if matches!(self.kind, ColorKind::Web(_)) {
-                    types().web_colors
+                let (t, own) = if matches!(self.kind, ColorKind::Web(_)) {
+                    (types().web_colors, web_text(ex, n))
                 } else {
-                    types().style_colors
+                    (types().style_colors, item_text(ex, Some(n), None).map(text))
                 };
+                own.or_else(|| {
+                    names_of(t)
+                        .iter()
+                        .find(|v| v.name_en == *n)
+                        .map(|v| Str::from(v.name_ru.as_str()))
+                })
+            }
+            ColorKind::Palette(id) => types().palette_colors.and_then(|t| {
+                let lang = ex.lang();
+                let (name, _) = PALETTE_IDS.iter().find(|(_, i)| i == id)?;
                 names_of(t)
                     .iter()
-                    .find(|v| v.name_en == *n)
-                    .map(|v| Str::from(v.name_ru.as_str()))
-            }
+                    .find(|v| v.name_en == *name)
+                    .and_then(|v| enum_presentation(t, &v.name_ru, &v.name_en, lang))
+            }),
+            ColorKind::Item(k) => item_text(ex, None, Some(*k)).map(text),
             _ => None,
         })
     }
@@ -230,6 +277,8 @@ impl HostObject for Color {
             ColorKind::Style { id, name } => boost_hash::ordinal(
                 id.map_or_else(|| name.map_or(0, |n| n.len() as u32), |i| i.unsigned_abs()),
             ),
+            ColorKind::Item(k) => boost_hash::ordinal(k.wrapping_add(1)),
+            ColorKind::Palette(id) => boost_hash::ordinal(u32::from(*id)),
             ColorKind::Auto => boost_hash::ordinal(0),
         })
     }
@@ -269,17 +318,25 @@ impl ValueCodec for ColorCodec {
         let Some(kind) = Self::of(v) else {
             return Ok(None);
         };
-        let (k, value) = match kind {
-            ColorKind::Abs(r, g, b) => {
-                (0, (i64::from(b) << 16) | (i64::from(g) << 8) | i64::from(r))
-            }
-            ColorKind::Web(n) => (2, web_index(n).map_or(0, |i| i as i64)),
-            ColorKind::Style { id: Some(id), .. } => (3, i64::from(id)),
+        let one = |n: i64| vec![Node::int(n)];
+        let (k, value, tail) = match kind {
+            ColorKind::Abs(r, g, b) => (
+                0,
+                one((i64::from(b) << 16) | (i64::from(g) << 8) | i64::from(r)),
+                0,
+            ),
+            ColorKind::Web(n) => (2, one(web_index(n).map_or(0, |i| i as i64)), 2),
+            ColorKind::Style { id: Some(id), .. } => (3, one(i64::from(id)), 3),
             ColorKind::Style { name, id: None } => match name.and_then(style_color_id) {
-                Some(id) => (3, i64::from(id)),
+                Some(id) => (3, one(i64::from(id)), 3),
                 None => return Err(unsupported(ex)),
             },
-            ColorKind::Auto => (4, 0),
+            ColorKind::Item(item) => match style::item_ref(ex, item) {
+                Some(reference) => (3, reference, 3),
+                None => return Err(unsupported(ex)),
+            },
+            ColorKind::Palette(id) => (4, one(i64::from(id)), 5),
+            ColorKind::Auto => (4, one(0), 4),
         };
         w.account(ex, 48)?;
         Ok(Some(vec![
@@ -287,8 +344,8 @@ impl ValueCodec for ColorCodec {
             Node::List(vec![
                 Node::int(4),
                 Node::int(k),
-                Node::List(vec![Node::int(value)]),
-                Node::int(k),
+                Node::List(value),
+                Node::int(tail),
             ]),
         ]))
     }
@@ -303,11 +360,8 @@ impl ValueCodec for ColorCodec {
             return Err(r.format_error(ex));
         };
         let kind = body.get(1).and_then(Node::as_i64);
-        let value = body
-            .get(2)
-            .and_then(Node::as_list)
-            .and_then(|l| l.first())
-            .and_then(Node::as_i64);
+        let inner = body.get(2).and_then(Node::as_list);
+        let value = inner.and_then(|l| l.first()).and_then(Node::as_i64);
         let (Some(kind), Some(value)) = (kind, value) else {
             return Err(r.format_error(ex));
         };
@@ -328,6 +382,15 @@ impl ValueCodec for ColorCodec {
                     id: Some(id),
                 })
             }
+            3 if value == 0 => inner
+                .and_then(|l| l.get(1))
+                .and_then(Node::text)
+                .and_then(|uuid| style::item_by_uuid(ex, uuid))
+                .map(ColorKind::Item),
+            4 if body.get(3).and_then(Node::as_i64) == Some(5) => PALETTE_IDS
+                .iter()
+                .find(|(_, id)| i64::from(*id) == value)
+                .map(|(_, id)| ColorKind::Palette(*id)),
             4 => Some(ColorKind::Auto),
             _ => None,
         };
@@ -364,6 +427,9 @@ impl XdtoCodec for ColorCodec {
                         return Err(s.fail(HostError::not_implemented("Цвет", "Сериализация")));
                     }
                 }
+            }
+            ColorKind::Item(_) | ColorKind::Palette(_) => {
+                return Err(s.fail(HostError::not_implemented("Цвет", "Сериализация")));
             }
         };
         s.account(ex, text.len() as u64)?;

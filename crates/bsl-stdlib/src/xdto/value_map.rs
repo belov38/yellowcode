@@ -360,7 +360,7 @@ impl XdtoCtx {
         }
         self.refresh_json_input(ex)?;
         let scratch = self.read_scratch(0).saturating_sub(self.json_roots_bytes);
-        let bytes = ex.measure_retained(scratch, |visit| {
+        let bytes = ex.measure_retained_lenient(scratch, |visit| {
             visit.work(self.json_roots.len() as u64)?;
             for root in &self.json_roots {
                 root(visit)?;
@@ -382,7 +382,7 @@ impl XdtoCtx {
     ) -> Result<(), Exception> {
         self.refresh_json_input(ex)?;
         let scratch = self.read_scratch(0).saturating_sub(self.json_roots_bytes);
-        let live = ex.measure_retained(scratch, |visit| {
+        let live = ex.measure_retained_lenient(scratch, |visit| {
             visit.work(self.json_roots.len() as u64)?;
             for root in &self.json_roots {
                 root(visit)?;

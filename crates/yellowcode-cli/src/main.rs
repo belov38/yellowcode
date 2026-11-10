@@ -10,5 +10,5 @@ fn main() {
         &mut std::io::stderr(),
         tty,
     );
-    std::process::exit(code);
+    yellowcode_cli::exit(code);
 }

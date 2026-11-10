@@ -73,7 +73,11 @@ pub(super) fn load_slot(ex: &mut Execution, abs: usize) -> Result<Value, Excepti
     match arg_ref(&v) {
         Some(r) => {
             let place = r.place.clone();
-            place.get(ex)
+            let read = place.get(ex);
+            if place.is_host_backed() {
+                ex.note_host_code();
+            }
+            read
         }
         None => Ok(v),
     }
@@ -87,7 +91,11 @@ pub(super) fn store_slot(ex: &mut Execution, abs: usize, v: Value) -> Result<(),
         .ok_or_else(|| internal("slot out of range"))?;
     if let Some(r) = arg_ref(slot) {
         let place = r.place.clone();
-        return place.set(ex, v);
+        let written = place.set(ex, v);
+        if place.is_host_backed() {
+            ex.note_host_code();
+        }
+        return written;
     }
     let old = std::mem::replace(slot, v);
     drop(old);

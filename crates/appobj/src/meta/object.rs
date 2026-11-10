@@ -2,7 +2,7 @@ use super::{
     MdCtx, MdKey, MdPath, arg_value, fold, member_name, member_of, no_field, not_implemented,
     props, value_of,
 };
-use crate::model::{FieldDef, FieldRole, ObjId};
+use crate::model::{FieldDef, FieldRole, ObjId, ObjKind, StdAttr};
 use bsl_prim::{Number, Str};
 use bsl_vm::{
     Arg, CallResult, Execution, HostError, HostObject, MemberId, MemberKind, TypeId, Value,
@@ -13,6 +13,8 @@ use std::any::Any;
 use std::sync::Arc;
 
 const ROOT_FULL_NAME: u32 = u32::MAX;
+
+const NOT_INDEXED: &str = "bsl:IDS_RTE_NOTINDEXED";
 
 pub(super) fn read_only(name: &str) -> HostError {
     HostError::key(bsl_stdlib::bind::msg::PROP_NOT_WRITABLE)
@@ -208,6 +210,15 @@ pub(crate) fn info<'a>(cx: &'a MdCtx, p: MdPath) -> Option<Info<'a>> {
                 props: &md.props,
             })
         }
+        MdPath::Subsystem(k) => {
+            let md = model.subsystem(k)?;
+            Some(Info {
+                name: &md.name,
+                synonym: Some(&md.synonym),
+                comment: &md.comment,
+                props: &md.props,
+            })
+        }
         MdPath::Configuration => None,
     }
 }
@@ -355,6 +366,20 @@ fn words(cx: &MdCtx, p: MdPath) -> Vec<String> {
                 name_of(cx, p),
             ]
         }
+        MdPath::Subsystem(k) => {
+            let mut chain = Vec::new();
+            let mut at = Some(k);
+            while let Some(i) = at {
+                chain.push(i);
+                at = model.subsystems.get(i).and_then(|d| d.parent);
+            }
+            let mut w = Vec::with_capacity(chain.len() * 2);
+            for &i in chain.iter().rev() {
+                w.push(pick("Подсистема", "Subsystem"));
+                w.push(name_of(cx, MdPath::Subsystem(i)));
+            }
+            w
+        }
         MdPath::Other(i) => {
             let kind = model.config.objects.get(i).map(|o| o.kind);
             let ru = kind
@@ -368,6 +393,10 @@ fn words(cx: &MdCtx, p: MdPath) -> Vec<String> {
                         .name_ru
                         .strip_prefix("ОбъектМетаданных: ")
                         .map(str::to_string)
+                })
+                .or_else(|| {
+                    kind.and_then(super::shared_type)
+                        .map(|(_, word)| word.to_string())
                 });
             let en = kind.map_or("", MdKind::as_str);
             vec![pick(ru.as_deref().unwrap_or(en), en), name_of(cx, p)]
@@ -379,8 +408,14 @@ pub(crate) fn full_name(cx: &MdCtx, p: MdPath) -> String {
     words(cx, p).join(".")
 }
 
-fn parent_of(p: MdPath) -> MdPath {
+fn parent_of(cx: &MdCtx, p: MdPath) -> MdPath {
     match p {
+        MdPath::Subsystem(k) => cx
+            .model()
+            .subsystems
+            .get(k)
+            .and_then(|d| d.parent)
+            .map_or(MdPath::Configuration, MdPath::Subsystem),
         MdPath::Field(o, None, _)
         | MdPath::Tabular(o, _)
         | MdPath::EnumValue(o, _)
@@ -417,7 +452,11 @@ pub(crate) fn type_idx(cx: &MdCtx, p: MdPath) -> Option<TypeIdx> {
         MdPath::CommonModule(_) => "CommonModule",
         MdPath::SessionParam(_) => "SessionParameter",
         MdPath::Subscription(_) => "EventSubscription",
-        MdPath::Other(i) => cx.model().config.objects.get(i)?.kind.as_str(),
+        MdPath::Subsystem(_) => "Subsystem",
+        MdPath::Other(i) => {
+            let kind = cx.model().config.objects.get(i)?.kind;
+            super::shared_type(kind).map_or(kind.as_str(), |(catalog_kind, _)| catalog_kind)
+        }
         MdPath::Configuration => return None,
     };
     cx.catalog.find_type(&format!("MetadataObject: {en}"))
@@ -497,6 +536,12 @@ impl HostObject for MdRoot {
             max_args: Some(0),
         })
     }
+    fn index_get(&self, _: &mut Execution, key: &Value) -> CallResult<Value> {
+        props::root_index(&self.cx, key)
+    }
+    fn index_set(&self, _: &mut Execution, _: &Value, _: Value) -> CallResult<()> {
+        Err(not_implemented("[запись по индексу]").into())
+    }
     fn presentation(&self, ex: &mut Execution) -> CallResult<Option<Str>> {
         let info = self.cx.catalog.type_info(self.cx.root.idx);
         Ok(Some(Str::from(match ex.lang() {
@@ -568,7 +613,11 @@ impl HostObject for MdObj {
             "представление" => {
                 Ok(Value::from(presentation_of(&self.cx, self.path)?.as_str()))
             }
-            "родитель" => Ok(value_of(&self.cx, ex, MdKey::Path(parent_of(self.path)))),
+            "родитель" => Ok(value_of(
+                &self.cx,
+                ex,
+                MdKey::Path(parent_of(&self.cx, self.path)),
+            )),
             "получитьименапредопределенных" => {
                 props::predefined_names(&self.cx, ex, self.path)
             }
@@ -602,6 +651,23 @@ impl HostObject for MdObj {
             presentation_of(&self.cx, self.path)?.as_str(),
         )))
     }
+    fn index_get(&self, ex: &mut Execution, key: &Value) -> CallResult<Value> {
+        let Value::String(name) = key else {
+            return match key {
+                Value::Number(_) | Value::Bool(_) | Value::Undefined => {
+                    Err(HostError::key(NOT_INDEXED).raw().into())
+                }
+                _ => Err(not_implemented("[ключ не строка]").into()),
+            };
+        };
+        let name = name.to_string_lossy();
+        match self.find_member(&name) {
+            Some(m) if matches!(self.member_kind(m), Some(MemberKind::Property { .. })) => {
+                self.get(ex, m)
+            }
+            _ => Err(no_field(&name).into()),
+        }
+    }
     fn boost_hash(&self) -> Option<i32> {
         Some(MdKey::Path(self.path).hash32())
     }
@@ -626,6 +692,72 @@ impl MdStd {
     fn def(&self) -> Option<&FieldDef> {
         field(&self.cx, self.obj, self.tab, self.idx)
     }
+
+    fn presentation_text(&self, ex: &Execution, fd: &FieldDef) -> CallResult<String> {
+        let syn = props::std_synonym(&self.cx, self.obj, fd);
+        if !syn.is_empty() {
+            return Ok(syn);
+        }
+        let kind = self.cx.model().obj(self.obj).kind;
+        match fd.std.and_then(|std| default_std_presentation(kind, std)) {
+            Some(_) if ex.lang() != platform_catalog::messages::Lang::Ru => {
+                Err(not_implemented("Представление: язык интерфейса не русский").into())
+            }
+            Some(text) => Ok(text.to_string()),
+            None => Ok(fd.name.clone()),
+        }
+    }
+}
+
+fn default_std_presentation(kind: ObjKind, std: StdAttr) -> Option<&'static str> {
+    use ObjKind as K;
+    use StdAttr as S;
+    Some(match (kind, std) {
+        (K::Catalog | K::ChartOfCharacteristicTypes, S::PredefinedDataName) => {
+            "Имя предопределенных данных"
+        }
+        (K::Catalog | K::ChartOfCharacteristicTypes, S::Predefined) => "Предопределенный",
+        (K::Catalog | K::ChartOfCharacteristicTypes, S::IsFolder) => "Это группа",
+        (
+            K::Catalog
+            | K::Document
+            | K::ExchangePlan
+            | K::ChartOfCharacteristicTypes
+            | K::BusinessProcess
+            | K::Task,
+            S::Ref,
+        ) => "Ссылка",
+        (
+            K::Catalog
+            | K::Document
+            | K::ExchangePlan
+            | K::ChartOfCharacteristicTypes
+            | K::BusinessProcess
+            | K::Task,
+            S::DeletionMark,
+        ) => "Пометка удаления",
+        (K::Catalog | K::ExchangePlan | K::ChartOfCharacteristicTypes, S::Description) => {
+            "Наименование"
+        }
+        (K::Catalog | K::ExchangePlan | K::ChartOfCharacteristicTypes, S::Code) => "Код",
+        (K::Document, S::Posted) => "Проведен",
+        (K::Document | K::BusinessProcess, S::Date) => "Дата",
+        (K::Document | K::BusinessProcess | K::Task, S::Number) => "Номер",
+        (K::ExchangePlan, S::ExchangeDate) => "Дата актуальности",
+        (K::ExchangePlan, S::ThisNode) => "Этот узел",
+        (K::ExchangePlan, S::ReceivedNo) => "Номер принятого сообщения",
+        (K::ExchangePlan, S::SentNo) => "Номер отправленного сообщения",
+        (K::ChartOfCharacteristicTypes, S::ValueType) => "Тип значения",
+        (K::BusinessProcess, S::Started) => "Стартован",
+        (K::BusinessProcess, S::HeadTask) => "Ведущая задача",
+        (K::Task, S::RoutePoint) => "Точка маршрута",
+        (K::Task, S::BusinessProcess) => "Бизнес-процесс",
+        (K::InformationRegister, S::Period) => "Период",
+        (K::InformationRegister, S::Active) => "Активность",
+        (K::InformationRegister, S::LineNumber) => "N",
+        (K::InformationRegister, S::Recorder) => "Регистратор",
+        _ => return None,
+    })
 }
 
 impl HostObject for MdStd {
@@ -646,31 +778,21 @@ impl HostObject for MdStd {
         let name = member_name(self.cx.catalog, self.cx.std.idx, m).map_or("", |n| n.1);
         Err(read_only(name).into())
     }
-    fn call(&self, _: &mut Execution, m: MemberId, _: &mut [Arg]) -> CallResult<Value> {
+    fn call(&self, ex: &mut Execution, m: MemberId, _: &mut [Arg]) -> CallResult<Value> {
         let fd = self.def().ok_or_else(|| no_field(""))?;
         match member_name(self.cx.catalog, self.cx.std.idx, m) {
             Some((true, ru, _)) if fold(ru) == "представление" => {
-                let syn = synonym_text(&fd.synonym, &self.cx.model().lang_code);
-                Ok(Value::from(if syn.is_empty() {
-                    fd.name.as_str()
-                } else {
-                    syn.as_str()
-                }))
+                Ok(Value::from(self.presentation_text(ex, fd)?.as_str()))
             }
             Some((true, ru, _)) => Err(not_implemented(ru).into()),
             _ => Err(no_field(&m.0.to_string()).into()),
         }
     }
-    fn presentation(&self, _: &mut Execution) -> CallResult<Option<Str>> {
+    fn presentation(&self, ex: &mut Execution) -> CallResult<Option<Str>> {
         let Some(fd) = self.def() else {
             return Ok(None);
         };
-        let syn = synonym_text(&fd.synonym, &self.cx.model().lang_code);
-        Ok(Some(Str::from(if syn.is_empty() {
-            fd.name.as_str()
-        } else {
-            syn.as_str()
-        })))
+        Ok(Some(Str::from(self.presentation_text(ex, fd)?.as_str())))
     }
     fn boost_hash(&self) -> Option<i32> {
         Some(MdKey::Std(self.obj, self.tab, self.idx).hash32())

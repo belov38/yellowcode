@@ -44,7 +44,7 @@ fn create(ex: &mut Execution, date: BslDate, reference: &Value) -> CallResult<Va
         _ => return Err(type_mismatch(2).into()),
     };
     let scratch = retained_rc_size::<Moment>();
-    let retained = ex.measure_retained(scratch, |visit| visit.value(reference))?;
+    let retained = ex.measure_retained_lenient(scratch, |visit| visit.value(reference))?;
     ex.reserve(retained.saturating_add(scratch))?;
     Ok(Value::Object(Rc::new(Moment {
         date,
@@ -61,7 +61,7 @@ pub fn point_in_time_parts(
         return Ok(None);
     };
     ex.charge(1)?;
-    ex.measure_retained(0, |visit| visit.value(value))?;
+    ex.measure_retained_lenient(0, |visit| visit.value(value))?;
     Ok(Some((point.date, point.reference.clone())))
 }
 

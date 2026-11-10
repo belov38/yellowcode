@@ -167,6 +167,11 @@ pub(crate) static MESSAGES: &[L5Msg] = &[
         en: "Metadata object",
     },
     L5Msg {
+        key: "backend:IDS_TYPE_PRESENTATION_OBJECTPROPERTY",
+        ru: "Перечислимое свойство объектов метаданных",
+        en: "Metadata object enumerated property",
+    },
+    L5Msg {
         key: "basic:IDS_ACCUMREG_LIST_TYPE_PRESENT",
         ru: "Регистр накопления список",
         en: "Accumulation register List",
@@ -668,6 +673,7 @@ pub mod keys {
     pub const DB_LOCKING: &str = "backend:IDS_DBERROR_LOCKING";
     pub const DB_OBJECT_NOT_FOUND: &str = "backend:IDS_DBOBJECT_NOTFOUND";
     pub const ELEMENT_NOT_SELECTED: &str = "basic:IDS_ELEMENT_NOT_SELECTED";
+    pub const ENUMERATED_PROPERTY_TYPE: &str = "backend:IDS_TYPE_PRESENTATION_OBJECTPROPERTY";
     pub const INVALID_PROPERTY_NAME: &str = "backend:IDS_ERR_INVALID_PROPERTY_NAME";
     pub const LIST_STREAM_ERROR: &str = "core85:IDS_LISTSTREAMERROR";
     pub const MD_OBJECT_TYPE: &str = "backend:IDS_TYPE_PRESENTATION_MDCONTEXT";

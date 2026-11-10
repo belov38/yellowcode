@@ -48,6 +48,10 @@ impl Place {
         Place(Kind::Index { obj, key })
     }
 
+    pub(crate) fn is_host_backed(&self) -> bool {
+        matches!(self.0, Kind::Member { .. } | Kind::Index { .. })
+    }
+
     pub fn temp_value(&self) -> Option<Value> {
         match &self.0 {
             Kind::Temp(c) => Some(c.borrow().clone()),

@@ -9,6 +9,7 @@
     )
 )]
 pub mod config_cf;
+pub mod dynamic_update;
 pub mod media;
 pub mod page_source;
 pub mod pages;

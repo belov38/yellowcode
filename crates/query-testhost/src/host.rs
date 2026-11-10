@@ -642,15 +642,25 @@ pub fn try_base(name: &str) -> Result<Option<TestBase>, String> {
     }
 }
 
+pub fn absent_base(bases: &Path, name: &str) -> Option<String> {
+    let file = bases.join(name).join("1Cv8.1CD");
+    (!file.is_file()).then(|| format!("QUERY_BASES: {} not found", file.display()))
+}
+
 pub fn try_base_in(bases: &Path, name: &str) -> Result<Option<TestBase>, String> {
-    let dir = bases.join(name);
-    if !dir.join("1Cv8.1CD").is_file() {
-        eprintln!(
-            "SKIP: QUERY_BASES: {} not found",
-            dir.join("1Cv8.1CD").display()
-        );
+    try_base_in_reporting(bases, name, &mut |reason| eprintln!("SKIP: {reason}"))
+}
+
+pub fn try_base_in_reporting(
+    bases: &Path,
+    name: &str,
+    report: &mut dyn FnMut(&str),
+) -> Result<Option<TestBase>, String> {
+    if let Some(reason) = absent_base(bases, name) {
+        report(&reason);
         return Ok(None);
     }
+    let dir = bases.join(name);
     let base = TestBase::open(&dir)?;
     if !base.schema_notes.is_empty() {
         eprintln!(

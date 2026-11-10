@@ -14,6 +14,7 @@ yellowcode-core = { path = "../yellowcode-core", features = ["clap"] }
 yellowcode-http = { path = "../yellowcode-http" }
 clap = { version = "4", features = ["derive"] }
 memory-budget = { path = "../memory-budget" }
+bak-trace = { path = "../bak-trace" }
 
 [lints.clippy]
 dbg_macro = "warn"

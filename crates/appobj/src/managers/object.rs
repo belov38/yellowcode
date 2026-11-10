@@ -205,8 +205,17 @@ impl HostObject for ObjMgr {
             "СоздатьЭлемент" if self.kind() == ObjKind::Catalog => {
                 crate::objects::create_item(ex, &self.app, self.obj)
             }
+            "СоздатьНаборЗаписей" if self.kind() == ObjKind::InformationRegister => {
+                crate::recordset::create_set(ex, &self.app, self.obj)
+            }
+            "СоздатьКлючЗаписи" if self.kind() == ObjKind::InformationRegister => {
+                crate::recordset::create_key(ex, &self.app, self.obj, args)
+            }
             "ПустаяСсылка" => Ok(empty_ref(&self.app, self.obj)?),
             "ПолучитьСсылку" => self.get_ref(ex, args),
+            "Получить" if self.kind() == ObjKind::Constant => {
+                super::constants::get(ex, &self.app, self.obj)
+            }
             "Количество" if self.is_enum() => Ok(Value::from(
                 i64::try_from(enums::count(&self.app, self.obj)).unwrap_or(i64::MAX),
             )),
@@ -291,6 +300,23 @@ impl HostObject for ObjMgr {
             min_args: clamp(required),
             max_args: Some(clamp(code.params.len())),
         })
+    }
+
+    fn index_get(&self, _: &mut Execution, key: &Value) -> CallResult<Value> {
+        if !self.is_enum() {
+            return Err(super::not_indexed().into());
+        }
+        let i = match key {
+            Value::String(name) => {
+                let name = name.to_string_lossy();
+                enums::find(&self.app, self.obj, &name)
+                    .ok_or_else(|| crate::meta::no_field(&name))?
+            }
+            Value::Number(n) => usize::try_from(n.trunc_to_i64_saturating())
+                .map_err(|_| super::index_off_bound())?,
+            _ => return Err(super::not_indexed().into()),
+        };
+        enums::value_at(&self.app, self.obj, i)?.ok_or_else(|| super::index_off_bound().into())
     }
 
     fn iter_len(&self, _: &mut Execution) -> Option<usize> {

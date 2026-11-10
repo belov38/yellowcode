@@ -23,7 +23,7 @@ impl TreeRows {
             })
         });
         let unsupported = ex.out_of_memory();
-        let retained = ex.measure_retained(scratch, |visit| {
+        let retained = ex.measure_retained_lenient(scratch, |visit| {
             if !crate::collections::accounting::project(self, visit)? {
                 return Err(unsupported);
             }

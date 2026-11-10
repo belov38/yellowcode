@@ -613,6 +613,14 @@ struct FolderFile {
     length: usize,
     parts: Vec<(u64, RowId)>,
 }
+struct StoredPart {
+    number: u64,
+    row: RowId,
+    created: DateTime,
+    modified: DateTime,
+    attributes: Numeric,
+    size: Numeric,
+}
 fn number(value: &Numeric, context: &str) -> Result<u64> {
     if value.scale() != 0 || (value.is_negative() && value.digits().iter().any(|&d| d != 0)) {
         return Err(bad(context, "invalid nonnegative integer"));
@@ -649,7 +657,7 @@ fn folder_files(table: &TableRead<'_>) -> Result<Vec<FolderFile>> {
         })
         .ok_or_else(|| bad(context, "no index beginning with FILENAME"))?;
     let index = table.index(&index.name)?;
-    let mut files: Vec<FolderFile> = Vec::new();
+    let mut collected: Vec<(String, Vec<StoredPart>)> = Vec::new();
     let mut by_name = HashMap::new();
     let mut seen = HashSet::new();
     for item in index.entries(
@@ -691,34 +699,82 @@ fn folder_files(table: &TableRead<'_>) -> Result<Vec<FolderFile>> {
             None => 0,
         };
         let i = *by_name.entry(name.clone()).or_insert_with(|| {
-            files.push(FolderFile {
-                name,
-                created,
-                modified,
-                attributes: attributes.clone(),
-                size: size.clone(),
-                length,
-                parts: Vec::new(),
-            });
-            files.len() - 1
+            collected.push((name, Vec::new()));
+            collected.len() - 1
         });
-        let file = files
+        let (_, parts) = collected
             .get_mut(i)
             .ok_or_else(|| bad(context, "invalid folder index"))?;
-        if (file.created, file.modified, &file.attributes, &file.size)
-            != (created, modified, &attributes, &size)
-        {
-            return Err(bad(context, "inconsistent multipart metadata"));
-        }
-        file.parts.push((partno, entry.row));
+        parts.push(StoredPart {
+            number: partno,
+            row: entry.row,
+            created,
+            modified,
+            attributes,
+            size,
+        });
     }
-    for file in &mut files {
-        file.parts.sort_by_key(|&(part, _)| part);
-        for (expected, &(actual, _)) in file.parts.iter().enumerate() {
-            if actual != expected as u64 {
-                return Err(bad(context, "PARTNO must be contiguous from zero"));
+    let mut files = Vec::with_capacity(collected.len());
+    for (name, mut parts) in collected {
+        parts.sort_by_key(|part| part.number);
+        for (expected, stored) in parts.iter().enumerate() {
+            if stored.number != expected as u64 {
+                return Err(bad(
+                    context,
+                    &format!(
+                        "part {} of a file: PARTNO must be contiguous from zero",
+                        stored.number
+                    ),
+                ));
             }
         }
+        let Some(first) = parts.first() else {
+            return Err(bad(context, "folder file without parts"));
+        };
+        let (created, modified, attributes, size) = (
+            first.created,
+            first.modified,
+            first.attributes.clone(),
+            first.size.clone(),
+        );
+        for pair in parts.windows(2) {
+            let [before, stored] = pair else { continue };
+            let refuse = |what: &str| {
+                bad(
+                    context,
+                    &format!("part {} of a file: {what}", stored.number),
+                )
+            };
+            if stored.created != created {
+                return Err(refuse("Creation differs from part 0"));
+            }
+            if stored.attributes != attributes {
+                return Err(refuse("Attributes differs from part 0"));
+            }
+            if stored.size != size {
+                return Err(refuse("DataSize differs from part 0"));
+            }
+            if stored.modified < before.modified {
+                return Err(refuse(&format!(
+                    "Modified is earlier than part {}",
+                    before.number
+                )));
+            }
+        }
+        let length = usize::try_from(number(&size, context)?)
+            .map_err(|_| limit(context, "DATASIZE overflow"))?;
+        files.push(FolderFile {
+            name,
+            created,
+            modified,
+            attributes,
+            size,
+            length,
+            parts: parts
+                .iter()
+                .map(|stored| (stored.number, stored.row))
+                .collect(),
+        });
     }
     for item in table.scan() {
         let (slot, _) = item?;

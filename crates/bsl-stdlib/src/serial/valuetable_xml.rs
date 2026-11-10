@@ -122,7 +122,7 @@ pub(crate) fn xml_data(
     let bytes = table.serial_xml_snapshot_bytes(ex)?;
     ctx.account(ex, bytes.saturating_add(2048))?;
     ctx.refresh_xml_prefix(ex)?;
-    let retained = ex.measure_retained(ctx.read_scratch(0), |visit| {
+    let retained = ex.measure_retained_lenient(ctx.read_scratch(0), |visit| {
         visit.value(&Value::Object(source.clone()))
     })?;
     ctx.account(ex, retained)?;
@@ -201,7 +201,7 @@ pub(crate) fn xml_data(
                     return Err(ctx.mismatch(ex));
                 }
                 ctx.refresh_xml_prefix(ex)?;
-                let retained = ex.measure_retained(ctx.read_scratch(0), |visit| {
+                let retained = ex.measure_retained_lenient(ctx.read_scratch(0), |visit| {
                     visit.value(&Value::Object(source.clone()))?;
                     for col in &snapshot.columns {
                         visit.value(&col.value_type)?;
@@ -218,7 +218,7 @@ pub(crate) fn xml_data(
                 admit_value(ex, ctx, value)?;
                 let data = ctx.to_data(ex, value)?;
                 ctx.refresh_xml_prefix(ex)?;
-                let retained = ex.measure_retained(ctx.read_scratch(0), |visit| {
+                let retained = ex.measure_retained_lenient(ctx.read_scratch(0), |visit| {
                     visit.value(&Value::Object(source.clone()))?;
                     for col in &snapshot.columns {
                         visit.value(&col.value_type)?;

@@ -104,6 +104,36 @@ const CASES: &[(&str, &[&str], &str)] = cases![
         ["convert", "source.cf", "--to", "zip", "--output", "out"]
     ),
     (
+        "err-bak-convert-raw-dt",
+        [
+            "bak",
+            "convert",
+            "base.bak",
+            "--server",
+            "localhost",
+            "--to",
+            "dt",
+            "--output",
+            "base.dt",
+            "--raw"
+        ]
+    ),
+    (
+        "err-bak-convert-raw-1cd",
+        [
+            "bak",
+            "convert",
+            "base.bak",
+            "--server",
+            "localhost",
+            "--to",
+            "1cd",
+            "--output",
+            "base.1CD",
+            "--raw"
+        ]
+    ),
+    (
         "err-metadata-format",
         ["metadata", "tree", "source.cf", "--format", "xml"]
     ),

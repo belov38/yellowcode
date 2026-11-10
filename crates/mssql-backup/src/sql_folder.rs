@@ -8,7 +8,7 @@ use ibschema::{
     columns::{ColRole, ColType, Column, Origin, Part},
     values::ColumnValue,
 };
-use onecd::Numeric;
+use onecd::{DateTime, Numeric};
 
 const MAX_ROW_BYTES: usize = 128 * 1024 * 1024;
 const MAX_FILES: usize = 100_000;
@@ -128,6 +128,7 @@ pub fn write_sql_folder_multipart<W: Write>(
     struct Pending {
         name: String,
         values: Vec<ColumnValue>,
+        modified: DateTime,
         next_part: u64,
     }
     fn finish<W: Write>(writer: &mut DtWriter<W>, file: Pending) -> Result<(), String> {
@@ -139,7 +140,17 @@ pub fn write_sql_folder_multipart<W: Write>(
         };
         let actual = Numeric::parse(&data.len().to_string()).ok_or("invalid data length")?;
         if !size.eq_value(&actual) {
-            return Err("folder data length mismatch".into());
+            let relation = match size.to_string().parse::<u64>() {
+                Ok(declared) if u64::try_from(data.len()).is_ok_and(|bytes| bytes > declared) => {
+                    "more"
+                }
+                _ => "fewer",
+            };
+            return Err(format!(
+                "part {} of a file: the parts add up to {} bytes, {relation} than DataSize ({size})",
+                file.next_part.saturating_sub(1),
+                data.len()
+            ));
         }
         if data.len() == 64 && data.starts_with(b"STORHDR\0") {
             return Err("unresolved SQL binary storage reference".into());
@@ -164,10 +175,10 @@ pub fn write_sql_folder_multipart<W: Write>(
         };
         let [
             ColumnValue::Str(name),
-            _,
-            _,
+            ColumnValue::DateTime(_),
+            ColumnValue::DateTime(modified),
             ColumnValue::Number(attributes),
-            _,
+            ColumnValue::Number(_),
             ColumnValue::Bytes(data),
         ] = values.as_slice()
         else {
@@ -176,10 +187,12 @@ pub fn write_sql_folder_multipart<W: Write>(
         if name.is_empty() || !name.is_ascii() || name.chars().any(char::is_control) {
             return Err("unsupported folder name".into());
         }
-        if !attributes.eq_value(&zero) || data.len() > MAX_FOLDER_BYTES {
-            return Err("unsupported folder attributes or size".into());
+        if data.len() > MAX_FOLDER_BYTES {
+            return Err("folder part exceeds the size limit".into());
         }
-        if pending.as_ref().is_none_or(|file| file.name != *name) {
+        let (name, modified, attributes_are_zero) =
+            (name.clone(), *modified, attributes.eq_value(&zero));
+        if pending.as_ref().is_none_or(|file| file.name != name) {
             if let Some(file) = pending.take() {
                 finish(writer, file)?;
                 count = count.checked_add(1).ok_or("folder count overflow")?;
@@ -188,23 +201,62 @@ pub fn write_sql_folder_multipart<W: Write>(
                 return Err("duplicate or excessive folder names".into());
             }
             if !part.eq_value(&zero) {
-                return Err("first folder part is not zero".into());
+                return Err(format!(
+                    "part {part} of a file: the file does not start with part 0"
+                ));
+            }
+            if !attributes_are_zero {
+                return Err("part 0 of a file: Attributes is not 0".into());
             }
             pending = Some(Pending {
-                name: name.clone(),
+                name,
                 values,
+                modified,
                 next_part: 1,
             });
             return Ok(());
         }
         let file = pending.as_mut().ok_or("missing current folder file")?;
-        if file.next_part >= MAX_PARTS_PER_FILE
-            || !part.eq_value(&Numeric::parse(&file.next_part.to_string()).ok_or("part overflow")?)
-        {
-            return Err("duplicate, missing or excessive folder part".into());
+        if file.next_part >= MAX_PARTS_PER_FILE {
+            return Err("too many parts for one folder file".into());
         }
-        if values.get(1..5) != file.values.get(1..5) {
-            return Err("inconsistent multipart metadata".into());
+        let expected = file.next_part;
+        let number: i64 = part
+            .to_string()
+            .parse()
+            .map_err(|_| "invalid part number")?;
+        let expected_number = i64::try_from(expected).map_err(|_| "part overflow")?;
+        if number > expected_number {
+            return Err(format!("part {part} of a file: part {expected} is missing"));
+        }
+        if Some(number) == expected_number.checked_sub(1) {
+            return Err(format!("part {part} of a file: PartNo repeats"));
+        }
+        if number < expected_number {
+            return Err(format!(
+                "part {part} of a file: PartNo is lower than the part before it"
+            ));
+        }
+        if values.get(1) != file.values.get(1) {
+            return Err(format!(
+                "part {part} of a file: Creation differs from part 0"
+            ));
+        }
+        if values.get(3) != file.values.get(3) {
+            return Err(format!(
+                "part {part} of a file: Attributes differs from part 0"
+            ));
+        }
+        if values.get(4) != file.values.get(4) {
+            return Err(format!(
+                "part {part} of a file: DataSize differs from part 0"
+            ));
+        }
+        if modified < file.modified {
+            return Err(format!(
+                "part {part} of a file: Modified is earlier than part {}",
+                expected.saturating_sub(1)
+            ));
         }
         let Some(ColumnValue::Bytes(bytes)) = values.pop() else {
             return Err("missing part data".into());
@@ -221,10 +273,12 @@ pub fn write_sql_folder_multipart<W: Write>(
         }
         data.extend_from_slice(&bytes);
         file.next_part = file.next_part.checked_add(1).ok_or("part overflow")?;
+        file.modified = modified;
         Ok(())
     })?;
     if let Some(file) = pending {
-        finish(writer, file).map_err(|_| Error::Unsupported("incomplete multipart folder"))?;
+        finish(writer, file)
+            .map_err(|message| Error::Sql(crate::sql_rows::Error::Consumer(message)))?;
         count = count
             .checked_add(1)
             .ok_or(Error::Unsupported("folder count overflow"))?;

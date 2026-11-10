@@ -11,6 +11,18 @@ pub enum Error {
     Container(#[from] v8cont::Error),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CfView {
+    #[default]
+    Applied,
+    Stored,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CfOptions {
+    pub view: CfView,
+}
+
 #[derive(Debug, Clone)]
 pub struct ConfigRow {
     pub name: String,

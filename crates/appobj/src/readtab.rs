@@ -1,11 +1,11 @@
 use crate::Application;
-use crate::model::{ObjId, TabDef};
+use crate::model::{ObjId, StdAttr, TabDef, TypeAtom};
 use crate::read::read_tabular;
 use crate::values::refs::RefValue;
-use bsl_prim::fold_name;
+use bsl_prim::{Number, fold_name};
 use bsl_vm::{
-    Arg, CallResult, Category, CategorySet, Execution, HostError, HostObject, MemberId, MemberKind,
-    TypeId, Value,
+    Arg, CallError, CallResult, Category, CategorySet, Execution, HostError, HostObject, MemberId,
+    MemberKind, TypeId, Value,
 };
 use std::any::Any;
 use std::rc::Rc;
@@ -20,6 +20,9 @@ enum Op {
     Get,
     IndexOf,
     Write,
+    Total,
+    Find,
+    Unload,
     Later,
 }
 
@@ -61,11 +64,11 @@ const METHODS: &[Method] = &[
     m("Загрузить", "Load", false, 1, Some(1), Op::Write),
     m("Сдвинуть", "Move", false, 2, Some(2), Op::Write),
     m("Свернуть", "GroupBy", false, 1, Some(2), Op::Write),
-    m("Выгрузить", "Unload", true, 0, None, Op::Later),
+    m("Выгрузить", "Unload", true, 0, Some(2), Op::Unload),
     m("ВыгрузитьКолонку", "UnloadColumn", true, 1, None, Op::Later),
-    m("Найти", "Find", true, 0, None, Op::Later),
+    m("Найти", "Find", true, 1, Some(2), Op::Find),
     m("НайтиСтроки", "FindRows", true, 0, None, Op::Later),
-    m("Итог", "Total", true, 0, None, Op::Later),
+    m("Итог", "Total", true, 1, Some(1), Op::Total),
     m("Сортировать", "Sort", false, 0, None, Op::Later),
 ];
 
@@ -175,6 +178,144 @@ impl ReadTab {
         self.def()
             .map_or_else(String::new, |t| format!("ТабличнаяЧасть.{}", t.name))
     }
+
+    fn refuse(&self, method: &str, form: &str) -> HostError {
+        HostError::not_implemented(&self.type_name(), &format!("{method}: {form}"))
+    }
+
+    fn column(&self, method: &str, name: &str) -> Result<usize, HostError> {
+        let def = self.def().ok_or_else(|| internal("no such section"))?;
+        match column_index(def, name) {
+            Some(i)
+                if def
+                    .fields
+                    .get(i)
+                    .is_some_and(|f| f.std != Some(StdAttr::LineNumber)) =>
+            {
+                Ok(i)
+            }
+            Some(_) => Err(self.refuse(method, "колонка НомерСтроки")),
+            None => Err(self.refuse(method, "колонка не найдена")),
+        }
+    }
+
+    fn total(&self, ex: &mut Execution, args: &[Arg]) -> CallResult<Value> {
+        let Value::String(name) = crate::meta::arg_value(ex, args, 0)? else {
+            return Err(self.refuse("Итог", "колонка задана не именем").into());
+        };
+        let at = self.column("Итог", &name.to_string_lossy())?;
+        let numeric = self
+            .def()
+            .and_then(|d| d.fields.get(at))
+            .is_some_and(|f| f.types.atoms == [TypeAtom::Number]);
+        if !numeric {
+            return Err(self.refuse("Итог", "колонка не числового типа").into());
+        }
+        ex.charge(self.rows.len() as u64)?;
+        let mut sum = Number::from_i64(0);
+        for cell in self.rows.iter().filter_map(|row| row.get(at)) {
+            if let Value::Number(n) = cell {
+                sum = sum.add(n);
+            }
+        }
+        Ok(Value::Number(sum))
+    }
+
+    fn find(&self, ex: &mut Execution, args: &[Arg]) -> CallResult<Value> {
+        let needle = crate::meta::arg_value(ex, args, 0)?;
+        let names = match crate::meta::arg_value(ex, args, 1)? {
+            Value::Undefined => String::new(),
+            Value::String(s) => s.to_string_lossy(),
+            _ => return Err(crate::meta::type_mismatch(2).into()),
+        };
+        let columns: Vec<usize> = if names.is_empty() {
+            if matches!(needle, Value::Number(_)) {
+                return Err(self.refuse("Найти", "число среди всех колонок").into());
+            }
+            let def = self.def().ok_or_else(|| internal("no such section"))?;
+            def.fields
+                .iter()
+                .enumerate()
+                .filter(|(_, f)| f.std != Some(StdAttr::LineNumber))
+                .map(|(i, _)| i)
+                .collect()
+        } else {
+            let blank = |c: char| matches!(c, '\t' | '\n' | '\r' | ' ');
+            names
+                .split(',')
+                .map(|name| self.column("Найти", name.trim_matches(blank)))
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        for (i, row) in self.rows.iter().enumerate() {
+            ex.charge(1)?;
+            for cell in columns.iter().filter_map(|&c| row.get(c)) {
+                bsl_vm::ops::charge_equal(ex, cell, &needle)?;
+                if same_value(cell, &needle) {
+                    return self.row(ex, i);
+                }
+            }
+        }
+        Ok(Value::Undefined)
+    }
+
+    fn unload(&self, ex: &mut Execution, args: &[Arg]) -> CallResult<Value> {
+        if !args.is_empty() {
+            return Err(self.refuse("Выгрузить", "с параметрами").into());
+        }
+        let def = self.def().ok_or_else(|| internal("no such section"))?;
+        let mut types = Vec::with_capacity(def.fields.len());
+        for f in &def.fields {
+            match crate::values::typedesc::from_standard(&self.app, ex, &f.types) {
+                Err(CallError::Host(_)) => {
+                    let form = format!("тип колонки {}", f.name);
+                    return Err(self.refuse("Выгрузить", &form).into());
+                }
+                other => types.push(other?),
+            }
+        }
+        let cells = (self.rows.len() as u64).saturating_mul(def.fields.len() as u64);
+        ex.reserve(
+            self.bytes
+                .saturating_mul(2)
+                .saturating_add(cells.saturating_mul(128)),
+        )?;
+        let table_type = platform_catalog::catalog()
+            .find_type("ValueTable")
+            .ok_or_else(|| internal("no value table type"))?;
+        let table = ex.construct(table_type, &mut [])?;
+        let columns = ex.get_member(&table, "Columns")?;
+        for (f, ty) in def.fields.iter().zip(types) {
+            let mut add = [Arg::Val(Value::from(f.name.as_str())), Arg::Val(ty)];
+            ex.call_method(&columns, "Add", &mut add, true)?;
+        }
+        for row in self.rows.iter() {
+            ex.charge(1)?;
+            let line = ex.call_method(&table, "Add", &mut [], true)?;
+            for (i, cell) in row.iter().enumerate() {
+                let at = Value::from(i64::try_from(i).unwrap_or(i64::MAX));
+                ex.index_set(&line, &at, cell.clone())?;
+            }
+        }
+        Ok(table)
+    }
+}
+
+fn same_value(a: &Value, b: &Value) -> bool {
+    !matches!(
+        (a, b),
+        (Value::Bool(_), Value::Number(_)) | (Value::Number(_), Value::Bool(_))
+    ) && bsl_vm::ops::equal(a, b)
+}
+
+fn column_index(def: &TabDef, name: &str) -> Option<usize> {
+    let n = fold_name(name);
+    def.fields.iter().position(|f| {
+        fold_name(&f.name) == n
+            || f.std.is_some_and(|a| {
+                let (ru, en) = a.names();
+                fold_name(ru) == n || fold_name(en) == n
+            })
+    })
 }
 
 fn index_arg(args: &[Arg], ex: &mut Execution) -> CallResult<usize> {
@@ -268,6 +409,9 @@ impl HostObject for ReadTab {
                 Ok(Value::from(at))
             }
             Op::Write => Err(read_only().into()),
+            Op::Total => self.total(ex, args),
+            Op::Find => self.find(ex, args),
+            Op::Unload => self.unload(ex, args),
             Op::Later => Err(HostError::not_implemented(&self.type_name(), method.ru).into()),
         }
     }
@@ -393,16 +537,7 @@ impl HostObject for ReadTabRow {
 
     fn find_member(&self, name: &str) -> Option<MemberId> {
         let def = self.app.model().obj(self.obj).tabular.get(self.tab)?;
-        let n = fold_name(name);
-        def.fields
-            .iter()
-            .position(|f| {
-                fold_name(&f.name) == n
-                    || f.std.is_some_and(|a| {
-                        let (ru, en) = a.names();
-                        fold_name(ru) == n || fold_name(en) == n
-                    })
-            })
+        column_index(def, name)
             .and_then(|i| u32::try_from(i).ok())
             .map(|i| MemberId(COLUMN_BASE + i))
     }

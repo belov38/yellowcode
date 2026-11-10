@@ -288,10 +288,14 @@ impl Registrar<'_> {
     }
 }
 
-pub(crate) fn synonym(s: &LocalString, name: &str, code: &str) -> String {
+fn localized<'a>(s: &'a LocalString, code: &str) -> Option<&'a str> {
     s.0.iter()
         .find(|(l, t)| l == code && !t.is_empty())
-        .map_or_else(|| name.to_string(), |(_, t)| t.clone())
+        .map(|(_, t)| t.as_str())
+}
+
+pub(crate) fn synonym(s: &LocalString, name: &str, code: &str) -> String {
+    localized(s, code).unwrap_or(name).to_string()
 }
 
 fn present(def: &ObjDef, code: &str, cat: Category, tab: Option<usize>, lang: Lang) -> String {
@@ -320,7 +324,7 @@ fn present(def: &ObjDef, code: &str, cat: Category, tab: Option<usize>, lang: La
     };
     let name = synonym(syn, name, code);
     if cat == Category::Ref {
-        return name;
+        return localized(&def.object_presentation, code).map_or(name, str::to_string);
     }
     if cat == Category::RoutePointRef {
         return match lang {

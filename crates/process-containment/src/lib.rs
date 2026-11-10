@@ -5,6 +5,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+pub mod interrupt;
 #[cfg(unix)]
 mod unix;
 #[cfg(windows)]
@@ -52,6 +53,10 @@ pub struct Spawned {
 
 pub fn spawn(command: &mut Command, deadline: Instant) -> Result<Spawned, SpawnError> {
     platform::spawn(command, deadline)
+}
+
+pub fn spawn_apart(command: &mut Command, deadline: Instant) -> Result<Spawned, SpawnError> {
+    platform::spawn_apart(command, deadline)
 }
 
 impl Process {

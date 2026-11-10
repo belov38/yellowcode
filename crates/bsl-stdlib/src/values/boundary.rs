@@ -37,7 +37,7 @@ pub fn new_boundary(
 ) -> Result<Value, Exception> {
     ex.charge(1)?;
     let scratch = retained_rc_size::<Boundary>();
-    let retained = ex.measure_retained(scratch, |visit| visit.value(value))?;
+    let retained = ex.measure_retained_lenient(scratch, |visit| visit.value(value))?;
     let live = retained.saturating_add(scratch);
     ex.reserve(live)?;
     let value = copy_value(ex, value, live).map_err(|e| ex.call_error(e))?;
@@ -55,7 +55,7 @@ pub fn boundary_parts(
         return Ok(None);
     };
     ex.charge(1)?;
-    let retained = ex.measure_retained(0, |visit| visit.value(value))?;
+    let retained = ex.measure_retained_lenient(0, |visit| visit.value(value))?;
     let value = copy_value(ex, &boundary.value.borrow(), retained).map_err(|e| ex.call_error(e))?;
     Ok(Some((value, boundary.kind)))
 }
@@ -85,7 +85,7 @@ impl HostObject for Boundary {
         Ok(true)
     }
     fn get(&self, ex: &mut Execution, member: MemberId) -> CallResult<Value> {
-        let retained = ex.measure_retained(0, |visit| {
+        let retained = ex.measure_retained_lenient(0, |visit| {
             visit.bytes(retained_rc_size::<Self>())?;
             visit.value(&self.value.borrow())
         })?;
@@ -205,7 +205,7 @@ fn ctor_live(ex: &mut Execution, args: &[Arg], copies: &[&Value]) -> CallResult<
         _ => bytes,
     });
     let scratch = retained_rc_size::<Boundary>().saturating_add(places);
-    let retained = ex.measure_retained(scratch, |visit| {
+    let retained = ex.measure_retained_lenient(scratch, |visit| {
         for arg in args.iter().take(2) {
             if let Arg::Val(value) = arg {
                 visit.value(value)?;

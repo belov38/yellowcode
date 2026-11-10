@@ -9,12 +9,13 @@ use std::any::Any;
 use std::rc::Rc;
 use std::sync::Arc;
 
-const NOT_HERE: [&str; 5] = [
+const NOT_HERE: [&str; 6] = [
     "ErrorCategory",
     "Chars",
     "WebColors",
     "StyleColors",
     "StyleFonts",
+    "PaletteColors",
 ];
 
 pub(crate) fn register(reg: &mut Registry) {

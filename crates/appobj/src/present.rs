@@ -121,6 +121,13 @@ struct Handler {
     fields: Option<String>,
 }
 
+pub(crate) fn has_handler(ex: &mut Execution, app: &Application, obj: ObjId) -> bool {
+    match handler_of(ex, app, obj) {
+        Ok(handler) => handler.is_some(),
+        Err(_) => true,
+    }
+}
+
 fn handler_of(ex: &mut Execution, app: &Application, obj: ObjId) -> CallResult<Option<Handler>> {
     let Some(module) = app
         .modules()

@@ -25,6 +25,10 @@ pub(super) fn spawn(command: &mut Command, deadline: Instant) -> Result<Spawned,
     spawn_with_setup(command, deadline, prepare_pipes)
 }
 
+pub(super) fn spawn_apart(command: &mut Command, deadline: Instant) -> Result<Spawned, SpawnError> {
+    spawn(command, deadline)
+}
+
 fn spawn_with_setup(
     command: &mut Command,
     deadline: Instant,

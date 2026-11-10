@@ -28,6 +28,10 @@ impl Registry {
 }
 
 impl Execution {
+    pub fn registry_data<T: std::any::Any + Send + Sync>(&self) -> Option<std::sync::Arc<T>> {
+        self.runtime().registry().data::<T>()
+    }
+
     pub fn call_global(&mut self, name: &str, args: &mut [Arg]) -> Result<Value, Exception> {
         let catalog = self.runtime().registry().catalog;
         let Some(m) = catalog.find_global_method(name) else {

@@ -79,6 +79,14 @@ fn scalar(ex: &mut Execution, host: &dyn QueryHost, v: &Value) -> CallResult<Opt
         }
     }))
 }
+fn limit_string(ty: &mut QType, v: &Value) {
+    if let Value::String(s) = v {
+        ty.string = Some(StrQ {
+            len: u32::try_from(s.len()).unwrap_or(u32::MAX).max(1),
+            fixed: false,
+        });
+    }
+}
 pub fn from_value(
     ex: &mut Execution,
     host: &dyn QueryHost,
@@ -87,12 +95,7 @@ pub fn from_value(
     ex.charge(1)?;
     if let Some(q) = scalar(ex, host, v)? {
         let mut ty = value_type(host, &q)?;
-        if let Value::String(s) = v {
-            ty.string = Some(StrQ {
-                len: u32::try_from(s.len()).unwrap_or(u32::MAX),
-                fixed: false,
-            });
-        }
+        limit_string(&mut ty, v);
         return Ok(ConvertedParam {
             shape: ParamShape::Value(ty),
             value: Some(ParamValue::Value(q)),
@@ -109,7 +112,9 @@ pub fn from_value(
             ex.charge(1)?;
             let q =
                 scalar(ex, host, &v)?.ok_or_else(|| unsupported("элемент списка параметров"))?;
-            ty = ty.merge(&value_type(host, &q)?);
+            let mut item = value_type(host, &q)?;
+            limit_string(&mut item, &v);
+            ty = ty.merge(&item);
             values.push(q);
         }
         return Ok(ConvertedParam {

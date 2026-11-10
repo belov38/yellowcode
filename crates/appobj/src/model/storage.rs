@@ -16,6 +16,7 @@ pub struct ObjStorage {
     pub main: TableId,
     pub ref_number: Option<u32>,
     pub fields: Vec<Option<FieldId>>,
+    pub value: Option<FieldId>,
     pub tabular: Vec<(TableId, Vec<Option<FieldId>>)>,
     pub service: Vec<(String, TableId)>,
 }
@@ -98,6 +99,7 @@ fn bind_object(o: &ObjDef, map: &StorageMap) -> Result<Option<ObjStorage>> {
     let st = map.object(o.md).ok_or_else(no_table)?;
     map.try_table(st.main).ok_or_else(no_table)?;
     let fields = o.fields.iter().map(|f| field_in(map, st.main, f)).collect();
+    let value = o.value.as_ref().and_then(|f| field_in(map, st.main, f));
     let mut tabular = Vec::with_capacity(o.tabular.len());
     for tab in &o.tabular {
         let id = match tab.std_list {
@@ -147,6 +149,7 @@ fn bind_object(o: &ObjDef, map: &StorageMap) -> Result<Option<ObjStorage>> {
             None
         },
         fields,
+        value,
         tabular,
         service: st.service.clone(),
     }))

@@ -97,10 +97,21 @@ fn unsigned(n: &Numeric, table: &str) -> Result<u64> {
         .map_err(|_| bad(table, "expected nonnegative integer"))
 }
 
+struct StoredPart {
+    number: u64,
+    id: RowId,
+    bytes: usize,
+    creation: onecd::DateTime,
+    modified: onecd::DateTime,
+    attributes: Numeric,
+    size: Numeric,
+}
+
 fn collect(t: &TableRead<'_>, c: &Columns, name: &str) -> Result<Option<Parts>> {
     let table = &t.descr().name;
     t.strings_equal("FILENAME", name, name)?;
-    let mut group: Option<Parts> = None;
+    let mut spelling: Option<String> = None;
+    let mut found: Vec<StoredPart> = Vec::new();
     for item in t.scan() {
         let (id, row) = item?;
         let stored = match cell(&row, c.name, table)? {
@@ -110,19 +121,16 @@ fn collect(t: &TableRead<'_>, c: &Columns, name: &str) -> Result<Option<Parts>> 
         if !t.strings_equal("FILENAME", stored, name)? {
             continue;
         }
+        match &spelling {
+            Some(first) if first != stored => return Err(bad(table, "ambiguous file spelling")),
+            Some(_) => {}
+            None => spelling = Some(stored.clone()),
+        }
         let date = |i| match cell(&row, i, table)? {
             Value::DateTime(at) => Ok(*at),
             _ => Err(bad(table, "expected folder timestamp")),
         };
-        let f = FolderFile {
-            name: stored.clone(),
-            creation: date(c.creation)?,
-            modified: date(c.modified)?,
-            attributes: number(&row, c.attributes, table)?,
-            data_size: number(&row, c.size, table)?,
-            data: Vec::new(),
-        };
-        let part = unsigned(&number(&row, c.part, table)?, table)?;
+        let number = unsigned(&number(&row, c.part, table)?, table)?;
         let bytes = match cell(&row, c.data, table)? {
             Value::Image(BlobVal::Data(b)) => b.len(),
             Value::Image(BlobVal::Ref(r)) => {
@@ -130,40 +138,71 @@ fn collect(t: &TableRead<'_>, c: &Columns, name: &str) -> Result<Option<Parts>> 
             }
             _ => return Err(bad(table, "BINARYDATA is not image")),
         };
-        let group = group.get_or_insert_with(|| Parts {
-            file: f.clone(),
-            rows: Vec::new(),
+        found.push(StoredPart {
+            number,
+            id,
+            bytes,
+            creation: date(c.creation)?,
+            modified: date(c.modified)?,
+            attributes: self::number(&row, c.attributes, table)?,
+            size: self::number(&row, c.size, table)?,
         });
-        if group.file != f {
-            return Err(bad(
-                table,
-                "ambiguous file spelling or inconsistent part metadata",
-            ));
-        }
-        group.rows.push((part, id, bytes));
     }
-    if let Some(group) = &mut group {
-        group.rows.sort_by_key(|p| p.0);
-        let mut size = 0usize;
-        for (i, &(part, _, bytes)) in group.rows.iter().enumerate() {
-            if u64::try_from(i).ok() != Some(part) {
-                return Err(bad(table, "duplicate or noncontiguous PARTNO"));
-            }
-            if bytes > PART_SIZE
-                || (i + 1 < group.rows.len() && bytes != PART_SIZE)
-                || (group.rows.len() > 1 && bytes == 0)
-            {
-                return Err(bad(table, "invalid folder part length"));
-            }
-            size = size
-                .checked_add(bytes)
-                .ok_or_else(|| bad(table, "folder length overflow"))?;
+    let Some(spelling) = spelling else {
+        return Ok(None);
+    };
+    found.sort_by_key(|p| p.number);
+    let mut total = 0usize;
+    for (i, part) in found.iter().enumerate() {
+        if u64::try_from(i).ok() != Some(part.number) {
+            return Err(bad(table, "duplicate or noncontiguous PARTNO"));
         }
-        if u64::try_from(size).ok() != Some(unsigned(&group.file.data_size, table)?) {
-            return Err(bad(table, "DATASIZE differs from total stored length"));
+        if part.bytes > PART_SIZE
+            || (i + 1 < found.len() && part.bytes != PART_SIZE)
+            || (found.len() > 1 && part.bytes == 0)
+        {
+            return Err(bad(table, "invalid folder part length"));
+        }
+        total = total
+            .checked_add(part.bytes)
+            .ok_or_else(|| bad(table, "folder length overflow"))?;
+    }
+    let Some(first) = found.first() else {
+        return Ok(None);
+    };
+    for pair in found.windows(2) {
+        let [before, part] = pair else { continue };
+        let refuse = |what: &str| bad(table, &format!("part {} of a file: {what}", part.number));
+        if part.creation != first.creation {
+            return Err(refuse("Creation differs from part 0"));
+        }
+        if part.attributes != first.attributes {
+            return Err(refuse("Attributes differs from part 0"));
+        }
+        if part.size != first.size {
+            return Err(refuse("DataSize differs from part 0"));
+        }
+        if part.modified < before.modified {
+            return Err(refuse(&format!(
+                "Modified is earlier than part {}",
+                before.number
+            )));
         }
     }
-    Ok(group)
+    if u64::try_from(total).ok() != Some(unsigned(&first.size, table)?) {
+        return Err(bad(table, "DATASIZE differs from total stored length"));
+    }
+    Ok(Some(Parts {
+        file: FolderFile {
+            name: spelling,
+            creation: first.creation,
+            modified: first.modified,
+            attributes: first.attributes.clone(),
+            data_size: first.size.clone(),
+            data: Vec::new(),
+        },
+        rows: found.iter().map(|p| (p.number, p.id, p.bytes)).collect(),
+    }))
 }
 
 pub fn read_file(txn: &WriteTxn<'_>, table: &str, name: &str) -> Result<Option<FolderFile>> {

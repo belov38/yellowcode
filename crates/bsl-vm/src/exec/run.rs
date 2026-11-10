@@ -293,11 +293,84 @@ fn run_loop(
     }
 }
 
+pub(crate) fn runs_host_code(op: Op) -> bool {
+    match op {
+        Op::Const(_)
+        | Op::Undef
+        | Op::Null
+        | Op::True
+        | Op::False
+        | Op::Pop
+        | Op::Dup
+        | Op::LoadLocal(_)
+        | Op::StoreLocal(_)
+        | Op::LoadModVar(_)
+        | Op::StoreModVar(_)
+        | Op::CallLocal { .. }
+        | Op::Neg
+        | Op::Pos
+        | Op::Not
+        | Op::Add
+        | Op::Sub
+        | Op::Mul
+        | Op::Div
+        | Op::Mod
+        | Op::Eq
+        | Op::Ne
+        | Op::Lt
+        | Op::Le
+        | Op::Gt
+        | Op::Ge
+        | Op::ToBool
+        | Op::Jump(_)
+        | Op::JumpIfFalse(_)
+        | Op::JumpIfTrue(_) => false,
+        Op::LoadOuter(_)
+        | Op::StoreOuter(_)
+        | Op::LoadGlobal(_)
+        | Op::StoreGlobal(_)
+        | Op::LoadContext(_)
+        | Op::StoreContext(_)
+        | Op::GetMember(_)
+        | Op::SetMember(_)
+        | Op::GetIndex
+        | Op::SetIndex
+        | Op::RefLocal(_)
+        | Op::RefModVar(_)
+        | Op::RefOuter(_)
+        | Op::RefMember(_)
+        | Op::RefIndex
+        | Op::Omitted
+        | Op::CallApp { .. }
+        | Op::CallPlatform { .. }
+        | Op::CallContext { .. }
+        | Op::CallMember { .. }
+        | Op::New { .. }
+        | Op::NewNoArgs { .. }
+        | Op::NewDynamic { .. }
+        | Op::Return
+        | Op::ReturnValue
+        | Op::IterStart(_)
+        | Op::IterNext { .. }
+        | Op::Raise
+        | Op::RaiseExt(_)
+        | Op::Reraise
+        | Op::EnterHandler
+        | Op::LeaveHandler(_)
+        | Op::Execute
+        | Op::Evaluate
+        | Op::Await
+        | Op::AddHandler
+        | Op::RemoveHandler => true,
+    }
+}
+
 fn run_ops(
     ex: &mut Execution,
     floor: usize,
     snapshot: bool,
 ) -> Result<(Value, Vec<Value>), Exception> {
+    let mut after_host_code = true;
     'frame: loop {
         if ex.exec.frames.len() <= floor {
             return Err(internal("no frame to run"));
@@ -316,10 +389,11 @@ fn run_ops(
         };
         let code = code_of(&module, method).ok_or_else(|| internal("no such method"))?;
         loop {
-            crate::reuse::reconcile(ex)?;
+            crate::reuse::census_before_instruction(ex, after_host_code)?;
             let Some(&op) = code.code.get(pc as usize) else {
                 return Err(internal("jump or flow out of the code"));
             };
+            after_host_code = runs_host_code(op);
             ex.charge(1)?;
             ex.exec.frames[fi].pc = pc;
             pc += 1;
@@ -528,6 +602,7 @@ fn run_ops(
                         crate::reuse::publish(ex, pending, &v)?;
                     }
                     crate::reuse::reconcile(ex)?;
+                    after_host_code = false;
                     if fi == floor {
                         return Ok((v, slots));
                     }

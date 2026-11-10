@@ -3,6 +3,9 @@ mod font;
 mod formatted;
 mod frame;
 mod picture;
+mod style;
+
+pub use style::{StyleItem, StyleItemKind, StyleItems};
 
 use crate::enums::{enum_value, manager, type_by_id};
 use crate::serial::codec::ValueCodec;
@@ -32,6 +35,7 @@ pub(crate) struct Types {
     pub web_colors: TypeIdx,
     pub style_colors: TypeIdx,
     pub style_fonts: TypeIdx,
+    pub palette_colors: Option<TypeIdx>,
 }
 
 #[allow(
@@ -57,6 +61,7 @@ pub(crate) fn types() -> &'static Types {
             web_colors: t("WebColors"),
             style_colors: t("StyleColors"),
             style_fonts: t("StyleFonts"),
+            palette_colors: type_by_id("PaletteColors"),
         }
     })
 }
@@ -74,8 +79,17 @@ pub(crate) fn register(reg: &mut Registry) {
     reg.type_impl(t.border, ctor(frame::border_ctor));
     reg.type_impl(t.line, ctor(frame::line_ctor));
     reg.system_enum(t.web_colors, manager(t.web_colors, color::web_member));
-    reg.system_enum(t.style_colors, manager(t.style_colors, color::style_member));
-    reg.system_enum(t.style_fonts, manager(t.style_fonts, font::style_member));
+    reg.system_enum(
+        t.style_colors,
+        style::manager(t.style_colors, StyleItemKind::Color),
+    );
+    reg.system_enum(
+        t.style_fonts,
+        style::manager(t.style_fonts, StyleItemKind::Font),
+    );
+    if let Some(palette) = t.palette_colors {
+        reg.system_enum(palette, manager(palette, color::palette_member));
+    }
 }
 
 pub(crate) fn comparison_resources(value: &Value) -> Option<(u64, u64)> {
@@ -173,6 +187,7 @@ pub(crate) fn enum_presentation(
         ty.picture_format,
     ]
     .contains(&t)
+        && ty.palette_colors != Some(t)
     {
         return None;
     }

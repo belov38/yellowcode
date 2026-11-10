@@ -79,10 +79,6 @@ impl TypeDescription {
     ) -> Self {
         let mut td = Self::new(types, number, string, date, binary, rt);
         td.keeps_undefined = true;
-        if types.contains(&TypeId::UNDEFINED) {
-            td.types.push(TypeId::UNDEFINED);
-            order::sort(&mut td.types, rt);
-        }
         td
     }
 
@@ -106,7 +102,7 @@ impl TypeDescription {
         &self.types
     }
     pub fn contains(&self, t: TypeId) -> bool {
-        self.types.contains(&t)
+        self.types.contains(&t) || (t == TypeId::UNDEFINED && self.types.len() >= 2)
     }
     pub fn number(&self) -> NumberQualifiers {
         self.number.unwrap_or_default()
@@ -276,9 +272,9 @@ pub(crate) fn register(reg: &mut Registry) {
     qualifiers::register(reg);
 }
 
-fn type_list(ex: &mut Execution, v: &Value, param: usize) -> CallResult<(Vec<TypeId>, bool)> {
+fn type_list(ex: &mut Execution, v: &Value, param: usize) -> CallResult<Vec<TypeId>> {
     match v {
-        Value::Undefined => Ok((Vec::new(), false)),
+        Value::Undefined => Ok(Vec::new()),
         Value::String(s) => {
             let mut out = Vec::new();
             for name in s
@@ -302,11 +298,11 @@ fn type_list(ex: &mut Execution, v: &Value, param: usize) -> CallResult<(Vec<Typ
                 };
                 out.push(t);
             }
-            Ok((out, false))
+            Ok(out)
         }
         _ => {
             if let Some(td) = type_description_of(v) {
-                return Ok((td.types, td.keeps_undefined));
+                return Ok(td.types);
             }
             let Some(items) = crate::array_items(v) else {
                 return Err(type_mismatch(param).into());
@@ -321,7 +317,7 @@ fn type_list(ex: &mut Execution, v: &Value, param: usize) -> CallResult<(Vec<Typ
                     }
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            Ok((types, true))
+            Ok(types)
         }
     }
 }
@@ -329,15 +325,14 @@ fn type_list(ex: &mut Execution, v: &Value, param: usize) -> CallResult<(Vec<Typ
 fn ctor(ex: &mut Execution, args: &mut [Arg]) -> CallResult<Value> {
     let first = arg_value(ex, args.first())?;
     let base = type_description_of(&first);
-    let (mut types, mut keeps) = type_list(ex, &first, 1)?;
+    let mut types = type_list(ex, &first, 1)?;
     let start = if base.is_some() {
         let add = arg_value(ex, args.get(1))?;
         let sub = arg_value(ex, args.get(2))?;
-        let (add, extra_keeps) = type_list(ex, &add, 2)?;
-        let (sub, _) = type_list(ex, &sub, 3)?;
+        let add = type_list(ex, &add, 2)?;
+        let sub = type_list(ex, &sub, 3)?;
         types.extend(add);
         types.retain(|t| !sub.contains(t));
-        keeps |= extra_keeps;
         3
     } else {
         1
@@ -345,10 +340,7 @@ fn ctor(ex: &mut Execution, args: &mut [Arg]) -> CallResult<Value> {
     let mut td =
         base.unwrap_or_else(|| TypeDescription::new(&[], None, None, None, None, ex.runtime()));
     td.types = types;
-    td.keeps_undefined = keeps;
-    if !keeps {
-        td.types.retain(|t| *t != TypeId::UNDEFINED);
-    }
+    td.types.retain(|t| *t != TypeId::UNDEFINED);
     order::sort(&mut td.types, ex.runtime());
     td.types.dedup();
     for offset in 0..4 {

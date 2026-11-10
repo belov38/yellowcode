@@ -54,6 +54,7 @@ pub(crate) fn root_coll(cx: &Arc<MdCtx>, kind: MdKind) -> Value {
             MdKind::EventSubscription => (0..model.subscriptions.len())
                 .map(|i| MdKey::Path(MdPath::Subscription(i)))
                 .collect(),
+            MdKind::Subsystem => super::subsystems::top_level(cx),
             _ => model
                 .config
                 .objects
@@ -263,7 +264,17 @@ impl HostObject for MdColl {
         self
     }
     fn get(&self, ex: &mut Execution, m: MemberId) -> CallResult<Value> {
-        self.item(ex, (m.0.wrapping_sub(ITEM_BASE)) as usize)
+        let index = (m.0.wrapping_sub(ITEM_BASE)) as usize;
+        if self.ty == CollTy::Values
+            && let Some(k) = self.items.get(index)
+        {
+            return Err(HostError::not_implemented(
+                "КоллекцияЗначенийСвойстваОбъектаМетаданных",
+                &self.name_of(*k),
+            )
+            .into());
+        }
+        self.item(ex, index)
             .ok_or_else(|| no_field(&m.0.to_string()).into())
     }
     fn set(&self, _: &mut Execution, m: MemberId, _: Value) -> CallResult<()> {

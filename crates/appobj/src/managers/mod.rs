@@ -1,4 +1,5 @@
 mod coll;
+pub(crate) mod constants;
 mod enums;
 mod object;
 mod points;
@@ -6,11 +7,19 @@ mod points;
 use crate::Application;
 use crate::model::{KINDS, ObjId, ObjKind};
 use crate::session::call_ctx;
-use bsl_prim::fold_name;
-use bsl_vm::{CallError, Exception, Execution, ObjRef, Registry, Value};
+use bsl_prim::{Str, fold_name};
+use bsl_vm::{CallError, Exception, Execution, HostError, ObjRef, Registry, TypeId, Value};
 use platform_catalog::messages::Lang;
 use std::rc::Rc;
 use std::sync::Arc;
+
+pub(super) fn not_indexed() -> HostError {
+    HostError::key("bsl:IDS_RTE_NOTINDEXED").raw()
+}
+
+pub(super) fn index_off_bound() -> HostError {
+    HostError::key(bsl_stdlib::bind::msg::INDEX_OFFBOUND)
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub(crate) enum MgrKey {
@@ -86,4 +95,8 @@ pub(crate) fn enum_value(
 
 fn same_name(a: &str, b: &str) -> bool {
     fold_name(a) == fold_name(b)
+}
+
+pub(crate) fn kind_manager_string(ex: &Execution, ty: TypeId) -> Str {
+    Str::from(ex.runtime().types().name(ty, ex.script_variant()))
 }

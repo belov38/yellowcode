@@ -343,7 +343,7 @@ impl ValueTable {
         incoming: Option<&Value>,
         scratch: u64,
     ) -> Result<(), Exception> {
-        ex.measure_retained(scratch, |visit| {
+        ex.measure_retained_lenient(scratch, |visit| {
             visit.value(table)?;
             if let Some(incoming) = incoming {
                 visit.value(incoming)?;

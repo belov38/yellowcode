@@ -30,11 +30,13 @@ impl SharedValue {
 
     pub fn from_value_in(ex: &mut Execution, value: &Value) -> Result<Option<Self>, Exception> {
         ex.charge(1)?;
-        let retained = ex.measure_retained(0, |visit| visit.value(value))?;
+        if let Value::Object(object) = value
+            && !object.session_transfer_supported()
+        {
+            return Ok(None);
+        }
+        let retained = ex.measure_retained_lenient(0, |visit| visit.value(value))?;
         if let Value::Object(object) = value {
-            if !object.session_transfer_supported() {
-                return Ok(None);
-            }
             let limit = crate::reuse::memory_limit(ex).map(|limit| limit.saturating_sub(retained));
             let Some(work) = crate::session_graph::retire::acyclic(object.as_ref(), limit) else {
                 return Ok(None);

@@ -15,6 +15,7 @@ use std::{
 };
 
 mod bak;
+mod bak_report;
 mod convert;
 mod metadata;
 mod query;
@@ -187,6 +188,19 @@ struct OpenArgs {
     smoke: bool,
 }
 
+static ENDED_BY: std::sync::Mutex<Option<yellowcode_core::plain::bak::Interrupt>> =
+    std::sync::Mutex::new(None);
+
+pub fn exit(code: i32) -> ! {
+    let ended_by = ENDED_BY.lock().ok().and_then(|slot| *slot);
+    match ended_by {
+        Some(interrupt) if code == interrupt.exit_code() => {
+            yellowcode_core::plain::bak::end_process(interrupt)
+        }
+        _ => std::process::exit(code),
+    }
+}
+
 pub fn run(
     args: impl IntoIterator<Item = OsString>,
     input: &mut dyn Read,
@@ -219,6 +233,12 @@ pub fn run(
             return error.exit_code();
         }
     };
+    if let Some(Command::Bak(command)) = &cli.command
+        && let Some(error) = command.usage_error()
+    {
+        let _ = write!(err, "{error}");
+        return error.exit_code();
+    }
     let user_mutation = matches!(
         &cli.command,
         Some(Command::Users(command)) if command.is_mutation()
@@ -233,6 +253,13 @@ pub fn run(
     let mut output = yellowcode_core::output::Out {
         w: out,
         closed: false,
+    };
+    let report = match bak_report::begin(cli.command.as_ref()) {
+        Ok(report) => report,
+        Err(message) => {
+            let _ = writeln!(err, "yellowcode: {message}");
+            return 2;
+        }
     };
     let result = match cli.command {
         Some(Command::Bak(command)) => bak::run(command, &mut output, err).map(|()| 0),
@@ -255,18 +282,31 @@ pub fn run(
         Ok(()) => Ok(code),
     });
     match result {
-        Ok(code) => code,
-        Err(_) if output.closed && !user_mutation => 0,
+        Ok(code) => {
+            bak_report::end(report, code, None, err);
+            code
+        }
+        Err(_) if output.closed && !user_mutation => {
+            bak_report::end(report, 0, None, err);
+            0
+        }
         Err(error) => {
             let _ = writeln!(err, "yellowcode: {error}");
-            if error
+            let code = if let Some(interrupt) = yellowcode_core::plain::bak::interrupted(&error) {
+                if let Ok(mut slot) = ENDED_BY.lock() {
+                    *slot = Some(interrupt);
+                }
+                interrupt.exit_code()
+            } else if error
                 .downcast_ref::<memory_budget::policy::ConfigError>()
                 .is_some()
             {
                 2
             } else {
                 1
-            }
+            };
+            bak_report::end(report, code, Some(&error.to_string()), err);
+            code
         }
     }
 }

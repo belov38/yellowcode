@@ -1,8 +1,8 @@
 use super::value_list::arg_value_cached;
 use super::*;
-use crate::bind::type_mismatch;
+use crate::bind::{type_mismatch, value_mismatch};
 use bsl_prim::{Str, fold_name};
-use bsl_vm::{Arg, CallResult, HostObject, MemberKind};
+use bsl_vm::{Arg, CallResult, HostObject, Lang, MemberKind};
 use std::mem::size_of;
 
 struct Write {
@@ -124,7 +124,7 @@ fn live(
         .saturating_add(writes.iter().fold(0u64, |sum, write| {
             sum.saturating_add(write.name.capacity() as u64)
         }));
-    let bytes = ex.measure_retained(scratch, |visit| {
+    let bytes = ex.measure_retained_lenient(scratch, |visit| {
         for arg in args {
             if let Arg::Val(value) = arg {
                 visit.value(value)?;
@@ -155,9 +155,9 @@ fn live(
     Ok(total)
 }
 
-fn property(ex: &mut Execution, object: &Value, name: &str, write: bool) -> CallResult<bool> {
+fn field(ex: &mut Execution, object: &Value, name: &str) -> CallResult<Option<(bool, bool)>> {
     let Some(object) = object.as_object() else {
-        return Ok(false);
+        return Ok(None);
     };
     let descriptor = ex
         .runtime()
@@ -167,7 +167,7 @@ fn property(ex: &mut Execution, object: &Value, name: &str, write: bool) -> Call
         Some((_, kind @ MemberKind::Property { .. })) => kind,
         _ => {
             let Some(member) = object.find_member_guarded(ex, name)? else {
-                return Ok(false);
+                return Ok(None);
             };
             object.member_kind(member).unwrap_or(MemberKind::Property {
                 readable: true,
@@ -175,9 +175,136 @@ fn property(ex: &mut Execution, object: &Value, name: &str, write: bool) -> Call
             })
         }
     };
-    Ok(
-        matches!(kind, MemberKind::Property { readable, writable } if if write { writable } else { readable }),
-    )
+    Ok(match kind {
+        MemberKind::Property { readable, writable } => Some((readable, writable)),
+        MemberKind::Method { .. } => None,
+    })
+}
+
+fn property(ex: &mut Execution, object: &Value, name: &str, write: bool) -> CallResult<bool> {
+    Ok(field(ex, object, name)?
+        .is_some_and(|(readable, writable)| if write { writable } else { readable }))
+}
+
+fn lacks(ex: &Execution, param: usize, name: &str, object: &Value, read_only: bool) -> HostError {
+    let kind = object.as_object().map_or("", |object| {
+        ex.runtime()
+            .types()
+            .presentation(HostObject::type_id(&**object), ex.lang())
+    });
+    let text = match (ex.lang(), read_only) {
+        (Lang::Ru, false) => format!("Поле '{name}' объекта '{kind}' не обнаружено"),
+        (Lang::Ru, true) => format!("Поле '{name}' объекта '{kind}' недоступно для записи"),
+        (Lang::En, false) => format!("Field '{name}' not found in object '{kind}'"),
+        (Lang::En, true) => format!("Field '{name}' not writable in object '{kind}'"),
+    };
+    value_mismatch(param).with_arg(text)
+}
+
+fn refusal(
+    ex: &mut Execution,
+    source: &Value,
+    receiver: &Value,
+    name: &str,
+) -> CallResult<Option<HostError>> {
+    match field(ex, source, name)? {
+        None => return Ok(Some(lacks(ex, 3, name, source, false))),
+        Some((false, _)) => {
+            return Ok(Some(HostError::not_implemented(
+                "ЗаполнитьЗначенияСвойств",
+                "поле источника недоступно для чтения",
+            )));
+        }
+        Some(_) => {}
+    }
+    Ok(match field(ex, receiver, name)? {
+        None => Some(lacks(ex, 3, name, receiver, false)),
+        Some((_, false)) => Some(lacks(ex, 3, name, receiver, true)),
+        Some(_) => None,
+    })
+}
+
+fn check_exclusions(
+    ex: &mut Execution,
+    list: &Str,
+    source: &Value,
+    receiver: &Value,
+    retained: u64,
+) -> CallResult<()> {
+    ex.charge(list.len() as u64 + 1)?;
+    ex.reserve(
+        retained
+            .saturating_add((list.len() as u64).saturating_mul(8))
+            .saturating_add(2048),
+    )?;
+    let text = list.to_string_lossy();
+    for name in text
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        for object in [source, receiver] {
+            if field(ex, object, name)?.is_none() {
+                return Err(lacks(ex, 4, name, object, false).into());
+            }
+        }
+    }
+    Ok(())
+}
+
+const LISTED: usize = 32;
+
+fn walk_order(ex: &mut Execution, names: &mut Vec<Str>, retained: u64) -> CallResult<()> {
+    ex.charge((names.len() as u64).saturating_mul(LISTED as u64 + 1))?;
+    let total = names.iter().map(|name| name.len() as u64).sum::<u64>();
+    ex.reserve(
+        retained
+            .saturating_add(total.saturating_mul(8))
+            .saturating_add(4096),
+    )?;
+    let mut distinct: Vec<&Str> = Vec::new();
+    for name in names.iter() {
+        if distinct.contains(&name) {
+            continue;
+        }
+        if distinct.len() == LISTED {
+            return Err(HostError::not_implemented(
+                "ЗаполнитьЗначенияСвойств",
+                "список длиннее 32 имён",
+            )
+            .into());
+        }
+        distinct.push(name);
+    }
+    let hashes: Vec<usize> = distinct
+        .iter()
+        .map(|name| {
+            name.to_string_lossy()
+                .to_lowercase()
+                .encode_utf16()
+                .fold(0, |h, unit| (h * 37 + usize::from(unit)) % 64)
+        })
+        .collect();
+    let mut walk: Vec<usize> = Vec::new();
+    let mut buckets = 8;
+    let place = |walk: &mut Vec<usize>, i: usize, buckets: usize| {
+        let at = walk
+            .iter()
+            .position(|&j| hashes[j] % buckets == hashes[i] % buckets);
+        walk.insert(at.unwrap_or(walk.len()), i);
+    };
+    for i in 0..distinct.len() {
+        place(&mut walk, i, buckets);
+        while walk.len() > buckets {
+            buckets *= 8;
+            for j in std::mem::take(&mut walk) {
+                place(&mut walk, j, buckets);
+            }
+        }
+    }
+    let ordered: Vec<Str> = walk.into_iter().map(|i| distinct[i].clone()).collect();
+    *names = ordered;
+    Ok(())
 }
 
 fn contains(ex: &mut Execution, list: &Str, name: &str, retained: u64) -> CallResult<bool> {
@@ -254,7 +381,7 @@ pub(super) fn fill(ex: &mut Execution, args: &mut [Arg]) -> CallResult<Value> {
     }
     for (index, value) in cached.iter().take(2).enumerate() {
         if !matches!(value, Value::Object(_)) {
-            return Err(type_mismatch(index + 1).into());
+            return Err(value_mismatch(index + 1).into());
         }
     }
     for (index, value) in cached.iter().enumerate().skip(2) {
@@ -263,8 +390,9 @@ pub(super) fn fill(ex: &mut Execution, args: &mut [Arg]) -> CallResult<Value> {
         }
     }
     let retained = live(ex, args, &cached, &names, &writes, &Value::Undefined, 0)?;
+    let listed = matches!(&cached[2], Value::String(_));
     names = match &cached[2] {
-        Value::String(list) if !list.is_empty() => {
+        Value::String(list) => {
             ex.charge(list.len() as u64 + 1)?;
             let count = list
                 .units()
@@ -281,17 +409,28 @@ pub(super) fn fill(ex: &mut Execution, args: &mut [Arg]) -> CallResult<Value> {
                 (selected.capacity() as u64).saturating_mul(size_of::<Str>() as u64),
             ))?;
             let text = list.to_string_lossy();
-            selected.extend(text.split(',').map(|part| Str::from(part.trim())));
+            selected.extend(
+                text.split(',')
+                    .map(str::trim)
+                    .filter(|part| !part.is_empty())
+                    .map(Str::from),
+            );
             selected
         }
         _ => inventory(ex, &cached[0], &cached[1], retained)?,
     };
+    if listed {
+        walk_order(ex, &mut names, retained)?;
+    } else if let Value::String(list) = &cached[3] {
+        check_exclusions(ex, list, &cached[1], &cached[0], retained)?;
+    }
     live(ex, args, &cached, &names, &writes, &Value::Undefined, 0)?;
     let retained = live(ex, args, &cached, &names, &writes, &Value::Undefined, 0)?;
     ex.reserve(
         retained.saturating_add((names.len() as u64).saturating_mul(size_of::<Write>() as u64)),
     )?;
     writes = vec_with_capacity(ex, names.len() as u64)?;
+    let mut pending = None;
     for name in &names {
         let retained = live(ex, args, &cached, &names, &writes, &Value::Undefined, 0)?;
         let scratch = (name.len() as u64).saturating_mul(4).saturating_add(64);
@@ -304,10 +443,27 @@ pub(super) fn fill(ex: &mut Execution, args: &mut [Arg]) -> CallResult<Value> {
         {
             continue;
         }
-        if let Value::String(list) = &cached[3]
+        if !listed
+            && let Value::String(list) = &cached[3]
             && contains(ex, list, &name, retained.saturating_add(scratch))?
         {
             continue;
+        }
+        if listed {
+            let refused = refusal(ex, &cached[1], &cached[0], &name);
+            live(
+                ex,
+                args,
+                &cached,
+                &names,
+                &writes,
+                &Value::Undefined,
+                scratch,
+            )?;
+            if let Some(error) = refused? {
+                pending = Some(error);
+                break;
+            }
         }
         let writable = property(ex, &cached[0], &name, true);
         live(
@@ -355,7 +511,7 @@ pub(super) fn fill(ex: &mut Execution, args: &mut [Arg]) -> CallResult<Value> {
         });
     }
     if writes.is_empty() {
-        return Ok(Value::Undefined);
+        return pending.map_or(Ok(Value::Undefined), |error| Err(error.into()));
     }
     if let Some(target) = Target::of(&cached[0]) {
         for index in 0..writes.len() {
@@ -423,5 +579,5 @@ pub(super) fn fill(ex: &mut Execution, args: &mut [Arg]) -> CallResult<Value> {
             ex.set_member(&cached[0], &write.name, write.value)?;
         }
     }
-    Ok(Value::Undefined)
+    pending.map_or(Ok(Value::Undefined), |error| Err(error.into()))
 }

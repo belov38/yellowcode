@@ -125,7 +125,7 @@ fn atom(
         "xs:base64Binary" => return TypeAtom::Binary,
         "v8:Null" => return TypeAtom::Null,
         "v8:Undefined" => return TypeAtom::Undefined,
-        "cfg:AnyRef" => return TypeAtom::AnyRef(None),
+        "cfg:AnyRef" | "cfg:AnyIBRef" => return TypeAtom::AnyRef(None),
         _ => {}
     }
     let Some(rest) = qname.strip_prefix("cfg:") else {

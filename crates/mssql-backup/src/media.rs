@@ -109,7 +109,15 @@ pub fn inspect(reader: &mut (impl Read + Seek)) -> Result<MediaInfo, Error> {
         let h = read_at::<60>(reader, pos, size)?;
         let tag = bytes_at::<4>(&h, 0)?;
         if block_no == 0 && &tag != b"TAPE" {
-            return Err(invalid("missing TAPE signature"));
+            if h.get(..8) == Some(b"MSSQLBAK".as_slice()) {
+                return Err(Error::Unsupported(
+                    "compressed or encrypted backup (MSSQLBAK): its structure is not checked without SQL Server; `bak convert` asks the server, accepts compressed copies and refuses encrypted ones"
+                        .into(),
+                ));
+            }
+            return Err(invalid(
+                "not a SQL Server backup: the file does not start with a TAPE block",
+            ));
         }
         match &tag {
             b"ESET" => {
@@ -160,7 +168,9 @@ pub fn inspect(reader: &mut (impl Read + Seek)) -> Result<MediaInfo, Error> {
             let data_pos = add(stream_pos, STREAM_HEADER)?;
             let end = add(data_pos, length)?;
             if end > size {
-                return Err(invalid(format!("stream past end at {stream_pos}")));
+                return Err(invalid(format!(
+                    "stream past end at {stream_pos}: the file is shorter than the backup it describes (truncated or not fully copied)"
+                )));
             }
             if (&id == b"MQDA" || &id == b"MQTL") && length != 0 {
                 if length < 2 || !(length - 2).is_multiple_of(PAGE) {
@@ -201,7 +211,9 @@ pub fn inspect(reader: &mut (impl Read + Seek)) -> Result<MediaInfo, Error> {
         }
         pos = next.ok_or_else(|| invalid("missing padding stream or stream limit exceeded"))?;
         if pos >= size {
-            return Err(invalid("missing backup terminator"));
+            return Err(invalid(
+                "missing backup terminator: the file ends before the backup does (truncated or not fully copied)",
+            ));
         }
     }
     Err(invalid("descriptor limit exceeded"))

@@ -339,6 +339,14 @@ impl Execution {
         crate::reuse::memory::transfer(self, scratch, false, visit)
     }
 
+    pub fn measure_retained_lenient(
+        &mut self,
+        scratch: u64,
+        visit: impl FnOnce(&mut dyn crate::RetainedMemory) -> Result<(), Exception>,
+    ) -> Result<u64, Exception> {
+        crate::reuse::memory::transfer_lenient(self, scratch, visit)
+    }
+
     pub fn collation_error(&self, error: bsl_prim::CollationError) -> Exception {
         match error {
             bsl_prim::CollationError::Memory => self.out_of_memory(),
@@ -363,6 +371,18 @@ impl Execution {
     }
 
     pub fn present(&mut self, v: &Value) -> Result<Str, Exception> {
+        let shown = self.present_value(v);
+        if matches!(v, Value::Object(_)) {
+            self.note_host_code();
+        }
+        shown
+    }
+
+    pub(crate) fn note_host_code(&mut self) {
+        self.exec.host_code_ran = true;
+    }
+
+    fn present_value(&mut self, v: &Value) -> Result<Str, Exception> {
         if let Some(p) = self.runtime.0.registry.presenter.clone() {
             return p(self, v);
         }

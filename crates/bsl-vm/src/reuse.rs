@@ -537,8 +537,18 @@ pub(crate) fn publish(
     Ok(())
 }
 
+pub(crate) fn census_before_instruction(
+    ex: &mut Execution,
+    after_host_code: bool,
+) -> Result<(), Exception> {
+    let due = ex.retained_dirty
+        || ((after_host_code || ex.exec.host_code_ran) && ex.retained_check.is_some());
+    if due { reconcile(ex) } else { Ok(()) }
+}
+
 pub(crate) fn reconcile(ex: &mut Execution) -> Result<(), Exception> {
     ex.retained_dirty = false;
+    ex.exec.host_code_ran = false;
     let now = ex.env().reuse_clock();
     let before = ex.request_reuse.entries.len();
     crate::session_graph::retire::release(
@@ -582,6 +592,7 @@ pub(crate) fn reconcile(ex: &mut Execution) -> Result<(), Exception> {
 
 pub(crate) fn clear(ex: &mut Execution) {
     ex.retained_dirty = false;
+    ex.exec.host_code_ran = false;
     for frame in &mut ex.exec.frames {
         frame.reuse = None;
     }

@@ -42,6 +42,50 @@ CREATE TABLE #files (
  IsReadOnly bit, IsPresent bit, TDEThumbprint varbinary(32), SnapshotURL nvarchar(360));
 "#;
 
+const LABEL_TABLE: &str = r#"
+CREATE TABLE #label (
+ MediaName nvarchar(128), MediaSetId uniqueidentifier, FamilyCount int, FamilySequenceNumber int,
+ MediaFamilyId uniqueidentifier, MediaSequenceNumber int, MediaLabelPresent tinyint,
+ MediaDescription nvarchar(255), SoftwareName nvarchar(128), SoftwareVendorId int,
+ MediaDate datetime, MirrorCount int, IsCompressed bit);
+"#;
+
+macro_rules! header_columns {
+    () => {
+        "BackupName nvarchar(128), BackupDescription nvarchar(255), BackupType smallint, ExpirationDate datetime,
+ Compressed tinyint, Position smallint, DeviceType tinyint, UserName nvarchar(128), ServerName nvarchar(128),
+ DatabaseName nvarchar(128), DatabaseVersion int, DatabaseCreationDate datetime, BackupSize numeric(20,0),
+ FirstLSN numeric(25,0), LastLSN numeric(25,0), CheckpointLSN numeric(25,0), DatabaseBackupLSN numeric(25,0),
+ BackupStartDate datetime, BackupFinishDate datetime, SortOrder smallint, CodePage smallint,
+ UnicodeLocaleId int, UnicodeComparisonStyle int, CompatibilityLevel tinyint, SoftwareVendorId int,
+ SoftwareVersionMajor int, SoftwareVersionMinor int, SoftwareVersionBuild int, MachineName nvarchar(128),
+ Flags int, BindingID uniqueidentifier, RecoveryForkID uniqueidentifier, Collation nvarchar(128),
+ FamilyGUID uniqueidentifier, HasBulkLoggedData bit, IsSnapshot bit, IsReadOnly bit, IsSingleUser bit,
+ HasBackupChecksums bit, IsDamaged bit, BeginsLogChain bit, HasIncompleteMetaData bit, IsForceOffline bit,
+ IsCopyOnly bit, FirstRecoveryForkID uniqueidentifier, ForkPointLSN numeric(25,0), RecoveryModel nvarchar(60),
+ DifferentialBaseLSN numeric(25,0), DifferentialBaseGUID uniqueidentifier, BackupTypeDescription nvarchar(60),
+ BackupSetGUID uniqueidentifier, CompressedBackupSize numeric(20,0), Containment tinyint,
+ KeyAlgorithm nvarchar(32), EncryptorThumbprint varbinary(20), EncryptorType nvarchar(32)"
+    };
+}
+
+const HEADER_TABLES: &str = concat!(
+    "\nCREATE TABLE #hdr22 (",
+    header_columns!(),
+    ",\n LastValidRestoreTime datetime, TimeZone smallint, CompressionAlgorithm nvarchar(32));\nCREATE TABLE #hdr19 (",
+    header_columns!(),
+    ");\nCREATE TABLE #h (Position int, BackupType int, IsSnapshot bit, IsDamaged bit, HasIncompleteMetaData bit,\n KeyAlgorithm nvarchar(32), EncryptorType nvarchar(32), EncryptorThumbprint varbinary(20),\n Compressed int, RecoveryModel nvarchar(60));\n"
+);
+
+const FILES_DECISION: &str = r#" SET @refuse=CASE
+  WHEN EXISTS(SELECT 1 FROM #files WHERE TDEThumbprint IS NOT NULL) THEN 'tde'
+  WHEN EXISTS(SELECT 1 FROM #files WHERE SnapshotURL IS NOT NULL) THEN 'snapshot_url'
+  WHEN (SELECT COUNT(*) FROM #files)<>2 OR (SELECT COUNT(*) FROM #files WHERE [Type]='D')<>1 OR (SELECT COUNT(*) FROM #files WHERE [Type]='L')<>1 OR EXISTS(SELECT 1 FROM #files WHERE IsPresent<>1) THEN 'layout'
+  END;
+"#;
+
+const CLEANUP_WAIT_SECONDS: u32 = 30;
+
 const CHECK_OWNERSHIP: &str = r#"
 DECLARE @owned bit=0, @check nvarchar(max);
 SET @check=N'USE '+QUOTENAME(@db)+N'; SELECT @owned=CASE WHEN EXISTS (SELECT 1 FROM sys.extended_properties WHERE class=0 AND major_id=0 AND minor_id=0 AND name=N''yellowcode.bak.token'' AND DATALENGTH(CONVERT(nvarchar(128),value))=DATALENGTH(@token) AND CONVERT(varbinary(256),CONVERT(nvarchar(128),value))=CONVERT(varbinary(64),@token)) THEN 1 ELSE 0 END';
@@ -54,6 +98,27 @@ fn valid_table_name(table: &str) -> bool {
         && table.len() <= 128
         && table.is_ascii()
         && !table.chars().any(char::is_control)
+}
+
+const HEX_UNITS_PER_LINE: usize = 500;
+
+fn backup_expression(path: &str) -> String {
+    if path.is_ascii() {
+        return format!("N'{}'", path.replace('\'', "''"));
+    }
+    let units: Vec<u16> = path.encode_utf16().collect();
+    let lines: Vec<String> = units
+        .chunks(HEX_UNITS_PER_LINE)
+        .map(|line| {
+            let hex: String = line
+                .iter()
+                .flat_map(|unit| unit.to_le_bytes())
+                .map(|byte| format!("{byte:02X}"))
+                .collect();
+            format!("0x{hex}")
+        })
+        .collect();
+    format!("CONVERT(nvarchar(4000),{})", lines.join("\n+"))
 }
 
 impl SqlPlan {
@@ -148,20 +213,73 @@ GO
         )
     }
 
+    fn header_decision(&self) -> String {
+        let n = self.backup_set;
+        format!(
+            r#"SET @refuse=CASE
+ WHEN @shape=0 THEN 'header_shape'
+ WHEN EXISTS(SELECT 1 FROM #h WHERE BackupType NOT IN (1,2,4,5,6,7,8) OR Compressed NOT IN (0,1) OR RecoveryModel COLLATE Latin1_General_100_CI_AS NOT IN (N'FULL',N'BULK-LOGGED',N'BULK_LOGGED',N'SIMPLE')) THEN 'header_shape'
+ WHEN EXISTS(SELECT 1 FROM #label WHERE FamilyCount>1) THEN 'striped'
+ WHEN NOT EXISTS(SELECT 1 FROM #h WHERE Position={n}) THEN 'set_not_found:'+CONVERT(varchar(9),(SELECT COUNT(*) FROM #h))
+ WHEN EXISTS(SELECT 1 FROM #h WHERE Position={n} AND ((KeyAlgorithm IS NOT NULL AND KeyAlgorithm COLLATE Latin1_General_100_CI_AS<>N'NO_Encryption') OR EncryptorType IS NOT NULL OR EncryptorThumbprint IS NOT NULL)) THEN 'encrypted'
+ WHEN EXISTS(SELECT 1 FROM #h WHERE Position={n} AND BackupType<>1) THEN 'not_full'
+ WHEN EXISTS(SELECT 1 FROM #h WHERE Position={n} AND IsSnapshot=1) THEN 'snapshot'
+ WHEN EXISTS(SELECT 1 FROM #h WHERE Position={n} AND IsDamaged=1) THEN 'damaged'
+ WHEN EXISTS(SELECT 1 FROM #h WHERE Position={n} AND HasIncompleteMetaData=1) THEN 'incomplete'
+ END;
+"#
+        )
+    }
+
+    fn inspection_tables(&self) -> String {
+        format!(
+            "{}DECLARE @refuse varchar(64)=NULL, @shape int=0;\n{}{}{}",
+            self.declarations(),
+            FILES_TABLE,
+            LABEL_TABLE,
+            HEADER_TABLES
+        )
+    }
+
+    #[doc(hidden)]
+    pub fn decision_probe_script(&self, fabricated_rows: &str) -> String {
+        format!(
+            "{}SET @shape=22;\n{fabricated_rows}\n{}IF @refuse IS NULL BEGIN\n{FILES_DECISION}END;\nSELECT COALESCE(@refuse,'ok');\nGO\n",
+            self.inspection_tables(),
+            self.header_decision()
+        )
+    }
+
     pub fn restore_script(&self) -> String {
-        let backup = self.backup.replace('\'', "''");
+        let backup = backup_expression(&self.backup);
         let backup_set = self.backup_set;
         format!(
-            r#"{}DECLARE @backup nvarchar(4000)=N'{}';
+            r#"SET NOCOUNT ON;
+IF ISNULL(IS_SRVROLEMEMBER(N'sysadmin'),0)<>1 BEGIN SELECT 'YC_BAK_REFUSED:not_sysadmin'; RETURN; END;
+{tables}SELECT 'YC_BAK_INSPECTING';
+DECLARE @backup nvarchar(4000)={backup};
 IF DB_ID(@db) IS NOT NULL THROW 51000,'temporary database already exists',1;
-{}
-DECLARE @query nvarchar(max)=N'RESTORE FILELISTONLY FROM DISK=@backup WITH FILE={backup_set}';
-INSERT #files EXEC sys.sp_executesql @query,N'@backup nvarchar(4000)',@backup=@backup;
-IF (SELECT COUNT(*) FROM #files)<>2 OR (SELECT COUNT(*) FROM #files WHERE [Type]='D')<>1 OR (SELECT COUNT(*) FROM #files WHERE [Type]='L')<>1 OR EXISTS(SELECT 1 FROM #files WHERE IsPresent<>1 OR TDEThumbprint IS NOT NULL OR SnapshotURL IS NOT NULL) THROW 51000,'unsupported backup file layout',1;
+DECLARE @query nvarchar(max), @major int=CONVERT(int,SERVERPROPERTY('ProductMajorVersion'));
+SET @query=N'RESTORE LABELONLY FROM DISK=@backup';
+INSERT #label EXEC sys.sp_executesql @query,N'@backup nvarchar(4000)',@backup=@backup;
+SET @query=N'RESTORE HEADERONLY FROM DISK=@backup';
+IF @major>=16 BEGIN
+ INSERT #hdr22 EXEC sys.sp_executesql @query,N'@backup nvarchar(4000)',@backup=@backup; SET @shape=22;
+END ELSE IF @major BETWEEN 13 AND 15 BEGIN
+ INSERT #hdr19 EXEC sys.sp_executesql @query,N'@backup nvarchar(4000)',@backup=@backup; SET @shape=19;
+END;
+INSERT #h SELECT Position,BackupType,IsSnapshot,IsDamaged,HasIncompleteMetaData,KeyAlgorithm,EncryptorType,EncryptorThumbprint,Compressed,RecoveryModel FROM #hdr22;
+INSERT #h SELECT Position,BackupType,IsSnapshot,IsDamaged,HasIncompleteMetaData,KeyAlgorithm,EncryptorType,EncryptorThumbprint,Compressed,RecoveryModel FROM #hdr19;
+{header_decision}IF @refuse IS NULL BEGIN
+ SET @query=N'RESTORE FILELISTONLY FROM DISK=@backup WITH FILE={backup_set}';
+ INSERT #files EXEC sys.sp_executesql @query,N'@backup nvarchar(4000)',@backup=@backup;
+{FILES_DECISION}END;
+IF @refuse IS NOT NULL BEGIN SELECT 'YC_BAK_REFUSED:'+@refuse; RETURN; END;
 DECLARE @data nvarchar(128)=(SELECT LogicalName FROM #files WHERE [Type]='D'), @log nvarchar(128)=(SELECT LogicalName FROM #files WHERE [Type]='L');
 DECLARE @dd nvarchar(4000)=CONVERT(nvarchar(4000),SERVERPROPERTY('InstanceDefaultDataPath')), @ld nvarchar(4000)=CONVERT(nvarchar(4000),SERVERPROPERTY('InstanceDefaultLogPath'));
 IF @dd IS NULL OR @ld IS NULL OR RIGHT(@dd,1) NOT IN (N'\',N'/') OR RIGHT(@ld,1) NOT IN (N'\',N'/') THROW 51000,'unsupported server data path',1;
 DECLARE @df nvarchar(4000)=@dd+@db+N'.mdf', @lf nvarchar(4000)=@ld+@db+N'.ldf';
+SELECT 'YC_BAK_RESTORING';
 RESTORE DATABASE @db FROM DISK=@backup WITH FILE={backup_set}, MOVE @data TO @df, MOVE @log TO @lf, RECOVERY;
 IF DATABASEPROPERTYEX(@db,'Status')<>'ONLINE' THROW 51000,'restored database is not online',1;
 IF DATABASEPROPERTYEX(@db,'Updateability')='READ_ONLY' BEGIN SET @query=N'ALTER DATABASE '+QUOTENAME(@db)+N' SET READ_WRITE'; EXEC(@query); END;
@@ -171,9 +289,8 @@ SET @query=N'ALTER DATABASE '+QUOTENAME(@db)+N' SET READ_ONLY'; EXEC(@query);
 SELECT 'YC_BAK_READY';
 GO
 "#,
-            self.declarations(),
-            backup,
-            FILES_TABLE
+            tables = self.inspection_tables(),
+            header_decision = self.header_decision()
         )
     }
 
@@ -534,16 +651,95 @@ GO
         ))
     }
 
-    pub fn cleanup_script(&self) -> String {
+    pub fn abandoned_restore_script(&self, wait_seconds: u32) -> String {
         format!(
-            r#"{}IF DB_ID(@db) IS NULL BEGIN SELECT 'YC_BAK_GONE'; RETURN; END;
-{}
-DECLARE @query nvarchar(max)=N'DROP DATABASE '+QUOTENAME(@db); EXEC(@query);
+            r#"{declarations}DECLARE @wait int={wait_seconds}, @waited int=0, @id int, @state nvarchar(60), @session int, @verdict varchar(30);
+CREATE TABLE #files (physical_name nvarchar(260) NOT NULL, size_mb bigint NOT NULL);
+WHILE 1=1 BEGIN
+ SET @id=NULL; SET @state=NULL; SET @session=NULL;
+ SELECT @id=d.database_id, @state=d.state_desc FROM sys.databases AS d WHERE d.name COLLATE Latin1_General_100_BIN2=@db COLLATE Latin1_General_100_BIN2 AND DATALENGTH(d.name)=DATALENGTH(@db);
+ IF @id IS NULL BEGIN SELECT 'YC_BAK_GONE'; RETURN; END;
+ IF @state COLLATE Latin1_General_100_BIN2<>N'RESTORING' BEGIN SELECT 'YC_BAK_KEPT:'+@state; RETURN; END;
+ BEGIN TRY
+  SELECT TOP (1) @session=l.request_session_id FROM sys.dm_tran_locks AS l WHERE l.resource_type=N'DATABASE' AND l.resource_database_id=@id AND l.request_session_id<>@@SPID ORDER BY l.request_session_id;
+ END TRY
+ BEGIN CATCH
+  SET @session=NULL;
+ END CATCH;
+ IF @session IS NULL BREAK;
+ IF @waited>=@wait BEGIN SELECT 'YC_BAK_BUSY:'+CONVERT(varchar(11),@session); RETURN; END;
+ WAITFOR DELAY '00:00:01';
+ SET @waited+=1;
+END;
+SET @id=NULL; SET @state=NULL;
+SELECT @id=d.database_id, @state=d.state_desc FROM sys.databases AS d WHERE d.name COLLATE Latin1_General_100_BIN2=@db COLLATE Latin1_General_100_BIN2 AND DATALENGTH(d.name)=DATALENGTH(@db);
+IF @id IS NULL BEGIN SELECT 'YC_BAK_GONE'; RETURN; END;
+IF @state COLLATE Latin1_General_100_BIN2<>N'RESTORING' BEGIN SELECT 'YC_BAK_KEPT:'+@state; RETURN; END;
+INSERT #files SELECT f.physical_name, CONVERT(bigint,f.size)*8/1024 FROM sys.master_files AS f WHERE f.database_id=@id;
+IF IS_SRVROLEMEMBER(N'sysadmin')<>1 BEGIN SET @verdict='YC_BAK_NEEDS_SYSADMIN'; END
+ELSE BEGIN
+ DECLARE @drop nvarchar(300)=N'DROP DATABASE '+QUOTENAME(@db);
+ BEGIN TRY
+  EXEC(@drop);
+ END TRY
+ BEGIN CATCH
+  SELECT 'YC_BAK_NOT_DROPPED:'+CONVERT(varchar(11),ERROR_NUMBER())+':'+REPLACE(REPLACE(CONVERT(nvarchar(400),ERROR_MESSAGE()),CHAR(13),N' '),CHAR(10),N' ');
+  RETURN;
+ END CATCH;
+ SET @verdict='YC_BAK_DROPPED';
+END;
+BEGIN TRY
+ EXEC sys.sp_executesql N'SELECT ''YC_BAK_FILE|''+CONVERT(varchar(1),x.file_exists)+''|''+CONVERT(varchar(20),f.size_mb)+''|''+f.physical_name FROM #files AS f CROSS APPLY sys.dm_os_file_exists(f.physical_name) AS x ORDER BY f.physical_name';
+END TRY
+BEGIN CATCH
+ SELECT 'YC_BAK_FILE|?|'+CONVERT(varchar(20),f.size_mb)+'|'+f.physical_name FROM #files AS f ORDER BY f.physical_name;
+END CATCH;
+SELECT @verdict;
+GO
+"#,
+            declarations = self.declarations()
+        )
+    }
+
+    pub fn cleanup_script(&self) -> String {
+        self.cleanup_script_with_wait(CLEANUP_WAIT_SECONDS)
+    }
+
+    pub fn cleanup_script_with_wait(&self, wait_seconds: u32) -> String {
+        format!(
+            r#"{declarations}DECLARE @wait int={wait_seconds}, @waited int=0, @id int, @state nvarchar(60), @step varchar(5), @error int, @text nvarchar(400);
+SELECT @id=d.database_id, @state=d.state_desc FROM sys.databases AS d WHERE d.name COLLATE Latin1_General_100_BIN2=@db COLLATE Latin1_General_100_BIN2 AND DATALENGTH(d.name)=DATALENGTH(@db);
+IF @id IS NULL BEGIN SELECT 'YC_BAK_GONE'; RETURN; END;
+{ownership}
+DECLARE @alter nvarchar(300)=N'ALTER DATABASE '+QUOTENAME(@db)+N' SET SINGLE_USER WITH ROLLBACK IMMEDIATE', @drop nvarchar(300)=N'DROP DATABASE '+QUOTENAME(@db);
+WHILE 1=1 BEGIN
+ SET @step=NULL; SET @error=NULL;
+ BEGIN TRY
+  IF @state COLLATE Latin1_General_100_BIN2=N'ONLINE' BEGIN SET @step='alter'; EXEC(@alter); END;
+  SET @step='drop';
+  EXEC(@drop);
+  BREAK;
+ END TRY
+ BEGIN CATCH
+  SET @error=ERROR_NUMBER();
+  SET @text=REPLACE(REPLACE(CONVERT(nvarchar(400),ERROR_MESSAGE()),CHAR(13),N' '),CHAR(10),N' ');
+ END CATCH;
+ IF @waited>=@wait OR @error NOT IN (924,1205,3101,3702,5061,5069) BEGIN
+  SELECT 'YC_BAK_NOT_REMOVED:'+ISNULL(@step,'alter')+':'+CONVERT(varchar(11),@error)+':'+CONVERT(varchar(20),(SELECT ISNULL(SUM(CONVERT(bigint,f.size)),0)*8/1024 FROM sys.master_files AS f WHERE f.database_id=@id))+':'+@text;
+  RETURN;
+ END;
+ WAITFOR DELAY '00:00:01';
+ SET @waited+=1;
+END;
+IF EXISTS(SELECT 1 FROM sys.databases AS d WHERE d.name COLLATE Latin1_General_100_BIN2=@db COLLATE Latin1_General_100_BIN2 AND DATALENGTH(d.name)=DATALENGTH(@db)) BEGIN
+ SELECT 'YC_BAK_NOT_REMOVED:drop:0:'+CONVERT(varchar(20),(SELECT ISNULL(SUM(CONVERT(bigint,f.size)),0)*8/1024 FROM sys.master_files AS f WHERE f.database_id=@id))+':the database is still listed after the DROP';
+ RETURN;
+END;
 SELECT 'YC_BAK_GONE';
 GO
 "#,
-            self.declarations(),
-            CHECK_OWNERSHIP
+            declarations = self.declarations(),
+            ownership = CHECK_OWNERSHIP,
         )
     }
 }

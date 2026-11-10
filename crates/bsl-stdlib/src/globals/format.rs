@@ -5,7 +5,7 @@ use crate::bind::{
 use bsl_intl::format::{FmtValue, FormatEnv, format};
 use bsl_intl::locale::Locale;
 use bsl_intl::nstr::nstr;
-use bsl_intl::period::period_presentation;
+use bsl_intl::period::{PeriodError, period_presentation};
 use bsl_intl::plural::{NumberKind, string_with_number};
 use bsl_intl::words::number_in_words;
 use bsl_prim::Number;
@@ -112,7 +112,17 @@ fn period_fn(ex: &mut Execution, a: &mut [Arg]) -> CallResult<Value> {
     let fmt = opt_str(ex, a.get(2))?;
     let loc = locale_or_err(ex)?;
     ex.reserve(4096)?;
-    let text = period_presentation(begin, end, fmt.as_deref(), loc);
+    let text = match period_presentation(begin, end, fmt.as_deref(), loc) {
+        Ok(text) => text,
+        Err(PeriodError::Platform(error)) => return Err(intl_error(error).into()),
+        Err(PeriodError::Unobserved) => {
+            return Err(HostError::not_implemented(
+                "ПредставлениеПериода",
+                "форма периода без нативного ответа",
+            )
+            .into());
+        }
+    };
     Ok(Value::from(text.as_str()))
 }
 

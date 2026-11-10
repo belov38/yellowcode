@@ -42,9 +42,6 @@ impl ValueCodec for TableCodec {
         value: &ObjRef,
         w: &mut InternalWriter,
     ) -> Result<Option<Vec<Node>>, Exception> {
-        if w.is_storage() {
-            return Ok(None);
-        }
         let Some(table) = value.as_any().downcast_ref::<ValueTable>() else {
             return Ok(None);
         };
@@ -140,21 +137,15 @@ impl ValueCodec for TableCodec {
         if data.is_empty() {
             return Ok(Value::Undefined);
         }
-        if r.is_storage() {
-            return Err(unsupported(ex));
-        }
         let [node] = data else {
             return Err(r.format_error(ex));
         };
         let scratch = preflight(ex, node)?;
         read_table(ex, node, r, scratch)
     }
-    fn storable(&self) -> bool {
-        false
-    }
 }
 
-fn preflight(ex: &mut Execution, node: &Node) -> Result<u64, Exception> {
+pub(super) fn preflight(ex: &mut Execution, node: &Node) -> Result<u64, Exception> {
     ex.charge(1)?;
     ex.reserve(512)?;
     let mut stack = Vec::new();
@@ -186,31 +177,35 @@ fn preflight(ex: &mut Execution, node: &Node) -> Result<u64, Exception> {
     Ok(bytes)
 }
 
-fn atom(node: &Node, value: &str) -> bool {
+pub(super) fn atom(node: &Node, value: &str) -> bool {
     node.as_atom() == Some(value)
 }
-fn unsigned_field(node: &Node) -> Option<u64> {
+pub(super) fn unsigned_field(node: &Node) -> Option<u64> {
     let text = node.as_atom()?;
     if text.len() > 20 {
         return None;
     }
     text.parse().ok()
 }
-fn signed_field(node: &Node) -> Option<i64> {
+pub(super) fn signed_field(node: &Node) -> Option<i64> {
     let text = node.as_atom()?;
     if text.len() > 20 {
         return None;
     }
     text.parse().ok()
 }
-fn next_field(node: &Node) -> Option<u64> {
+pub(super) fn next_field(node: &Node) -> Option<u64> {
     if atom(node, "-1") {
         Some(0)
     } else {
         unsigned_field(node)?.checked_add(1)
     }
 }
-fn decode_text(ex: &mut Execution, r: &mut InternalReader, node: &Node) -> Result<Str, Exception> {
+pub(super) fn decode_text(
+    ex: &mut Execution,
+    r: &mut InternalReader,
+    node: &Node,
+) -> Result<Str, Exception> {
     let len = match node {
         Node::Str(s) | Node::Atom(s) => s.len(),
         _ => return Err(r.format_error(ex)),
@@ -429,7 +424,6 @@ fn read_table(
         )?;
         table.serial_restore_row(ex, id, width != 0)?;
         for (i, node) in fields[3..3 + width].iter().enumerate() {
-            ValueTable::serial_admit(ex, &result, None, scratch)?;
             let value = r.read_value(ex, node)?;
             if matches!(value, Value::Undefined)
                 && !matches!(node.as_list(), Some([tag, ..]) if tag.as_str() == Some("U"))
@@ -439,7 +433,6 @@ fn read_table(
                     "Вложенное значение без восстановимых данных",
                 )));
             }
-            ValueTable::serial_admit(ex, &result, Some(&value), scratch)?;
             table.serial_restore_cell(ex, i, value)?;
         }
     }

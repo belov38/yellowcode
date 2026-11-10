@@ -41,6 +41,7 @@ pub use typedesc::{
     AllowedLength, AllowedSign, BinaryQualifiers, DateParts, DateQualifiers, NumberQualifiers,
     StringQualifiers, TypeDescription, cast_value, new_type_description, type_description_of,
 };
+pub use ui::{StyleItem, StyleItemKind, StyleItems};
 pub use xdto::{
     ReservedXdtoName, ScalarProjection, XdtoCodec, XdtoCtx, XdtoData, register_xdto_codec,
 };

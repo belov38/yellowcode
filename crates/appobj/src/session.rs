@@ -101,6 +101,7 @@ pub struct SessionState {
     pub(crate) params: Vec<Option<SharedValue>>,
     pub(crate) reuse: ReuseStore,
     pub(crate) presentations: crate::present::PresentationCache,
+    pub(crate) safe_mode_disabled: bool,
 }
 
 impl std::fmt::Debug for SessionState {
@@ -123,6 +124,7 @@ impl SessionState {
             params: vec![None; params],
             reuse: ReuseStore::default(),
             presentations: crate::present::PresentationCache::default(),
+            safe_mode_disabled: false,
         }
     }
 
@@ -202,7 +204,7 @@ pub(crate) fn call_ctx(ex: &mut Execution) -> Option<&mut CallContext> {
     ex.host_data()?.downcast_mut::<CallContext>()
 }
 
-fn internal(text: &str) -> HostError {
+pub(crate) fn internal(text: &str) -> HostError {
     HostError::text(&format!("internal: {text}"), &format!("internal: {text}"))
 }
 
@@ -220,7 +222,7 @@ fn l5_args(key: &'static str, args: &[&str]) -> HostError {
     )
 }
 
-fn type_mismatch() -> HostError {
+pub(crate) fn type_mismatch() -> HostError {
     let mut e = l5(keys::TYPE_MISMATCH);
     e.categories = Some(bsl_vm::CategorySet::of(&[
         bsl_vm::Category::ScriptUseError,

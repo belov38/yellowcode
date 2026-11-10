@@ -1,7 +1,8 @@
 use crate::collections::not_implemented;
 use bsl_prim::Str;
 use bsl_vm::{
-    Arg, CallResult, Execution, HostObject, MemberId, Registry, TypeId, TypeIdx, TypeImpl, Value,
+    Arg, CallResult, Exception, Execution, HostObject, MemberId, Registry, RetainedMemory, TypeId,
+    TypeIdx, TypeImpl, Value,
 };
 use platform_catalog::catalog;
 use std::{any::Any, rc::Rc, sync::Arc};
@@ -35,6 +36,9 @@ impl HostObject for Placeholder {
     }
     fn boost_hash(&self) -> Option<i32> {
         Some(self.hash)
+    }
+    fn retained_memory(&self, _: &mut dyn RetainedMemory) -> Result<bool, Exception> {
+        Ok(true)
     }
 }
 

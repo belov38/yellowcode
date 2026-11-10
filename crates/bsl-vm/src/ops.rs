@@ -35,7 +35,9 @@ fn fail(ex: &mut Execution, key: &'static str) -> Exception {
 fn string_to_number(ex: &mut Execution, s: &Str) -> Result<Number, Exception> {
     if let Some(f) = ex.runtime().global_fn_by_name("Число") {
         let mut args = [Arg::Val(Value::String(s.clone()))];
-        return match f(ex, &mut args) {
+        let converted = f(ex, &mut args);
+        ex.note_host_code();
+        return match converted {
             Ok(Value::Number(n)) => Ok(n),
             Ok(_) | Err(CallError::Host(_)) => Err(fail(ex, CONVERT_2NUMERIC)),
             Err(CallError::Exc(e)) => Err(e),
@@ -141,10 +143,13 @@ pub fn charge_equal(ex: &mut Execution, a: &Value, b: &Value) -> Result<(), Exce
     match (a, b) {
         (Value::String(x), Value::String(y)) => charge_strings(ex, x, y),
         (Value::Object(x), Value::Object(y)) if !std::rc::Rc::ptr_eq(x, y) => {
-            if !x.charge_equals(ex, y.as_ref())? {
-                y.charge_equals(ex, x.as_ref())?;
-            }
-            Ok(())
+            let charged = match x.charge_equals(ex, y.as_ref()) {
+                Ok(true) => Ok(()),
+                Ok(false) => y.charge_equals(ex, x.as_ref()).map(|_| ()),
+                Err(error) => Err(error),
+            };
+            ex.note_host_code();
+            charged
         }
         _ => Ok(()),
     }

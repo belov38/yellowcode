@@ -1,6 +1,7 @@
 use super::{CallBindHost, to_value};
 use crate::app::QueryCtx;
 use crate::session::CallContext;
+use crate::types::Category;
 use crate::{AppError, Application, SessionUser};
 use bsl_vm::{Execution, Value};
 use ibschema::storage::{IndexId, StorageMap, TableId};
@@ -10,7 +11,7 @@ use query_exec::{DataSource, ExecEnv, Row, RowIter, StoreSource, TempTables};
 use query_ir::host::{PresentationInput, TxnId};
 use query_ir::{
     Access, AccessPolicy, BindHost, ExecError, FieldSet, HostError, PredefinedName, QStr, QTableId,
-    QValue, QuerySchema, SessionValues, SourceTable, StorageBinding,
+    QType, QValue, QuerySchema, SessionValues, SourceTable, StorageBinding,
 };
 use std::cell::{Cell, OnceCell};
 use std::ops::Bound;
@@ -151,6 +152,18 @@ impl CallQueryHost<'_> {
         }
         Ok(())
     }
+
+    fn reference_type(&self, t: &QType) -> Option<bsl_vm::TypeId> {
+        let [atom] = t.refs.as_slice() else {
+            return None;
+        };
+        if *t != QType::reference(*atom) {
+            return None;
+        }
+        let app = &self.provider.app;
+        let obj = app.model().by_uuid(self.schema().ref_info(*atom).object)?;
+        app.types()?.type_of(obj, Category::Ref)
+    }
 }
 impl BindHost for CallQueryHost<'_> {
     fn week_start(&self) -> Result<u32, HostError> {
@@ -180,6 +193,7 @@ impl QueryHost for CallQueryHost<'_> {
     ) -> Result<(), ExecError> {
         self.ready()?;
         if batch.stmts.len() > 1
+            && self.provider.app.options().read_only_scope.is_none()
             && !super::admission::scalar_batch(batch, temp, &self.provider.ctx.schema)
         {
             return Err(later("Q7e-BatchSnapshot", "P4 native/ruling"));
@@ -247,8 +261,9 @@ impl QueryHost for CallQueryHost<'_> {
         self.ready().map_err(|e| HostError::new(e.to_string()))
     }
     fn runtime_failed(&self) {}
-    fn presentation(&self, _: &mut Execution, _: &PresentationInput) -> Result<QStr, HostError> {
-        Err(HostError::new("Q7e-PresentationSnapshot / Q7c + P6"))
+    fn presentation(&self, ex: &mut Execution, p: &PresentationInput) -> Result<QStr, HostError> {
+        super::presentation::text(&self.provider.app, ex, p)
+            .ok_or_else(|| HostError::new("Q7e-PresentationSnapshot / Q7c + P6"))
     }
     fn lock_for_update(&self, _: &[TableId]) -> Result<(), HostError> {
         Err(HostError::new("Q7e-TransactionLocks / P2"))
@@ -276,6 +291,11 @@ impl QueryHost for CallQueryHost<'_> {
         }
     }
     fn to_value(&self, _: &mut Execution, v: &QValue) -> Result<Value, bsl_vm::HostError> {
+        if let QValue::Type(t) = v
+            && let Some(ty) = self.reference_type(t)
+        {
+            return Ok(Value::Type(ty));
+        }
         to_value(&self.provider.app, v, None)
     }
     fn from_value(

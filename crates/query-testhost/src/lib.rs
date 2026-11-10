@@ -30,7 +30,9 @@ mod walks;
 pub use batch_memory::{BatchMemory, SchemaBounds};
 pub use exec_host::TestHost;
 pub use failure::FailureChain;
-pub use host::{TestBase, base, project_root, try_base, try_base_in};
+pub use host::{
+    TestBase, absent_base, base, project_root, try_base, try_base_in, try_base_in_reporting,
+};
 pub use managed_store::{ManagedStoredOwnedRows, ManagedStoredRows, ManagedStoredTable};
 pub use params::{CaseParams, ParamError, parse_params};
 pub use repr::{
