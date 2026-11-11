@@ -82,9 +82,24 @@ pub(crate) static MESSAGES: &[L5Msg] = &[
         en: "Chart of accounts Tabular section",
     },
     L5Msg {
+        key: "backend:IDS_BADLOCKNAMESPACE",
+        ru: "Неверное имя пространства блокировок - ",
+        en: "Invalid lock namespace name - ",
+    },
+    L5Msg {
+        key: "backend:IDS_CANT_GET_NEWOBJECTREF",
+        ru: "Получение новой ссылки доступно только для нового объекта.",
+        en: "Getting a new reference is only available for a new object.",
+    },
+    L5Msg {
         key: "backend:IDS_CANT_ORDER_BY_THIS_FIELD",
         ru: "Выборка может быть упорядочена только по реквизитам, имеющими базовый тип и для которых установлен признак индексирования",
         en: "Selected data can only be ordered by attributes of base type with indexing flag set",
+    },
+    L5Msg {
+        key: "backend:IDS_CANT_SET_NEWOBJECTREF",
+        ru: "Ссылку можно устанавливать только для нового объекта.",
+        en: "A reference can be set only for a new object.",
     },
     L5Msg {
         key: "backend:IDS_DATAEXCHANGEENDPOINTS_OBJECT_TYPE_PRESENT",
@@ -122,9 +137,24 @@ pub(crate) static MESSAGES: &[L5Msg] = &[
         en: "Exchange plan Tabular section",
     },
     L5Msg {
+        key: "backend:IDS_DATALOCK_CAN_USE_ONLY_IN_TRANSACTION",
+        ru: "Использование блокировки допустимо только внутри транзакции в режиме управляемых блокировок!",
+        en: "In the managed lock mode, using locks is only allowed within transactions!",
+    },
+    L5Msg {
         key: "backend:IDS_DBERROR_LOCKING",
         ru: "Конфликт блокировок при выполнении транзакции:",
         en: "Lock conflict during the transaction:",
+    },
+    L5Msg {
+        key: "backend:IDS_DBERROR_REFISNOTUNIQUE",
+        ru: "Ошибка при попытке вставки записи с неуникальным значением ссылки.",
+        en: "Cannot insert a record with a nonunique reference value.",
+    },
+    L5Msg {
+        key: "backend:IDS_DBERROR_TXNPREERROR",
+        ru: "В данной транзакции уже происходили ошибки!",
+        en: "Errors occurred earlier in this transaction!",
     },
     L5Msg {
         key: "backend:IDS_DBOBJECT_NOTFOUND",
@@ -132,9 +162,24 @@ pub(crate) static MESSAGES: &[L5Msg] = &[
         en: "<Object not found>",
     },
     L5Msg {
+        key: "backend:IDS_DBOBJERROR_CALLBACK",
+        ru: "Ошибка при выполнении обработчика",
+        en: "Error running processor",
+    },
+    L5Msg {
+        key: "backend:IDS_DBOBJERROR_VERSION",
+        ru: "Операция не может быть выполнена из-за несоответствия версии или отсутствия записи базы данных (возможно, запись была изменена или удалена)!",
+        en: "Operation cannot be performed due to version mismatch or lack of database record (entry may have been modified or deleted)!",
+    },
+    L5Msg {
         key: "backend:IDS_ERR_INVALID_PROPERTY_NAME",
         ru: "Свойство %s не является свойством объекта метаданных %s.",
         en: "Property %s does not belong to metadata object %s.",
+    },
+    L5Msg {
+        key: "backend:IDS_ERR_TRANSNOTACTIVE",
+        ru: "Транзакция не активна",
+        en: "Transaction is not active",
     },
     L5Msg {
         key: "backend:IDS_PREDEFINEDOBJ_NOT_EXISTS",
@@ -152,6 +197,11 @@ pub(crate) static MESSAGES: &[L5Msg] = &[
         en: "Predefined object is not unique",
     },
     L5Msg {
+        key: "backend:IDS_SDBLERR_REFSELFISNTUNIQUE",
+        ru: "таблица %s.",
+        en: "table %s.",
+    },
+    L5Msg {
         key: "backend:IDS_SESSIONPARAMS_MANAGER_TYPE_PRESENT",
         ru: "Параметры сеанса",
         en: "Session parameters",
@@ -162,6 +212,11 @@ pub(crate) static MESSAGES: &[L5Msg] = &[
         en: "Attempt to obtain an uninitialized value of session parameter",
     },
     L5Msg {
+        key: "backend:IDS_TP_VALUE_NOT_FILLED",
+        ru: "Не заполнена колонка \"%1s\" в строке %2s списка \"%3s\"",
+        en: "\"%1s\" is required in row %2s of the \"%3s\" list.",
+    },
+    L5Msg {
         key: "backend:IDS_TYPE_PRESENTATION_MDCONTEXT",
         ru: "Объект метаданных",
         en: "Metadata object",
@@ -170,6 +225,11 @@ pub(crate) static MESSAGES: &[L5Msg] = &[
         key: "backend:IDS_TYPE_PRESENTATION_OBJECTPROPERTY",
         ru: "Перечислимое свойство объектов метаданных",
         en: "Metadata object enumerated property",
+    },
+    L5Msg {
+        key: "backend:IDS_VALUE_NOT_FILLED",
+        ru: "Поле \"%s\" не заполнено",
+        en: "\"%s\" is a required field.",
     },
     L5Msg {
         key: "basic:IDS_ACCUMREG_LIST_TYPE_PRESENT",
@@ -382,9 +442,29 @@ pub(crate) static MESSAGES: &[L5Msg] = &[
         en: "Data processor Tabular section",
     },
     L5Msg {
+        key: "basic:IDS_PROPERTY_NOT_FOR_FOLDER",
+        ru: "Реквизит недоступен для группы",
+        en: "Attribute doesn't exist for folder",
+    },
+    L5Msg {
         key: "basic:IDS_REFERENCES_OBJECT_TYPE_PRESENT",
         ru: "Справочник объект",
         en: "Catalog Object",
+    },
+    L5Msg {
+        key: "basic:IDS_REFERENCE_CANTDELETE",
+        ru: "Не удалось удалить",
+        en: "Failed to delete",
+    },
+    L5Msg {
+        key: "basic:IDS_REFERENCE_CANTSAVE",
+        ru: "Не удалось записать",
+        en: "Failed to save",
+    },
+    L5Msg {
+        key: "basic:IDS_REFERENCE_CANT_CONSIST_FOLDERS",
+        ru: "Данный справочник не может содержать группы!",
+        en: "This catalog cannot contain groups!",
     },
     L5Msg {
         key: "basic:IDS_REFERENCE_LIST_TYPE_PRESENT",
@@ -415,6 +495,31 @@ pub(crate) static MESSAGES: &[L5Msg] = &[
         key: "basic:IDS_REFERENCE_TABULARPART_TYPE_PRESENT",
         ru: "Справочник табличная часть",
         en: "Catalog Tabular section",
+    },
+    L5Msg {
+        key: "basic:IDS_REFOBJERROR_CODENOTUNIQUE",
+        ru: "Значение \"%s\" поля \"%s\" не уникально",
+        en: "The value \"%s\" of the field \"%s\" is not unique",
+    },
+    L5Msg {
+        key: "basic:IDS_REFOBJERROR_EMPTYOWNER",
+        ru: "Значение поля \"%s\" не заполнено или заполнено неверно",
+        en: "The \"%s\" field is blank or has an invalid value",
+    },
+    L5Msg {
+        key: "basic:IDS_REFOBJERROR_LEVELSLIMIT",
+        ru: "Превышено количество уровней!",
+        en: "Level limit exceeded!",
+    },
+    L5Msg {
+        key: "basic:IDS_REFOBJERROR_LEVELSLOOP",
+        ru: "Зацикливание уровней!",
+        en: "Levels loop!",
+    },
+    L5Msg {
+        key: "basic:IDS_REFOBJERROR_PARENTMUSTBEFOLDER",
+        ru: "Значение поля \"%s\" должно быть группой",
+        en: "\"%s\" field value should be a folder",
     },
     L5Msg {
         key: "basic:IDS_REPORT_MANAGER_TYPE_PRESENT",
@@ -669,17 +774,31 @@ pub(crate) static MESSAGES: &[L5Msg] = &[
 ];
 
 pub mod keys {
+    pub const ATTRIBUTE_NOT_FOR_FOLDER: &str = "basic:IDS_PROPERTY_NOT_FOR_FOLDER";
+    pub const BAD_LOCK_NAMESPACE: &str = "backend:IDS_BADLOCKNAMESPACE";
+    pub const CANT_GET_NEW_REF: &str = "backend:IDS_CANT_GET_NEWOBJECTREF";
     pub const CANT_ORDER_BY_THIS_FIELD: &str = "backend:IDS_CANT_ORDER_BY_THIS_FIELD";
+    pub const CANT_SET_NEW_REF: &str = "backend:IDS_CANT_SET_NEWOBJECTREF";
+    pub const CATALOG_HAS_NO_FOLDERS: &str = "basic:IDS_REFERENCE_CANT_CONSIST_FOLDERS";
+    pub const CODE_NOT_UNIQUE: &str = "basic:IDS_REFOBJERROR_CODENOTUNIQUE";
+    pub const DATALOCK_OUTSIDE_TRANSACTION: &str =
+        "backend:IDS_DATALOCK_CAN_USE_ONLY_IN_TRANSACTION";
     pub const DB_LOCKING: &str = "backend:IDS_DBERROR_LOCKING";
     pub const DB_OBJECT_NOT_FOUND: &str = "backend:IDS_DBOBJECT_NOTFOUND";
     pub const ELEMENT_NOT_SELECTED: &str = "basic:IDS_ELEMENT_NOT_SELECTED";
     pub const ENUMERATED_PROPERTY_TYPE: &str = "backend:IDS_TYPE_PRESENTATION_OBJECTPROPERTY";
+    pub const HANDLER_FAILED: &str = "backend:IDS_DBOBJERROR_CALLBACK";
     pub const INVALID_PROPERTY_NAME: &str = "backend:IDS_ERR_INVALID_PROPERTY_NAME";
+    pub const LEVELS_LIMIT: &str = "basic:IDS_REFOBJERROR_LEVELSLIMIT";
+    pub const LEVELS_LOOP: &str = "basic:IDS_REFOBJERROR_LEVELSLOOP";
     pub const LIST_STREAM_ERROR: &str = "core85:IDS_LISTSTREAMERROR";
     pub const MD_OBJECT_TYPE: &str = "backend:IDS_TYPE_PRESENTATION_MDCONTEXT";
     pub const NON_HIERARCHICAL: &str = "basic:IDS_CANT_PROCEE_FOR_NON_HIERACICAL";
+    pub const OBJECT_VERSION_MISMATCH: &str = "backend:IDS_DBOBJERROR_VERSION";
+    pub const OWNER_EMPTY: &str = "basic:IDS_REFOBJERROR_EMPTYOWNER";
     pub const PARAMETER_TYPE_MISMATCH: &str = "core85:IDS_PARAMETER_N_TYPE_MISMATCH";
     pub const PARAMETER_VALUE_MISMATCH: &str = "core85:IDS_PARAMETER_N_VALUE_MISMATCH";
+    pub const PARENT_MUST_BE_FOLDER: &str = "basic:IDS_REFOBJERROR_PARENTMUSTBEFOLDER";
     pub const PREDEFINED_ITEM_NOT_EXISTS: &str = "backend:IDS_PREDEFINED_ITEM_NOT_EXISTS";
     pub const PREDEFINED_ITEM_NOT_UNIQUE: &str = "backend:IDS_PREDEFINED_ITEM_NOT_UNIQUE";
     pub const PREDEFINED_NOT_IN_DATA: &str = "backend:IDS_PREDEFINEDOBJ_NOT_EXISTS";
@@ -833,10 +952,18 @@ pub mod keys {
     pub const PRES_TASK_SELECTION: &str = "bp:IDS_BPTASK_SEL_TYPE_PRESENT";
     pub const PRES_TASK_TABULARSECTION: &str = "bp:IDS_BPTASK_TABULARPART_TYPE_PRESENT";
     pub const PRES_TASK_TABULARSECTIONROW: &str = "bp:IDS_BPTASK_TABULARPARTROW_TYPE_PRESENT";
+    pub const REFERENCE_CANT_DELETE: &str = "basic:IDS_REFERENCE_CANTDELETE";
+    pub const REFERENCE_CANT_SAVE: &str = "basic:IDS_REFERENCE_CANTSAVE";
+    pub const REF_NOT_UNIQUE: &str = "backend:IDS_DBERROR_REFISNOTUNIQUE";
+    pub const REF_NOT_UNIQUE_TABLE: &str = "backend:IDS_SDBLERR_REFSELFISNTUNIQUE";
     pub const SAFE_MODE: &str = "core85:IDS_ERROR_SAFEMODE";
     pub const SESSION_PARAMS_TYPE: &str = "backend:IDS_SESSIONPARAMS_MANAGER_TYPE_PRESENT";
     pub const SESSION_PARAM_NOT_INITIALIZED: &str = "backend:IDS_SESSION_PARAM_NOT_INITIALIZED";
+    pub const TABLE_VALUE_NOT_FILLED: &str = "backend:IDS_TP_VALUE_NOT_FILLED";
+    pub const TRANSACTION_NOT_ACTIVE: &str = "backend:IDS_ERR_TRANSNOTACTIVE";
+    pub const TRANSACTION_POISONED: &str = "backend:IDS_DBERROR_TXNPREERROR";
     pub const TYPE_MISMATCH: &str = "core85:IDS_PROPERTY_TYPE_MISMATCH";
+    pub const VALUE_NOT_FILLED: &str = "backend:IDS_VALUE_NOT_FILLED";
     pub const WRONG_ATTRIBUTE: &str = "basic:IDS_WRONG_PARAMETER_FLDNAME";
     pub const XML_DATA_CONVERSION: &str = "xml2:IDS_XMLERR_DATACONVERSION";
 }

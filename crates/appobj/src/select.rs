@@ -4,10 +4,11 @@ use crate::errors::{self, keys};
 use crate::meta::{arg_value, member_name, type_mismatch};
 use crate::model::{CodeType, NumberPeriodicity, ObjId, ObjKind, TypeAtom};
 use crate::queryhost::{CallBindHost, exec_error, to_value};
-use crate::read::{field_index, store_call_error, tabular_index};
+use crate::read::{field_index, read_view, store_call_error, tabular_index};
 use crate::read_budget as budget;
 use crate::readtab::tabular_value;
 use crate::session::call_ctx;
+use crate::txn::CallTxn;
 use crate::types::Category;
 use crate::values::field::default_of;
 use crate::values::refs::{RefValue, as_ref, empty_ref};
@@ -371,7 +372,7 @@ struct InterimSelectionSecurity;
 
 impl InterimSelectionSecurity {
     fn for_call(ex: &mut Execution, app: &Application) -> Result<Self, HostError> {
-        if app.options().read_only_scope.is_none()
+        if app.options().area().is_none()
             && app
                 .store()
                 .storage()
@@ -605,18 +606,15 @@ impl SelectionObject {
         let (ctx, stmt) = *p;
         let security = InterimSelectionSecurity::for_call(ex, &self.app)?;
         let lowered = bind(&self.app, &ctx, &stmt, &security)?;
-        let mut txn = self
-            .app
-            .store()
-            .read()
-            .map_err(|e| store_call_error(ex, e))?;
+        let call_txn = CallTxn::of_call(ex);
+        let mut view = read_view(ex, call_txn.as_deref(), &self.app)?;
         let limit = self
             .app
             .options()
             .query_mem_limit
             .min(ex.options().memory_limit.unwrap_or(u64::MAX))
             .saturating_sub(ex.retained_workspace_bytes());
-        let memory = txn
+        let memory = view
             .read_memory(limit)
             .map_err(|e| store_call_error(ex, e))?;
         st.state_paid = Some(
@@ -625,7 +623,12 @@ impl SelectionObject {
                 .map_err(|_| ex.out_of_memory())?,
         );
         st.memory = Some(memory.clone());
-        let Some(guard) = StreamGuard::take(self.app.live_streams()) else {
+        let guard = if view.is_own() {
+            None
+        } else {
+            StreamGuard::take(self.app.live_streams())
+        };
+        let Some(guard) = guard else {
             let cancel = AtomicBool::new(false);
             let request = RequestMemory {
                 budget: memory.clone(),
@@ -649,9 +652,9 @@ impl SelectionObject {
                 lease: Some(&paid),
                 evictor: None,
             };
-            let res = execute_store(&lowered, &*txn, &ctx.map, &env)
+            let res = execute_store(&lowered, &*view.txn(), &ctx.map, &env)
                 .map_err(|e| execution_error(ex, e))?;
-            drop(txn);
+            drop(view);
             st.buffer_bytes = res
                 .rows
                 .iter()
@@ -673,6 +676,9 @@ impl SelectionObject {
                 .query_mem_limit
                 .min(ex.options().memory_limit.unwrap_or(u64::MAX)),
             max_number_limbs: MAX_LIMBS,
+        };
+        let Some(txn) = view.into_snapshot() else {
+            return Err(internal("a stream was admitted over the write transaction").into());
         };
         let rows = query_exec::stream::stream_admitted(
             Arc::new(lowered),
@@ -1058,13 +1064,14 @@ pub(crate) fn find_one(
         None
     } else {
         let lowered = bind(app, &p.ctx, &p.stmt, &security)?;
-        let mut txn = app.store().read().map_err(|e| store_call_error(ex, e))?;
+        let call_txn = CallTxn::of_call(ex);
+        let mut view = read_view(ex, call_txn.as_deref(), app)?;
         let limit = app
             .options()
             .query_mem_limit
             .min(ex.options().memory_limit.unwrap_or(u64::MAX))
             .saturating_sub(ex.retained_workspace_bytes());
-        let memory = txn
+        let memory = view
             .read_memory(limit)
             .map_err(|e| store_call_error(ex, e))?;
         let request = RequestMemory {
@@ -1089,9 +1096,9 @@ pub(crate) fn find_one(
             lease: Some(&paid),
             evictor: None,
         };
-        let res =
-            execute_store(&lowered, &*txn, &p.ctx.map, &env).map_err(|e| execution_error(ex, e))?;
-        drop(txn);
+        let res = execute_store(&lowered, &*view.txn(), &p.ctx.map, &env)
+            .map_err(|e| execution_error(ex, e))?;
+        drop(view);
         _found_payment = Some(paid);
         res.rows.into_iter().next()
     };

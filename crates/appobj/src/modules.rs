@@ -272,8 +272,23 @@ impl Modules {
         ex: &mut Execution,
         m: ModuleRef,
     ) -> Result<ModuleInstanceRef, Exception> {
+        self.instance_with(ex, m, ModuleContext::None)
+    }
+
+    pub fn instance_with(
+        &self,
+        ex: &mut Execution,
+        m: ModuleRef,
+        ctx: ModuleContext,
+    ) -> Result<ModuleInstanceRef, Exception> {
         let c = self.compiled_or_fatal(m, ex.lang())?;
-        ex.instantiate(&c, ModuleContext::None)
+        ex.instantiate(&c, ctx)
+    }
+
+    pub(crate) fn manager_of(&self, m: ModuleRef) -> Option<ObjId> {
+        self.entry(m)
+            .filter(|e| e.kind == ModuleKind::Manager)
+            .and_then(|e| e.owner)
     }
 
     pub fn compile_managers(

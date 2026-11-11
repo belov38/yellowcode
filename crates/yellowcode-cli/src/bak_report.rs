@@ -77,8 +77,12 @@ pub(crate) fn begin(command: Option<&crate::Command>) -> Result<Option<Session>,
         trace: trace_flag,
         memory_limit,
         raw,
+        strict: _,
     })) = command
     else {
+        return Ok(None);
+    };
+    let Some(server) = server else {
         return Ok(None);
     };
     let asked = requested(trace_flag.as_deref(), std::env::var_os(TRACE_VARIABLE));
@@ -93,6 +97,9 @@ pub(crate) fn begin(command: Option<&crate::Command>) -> Result<Option<Session>,
         return Err(unusable(*from, path, &error));
     }
     let output_text = output.to_string_lossy();
+    let sqlcmd = sqlcmd
+        .clone()
+        .unwrap_or_else(|| std::path::PathBuf::from("sqlcmd"));
     let sqlcmd_text = sqlcmd.to_string_lossy();
     if let Some(password) = std::env::var_os("SQLCMDPASSWORD") {
         let password = password.to_string_lossy();

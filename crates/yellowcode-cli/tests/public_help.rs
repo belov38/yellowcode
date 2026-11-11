@@ -134,6 +134,58 @@ const CASES: &[(&str, &[&str], &str)] = cases![
         ]
     ),
     (
+        "err-bak-convert-direct-trace",
+        [
+            "bak",
+            "convert",
+            "base.bak",
+            "--to",
+            "cf",
+            "--output",
+            "base.cf",
+            "--trace",
+            "trace.log"
+        ]
+    ),
+    (
+        "err-bak-convert-strict-server",
+        [
+            "bak",
+            "convert",
+            "base.bak",
+            "--server",
+            "localhost",
+            "--to",
+            "cf",
+            "--output",
+            "base.cf",
+            "--strict"
+        ]
+    ),
+    (
+        "err-bak-convert-direct-sql-options",
+        [
+            "bak",
+            "convert",
+            "base.bak",
+            "--to",
+            "dt",
+            "--output",
+            "base.dt",
+            "--backup-set",
+            "2",
+            "--user",
+            "sa",
+            "--sqlcmd",
+            "sqlcmd",
+            "--sqlcmd-lifecycle-timeout",
+            "60",
+            "--trust-server-certificate",
+            "--memory-limit",
+            "auto"
+        ]
+    ),
+    (
         "err-metadata-format",
         ["metadata", "tree", "source.cf", "--format", "xml"]
     ),
@@ -144,6 +196,7 @@ fn run(args: &[&str]) -> String {
     let out = Command::new(env!("CARGO_BIN_EXE_yellowcode"))
         .args(args)
         .env("COLUMNS", "100")
+        .env_remove("YELLOWCODE_TRACE")
         .env_remove("DISPLAY")
         .env_remove("WAYLAND_DISPLAY")
         .output()

@@ -56,6 +56,7 @@ pub fn from_field(app: &Application, f: &FieldDef, v: &FieldValue) -> Result<Val
             })?;
             ref_value(app, RefValue { obj, id: *id })?
         }
+        FieldValue::Storage(b) | FieldValue::Binary(b) if b.is_empty() => Value::Undefined,
         FieldValue::Storage(_) => {
             return Err(HostError::not_implemented("ХранилищеЗначения", &f.name));
         }

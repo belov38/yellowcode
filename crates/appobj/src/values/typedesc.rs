@@ -5,7 +5,7 @@ use bsl_stdlib::typedesc::{
     AllowedLength, AllowedSign, BinaryQualifiers, DateParts, DateQualifiers, NumberQualifiers,
     StringQualifiers, TypeDescription, new_type_description,
 };
-use bsl_vm::{CallResult, Execution, HostError, TypeId, Value};
+use bsl_vm::{CallError, CallResult, Execution, HostError, TypeId, Value};
 
 fn unsupported() -> HostError {
     crate::meta::not_implemented("Тип")
@@ -87,6 +87,36 @@ fn platform_type(ex: &Execution, name: &str) -> Option<TypeId> {
 }
 
 fn from_set(app: &Application, ex: &mut Execution, set: &TypeSet) -> CallResult<Value> {
+    Ok(new_type_description(description_of(app, ex, set)?))
+}
+
+pub(crate) fn cast_to_field(
+    app: &Application,
+    ex: &mut Execution,
+    f: &crate::model::FieldDef,
+    value: Value,
+) -> CallResult<Value> {
+    let refuse =
+        |what: &str| HostError::not_implemented("Реквизит", &format!("{}: {what}", f.name)).into();
+    if f.types
+        .atoms
+        .iter()
+        .any(|a| matches!(a, TypeAtom::ValueStorage | TypeAtom::Binary))
+    {
+        return Err(refuse("значение типа ХранилищеЗначения или ДвоичныеДанные"));
+    }
+    let td = description_of(app, ex, &f.types).map_err(|e| match e {
+        CallError::Host(_) => refuse("приведение к типам реквизита"),
+        other => other,
+    })?;
+    bsl_stdlib::cast_value(ex, &td, value).map_err(CallError::Exc)
+}
+
+pub(crate) fn description_of(
+    app: &Application,
+    ex: &mut Execution,
+    set: &TypeSet,
+) -> CallResult<TypeDescription> {
     let refs = app.types().ok_or_else(unsupported)?;
     let mut ids = Vec::new();
     for atom in &set.atoms {
@@ -128,10 +158,14 @@ fn from_set(app: &Application, ex: &mut Execution, set: &TypeSet) -> CallResult<
     if ids.is_empty() && !set.atoms.is_empty() {
         return Err(unsupported().into());
     }
-    from_ids(ex, &ids, set)
+    build_ids(ex, &ids, set)
 }
 
 fn from_ids(ex: &mut Execution, ids: &[TypeId], set: &TypeSet) -> CallResult<Value> {
+    Ok(new_type_description(build_ids(ex, ids, set)?))
+}
+
+fn build_ids(ex: &mut Execution, ids: &[TypeId], set: &TypeSet) -> CallResult<TypeDescription> {
     ex.reserve((ids.len() as u64).saturating_mul(32).saturating_add(256))?;
     let number = set.number.map(|q| NumberQualifiers {
         digits: q.digits,
@@ -170,5 +204,5 @@ fn from_ids(ex: &mut Execution, ids: &[TypeId], set: &TypeSet) -> CallResult<Val
     } else {
         td
     };
-    Ok(new_type_description(td))
+    Ok(td)
 }

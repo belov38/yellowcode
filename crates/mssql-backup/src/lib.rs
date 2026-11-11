@@ -8,6 +8,20 @@
         clippy::indexing_slicing
     )
 )]
+mod bak_bytes;
+pub mod bak_catalog;
+pub mod bak_checksum;
+pub mod bak_config_source;
+pub mod bak_consistency;
+pub mod bak_direct;
+pub mod bak_idle;
+pub mod bak_lob;
+pub mod bak_logscan;
+pub mod bak_pagemap;
+pub mod bak_read;
+pub mod bak_record;
+pub mod bak_table;
+pub mod bak_values;
 pub mod config_cf;
 pub mod dynamic_update;
 pub mod media;

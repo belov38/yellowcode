@@ -349,6 +349,21 @@ pub fn storage_and_config_lenient(
 }
 
 pub fn check_schema(built: &Built, actual: &LogicalSchema) -> Vec<String> {
+    let mut out: Vec<String> = object_table_diffs(built, actual)
+        .iter()
+        .map(|d| match d {
+            TableDiff::Differs(n, ours, theirs) => {
+                format!("{n} differs: {}", first_difference(ours, theirs))
+            }
+            TableDiff::Extra(n) => format!("{n}: not in DBSCHEMA"),
+            TableDiff::Missing(n) => format!("{n}: not in the built schema"),
+        })
+        .collect();
+    out.extend(allocated_lines(built));
+    out
+}
+
+pub fn object_table_diffs(built: &Built, actual: &LogicalSchema) -> Vec<TableDiff> {
     let names: std::collections::HashSet<&str> = built
         .objects
         .iter()
@@ -364,23 +379,15 @@ pub fn check_schema(built: &Built, actual: &LogicalSchema) -> Vec<String> {
             .cloned()
             .collect(),
     };
-    let mut out: Vec<String> = schema_diff(&pick(&built.schema), &pick(actual))
+    schema_diff(&pick(&built.schema), &pick(actual))
+}
+
+pub fn allocated_lines(built: &Built) -> Vec<String> {
+    built
+        .allocated
         .iter()
-        .map(|d| match d {
-            TableDiff::Differs(n, ours, theirs) => {
-                format!("{n} differs: {}", first_difference(ours, theirs))
-            }
-            TableDiff::Extra(n) => format!("{n}: not in DBSCHEMA"),
-            TableDiff::Missing(n) => format!("{n}: not in the built schema"),
-        })
-        .collect();
-    out.extend(
-        built
-            .allocated
-            .iter()
-            .map(|n| format!("DBNames has no {} for {}", n.purpose, n.uuid)),
-    );
-    out
+        .map(|n| format!("DBNames has no {} for {}", n.purpose, n.uuid))
+        .collect()
 }
 
 fn first_difference(ours: &[u8], actual: &[u8]) -> String {

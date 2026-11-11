@@ -1,7 +1,8 @@
 use crate::Application;
 use crate::model::{FieldDef, ObjId, TypeAtom};
-use crate::read::{admit_data_read, internal, store_call_error};
+use crate::read::{admit_data_read, internal, read_view, store_call_error};
 use crate::read_budget as budget;
+use crate::txn::CallTxn;
 use crate::values::field::from_field;
 use crate::values::refs::empty_ref;
 use bsl_prim::{BslDate, Number, Str};
@@ -48,19 +49,21 @@ pub(crate) fn get(ex: &mut Execution, app: &Application, obj: ObjId) -> CallResu
         .storage()
         .try_table(st.main)
         .ok_or_else(|| internal("no table"))?;
-    if !table.separators.is_empty() && app.options().read_only_scope.is_none() {
+    if !table.separators.is_empty() && app.options().area().is_none() {
         return Err(refusal("Разделение данных").into());
     }
 
-    let mut txn = app.store().read().map_err(|e| store_call_error(ex, e))?;
+    let call_txn = CallTxn::of_call(ex);
+    let mut view = read_view(ex, call_txn.as_deref(), app)?;
     let remaining = ex
         .options()
         .memory_limit
         .unwrap_or(u64::MAX)
         .saturating_sub(ex.retained_workspace_bytes());
-    let memory = txn
+    let memory = view
         .read_memory(remaining)
         .map_err(|e| store_call_error(ex, e))?;
+    let txn = view.txn();
     let mut rows = txn.scan(st.main).map_err(|e| store_call_error(ex, e))?;
     let Some(first) = rows.next() else {
         return if table.separators.is_empty() {

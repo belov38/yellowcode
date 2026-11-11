@@ -3,6 +3,7 @@ use crate::Application;
 use crate::meta::{arg_value, member_name, type_mismatch};
 use crate::model::{ObjId, ObjKind};
 use crate::predefined::{self, AreaKey};
+use crate::txn::CallTxn;
 use crate::values::refs::{RefValue, empty_ref, ref_value};
 use bsl_syntax::ast::MethodKind;
 use bsl_vm::{
@@ -134,10 +135,14 @@ impl HostObject for ObjMgr {
             && let Some(name) = predefined::item_name(&self.app, self.obj, i)
         {
             crate::read::admit_data_read(ex)?;
-            let r =
-                self.app
-                    .predefined()
-                    .by_name(&self.app, self.obj, &AreaKey::default(), &name)?;
+            let own = CallTxn::of_call(ex);
+            let r = self.app.predefined().by_name(
+                &self.app,
+                self.obj,
+                &AreaKey::default(),
+                &name,
+                own.as_deref(),
+            )?;
             return Ok(ref_value(&self.app, r)?);
         }
         let name = self
@@ -204,6 +209,9 @@ impl HostObject for ObjMgr {
         match ru {
             "СоздатьЭлемент" if self.kind() == ObjKind::Catalog => {
                 crate::objects::create_item(ex, &self.app, self.obj)
+            }
+            "СоздатьГруппу" if self.kind() == ObjKind::Catalog => {
+                crate::objects::create_group(ex, &self.app, self.obj)
             }
             "СоздатьНаборЗаписей" if self.kind() == ObjKind::InformationRegister => {
                 crate::recordset::create_set(ex, &self.app, self.obj)

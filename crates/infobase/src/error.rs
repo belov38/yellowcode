@@ -29,6 +29,10 @@ pub enum Error {
     Inconsistent(String),
     #[error("schema built from the configuration differs from DBSCHEMA: {}", .0.join(", "))]
     SchemaMismatch(Vec<String>),
+    #[error("the differences of the schema from the rules are not the pinned ones: {}", .0.join("; "))]
+    SchemaPin(Vec<String>),
+    #[error("sealed snapshot: {0}")]
+    Sealed(String),
     #[error(transparent)]
     Store(#[from] ibschema::store::StoreError),
     #[error("unsupported: {0}")]

@@ -177,6 +177,7 @@ pub(crate) enum ParamSlot {
 
 pub(crate) struct CallContext {
     pub query: Rc<crate::queryhost::QueryCallState>,
+    pub txn: Rc<crate::txn::CallTxn>,
     pub sess: SessionState,
     pub params: Vec<ParamSlot>,
     pub common: HashMap<ModuleRef, ModuleInstanceRef>,
@@ -186,6 +187,7 @@ pub(crate) struct CallContext {
     pub selections: Vec<std::rc::Weak<crate::select::SelectionObject>>,
     #[allow(dead_code)]
     pub opts: CallOptions,
+    pub(crate) handler_modes: Vec<crate::events::HandlerMode>,
 }
 
 pub const READ_CACHE_CAP: usize = 2048;

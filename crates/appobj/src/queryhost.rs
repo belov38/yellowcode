@@ -7,6 +7,7 @@ pub(crate) use call::QueryCallState;
 use crate::Application;
 use crate::model::StdAttr;
 use crate::predefined::{AreaKey, engine_error};
+use crate::txn::CallTxn;
 use crate::values::field::default_of;
 use crate::values::refs::{RefValue, ref_value};
 use bsl_prim::Str;
@@ -17,11 +18,16 @@ use query_ir::{BindHost, HostError, PredefinedName, QTableId, QValue};
 
 pub(crate) struct CallBindHost<'c> {
     app: &'c Application,
+    txn: Option<&'c CallTxn>,
 }
 
 impl<'c> CallBindHost<'c> {
     pub fn new(app: &'c Application) -> CallBindHost<'c> {
-        CallBindHost { app }
+        CallBindHost { app, txn: None }
+    }
+
+    pub fn in_call(app: &'c Application, txn: Option<&'c CallTxn>) -> CallBindHost<'c> {
+        CallBindHost { app, txn }
     }
 }
 
@@ -46,7 +52,7 @@ impl BindHost for CallBindHost<'_> {
         let r = self
             .app
             .predefined()
-            .by_name(self.app, obj, &AreaKey::default(), &p.name)
+            .by_name(self.app, obj, &AreaKey::default(), &p.name, self.txn)
             .map_err(|e| engine_error(&e))?;
         let table = self
             .app

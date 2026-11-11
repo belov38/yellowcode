@@ -390,6 +390,8 @@ fn recoverable_content_error(error: &Error) -> bool {
         | Error::ConfigTable { .. }
         | Error::Inconsistent(_)
         | Error::SchemaMismatch(_)
+        | Error::SchemaPin(_)
+        | Error::Sealed(_)
         | Error::Store(_)
         | Error::Unsupported(_)
         | Error::UnsupportedStatic(_)

@@ -150,6 +150,9 @@ fn write_err(map: &StorageMap, phys: &PhysMap, e: onecd::Error) -> StoreError {
 impl Write1cd {
     fn writable(&self, t: TableId) -> StoreResult<(&TableInfo, &PhysTable)> {
         let (ti, p) = self.table(t)?;
+        if let Some(why) = p.refused {
+            return Err(StoreError::Unsupported(format!("{}: {why}", ti.logical)));
+        }
         if !p.writable {
             return Err(StoreError::Unsupported(format!(
                 "{}: schema does not cover every physical column",

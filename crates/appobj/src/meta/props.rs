@@ -284,7 +284,7 @@ pub(crate) fn root_get(
         _ => {}
     }
     let p = prop_of(props, en).ok_or_else(|| no_field(ru))?;
-    convert(cx, ex, None, ru, p)
+    convert(cx, ex, Some(ROOT_KIND), ru, p)
 }
 
 pub(crate) fn root_index(cx: &Arc<MdCtx>, key: &Value) -> CallResult<Value> {
@@ -369,6 +369,8 @@ fn enum_by_name(cx: &MdCtx, type_ru: &str, literal: &str) -> Option<Value> {
     let t = cx.catalog.find_type(type_ru)?;
     bsl_stdlib::enums::enum_value(t, literal)
 }
+
+const ROOT_KIND: &str = "Корень";
 
 const ENUM_TYPES: [(&str, &str, &str); 39] = [
     (
@@ -462,13 +464,13 @@ const ENUM_TYPES: [(&str, &str, &str); 39] = [
     ),
     (
         "РежимУправленияБлокировкойДанных",
-        "",
-        "РежимУправленияБлокировкойДанных",
+        ROOT_KIND,
+        "РежимУправленияБлокировкойДанныхПоУмолчанию",
     ),
     (
         "РежимУправленияБлокировкойДанных",
-        "Корень",
-        "РежимУправленияБлокировкойДанныхПоУмолчанию",
+        "",
+        "РежимУправленияБлокировкойДанных",
     ),
     ("ИспользованиеПодчинения", "", "ИспользованиеПодчинения"),
     ("ВидИерархии", "", "ВидИерархии"),
@@ -651,9 +653,14 @@ fn design_time_ref(cx: &MdCtx, ex: &mut Execution, text: &str) -> CallResult<Opt
                 return Ok(None);
             }
             crate::read::admit_data_read(ex)?;
-            let r =
-                app.predefined()
-                    .by_name(app, obj, &crate::predefined::AreaKey::default(), item)?;
+            let own = crate::txn::CallTxn::of_call(ex);
+            let r = app.predefined().by_name(
+                app,
+                obj,
+                &crate::predefined::AreaKey::default(),
+                item,
+                own.as_deref(),
+            )?;
             Some(crate::values::refs::ref_value(app, r)?)
         }
         _ => None,

@@ -45,13 +45,16 @@ pub fn render(key: &str, args: &[&str], lang: Lang) -> String {
             out.push(c);
             continue;
         }
-        let arg = match it.peek() {
+        let (arg, positional) = match it.peek() {
             Some('s' | 'd') => {
                 let a = args.get(next).copied();
                 next += 1;
-                a
+                (a, false)
             }
-            Some(d @ '1'..='9') => args.get(d.to_digit(10).unwrap_or(1) as usize - 1).copied(),
+            Some(d @ '1'..='9') => (
+                args.get(d.to_digit(10).unwrap_or(1) as usize - 1).copied(),
+                true,
+            ),
             _ => {
                 out.push('%');
                 continue;
@@ -60,6 +63,9 @@ pub fn render(key: &str, args: &[&str], lang: Lang) -> String {
         match arg {
             Some(a) => {
                 it.next();
+                if positional && matches!(it.peek(), Some('s' | 'd')) {
+                    it.next();
+                }
                 out.push_str(a);
             }
             None => out.push('%'),

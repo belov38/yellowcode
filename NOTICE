@@ -46,3 +46,8 @@ This product includes CodeMirror 6, Copyright by Marijn Haverbeke
 and others, Lezer, crelt, style-mod and w3c-keyname, under the MIT License. The pinned versions are
 listed in tools/viewer/codemirror/package-lock.json; the full license is in
 crates/yellowcode-http/src/viewer/front/vendor/LICENSE-CODEMIRROR.
+
+This product includes code ported to Rust from bcdb 0.2.1
+(https://github.com/StefanMaron/BusinessCentral.DbReader), Copyright (c) 2026 Stefan Maron, under the
+MIT License; the derived files are listed in crates/mssql-backup/BCDB-PORT.md and the full licence is
+in crates/mssql-backup/LICENSE-BCDB-MIT.

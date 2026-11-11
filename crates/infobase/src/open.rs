@@ -4,13 +4,14 @@ use crate::config::{
 use crate::create::{CreateOptions, create_empty};
 use crate::error::{Error, Result};
 use crate::maybe_charged::MaybeCharged;
+use crate::pin::{self, SchemaPin, WarnWrite};
 use crate::raw::RawIb;
 use crate::seed::seed;
 use crate::store1cd::Store1cd;
 use ibschema::dbnames::DbNames;
 use ibschema::logical::LogicalSchema;
 use ibschema::rules::{self, RulesOptions};
-use ibschema::storage::StorageMap;
+use ibschema::storage::{StorageMap, TableId};
 use ibschema::store::{Store, WriterGate};
 use mdconf::ConfigurationExt;
 use mdconf::{Configuration, LoadMeter, LoadOptions, LoadProfile};
@@ -27,6 +28,9 @@ const SI_FILES: [&str; 3] = [
 ];
 
 const MIN_WRITABLE_COMPAT: u32 = 80311;
+
+const PINNED_WHY: &str =
+    "the object of a pinned table that differs from the rules is read only as a whole";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpenMode {
@@ -51,6 +55,7 @@ pub struct OpenOptions {
     pub locking: Locking,
     pub schema_check: SchemaCheck,
     pub load_profile: LoadProfile,
+    pub warn_write: Option<WarnWrite>,
 }
 
 impl Default for OpenOptions {
@@ -70,6 +75,7 @@ impl OpenOptions {
             locking: Locking::Exclusive,
             schema_check: SchemaCheck::Strict,
             load_profile: LoadProfile::Full,
+            warn_write: None,
         }
     }
 }
@@ -94,6 +100,7 @@ pub struct Infobase {
     gate: Arc<WriterGate>,
     warnings: Vec<Warning>,
     write_refusal: Option<String>,
+    pinned: Vec<TableId>,
     store: Arc<Store1cd>,
     dbnames: MaybeCharged<DbNames>,
     schema: MaybeCharged<Arc<LogicalSchema>>,
@@ -241,6 +248,14 @@ impl Infobase {
         } else {
             path.to_path_buf()
         };
+        if let Some(request) = &opts.warn_write {
+            if opts.mode != OpenMode::ReadWrite || opts.schema_check != SchemaCheck::Warn {
+                return Err(Error::Unsupported(
+                    "warn_write needs OpenMode::ReadWrite and SchemaCheck::Warn".into(),
+                ));
+            }
+            pin::check_file(&file, &request.sealed_sha256)?;
+        }
         let mut eo = onecd::OpenOptions {
             memory_budget: opts.memory_budget.clone(),
             locking: opts.locking,
@@ -289,6 +304,8 @@ impl Infobase {
         }
 
         let mut write_refusal = None;
+        let mut pinned = Vec::new();
+        let mut closed = Vec::new();
         let kept_schema = MaybeCharged::Legacy(Arc::clone(&schema));
         let (map, config) = if opts.mode == OpenMode::Raw {
             write_refusal = Some("raw mode".to_string());
@@ -307,18 +324,34 @@ impl Infobase {
                             skip_unsupported: warn,
                         },
                     )?;
-                    let mut diff = check_schema(&built, &schema);
+                    let actual = Arc::clone(&schema);
+                    let mut diff = check_schema(&built, &actual);
+                    let mut left_out = Vec::new();
                     let map = if diff.is_empty() {
                         StorageMap::new(schema, &built)?
                     } else if warn {
                         let (map, notes) = StorageMap::new_lenient(schema, &built)?;
+                        left_out.clone_from(&notes);
                         diff.extend(notes);
                         map
                     } else {
                         return Err(Error::SchemaMismatch(diff));
                     };
+                    let pinned_open = opts.warn_write.is_some();
+                    if let Some(request) = &opts.warn_write {
+                        (pinned, closed) = pin::check_pin(
+                            &request.pin,
+                            &built,
+                            &actual,
+                            &left_out,
+                            &map,
+                            raw.db(),
+                        )?;
+                    }
                     if !diff.is_empty() {
-                        write_refusal = Some("schema differs from the rules".to_string());
+                        if !pinned_open {
+                            write_refusal = Some("schema differs from the rules".to_string());
+                        }
                         warnings.push(Warning::SchemaMismatch(diff));
                     }
                     if !built.skipped.is_empty() {
@@ -329,6 +362,14 @@ impl Infobase {
                 }
             }
         };
+        if let Some(request) = &opts.warn_write
+            && config.is_none()
+            && request.pin != SchemaPin::default()
+        {
+            return Err(Error::SchemaPin(vec![
+                "the base has no configuration, so it has none of the pinned differences".into(),
+            ]));
+        }
 
         if raw.has_rows("CONFIGSAVE")? {
             warnings.push(Warning::PendingConfiguration);
@@ -390,12 +431,15 @@ impl Infobase {
         }
         let map = Arc::new(map);
         let gate = WriterGate::new();
-        let store = Arc::new(Store1cd::new(
-            Arc::clone(raw.db_arc()),
-            Arc::clone(&map),
-            Arc::clone(&gate),
-            write_refusal.clone(),
-        )?);
+        let store = Arc::new(
+            Store1cd::new(
+                Arc::clone(raw.db_arc()),
+                Arc::clone(&map),
+                Arc::clone(&gate),
+                write_refusal.clone(),
+            )?
+            .refusing_writes(&closed, PINNED_WHY),
+        );
         Ok(Infobase {
             path: file,
             mode: opts.mode,
@@ -405,6 +449,7 @@ impl Infobase {
             gate,
             warnings,
             write_refusal,
+            pinned,
             store,
             dbnames: MaybeCharged::Legacy(dbnames),
             schema: kept_schema,
@@ -599,6 +644,7 @@ impl Infobase {
             gate,
             warnings,
             write_refusal,
+            pinned: Vec::new(),
             store,
             dbnames: MaybeCharged::Charged(dbnames),
             schema: MaybeCharged::Charged(schema),
@@ -640,6 +686,9 @@ impl Infobase {
     }
     pub fn write_refusal(&self) -> Option<&str> {
         self.write_refusal.as_deref()
+    }
+    pub fn pinned_tables(&self) -> &[TableId] {
+        &self.pinned
     }
     pub fn into_startup_owners(self) -> StartupOwners {
         let db = Arc::clone(self.raw.db_arc());

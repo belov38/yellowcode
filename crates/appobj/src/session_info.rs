@@ -108,10 +108,11 @@ fn set_safe_mode_disabled(ex: &mut Execution, args: &mut [Arg]) -> CallResult<Va
     let Value::Bool(disabled) = value else {
         return Err(refused(NAME, "параметр не Булево").into());
     };
-    call_ctx(ex)
-        .ok_or_else(outside_call)?
-        .sess
-        .safe_mode_disabled = disabled;
+    let sess = &mut call_ctx(ex).ok_or_else(outside_call)?.sess;
+    let was = std::mem::replace(&mut sess.safe_mode_disabled, disabled);
+    if was && !disabled {
+        crate::events::flag_taken_back(ex)?;
+    }
     Ok(Value::Undefined)
 }
 

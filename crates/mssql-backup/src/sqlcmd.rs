@@ -6,7 +6,22 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::{config_cf::CfOptions, dynamic_update::Summary, sql_config, sql_server::SqlPlan};
+use crate::{
+    config_cf::CfOptions,
+    dynamic_update::Summary,
+    sql_config,
+    sql_config_spool::{self, Limits},
+    sql_server::SqlPlan,
+};
+
+pub(crate) const CONFIG_LIMITS: Limits = Limits {
+    max_files: 1_000_000,
+    max_parts: 1024,
+    max_file_bytes: 16 * 1024 * 1024 * 1024,
+    max_total_bytes: 16 * 1024 * 1024 * 1024,
+};
+
+pub(crate) const CONFIG_ROW_LIMIT: usize = 128 * 1024 * 1024;
 
 mod cleaned;
 mod diag;
@@ -791,17 +806,11 @@ pub fn convert_cf_with_options(
             sql_config::read_year_offset(stdout).map_err(|e| e.to_string())
         })
         .map_err(|e| err(format!("SQL year offset failed: {}", e.message)))?;
-        let limits = crate::sql_config_spool::Limits {
-            max_files: 1_000_000,
-            max_parts: 1024,
-            max_file_bytes: 16 * 1024 * 1024 * 1024,
-            max_total_bytes: 16 * 1024 * 1024 * 1024,
-        };
         let builder =
-            crate::sql_config_spool::Builder::new_in(year_offset, limits, parent(&request.output))
+            sql_config_spool::Builder::new_in(year_offset, CONFIG_LIMITS, parent(&request.output))
                 .map_err(|e| err(format!("creating CONFIG staging file: {e}")))?;
         let mut config = run(request, &plan.framed_config_script(), |stdout| {
-            crate::sql_config_spool::read_framed(stdout, builder, 128 * 1024 * 1024)
+            sql_config_spool::read_framed(stdout, builder, CONFIG_ROW_LIMIT)
                 .map_err(|e| e.to_string())
         })
         .map_err(|e| err(format!("SQL configuration export failed: {}", e.message)))?;

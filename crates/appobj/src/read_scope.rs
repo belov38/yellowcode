@@ -129,6 +129,10 @@ impl ReadOnlyScope {
     }
 
     pub(crate) fn bind(&self, inner: Arc<dyn Store>) -> Result<Arc<dyn Store>> {
+        self.bind_with(inner, false)
+    }
+
+    fn bind_with(&self, inner: Arc<dyn Store>, writable: bool) -> Result<Arc<dyn Store>> {
         let mut tables = HashMap::new();
         for (i, table) in inner.storage().tables().iter().enumerate() {
             let values = self.area(table)?;
@@ -157,7 +161,35 @@ impl ReadOnlyScope {
         Ok(Arc::new(ScopedStore {
             inner,
             tables: Arc::new(tables),
+            writable,
         }))
+    }
+}
+
+#[derive(Clone)]
+pub struct DataArea {
+    scope: ReadOnlyScope,
+}
+
+impl DataArea {
+    pub fn new(values: Vec<(Uuid16, FieldValue)>) -> Result<Self> {
+        Ok(Self {
+            scope: ReadOnlyScope::new(values)?,
+        })
+    }
+
+    pub fn zero_from_schema(map: &StorageMap) -> Result<Self> {
+        Ok(Self {
+            scope: ReadOnlyScope::zero_from_schema(map)?,
+        })
+    }
+
+    pub(crate) fn scope(&self) -> &ReadOnlyScope {
+        &self.scope
+    }
+
+    pub(crate) fn bind(&self, inner: Arc<dyn Store>) -> Result<Arc<dyn Store>> {
+        self.scope.bind_with(inner, true)
     }
 }
 
@@ -166,6 +198,7 @@ type TableScopes = HashMap<TableId, Vec<(FieldId, FieldValue)>>;
 struct ScopedStore {
     inner: Arc<dyn Store>,
     tables: Arc<TableScopes>,
+    writable: bool,
 }
 
 impl Store for ScopedStore {
@@ -178,19 +211,25 @@ impl Store for ScopedStore {
             tables: self.tables.clone(),
         }))
     }
-    fn write(&self, _: Duration) -> StoreResult<Box<dyn WriteTxn>> {
-        Err(StoreError::Unsupported(
-            "P1ro: read-only application".into(),
-        ))
+    fn write(&self, wait: Duration) -> StoreResult<Box<dyn WriteTxn>> {
+        if !self.writable {
+            return Err(StoreError::Unsupported(
+                "P1ro: read-only application".into(),
+            ));
+        }
+        Ok(Box::new(ScopedTxn {
+            inner: self.inner.write(wait)?,
+            tables: self.tables.clone(),
+        }))
     }
 }
 
-struct ScopedTxn {
-    inner: Box<dyn ReadTxn + Send>,
+struct ScopedTxn<T: ?Sized> {
+    inner: Box<T>,
     tables: Arc<TableScopes>,
 }
 
-impl ScopedTxn {
+impl<T: ReadTxn + ?Sized> ScopedTxn<T> {
     fn contains(&self, table: TableId, row: &Row) -> bool {
         self.tables.get(&table).is_none_or(|fields| {
             fields.iter().all(
@@ -213,7 +252,7 @@ impl ScopedTxn {
     }
 }
 
-impl ReadTxn for ScopedTxn {
+impl<T: ReadTxn + ?Sized> ReadTxn for ScopedTxn<T> {
     fn read_memory(&mut self, limit: u64) -> StoreResult<memory_budget::MemoryBudget> {
         self.inner.read_memory(limit)
     }
@@ -255,5 +294,47 @@ impl ReadTxn for ScopedTxn {
         }
         self.scan(table)?
             .try_fold(0u64, |n, row| row.map(|_| n.saturating_add(1)))
+    }
+}
+
+impl ScopedTxn<dyn WriteTxn> {
+    fn stamped(&self, table: TableId, row: &Row) -> Row {
+        let mut row = row.clone();
+        for (field, value) in self.tables.get(&table).into_iter().flatten() {
+            if let Some(slot) = row.get_mut(usize::from(field.0)) {
+                *slot = value.clone();
+            }
+        }
+        row
+    }
+
+    fn own(&self, table: TableId, handle: RowHandle) -> StoreResult<()> {
+        let row = self.inner.get(table, handle)?;
+        if self.contains(table, &row) {
+            Ok(())
+        } else {
+            Err(StoreError::Unsupported(
+                "P1ro: row outside the data area".into(),
+            ))
+        }
+    }
+}
+
+impl WriteTxn for ScopedTxn<dyn WriteTxn> {
+    fn insert(&mut self, table: TableId, row: &Row) -> StoreResult<RowHandle> {
+        let row = self.stamped(table, row);
+        self.inner.insert(table, &row)
+    }
+    fn update(&mut self, table: TableId, handle: RowHandle, row: &Row) -> StoreResult<()> {
+        self.own(table, handle)?;
+        let row = self.stamped(table, row);
+        self.inner.update(table, handle, &row)
+    }
+    fn delete(&mut self, table: TableId, handle: RowHandle) -> StoreResult<()> {
+        self.own(table, handle)?;
+        self.inner.delete(table, handle)
+    }
+    fn commit(self: Box<Self>) -> StoreResult<()> {
+        self.inner.commit()
     }
 }

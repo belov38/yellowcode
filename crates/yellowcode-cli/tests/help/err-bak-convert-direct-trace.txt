@@ -1,0 +1,8 @@
+exit 2
+--- stdout
+--- stderr
+error: без --server CF читается прямо из файла BAK (только --to cf, первый набор), и не допускается: --trace; трасса доступна только с --server
+
+Usage: yellowcode bak convert [OPTIONS] --to <TO> --output <OUTPUT> <SOURCE>
+
+For more information, try '--help'.

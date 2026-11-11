@@ -3,6 +3,6 @@ exit 2
 --- stderr
 error: the argument '--raw' cannot be used with '--to dt': only a CF has a stored form to return
 
-Usage: yellowcode bak convert [OPTIONS] --server <SERVER> --to <TO> --output <OUTPUT> <SOURCE>
+Usage: yellowcode bak convert [OPTIONS] --to <TO> --output <OUTPUT> <SOURCE>
 
 For more information, try '--help'.

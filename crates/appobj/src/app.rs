@@ -15,6 +15,7 @@ use bsl_prim::CompatMode;
 use bsl_syntax::ExecContext;
 use bsl_vm::{Arg, Exception, Execution, ModuleInstanceRef, ModuleRef, SharedValue, TypeId, Value};
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
@@ -30,6 +31,7 @@ pub struct AppOpen {
 #[derive(Clone)]
 pub struct AppOptions {
     pub read_only_scope: Option<crate::ReadOnlyScope>,
+    pub data_area: Option<crate::DataArea>,
     pub lock_timeout: Duration,
     pub compile_cache: Option<Arc<CompileCache>>,
     pub uuid_node: Option<[u8; 6]>,
@@ -44,6 +46,7 @@ impl Default for AppOptions {
     fn default() -> AppOptions {
         AppOptions {
             read_only_scope: None,
+            data_area: None,
             lock_timeout: Duration::from_secs(20),
             compile_cache: None,
             uuid_node: None,
@@ -53,6 +56,14 @@ impl Default for AppOptions {
             file_system: None,
             connection_string: None,
         }
+    }
+}
+
+impl AppOptions {
+    pub(crate) fn area(&self) -> Option<&crate::ReadOnlyScope> {
+        self.read_only_scope
+            .as_ref()
+            .or_else(|| self.data_area.as_ref().map(crate::DataArea::scope))
     }
 }
 
@@ -83,6 +94,8 @@ pub struct Application {
     query: OnceLock<std::result::Result<Arc<QueryCtx>, String>>,
     streams: Arc<AtomicUsize>,
     predefined: crate::predefined::Predefined,
+    numerator: Arc<crate::numerator::Numerator>,
+    locks: Arc<crate::locks::LockTable>,
 }
 
 pub(crate) struct QueryCtx {
@@ -95,8 +108,15 @@ pub(crate) struct QueryCtx {
 impl Application {
     pub fn open(mut o: AppOpen) -> Result<Arc<Application>> {
         let unscoped_store = o.store.clone();
+        if o.options.read_only_scope.is_some() && o.options.data_area.is_some() {
+            return Err(AppError::Unsupported(
+                "an application has a read-only scope or a data area to write in, not both".into(),
+            ));
+        }
         if let Some(scope) = &o.options.read_only_scope {
             o.store = scope.bind(o.store)?;
+        } else if let Some(area) = &o.options.data_area {
+            o.store = area.bind(o.store)?;
         }
         let mut model = AppModel::build(o.config)?;
         model.bind(o.store.storage())?;
@@ -126,6 +146,8 @@ impl Application {
             query: OnceLock::new(),
             streams: Arc::new(AtomicUsize::new(0)),
             predefined: crate::predefined::Predefined::default(),
+            numerator: Arc::default(),
+            locks: Arc::default(),
         }))
     }
 
@@ -186,6 +208,19 @@ impl Application {
 
     pub(crate) fn predefined(&self) -> &crate::predefined::Predefined {
         &self.predefined
+    }
+
+    pub(crate) fn numerator(&self) -> &Arc<crate::numerator::Numerator> {
+        &self.numerator
+    }
+
+    #[doc(hidden)]
+    pub fn reserved_codes(&self) -> (usize, usize) {
+        (self.numerator.runs(), self.numerator.series())
+    }
+
+    pub fn locks(&self) -> &Arc<crate::locks::LockTable> {
+        &self.locks
     }
 
     pub fn uuid1(&self) -> &Uuid1Gen {
@@ -266,6 +301,8 @@ impl Application {
         crate::functional_option::register(self, reg);
         crate::users::register(self, reg)?;
         crate::session_info::register(self, reg);
+        crate::txn_globals::register(self, reg);
+        crate::data_lock::register(self, reg);
         crate::settings_storage::register(self, reg);
         crate::extensions::register(self, reg);
         crate::predefined::register(self, reg);
@@ -358,8 +395,10 @@ impl Application {
             "begin_call over an existing call context"
         );
         ex.attach_reuse(reuse);
+        let txn = Rc::new(crate::txn::CallTxn::default());
         ex.set_host_data(Box::new(CallContext {
-            query: crate::queryhost::QueryCallState::new(self.me.clone()),
+            query: crate::queryhost::QueryCallState::new(self.me.clone(), txn.clone()),
+            txn,
             sess,
             params,
             common: HashMap::new(),
@@ -368,6 +407,7 @@ impl Application {
             read_cache: HashMap::new(),
             selections: Vec::new(),
             opts,
+            handler_modes: Vec::new(),
         }));
     }
 
@@ -387,8 +427,12 @@ impl Application {
             }
         }
         let CallContext {
-            mut sess, params, ..
+            mut sess,
+            params,
+            txn,
+            ..
         } = ctx;
+        let rolled_back = txn.finish(self);
         sess.params = params
             .iter()
             .map(|s| match s {
@@ -397,7 +441,7 @@ impl Application {
             })
             .collect();
         sess.reuse = reuse;
-        (sess, CallOutcome { rolled_back: 0 })
+        (sess, CallOutcome { rolled_back })
     }
 
     pub(crate) fn instance_in_call(
@@ -408,10 +452,25 @@ impl Application {
         if let Some(i) = call_ctx(ex).and_then(|c| c.common.get(&m).cloned()) {
             return Ok(i);
         }
-        let inst = self.modules.instance(ex, m)?;
+        let ctx = self.module_context(ex, m)?;
+        let inst = self.modules.instance_with(ex, m, ctx)?;
         Ok(match call_ctx(ex) {
             Some(c) => c.common.entry(m).or_insert(inst).clone(),
             None => inst,
+        })
+    }
+
+    fn module_context(
+        &self,
+        ex: &mut Execution,
+        m: ModuleRef,
+    ) -> std::result::Result<bsl_vm::ModuleContext, Exception> {
+        let (Some(obj), Some(app)) = (self.modules.manager_of(m), self.arc()) else {
+            return Ok(bsl_vm::ModuleContext::None);
+        };
+        Ok(match crate::managers::of_object(&app, ex, obj)? {
+            Value::Object(o) => bsl_vm::ModuleContext::Object(o),
+            _ => bsl_vm::ModuleContext::None,
         })
     }
 

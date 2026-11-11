@@ -40,28 +40,13 @@ pub fn convert_with_backup_set(
 ) -> Result<()> {
     let _watch = watch_interrupts(err);
     let report = mssql_backup::sqlcmd::convert_cf_with_backup_set(&request, backup_set, err)?;
-    publish(&request, &report, out, err)
-}
-
-fn plural(count: usize, one: &'static str, few: &'static str, many: &'static str) -> &'static str {
-    if (11..=14).contains(&(count % 100)) {
-        return many;
-    }
-    match count % 10 {
-        1 => one,
-        2..=4 => few,
-        _ => many,
-    }
+    publish(&request.output, &report, None, out, err)
 }
 
 pub fn dynamic_update_notice(summary: &mssql_backup::dynamic_update::Summary) -> String {
     format!(
-        "динамическое обновление: применено {} {} (операций: замен {}, добавлений {}, удалений {}); --raw — как хранится",
-        summary.generations,
-        plural(summary.generations, "поколение", "поколения", "поколений"),
-        summary.replaced,
-        summary.added,
-        summary.deleted,
+        "динамические обновления конфигурации применены: {} (операций: замен {}, добавлений {}, удалений {}); --raw — как хранится",
+        summary.generations, summary.replaced, summary.added, summary.deleted,
     )
 }
 
@@ -90,19 +75,206 @@ pub fn convert_with_options(
 ) -> Result<()> {
     let _watch = watch_interrupts(err);
     let report = mssql_backup::sqlcmd::convert_cf_with_options(&request, backup_set, options, err)?;
-    publish(&request, &report, out, err)
+    publish(&request.output, &report, None, out, err)
+}
+
+pub fn convert_direct(
+    source: &Path,
+    output: &Path,
+    options: &CfOptions,
+    strict: bool,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> Result<()> {
+    let _ = writeln!(
+        err,
+        "yellowcode: direct reading of the backup, without SQL Server"
+    );
+    let mode = if strict {
+        mssql_backup::bak_idle::Mode::Strict
+    } else {
+        mssql_backup::bak_idle::Mode::Warn
+    };
+    let outcome = match mssql_backup::bak_idle::convert_cf(source, output, *options, mode) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            if !strict && let Some(records) = mssql_backup::bak_idle::unapplied_log_records(source)
+            {
+                let _ = writeln!(err, "yellowcode: {}", unapplied_log_line(records));
+            }
+            return Err(error.into());
+        }
+    };
+    if !outcome.warnings.is_empty() {
+        let _ = writeln!(err, "yellowcode: {}", direct_warning_line(&outcome));
+    }
+    let report = mssql_backup::sqlcmd::Report {
+        rows: outcome.report.rows,
+        dynamic_update: outcome.report.dynamic_update,
+    };
+    publish(
+        output,
+        &report,
+        Some(direct_status_fields(&outcome)),
+        out,
+        err,
+    )
+}
+
+fn plural(count: usize, one: &'static str, few: &'static str, many: &'static str) -> &'static str {
+    if (11..=14).contains(&(count % 100)) {
+        return many;
+    }
+    match count % 10 {
+        1 => one,
+        2..=4 => few,
+        _ => many,
+    }
+}
+
+fn unapplied_log_line(records: u64) -> String {
+    format!(
+        "журнал транзакций копии не применён ({records} {}): отказ может быть следствием незавершённых изменений; точный вид — с --server",
+        plural(
+            usize::try_from(records).unwrap_or(usize::MAX),
+            "запись",
+            "записи",
+            "записей"
+        )
+    )
+}
+
+fn sql_server_name(major: u8) -> String {
+    match major {
+        12 => "SQL Server 2014".to_owned(),
+        13 => "SQL Server 2016".to_owned(),
+        14 => "SQL Server 2017".to_owned(),
+        15 => "SQL Server 2019".to_owned(),
+        16 => "SQL Server 2022".to_owned(),
+        17 => "SQL Server 2025".to_owned(),
+        other => format!("SQL Server версии {other}"),
+    }
+}
+
+fn warning_reason(
+    scope: &mssql_backup::bak_direct::Scope,
+    outcome: &mssql_backup::bak_idle::Outcome,
+) -> String {
+    use mssql_backup::bak_direct::Scope;
+    let records = |records: Option<u64>| match records {
+        Some(n) => format!(
+            " ({n} {})",
+            plural(
+                usize::try_from(n).unwrap_or(usize::MAX),
+                "запись",
+                "записи",
+                "записей"
+            )
+        ),
+        None => String::new(),
+    };
+    match scope {
+        Scope::LogWindowNotIdle { .. } => format!(
+            "в базу писали во время копирования, журнал транзакций копии не применён{}",
+            records(outcome.log_records)
+        ),
+        Scope::LogNotProven { .. } => match outcome.log_records {
+            Some(_) => format!(
+                "журнал транзакций копии не применён и не подтверждает прочитанное{}",
+                records(outcome.log_records)
+            ),
+            None => "журнал транзакций копии не применён и не разобран (сколько в нём записей, неизвестно), в базу могли писать во время копирования".to_owned(),
+        },
+        Scope::NoLogBlockChecksums => {
+            "у блоков журнала нет контрольных сумм, журнал проверен только по структуре".to_owned()
+        }
+        Scope::Adr => {
+            let records = outcome.report.config.unreleased_rows;
+            let base = "в базе включено ускоренное восстановление (ADR): строки откаченных транзакций могут остаться в результате, а удалённые ими — пропасть";
+            if records > 0 {
+                format!(
+                    "{base} ({records} {} с неосвобождённой версией прочитано как на странице)",
+                    plural(usize::try_from(records).unwrap_or(usize::MAX), "запись", "записи", "записей")
+                )
+            } else {
+                base.to_owned()
+            }
+        }
+        Scope::ServerVersion {
+            found: Some((major, _)),
+            ..
+        } => format!(
+            "копию сделал {}, прямое чтение проверено только на SQL Server 2022",
+            sql_server_name(*major)
+        ),
+        Scope::ServerVersion { found: None, .. } => {
+            "копия не называет версию SQL Server, прямое чтение проверено только на SQL Server 2022"
+                .to_owned()
+        }
+        other => other.to_string(),
+    }
+}
+
+fn direct_warning_line(outcome: &mssql_backup::bak_idle::Outcome) -> String {
+    let reasons: Vec<String> = outcome
+        .warnings
+        .iter()
+        .map(|scope| warning_reason(scope, outcome))
+        .collect();
+    format!(
+        "предупреждение: CF прочитан без SQL Server и может отличаться от восстановленного SQL Server: {}; точный вид — с --server",
+        reasons.join("; ")
+    )
+}
+
+fn warning_detail(scope: &mssql_backup::bak_direct::Scope) -> String {
+    use mssql_backup::bak_direct::Scope;
+    match scope {
+        Scope::LogWindowNotIdle { what } | Scope::LogNotProven { what } => what.clone(),
+        Scope::NoLogBlockChecksums => "the log blocks of the backup carry no checksums".to_owned(),
+        Scope::Adr => "the database has accelerated database recovery on".to_owned(),
+        Scope::ServerVersion {
+            found: Some((major, build)),
+            ..
+        } => format!("made by SQL Server of major version {major} (build {build})"),
+        Scope::ServerVersion { found: None, .. } => {
+            "the backup does not state the version of the SQL Server that made it".to_owned()
+        }
+        other => other.to_string(),
+    }
+}
+
+fn direct_status_fields(
+    outcome: &mssql_backup::bak_idle::Outcome,
+) -> serde_json::Map<String, serde_json::Value> {
+    let warnings: Vec<serde_json::Value> = outcome
+        .warnings
+        .iter()
+        .map(|scope| serde_json::json!({"code": scope.code(), "detail": warning_detail(scope)}))
+        .collect();
+    let mut fields = serde_json::Map::new();
+    fields.insert("reader".into(), "direct".into());
+    fields.insert("logRecords".into(), outcome.log_records.into());
+    fields.insert("logApplied".into(), false.into());
+    fields.insert("proven".into(), outcome.proven.into());
+    fields.insert("warnings".into(), warnings.into());
+    fields
 }
 
 fn publish(
-    request: &SqlConvertRequest,
+    output: &Path,
     report: &mssql_backup::sqlcmd::Report,
+    extra: Option<serde_json::Map<String, serde_json::Value>>,
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Result<()> {
     if let Some(summary) = &report.dynamic_update {
         let _ = writeln!(err, "{}", dynamic_update_notice(summary));
     }
-    let status = cf_status(&request.output, report);
+    let mut status = cf_status(output, report);
+    if let (Some(extra), Some(fields)) = (extra, status.as_object_mut()) {
+        fields.extend(extra);
+    }
     if let Err(error) = serde_json::to_writer(&mut *out, &status) {
         return if error.io_error_kind() == Some(std::io::ErrorKind::BrokenPipe) {
             Ok(())

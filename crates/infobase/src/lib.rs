@@ -19,6 +19,7 @@ pub mod maybe_charged;
 pub mod open;
 pub mod params;
 pub mod physical;
+pub mod pin;
 pub mod raw;
 pub mod restore;
 pub mod seed;
@@ -28,5 +29,6 @@ pub mod store1cd;
 pub use error::{Error, Result};
 pub use maybe_charged::MaybeCharged;
 pub use open::{Infobase, OpenMode, OpenOptions, SchemaCheck, StartupOwners, Warning};
+pub use pin::{PinnedTable, SchemaPin, WarnWrite};
 
 pub use dump::{DumpReport, UsersLayout};

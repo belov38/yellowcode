@@ -1,7 +1,8 @@
 use crate::Application;
 use crate::meta::{arg_value, member_name};
-use crate::read::{admit_data_read, internal, store_call_error};
+use crate::read::{admit_data_read, internal, read_view, store_call_error};
 use crate::read_budget as budget;
+use crate::txn::CallTxn;
 use bsl_prim::fold_name;
 use bsl_vm::{
     Arg, CallError, CallResult, Execution, HostError, HostObject, MemberId, Registry, TypeId, Value,
@@ -112,7 +113,7 @@ impl Storage {
             .table_by_name(self.table)
             .ok_or_else(|| internal("the base has no table of the settings storage"))?;
         let table = storage.table(id);
-        if !table.separators.is_empty() && self.app.options().read_only_scope.is_none() {
+        if !table.separators.is_empty() && self.app.options().area().is_none() {
             return Err(refusal("Загрузить: Разделение данных").into());
         }
         let Some(object) = object.filter(|_| !named) else {
@@ -130,16 +131,14 @@ impl Storage {
             column("SettingsKey")?,
         );
 
-        let mut txn = self
-            .app
-            .store()
-            .read()
-            .map_err(|e| store_call_error(ex, e))?;
+        let call_txn = CallTxn::of_call(ex);
+        let mut view = read_view(ex, call_txn.as_deref(), &self.app)?;
         let ceiling = ex.options().memory_limit.unwrap_or(u64::MAX);
         let remaining = ceiling.saturating_sub(ex.retained_workspace_bytes());
-        let memory = txn
+        let memory = view
             .read_memory(remaining)
             .map_err(|e| store_call_error(ex, e))?;
+        let txn = view.txn();
         for item in txn.scan(id).map_err(|e| store_call_error(ex, e))? {
             ex.charge(1)?;
             let (_, row) = item.map_err(|e| store_call_error(ex, e))?;

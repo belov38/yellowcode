@@ -3,6 +3,7 @@ use crate::model::{FieldDef, ObjDef, ObjId, StdAttr, Usage};
 use crate::predefined::AreaKey;
 use crate::read_budget as budget;
 use crate::session::call_ctx;
+use crate::txn::{CallTxn, View};
 use crate::values::field::{default_of, from_field};
 use crate::values::refs::{RefValue, ref_value};
 use bsl_vm::{CallResult, Cause, Execution, HostError, Value};
@@ -89,7 +90,26 @@ fn admit_read(ex: &mut Execution, r: RefValue) -> Result<(), HostError> {
     if r.is_empty() {
         return Ok(());
     }
-    admit_data_read(ex)
+    admit_data_read(ex)?;
+    if let Some(c) = call_ctx(ex) {
+        c.txn.check().map_err(|e| e.host())?;
+    }
+    Ok(())
+}
+
+pub(crate) fn read_view<'a>(
+    ex: &Execution,
+    txn: Option<&'a CallTxn>,
+    app: &Application,
+) -> CallResult<View<'a>> {
+    match txn {
+        Some(txn) => txn.view(app).map_err(|e| e.call_error(ex)),
+        None => app
+            .store()
+            .read()
+            .map(View::Snapshot)
+            .map_err(|e| store_call_error(ex, e)),
+    }
 }
 
 pub(crate) fn admit_data_read(ex: &mut Execution) -> Result<(), HostError> {
@@ -247,8 +267,7 @@ fn visit(
     let mut key = if ti.key_index.as_ref().is_some_and(|k| k.prefix != 0) {
         let scope = app
             .options()
-            .read_only_scope
-            .as_ref()
+            .area()
             .ok_or_else(|| HostError::not_implemented("Ссылка", "Разделение данных"))?;
         let values = scope
             .area(ti)
@@ -275,16 +294,18 @@ fn visit(
         table: number,
         id: r.id,
     });
-    let mut txn = app.store().read().map_err(|e| store_call_error(ex, e))?;
+    let call_txn = CallTxn::of_call(ex);
+    let mut view = read_view(ex, call_txn.as_deref(), app)?;
     let remaining = ex
         .options()
         .memory_limit
         .unwrap_or(u64::MAX)
         .saturating_sub(live)
         .saturating_sub(ex.retained_workspace_bytes());
-    let memory = txn
+    let memory = view
         .read_memory(remaining)
         .map_err(|e| store_call_error(ex, e))?;
+    let txn = view.txn();
     let it = txn
         .range(
             table,
@@ -337,12 +358,16 @@ pub(crate) fn tabular_index(def: &ObjDef, name: &str) -> Option<usize> {
     })
 }
 
-pub(crate) fn is_std_name(name: &str) -> bool {
+pub(crate) fn std_attr_named(name: &str) -> Option<StdAttr> {
     let n = bsl_prim::fold_name(name);
-    StdAttr::ALL.iter().any(|a| {
+    StdAttr::ALL.iter().copied().find(|a| {
         let (ru, en) = a.names();
         bsl_prim::fold_name(ru) == n || bsl_prim::fold_name(en) == n
     })
+}
+
+pub(crate) fn is_std_name(name: &str) -> bool {
+    std_attr_named(name).is_some()
 }
 
 fn convert(app: &Application, f: &FieldDef, v: &FieldValue) -> Result<Value, HostError> {

@@ -2,6 +2,7 @@ use crate::Application;
 use crate::errors::{self, keys};
 use crate::model::{FieldDef, ObjDef, ObjId, ObjKind, ObjStorage, TypeAtom, Usage};
 use crate::read::store_error;
+use crate::txn::CallTxn;
 use crate::values::refs::RefValue;
 use bsl_prim::fold_name;
 use bsl_vm::HostError;
@@ -74,6 +75,16 @@ fn other(key: &'static str, args: &[&str]) -> HostError {
 fn internal(text: &str) -> HostError {
     let t = format!("internal: {text}");
     HostError::text(&t, &t)
+}
+
+fn refuse_while_the_call_holds_the_writer() -> Result<(), HostError> {
+    if crate::txn::thread_holds_writer() {
+        return Err(HostError::not_implemented(
+            "Предопределенные",
+            "инициализация при открытой пишущей транзакции вызова",
+        ));
+    }
+    Ok(())
 }
 
 fn write_error(e: &StoreError) -> HostError {
@@ -185,8 +196,9 @@ impl Predefined {
         obj: ObjId,
         area: &AreaKey,
         name: &str,
+        own: Option<&CallTxn>,
     ) -> Result<RefValue, HostError> {
-        self.by_name_with(app, obj, area, name, l5)
+        self.by_name_with(app, obj, area, name, own, l5)
     }
 
     pub(crate) fn by_name_with(
@@ -195,6 +207,7 @@ impl Predefined {
         obj: ObjId,
         area: &AreaKey,
         name: &str,
+        own: Option<&CallTxn>,
         mk: fn(&'static str, &[&str]) -> HostError,
     ) -> Result<RefValue, HostError> {
         let def = app.model().obj(obj);
@@ -202,7 +215,7 @@ impl Predefined {
             .and_then(|p| p.iter().find(|i| same_name(&i.name, name)))
             .ok_or_else(|| mk(keys::PREDEFINED_ITEM_NOT_EXISTS, &[]))?;
         self.ensure(app, obj, area)?;
-        let pids = self.pids(app, obj, area)?;
+        let pids = self.pids(app, obj, area, own)?;
         match pids
             .get(&RefId::from_uuid(item.id).0)
             .map(Vec::as_slice)
@@ -217,7 +230,17 @@ impl Predefined {
         }
     }
 
-    fn pids(&self, app: &Application, obj: ObjId, area: &AreaKey) -> Result<Arc<Pids>, HostError> {
+    fn pids(
+        &self,
+        app: &Application,
+        obj: ObjId,
+        area: &AreaKey,
+        own: Option<&CallTxn>,
+    ) -> Result<Arc<Pids>, HostError> {
+        if let Some(txn) = own.filter(|t| t.has_writer()) {
+            let mut view = txn.view(app).map_err(|e| e.host())?;
+            return Ok(Arc::new(scan_pids(app, obj, view.txn())?));
+        }
         let key = (obj, area.clone());
         let epoch = app.write_epoch();
         if let Some(c) = lock(&self.pids).get(&key)
@@ -225,7 +248,8 @@ impl Predefined {
         {
             return Ok(c.pids.clone());
         }
-        let pids = Arc::new(scan_pids(app, obj)?);
+        let rd = app.store().read().map_err(|e| store_error(&e))?;
+        let pids = Arc::new(scan_pids(app, obj, &*rd)?);
         lock(&self.pids).insert(
             key,
             PidCache {
@@ -242,7 +266,7 @@ impl Predefined {
         plan: &[ObjId],
         area: &AreaKey,
     ) -> Result<(), HostError> {
-        if !area.0.is_empty() && app.options().read_only_scope.is_none() {
+        if !area.0.is_empty() && app.options().area().is_none() {
             return Err(HostError::not_implemented(
                 "Предопределенные",
                 "Разделение данных",
@@ -266,6 +290,7 @@ impl Predefined {
                 "P1ro initialization requires a write",
             ));
         }
+        refuse_while_the_call_holds_the_writer()?;
         let mut w = app
             .store()
             .write(app.options().lock_timeout)
@@ -372,7 +397,7 @@ impl<'a> Tables<'a> {
         let f = ti
             .field_by_std(StdField::PdInitialized)
             .ok_or_else(|| internal("no field PDInitialized"))?;
-        if !ti.separators.is_empty() && self.app.options().read_only_scope.is_none() {
+        if !ti.separators.is_empty() && self.app.options().area().is_none() {
             return Err(HostError::not_implemented(
                 "Предопределенные",
                 "Разделение данных",
@@ -460,7 +485,7 @@ fn options_table(app: &Application, obj: ObjId) -> Option<(TableId, FieldId, Fie
     Some((t, ti.field_by_name("MDID")?, ti.field_by_name("PDUpdMode")?))
 }
 
-fn scan_pids(app: &Application, obj: ObjId) -> Result<Pids, HostError> {
+fn scan_pids(app: &Application, obj: ObjId, rd: &dyn ReadTxn) -> Result<Pids, HostError> {
     let Some(st) = app.model().storage_of(obj) else {
         return Ok(Pids::new());
     };
@@ -475,7 +500,6 @@ fn scan_pids(app: &Application, obj: ObjId) -> Result<Pids, HostError> {
     ) else {
         return Ok(Pids::new());
     };
-    let rd = app.store().read().map_err(|e| store_error(&e))?;
     let mut out = Pids::new();
     let mut take = |row: &[FieldValue]| {
         if let (Some(FieldValue::Uuid(p)), Some(FieldValue::Ref { id, .. })) =
@@ -557,7 +581,7 @@ impl<'a, 'b> Rows<'a, 'b> {
             dim_number = app.model().storage_of(chart).and_then(|s| s.ref_number);
             dims = match made.get(&chart) {
                 Some(m) => m.clone(),
-                None => (*pd.pids(app, chart, &AreaKey::default())?).clone(),
+                None => (*pd.pids(app, chart, &AreaKey::default(), None)?).clone(),
             };
         }
         Ok(Rows {
@@ -890,7 +914,11 @@ fn code_value(ti: &TableInfo, fid: FieldId, code: &PredefinedCode) -> FieldValue
     }
 }
 
-fn blank_row(app: &Application, ti: &TableInfo, hints: &[Option<&FieldDef>]) -> Vec<FieldValue> {
+pub(crate) fn blank_row(
+    app: &Application,
+    ti: &TableInfo,
+    hints: &[Option<&FieldDef>],
+) -> Vec<FieldValue> {
     ti.fields
         .iter()
         .enumerate()
@@ -941,6 +969,8 @@ fn blank_row(app: &Application, ti: &TableInfo, hints: &[Option<&FieldDef>]) -> 
             cands.push(FieldValue::Uuid(Uuid16::NIL));
             cands.push(FieldValue::Undefined);
             cands.push(FieldValue::Null);
+            cands.push(FieldValue::Storage(Vec::new()));
+            cands.push(FieldValue::Binary(Vec::new()));
             cands
                 .into_iter()
                 .find(|c| encode(ti, fid, c).is_ok())
@@ -1030,6 +1060,7 @@ impl Predefined {
                 "ОбновлениеПредопределенныхДанных",
             ));
         };
+        refuse_while_the_call_holds_the_writer()?;
         let md = app.model().obj(obj).md;
         let mut w = app
             .store()
@@ -1191,8 +1222,14 @@ fn predefined_value(
         return Err(other(keys::PREDEFINED_ITEM_NOT_EXISTS, &[]));
     }
     crate::read::admit_data_read(ex)?;
-    let r = app
-        .predefined()
-        .by_name_with(app, obj, &AreaKey::default(), item, other)?;
+    let own = CallTxn::of_call(ex);
+    let r = app.predefined().by_name_with(
+        app,
+        obj,
+        &AreaKey::default(),
+        item,
+        own.as_deref(),
+        other,
+    )?;
     crate::values::refs::ref_value(app, r)
 }

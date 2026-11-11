@@ -268,6 +268,7 @@ fn exact_ref_pair(
     })
 }
 
+#[derive(Clone)]
 struct PhysTable {
     name: String,
     cols: Vec<usize>,
@@ -275,8 +276,10 @@ struct PhysTable {
     key_index: Option<String>,
     write_indexes: Vec<(String, IndexId)>,
     writable: bool,
+    refused: Option<&'static str>,
 }
 
+#[derive(Clone)]
 struct PhysMap {
     tables: Vec<PhysTable>,
 }
@@ -463,6 +466,7 @@ impl PhysMap {
                 key_index,
                 write_indexes,
                 writable,
+                refused: None,
             });
         }
         Ok(PhysMap { tables })
@@ -492,6 +496,24 @@ impl Store1cd {
             gate,
             refusal,
         })
+    }
+
+    #[must_use]
+    pub fn refusing_writes(mut self, tables: &[TableId], why: &'static str) -> Store1cd {
+        if tables.is_empty() {
+            return self;
+        }
+        let phys = Arc::make_mut(&mut self.phys);
+        for (n, ti) in self.map.tables().iter().enumerate() {
+            let owned = ti.owner.is_some_and(|owner| tables.contains(&owner));
+            let listed = u32::try_from(n).is_ok_and(|n| tables.contains(&TableId(n)));
+            if (owned || listed)
+                && let Some(p) = phys.tables.get_mut(n)
+            {
+                p.refused = Some(why);
+            }
+        }
+        self
     }
 
     fn transaction<T>(&self, txn: T, ticket: Option<WriterTicket>) -> Read1cd<T> {
