@@ -288,6 +288,15 @@ fn run<T>(
     script: &str,
     consume: impl FnOnce(lifecycle::Reader) -> Result<T, String>,
 ) -> Result<T, RunError> {
+    if !crate::sql_server::lines_fit(script) {
+        return Err(RunError {
+            started: false,
+            message: format!(
+                "internal error: a SQL script line is longer than {} characters; nothing was sent to sqlcmd",
+                crate::sql_server::SCRIPT_LINE_LIMIT
+            ),
+        });
+    }
     let mut command = Command::new(&request.sqlcmd);
     command
         .args([
@@ -1012,6 +1021,8 @@ enum SqlCleanup {
     CallerOwned,
 }
 
+const USERS_WITHOUT_SEPARATION: &str = "SQL system data check failed: в базе есть пользователи информационной базы (таблица V8USERS или файл users.usr не пусты), а конфигурация не разделяет пользователей; DT для такой базы пока не поддерживается";
+
 #[derive(Clone, Copy)]
 enum DtMode {
     Strict,
@@ -1155,9 +1166,10 @@ fn convert_dt_inner_owned(
             plan.support_script()
         };
         let presence = run(request, &support_script, |stdout| {
-            sql_support::read_support_for_separated_users(stdout).map_err(|e| e.to_string())
+            sql_support::read_support_findings(stdout).map_err(|e| e.to_string())
         })
-        .map_err(|e| err(format!("SQL system data check failed: {}", e.message)))?;
+        .map_err(|e| err(format!("SQL system data check failed: {}", e.message)))?
+        .map_err(|found| err(format!("SQL system data check failed: {found}")))?;
         let strict = matches!(mode, DtMode::Strict | DtMode::StrictFramed);
         let mut staged = if strict {
             let limits = crate::sql_config_spool::Limits {
@@ -1204,20 +1216,11 @@ fn convert_dt_inner_owned(
                 let spool = staged
                     .as_mut()
                     .ok_or_else(|| err("missing CONFIG staging"))?;
-                match sql_metadata::strict_compatibility_staged(spool, 512 * 1024 * 1024) {
-                    Ok(compatibility) => {
-                        strict_compatibility = Some(compatibility);
-                        sql_metadata::UsersLayout::Users8
-                    }
-                    Err(original) => {
-                        match sql_metadata::users_layout_staged(spool, 512 * 1024 * 1024) {
-                            Ok(sql_metadata::UsersLayout::UsersSpr11) => {
-                                sql_metadata::UsersLayout::UsersSpr11
-                            }
-                            _ => return Err(err(original.to_string())),
-                        }
-                    }
-                }
+                let profile =
+                    sql_metadata::dt_profile_staged(spool, sql_metadata::PROFILE_BUDGET_BYTES)
+                        .map_err(|e| err(e.to_string()))?;
+                strict_compatibility = Some(profile.compatibility);
+                profile.layout
             }
             DtMode::Separated => sql_metadata::users_layout(memory_config()?, 512 * 1024 * 1024)
                 .map_err(|e| err(e.to_string()))?,
@@ -1259,7 +1262,7 @@ fn convert_dt_inner_owned(
             match layout {
                 sql_metadata::UsersLayout::Users8 => {
                     if presence.users_present || presence.legacy_users_present {
-                        return Err(err("unsupported SQL system data: users"));
+                        return Err(err(USERS_WITHOUT_SEPARATION));
                     }
                     (
                         if strict {
@@ -1276,7 +1279,15 @@ fn convert_dt_inner_owned(
                     if presence.legacy_users_present && !presence.users_present {
                         return Err(err("legacy users without user rows"));
                     }
-                    (80501, true)
+                    (
+                        if strict {
+                            strict_compatibility
+                                .ok_or_else(|| err("missing verified compatibility"))?
+                        } else {
+                            80501
+                        },
+                        true,
+                    )
                 }
             }
         };
@@ -1289,12 +1300,60 @@ fn convert_dt_inner_owned(
             })
             .map_err(|e| err(format!("SQL catalog export failed: {}", e.message)))
         };
-        let storage_catalog = if legacy {
+        let heads = TableHead::database(&schema.schema).map_err(|e| err(e.to_string()))?;
+        let tables = if legacy {
             None
         } else {
-            Some(catalog("BINARYDATA")?)
+            let names: Vec<&str> = std::iter::once("BINARYDATA")
+                .chain(heads.iter().map(|head| head.phys_name.as_str()))
+                .collect();
+            let script = plan
+                .catalog_batch_script(&names)
+                .map_err(|e| err(e.to_string()))?;
+            let mut tables = run(request, &script, |stdout| {
+                sql_catalog::read_catalog_batch(stdout, names.len(), sql_catalog::Limits::default())
+                    .map_err(|e| e.to_string())
+            })
+            .map_err(|e| err(format!("SQL catalog export failed: {}", e.message)))?
+            .into_iter();
+            let storage = tables
+                .next()
+                .ok_or_else(|| err("missing storage catalog"))?;
+            Some((storage.columns, tables.collect::<Vec<_>>()))
         };
         let mut accounting = sql_blob::StorageAccounting::new(100_000);
+        let mut storage = None;
+        let storage_rows = match &tables {
+            Some((storage_catalog, _)) => {
+                let count = run(request, &plan.blob_count_script(), |out| {
+                    sql_blob::read_storage_count(out).map_err(|e| e.to_string())
+                })
+                .map_err(|e| err(format!("SQL binary storage count failed: {}", e.message)))?;
+                if count != 0 {
+                    let script = plan
+                        .blob_spool_script(storage_catalog)
+                        .map_err(|e| err(e.to_string()))?;
+                    let spool = run(request, &script, |out| {
+                        sql_blob::read_spool(out, parent(&request.output), 100_000)
+                            .map_err(|e| e.to_string())
+                    })
+                    .map_err(|e| {
+                        err(format!(
+                            "SQL data export failed: binary storage: {}",
+                            e.message
+                        ))
+                    })?;
+                    if spool.rows() != count {
+                        return Err(err(
+                            "SQL data export failed: binary storage: the rows differ from the storage count",
+                        ));
+                    }
+                    storage = Some(spool);
+                }
+                Some(count)
+            }
+            None => None,
+        };
         let mut buffered = BufWriter::new(output.as_file_mut());
         let mut dt = DtWriter::new(
             &mut buffered,
@@ -1389,9 +1448,10 @@ fn convert_dt_inner_owned(
                     sql_users::users_spr_catalog(&actual).map_err(|e| err(e.to_string()))?;
                 if email {
                     run(request, &plan.users_email_script(), |stdout| {
-                        sql_support::read_empty_user_email(stdout).map_err(|e| e.to_string())
+                        sql_support::read_email_findings(stdout).map_err(|e| e.to_string())
                     })
-                    .map_err(|e| err(format!("SQL user email check failed: {}", e.message)))?;
+                    .map_err(|e| err(format!("SQL user email check failed: {}", e.message)))?
+                    .map_err(|found| err(format!("SQL user email check failed: {found}")))?;
                 }
                 let script = plan
                     .data_table_script(&head.phys_name, &head.columns, &columns)
@@ -1415,10 +1475,93 @@ fn convert_dt_inner_owned(
         }
         dt.begin_database(&schema.schema)
             .map_err(|e| err(e.to_string()))?;
-        let heads = TableHead::database(&schema.schema).map_err(|e| err(e.to_string()))?;
         let mut rows = 0_u64;
-        for (index, head) in heads.iter().enumerate() {
-            let actual = catalog(&head.phys_name)?;
+        let mut resolve = |reference: &sql_blob::StorageRef| {
+            let parts = match storage.as_mut() {
+                Some(spool) => spool.parts(reference).map_err(|e| e.to_string())?,
+                None => Vec::new(),
+            };
+            let data = accounting
+                .resolve(reference, parts)
+                .map_err(|e| e.to_string())?;
+            Ok(vec![sql_blob::BlobPart {
+                key: reference.key,
+                offset: 0,
+                number: 0,
+                data,
+            }])
+        };
+        if let (Some((_, catalogs)), false) = (&tables, framed) {
+            let estimates: Vec<u64> = catalogs
+                .iter()
+                .map(|table| table.pages.saturating_mul(8192))
+                .collect();
+            for batch in crate::sql_batch::plan(&estimates, crate::sql_batch::LIMITS) {
+                let members: Vec<(u64, &TableHead, &sql_catalog::TableCatalog)> = heads
+                    .iter()
+                    .zip(catalogs)
+                    .enumerate()
+                    .skip(batch.start)
+                    .take(batch.len())
+                    .map(|(index, (head, table))| (index as u64 + 1, head, table))
+                    .collect();
+                let script = plan
+                    .data_batch_script(
+                        &members
+                            .iter()
+                            .map(|(index, head, table)| crate::sql_batch::Table {
+                                index: *index,
+                                name: &head.phys_name,
+                                columns: &head.columns,
+                                actual: &table.columns,
+                            })
+                            .collect::<Vec<_>>(),
+                    )
+                    .map_err(|e| err(e.to_string()))?;
+                let count = run(request, &script, |stdout| {
+                    let mut frames = crate::sql_rows::Frames::new(stdout);
+                    let mut count = 0_u64;
+                    for (index, head, _) in &members {
+                        let at = |e: String| {
+                            format!("table {index} of {} ({}): {e}", heads.len(), head.phys_name)
+                        };
+                        crate::sql_batch::begin(&mut frames, *index)
+                            .map_err(|e| at(e.to_string()))?;
+                        let rows = sql_dt::write_sql_section_with_resolver(
+                            &mut dt,
+                            head,
+                            &mut frames,
+                            schema.year_offset,
+                            &mut resolve,
+                        )
+                        .map_err(|e| at(e.to_string()))?;
+                        crate::sql_batch::end(&mut frames, *index, rows)
+                            .map_err(|e| at(e.to_string()))?;
+                        count += rows;
+                    }
+                    frames.end().map_err(|e| e.to_string())?;
+                    Ok(count)
+                })
+                .map_err(|e| err(format!("SQL data export failed: {}", e.message)))?;
+                rows = rows
+                    .checked_add(count)
+                    .ok_or_else(|| err("data row count overflow"))?;
+            }
+        }
+        let per_table = if tables.is_none() || framed {
+            heads.len()
+        } else {
+            0
+        };
+        for (index, head) in heads.iter().enumerate().take(per_table) {
+            let actual = match &tables {
+                None => catalog(&head.phys_name)?,
+                Some((_, catalogs)) => catalogs
+                    .get(index)
+                    .ok_or_else(|| err("missing SQL catalog"))?
+                    .columns
+                    .clone(),
+            };
             let script = if legacy && framed {
                 plan.legacy_framed_data_table_script(&head.phys_name, &head.columns, &actual)
             } else if legacy {
@@ -1443,34 +1586,13 @@ fn convert_dt_inner_owned(
                     return sql_dt::write_sql_table(&mut dt, head, stdout, schema.year_offset)
                         .map_err(|e| e.to_string());
                 }
-                let resolve = |reference: &sql_blob::StorageRef| {
-                    let script = plan
-                        .blob_script(
-                            reference,
-                            storage_catalog.as_ref().ok_or("missing storage catalog")?,
-                        )
-                        .map_err(|e| e.to_string())?;
-                    let parts = run(request, &script, |out| {
-                        sql_blob::read_blob_parts(out, reference).map_err(|e| e.to_string())
-                    })
-                    .map_err(|e| e.message)?;
-                    let data = accounting
-                        .resolve(reference, parts)
-                        .map_err(|e| e.to_string())?;
-                    Ok(vec![sql_blob::BlobPart {
-                        key: reference.key,
-                        offset: 0,
-                        number: 0,
-                        data,
-                    }])
-                };
                 if framed {
                     sql_dt::write_framed_sql_table_with_resolver(
                         &mut dt,
                         head,
                         stdout,
                         schema.year_offset,
-                        resolve,
+                        &mut resolve,
                     )
                 } else {
                     sql_dt::write_sql_table_with_resolver(
@@ -1478,7 +1600,7 @@ fn convert_dt_inner_owned(
                         head,
                         stdout,
                         schema.year_offset,
-                        resolve,
+                        &mut resolve,
                     )
                 }
                 .map_err(|e| e.to_string())
@@ -1498,11 +1620,8 @@ fn convert_dt_inner_owned(
             }
         }
         dt.end_database().map_err(|e| err(e.to_string()))?;
-        if !legacy {
-            let count = run(request, &plan.blob_count_script(), |out| {
-                sql_blob::read_storage_count(out).map_err(|e| e.to_string())
-            })
-            .map_err(|e| err(format!("SQL binary storage count failed: {}", e.message)))?;
+        drop(resolve);
+        if let Some(count) = storage_rows {
             accounting.finish(count).map_err(|e| err(e.to_string()))?;
         }
         dt.finish().map_err(|e| err(e.to_string()))?;
@@ -1691,7 +1810,7 @@ mod tests {
             lifecycle_timeout: None,
             output: dir.path().join("out.dt"),
         };
-        let script = "q".repeat(1_048_576);
+        let script = megabyte();
         let output = run(&request, &script, |mut stdout| {
             let mut bytes = Vec::new();
             stdout.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
@@ -1722,7 +1841,7 @@ mod tests {
             lifecycle_timeout: None,
             output: dir.path().join("out.dt"),
         };
-        let error = run(&request, &"q".repeat(1_048_576), |mut stdout| {
+        let error = run(&request, &megabyte(), |mut stdout| {
             let mut data = [0; 7];
             stdout.read_exact(&mut data).map_err(|e| e.to_string())?;
             Err::<(), _>("invalid SQL response".into())
@@ -1756,7 +1875,7 @@ mod tests {
             output: dir.path().join("out.dt"),
         };
         let mut completion = None;
-        let error = run(&request, &"q".repeat(1_048_576), |mut stdout| {
+        let error = run(&request, &megabyte(), |mut stdout| {
             completion = Some(lifecycle::test_support::completion(&stdout));
             let mut bytes = Vec::new();
             stdout.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
@@ -1793,7 +1912,7 @@ mod tests {
         };
         let mut completion = None;
         let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = run(&request, &"q".repeat(1_048_576), |mut stdout| {
+            let _ = run(&request, &megabyte(), |mut stdout| {
                 completion = Some(lifecycle::test_support::completion(&stdout));
                 let mut byte = [0; 1];
                 stdout.read_exact(&mut byte).unwrap();
@@ -1834,7 +1953,7 @@ mod windows_tests {
             lifecycle_timeout: None,
             output: dir.path().join("out.dt"),
         };
-        let output = run(&request, &"q".repeat(1_048_576), |mut stdout| {
+        let output = run(&request, &megabyte(), |mut stdout| {
             let mut bytes = Vec::new();
             stdout.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
             Ok(bytes)

@@ -1,6 +1,7 @@
 mod managed;
 mod re;
 pub use managed::{FindQuery, ManagedFindError};
+pub(crate) use re::compile_with_case;
 pub use re::{ALLOWANCE as REGEX_ALLOWANCE, FindRegex, MAX_PATTERN_BYTES, RegexError};
 
 use mdconf::{Child, Configuration, MdObject, Module, SubObject};
@@ -18,7 +19,7 @@ pub struct Hit {
     pub text: String,
 }
 
-fn fold(s: &str) -> String {
+pub(crate) fn fold(s: &str) -> String {
     bsl_prim::fold_name(s).replace('ё', "е")
 }
 

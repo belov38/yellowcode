@@ -1,3 +1,9 @@
 pub mod bak;
 pub mod convert;
+pub mod export;
+pub mod grep;
 pub mod metadata;
+pub mod module;
+pub mod modules;
+pub mod scope;
+pub mod template;

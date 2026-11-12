@@ -12,7 +12,7 @@ use query_exec::{DataSource, ExecEnv, Row, RowIter, StoreSource, TempTables};
 use query_ir::host::{PresentationInput, TxnId};
 use query_ir::{
     Access, AccessPolicy, BindHost, ExecError, FieldSet, HostError, PredefinedName, QStr, QTableId,
-    QType, QValue, QuerySchema, SessionValues, SourceTable, StorageBinding,
+    QType, QValue, SessionValues, SourceTable, StorageBinding,
 };
 use std::cell::{Cell, OnceCell, Ref};
 use std::ops::Bound;
@@ -231,7 +231,7 @@ impl QueryHost for CallQueryHost<'_> {
         }
         Ok(())
     }
-    fn schema(&self) -> &Arc<QuerySchema> {
+    fn schema(&self) -> &query_ir::schema::SchemaOwner {
         &self.provider.ctx.schema
     }
     fn storage(&self) -> &StorageBinding {

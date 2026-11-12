@@ -43,31 +43,7 @@ pub struct FindRegex {
 
 impl FindRegex {
     pub fn compile(pattern: &str) -> Result<Self, RegexError> {
-        check_len(pattern)?;
-        let syntax = syntax::Config::new()
-            .case_insensitive(true)
-            .unicode(true)
-            .utf8(true)
-            .nest_limit(250);
-        let config = meta::Config::new()
-            .match_kind(MatchKind::LeftmostFirst)
-            .utf8_empty(true)
-            .which_captures(WhichCaptures::Implicit)
-            .nfa_size_limit(Some(NFA_SIZE_LIMIT))
-            .hybrid_cache_capacity(LAZY_DFA_CACHE)
-            .backtrack(false)
-            .onepass(false)
-            .dfa(false);
-        let regex = meta::Builder::new()
-            .configure(config)
-            .syntax(syntax)
-            .build(pattern)
-            .map_err(|error| match error.size_limit() {
-                Some(limit) => RegexError::TooBig(limit),
-                None => RegexError::Build(Box::new(error)),
-            })?;
-        let cache = regex.create_cache();
-        Ok(Self { regex, cache })
+        compile_with_case(pattern, true)
     }
 
     pub fn is_match(&mut self, line: &str) -> bool {
@@ -75,4 +51,32 @@ impl FindRegex {
             .search_half_with(&mut self.cache, &Input::new(line).earliest(true))
             .is_some()
     }
+}
+
+pub fn compile_with_case(pattern: &str, case_insensitive: bool) -> Result<FindRegex, RegexError> {
+    check_len(pattern)?;
+    let syntax = syntax::Config::new()
+        .case_insensitive(case_insensitive)
+        .unicode(true)
+        .utf8(true)
+        .nest_limit(250);
+    let config = meta::Config::new()
+        .match_kind(MatchKind::LeftmostFirst)
+        .utf8_empty(true)
+        .which_captures(WhichCaptures::Implicit)
+        .nfa_size_limit(Some(NFA_SIZE_LIMIT))
+        .hybrid_cache_capacity(LAZY_DFA_CACHE)
+        .backtrack(false)
+        .onepass(false)
+        .dfa(false);
+    let regex = meta::Builder::new()
+        .configure(config)
+        .syntax(syntax)
+        .build(pattern)
+        .map_err(|error| match error.size_limit() {
+            Some(limit) => RegexError::TooBig(limit),
+            None => RegexError::Build(Box::new(error)),
+        })?;
+    let cache = regex.create_cache();
+    Ok(FindRegex { regex, cache })
 }

@@ -2,7 +2,7 @@ use bsl_vm::{Execution, HostError as VmHostError, Value};
 use ibschema::storage::{StorageMap, TableId};
 use query_exec::{DataSource, ExecEnv};
 use query_ir::host::{AccessPolicy, HostError, PresentationInput, SessionValues, TxnId};
-use query_ir::{BindHost, QStr, QValue, QuerySchema, StorageBinding};
+use query_ir::{BindHost, QStr, QValue, StorageBinding};
 use query_syntax::Lang;
 use std::sync::{Arc, atomic::AtomicBool};
 
@@ -17,7 +17,7 @@ pub trait QueryHost: BindHost {
     ) -> Result<(), query_ir::ExecError> {
         Ok(())
     }
-    fn schema(&self) -> &Arc<QuerySchema>;
+    fn schema(&self) -> &query_ir::schema::SchemaOwner;
     fn storage(&self) -> &StorageBinding;
     fn map(&self) -> &StorageMap;
     fn access(&self) -> &dyn AccessPolicy;
@@ -82,7 +82,7 @@ impl ExecHost for VmExecHost<'_> {
     ) -> Result<(), query_ir::ExecError> {
         self.host.admit_batch(batch, temp)
     }
-    fn schema(&self) -> &Arc<QuerySchema> {
+    fn schema(&self) -> &query_ir::schema::SchemaOwner {
         self.host.schema()
     }
     fn storage(&self) -> &StorageBinding {

@@ -6,8 +6,8 @@ use std::fmt;
 use mdconf::{Child, ChildTag, Configuration, MdKind, MdObject, Recalculation, SubKind, SubObject};
 
 use super::names::{
-    child_tag_from_name, child_tag_name, fold_path_name, kind_from_name, kind_name,
-    sub_kind_from_name, sub_kind_name,
+    child_tag_en, child_tag_from_name, child_tag_name, fold_path_name, kind_from_name, kind_name,
+    sub_kind_en, sub_kind_from_name, sub_kind_name,
 };
 use super::out::Lang;
 
@@ -273,5 +273,54 @@ pub fn resolve<'a>(cfg: &'a Configuration, path: &str) -> Result<Target<'a>, Pat
         Ok(Target::Object(owner))
     } else {
         Ok(Target::Child { owner, chain })
+    }
+}
+
+fn object_path(cfg: &Configuration, o: &MdObject) -> String {
+    fn within(prefix: &str, list: &[MdObject], o: &MdObject) -> Option<String> {
+        list.iter().find_map(|s| {
+            let p = format!("{prefix}.Subsystem.{}", s.name);
+            if std::ptr::eq(s, o) {
+                Some(p)
+            } else {
+                within(&p, &s.subsystems, o)
+            }
+        })
+    }
+    cfg.objects
+        .iter()
+        .find_map(|top| {
+            let p = format!("{}.{}", top.kind.as_str(), top.name);
+            if std::ptr::eq(top, o) {
+                Some(p)
+            } else {
+                within(&p, &top.subsystems, o)
+            }
+        })
+        .unwrap_or_else(|| format!("{}.{}", o.kind.as_str(), o.name))
+}
+
+pub fn canonical(cfg: &Configuration, t: &Target<'_>) -> String {
+    match t {
+        Target::Configuration(_) => MdKind::Configuration.as_str().to_string(),
+        Target::Object(o) => object_path(cfg, o),
+        Target::Child { owner, chain } => {
+            let mut p = object_path(cfg, owner);
+            for c in chain {
+                p = format!("{p}.{}.{}", child_tag_en(c.tag), c.name);
+            }
+            p
+        }
+        Target::Sub { owner, sub } => {
+            format!(
+                "{}.{}.{}",
+                object_path(cfg, owner),
+                sub_kind_en(sub.kind),
+                sub.name
+            )
+        }
+        Target::Recalc { owner, recalc } => {
+            format!("{}.{RECALC_EN}.{}", object_path(cfg, owner), recalc.name)
+        }
     }
 }

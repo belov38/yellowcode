@@ -1,0 +1,35 @@
+exit 0
+--- stdout
+Текст модуля, целиком, по строкам или одна процедура
+
+Usage: yellowcode module show [OPTIONS] <SOURCE> <MODULE>
+
+Arguments:
+  <SOURCE>  Конфигурация: CF, DT, файл 1Cv8.1CD или каталог базы
+  <MODULE>  Путь модуля из `module list` или объект с единственным модулем, например Справочник.Пользователи.МодульОбъекта
+
+Options:
+      --memory-limit <MEMORY_LIMIT>  Бюджет памяти на чтение конфигурации из DT; память самой модели расходуется сверх него
+      --platform-build <BUILD>       Точная версия эмулируемой платформы (не режим совместимости конфигурации) [default: 8.5.1.1529]
+      --lines <A:B>                  Только строки с A по B (с единицы); `A:` — до конца модуля
+      --procedure <ИМЯ>              Только процедура или функция с этим именем, с комментариями и директивами над ней
+  -n, --line-numbers                 Начинать каждую строку с её номера в модуле
+      --format <FORMAT>              Формат вывода [default: text] [possible values: json, text]
+  -h, --help                         Print help
+
+Примеры:
+  # Модули справочников подсистемы «Пользователи»
+  yellowcode module list configuration.cf --kind Справочник --subsystem СтандартныеПодсистемы.Пользователи
+
+  # Модуль объекта справочника
+  yellowcode module show configuration.cf Справочник.Пользователи.МодульОбъекта
+
+  # Одна процедура с номерами строк
+  yellowcode module show configuration.cf Справочник.Пользователи.МодульОбъекта --procedure ПередЗаписью -n
+
+  # Строки 100–160 модуля формы
+  yellowcode module show configuration.cf Справочник.Пользователи.Форма.ФормаЭлемента.МодульФормы --lines 100:160
+
+  # Процедуры и функции общего модуля
+  yellowcode module outline configuration.cf ОбщийМодуль.Пользователи
+--- stderr

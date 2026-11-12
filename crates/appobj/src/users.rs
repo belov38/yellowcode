@@ -156,6 +156,24 @@ fn anonymous_uuid() -> crate::model::Uuid16 {
     evlog::UserRef::nobody().uuid
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum UserValue {
+    Anonymous,
+    OfSessionWithUsers,
+    Restored,
+}
+
+pub(crate) fn user_value(v: &Value) -> Option<UserValue> {
+    let user = v.as_object()?.as_any().downcast_ref::<InfoBaseUser>()?;
+    Some(if user.app.is_none() {
+        UserValue::Restored
+    } else if user.user.no_users {
+        UserValue::Anonymous
+    } else {
+        UserValue::OfSessionWithUsers
+    })
+}
+
 struct InfoBaseUser {
     types: Types,
     app: Option<Arc<Application>>,

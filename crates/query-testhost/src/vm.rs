@@ -6,7 +6,7 @@ use bsl_vm::{
 use ibschema::storage::{StorageMap, TableId};
 use query_exec::{DataSource, ExecEnv, ExecHost};
 use query_ir::host::{AccessPolicy, PredefinedName, PresentationInput, SessionValues};
-use query_ir::{BindHost, QStr, QValue, QuerySchema, StorageBinding, TxnId};
+use query_ir::{BindHost, QStr, QValue, StorageBinding, TxnId};
 use query_syntax::Lang;
 use std::{
     any::Any,
@@ -161,7 +161,7 @@ impl query::QueryHost for VmHost<'_> {
         }
         Ok(())
     }
-    fn schema(&self) -> &Arc<QuerySchema> {
+    fn schema(&self) -> &query_ir::schema::SchemaOwner {
         &self.base.schema
     }
     fn storage(&self) -> &StorageBinding {

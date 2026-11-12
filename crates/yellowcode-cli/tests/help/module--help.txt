@@ -1,0 +1,32 @@
+exit 0
+--- stdout
+Модули: список, текст, процедуры и функции
+
+Usage: yellowcode module [OPTIONS] <COMMAND>
+
+Commands:
+  list     Список модулей конфигурации, по одному пути на строку
+  show     Текст модуля, целиком, по строкам или одна процедура
+  outline  Процедуры и функции модуля с номерами строк
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+      --platform-build <BUILD>  Точная версия эмулируемой платформы (не режим совместимости конфигурации) [default: 8.5.1.1529]
+  -h, --help                    Print help
+
+Примеры:
+  # Модули справочников подсистемы «Пользователи»
+  yellowcode module list configuration.cf --kind Справочник --subsystem СтандартныеПодсистемы.Пользователи
+
+  # Модуль объекта справочника
+  yellowcode module show configuration.cf Справочник.Пользователи.МодульОбъекта
+
+  # Одна процедура с номерами строк
+  yellowcode module show configuration.cf Справочник.Пользователи.МодульОбъекта --procedure ПередЗаписью -n
+
+  # Строки 100–160 модуля формы
+  yellowcode module show configuration.cf Справочник.Пользователи.Форма.ФормаЭлемента.МодульФормы --lines 100:160
+
+  # Процедуры и функции общего модуля
+  yellowcode module outline configuration.cf ОбщийМодуль.Пользователи
+--- stderr

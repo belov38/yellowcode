@@ -17,10 +17,15 @@ use std::{
 mod bak;
 mod bak_report;
 mod convert;
+mod export;
+mod grep;
 mod metadata;
+mod module;
 mod query;
+mod scope;
 mod serve;
 mod table;
+mod template;
 mod users;
 
 pub const VERSION: &str = yellowcode_core::VERSION;
@@ -71,7 +76,8 @@ pub fn is_cli(args: &[OsString]) -> bool {
             gui_has_cli_flag(args.get(1..).unwrap_or(&[]))
         }
         "open" => gui_has_cli_flag(args.get(2..).unwrap_or(&[])),
-        "help" | "metadata" | "convert" | "bak" | "query" | "serve" | "table" | "users" => true,
+        "help" | "metadata" | "module" | "template" | "grep" | "export" | "convert" | "bak"
+        | "query" | "serve" | "table" | "users" => true,
         flag if flag.starts_with('-') => true,
         _ => {
             let path = std::path::Path::new(arg);
@@ -155,6 +161,24 @@ enum Command {
         after_help = metadata::EXAMPLES
     )]
     Metadata(metadata::Command),
+    #[command(
+        subcommand,
+        about = "Модули: список, текст, процедуры и функции",
+        after_help = module::EXAMPLES
+    )]
+    Module(module::Command),
+    #[command(
+        subcommand,
+        about = "Макеты: список, содержимое, запросы схем компоновки данных",
+        after_help = template::EXAMPLES
+    )]
+    Template(template::Command),
+    #[command(
+        about = "Поиск в текстах модулей, запросах схем компоновки данных и именах объектов, как grep"
+    )]
+    Grep(grep::Args),
+    #[command(about = "Выгрузить модули и макеты выбранной части конфигурации в каталог")]
+    Export(export::Args),
 }
 
 #[derive(clap::Args)]
@@ -261,10 +285,15 @@ pub fn run(
             return 2;
         }
     };
+    let grep_command = matches!(cli.command, Some(Command::Grep(_)));
     let result = match cli.command {
         Some(Command::Bak(command)) => bak::run(command, &mut output, err).map(|()| 0),
         Some(Command::Users(command)) => users::run(command, &mut output, tty).map(|()| 0),
         Some(Command::Metadata(command)) => metadata::run(command, &mut output).map(|()| 0),
+        Some(Command::Module(command)) => module::run(command, &mut output).map(|()| 0),
+        Some(Command::Template(command)) => template::run(command, &mut output, err).map(|()| 0),
+        Some(Command::Grep(args)) => grep::run(args, &mut output, err),
+        Some(Command::Export(args)) => export::run(args, &mut output, err).map(|()| 0),
         Some(Command::Convert(args)) => convert::run(args, &mut output, err),
         Some(Command::Open(_)) => Err("open requires the installed desktop executable".into()),
         Some(Command::Query(args)) => query::run(args, input, &mut output, err, tty),
@@ -297,9 +326,10 @@ pub fn run(
                     *slot = Some(interrupt);
                 }
                 interrupt.exit_code()
-            } else if error
-                .downcast_ref::<memory_budget::policy::ConfigError>()
-                .is_some()
+            } else if grep_command
+                || error
+                    .downcast_ref::<memory_budget::policy::ConfigError>()
+                    .is_some()
             {
                 2
             } else {

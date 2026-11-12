@@ -20,7 +20,7 @@ pub fn write_sql_table<W: Write>(
     input: impl Read,
     year_offset: i32,
 ) -> Result<u64, Error> {
-    write_inner(writer, head, input, year_offset, None, Framing::Array)
+    write_inner::<_, std::io::Empty>(writer, head, input, year_offset, None, Framing::Array)
 }
 
 pub fn write_framed_sql_table<W: Write>(
@@ -29,7 +29,7 @@ pub fn write_framed_sql_table<W: Write>(
     input: impl Read,
     year_offset: i32,
 ) -> Result<u64, Error> {
-    write_inner(writer, head, input, year_offset, None, Framing::Rows)
+    write_inner::<_, std::io::Empty>(writer, head, input, year_offset, None, Framing::Rows)
 }
 
 pub fn write_sql_table_with_resolver<W: Write>(
@@ -41,7 +41,7 @@ pub fn write_sql_table_with_resolver<W: Write>(
         &crate::sql_blob::StorageRef,
     ) -> Result<Vec<crate::sql_blob::BlobPart>, String>,
 ) -> Result<u64, Error> {
-    write_inner(
+    write_inner::<_, std::io::Empty>(
         writer,
         head,
         input,
@@ -60,7 +60,7 @@ pub fn write_framed_sql_table_with_resolver<W: Write>(
         &crate::sql_blob::StorageRef,
     ) -> Result<Vec<crate::sql_blob::BlobPart>, String>,
 ) -> Result<u64, Error> {
-    write_inner(
+    write_inner::<_, std::io::Empty>(
         writer,
         head,
         input,
@@ -70,21 +70,41 @@ pub fn write_framed_sql_table_with_resolver<W: Write>(
     )
 }
 
-enum Framing {
+pub fn write_sql_section_with_resolver<W: Write, R: Read>(
+    writer: &mut DtWriter<W>,
+    head: &TableHead,
+    frames: &mut crate::sql_rows::Frames<R>,
+    year_offset: i32,
+    mut resolver: impl FnMut(
+        &crate::sql_blob::StorageRef,
+    ) -> Result<Vec<crate::sql_blob::BlobPart>, String>,
+) -> Result<u64, Error> {
+    write_inner(
+        writer,
+        head,
+        std::io::empty(),
+        year_offset,
+        Some(&mut resolver),
+        Framing::Section(frames),
+    )
+}
+
+enum Framing<'a, R: Read> {
     Array,
     Rows,
+    Section(&'a mut crate::sql_rows::Frames<R>),
 }
 
 type Resolver<'a> =
     dyn FnMut(&crate::sql_blob::StorageRef) -> Result<Vec<crate::sql_blob::BlobPart>, String> + 'a;
 
-fn write_inner<W: Write>(
+fn write_inner<W: Write, R: Read>(
     writer: &mut DtWriter<W>,
     head: &TableHead,
     input: impl Read,
     year_offset: i32,
     mut resolver: Option<&mut Resolver<'_>>,
-    framing: Framing,
+    framing: Framing<'_, R>,
 ) -> Result<u64, Error> {
     if head.source != Source::DataBase {
         return Err(Error::Unsupported("expected DataBase table"));
@@ -114,6 +134,9 @@ fn write_inner<W: Write>(
     match framing {
         Framing::Array => crate::sql_rows::read_rows(input, MAX_ROW_BYTES, &mut consume)?,
         Framing::Rows => crate::sql_rows::read_framed_rows(input, MAX_ROW_BYTES, &mut consume)?,
+        Framing::Section(frames) => {
+            frames.rows(MAX_ROW_BYTES, &mut consume)?;
+        }
     }
     writer.end_table()?;
     Ok(count)

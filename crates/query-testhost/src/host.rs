@@ -24,7 +24,7 @@ pub struct TestBase {
     pub(crate) store: Arc<dyn Store>,
     pub(crate) map: Arc<StorageMap>,
     pub schema_notes: Vec<String>,
-    pub(crate) schema: Arc<QuerySchema>,
+    pub(crate) schema: query_ir::schema::SchemaOwner,
     pub(crate) storage: StorageBinding,
     pub(crate) collation: Arc<dyn Collation>,
     pub(crate) collation_locale: BaseLocale,
@@ -158,7 +158,7 @@ impl TestBase {
             store,
             map,
             schema_notes,
-            schema,
+            schema: query_ir::schema::SchemaOwner::from_legacy(schema),
             storage,
             collation: Arc::new(bsl_prim::IcuCollation::new(collation_locale.as_str())),
             collation_locale,
@@ -197,7 +197,7 @@ impl TestBase {
             store: Arc::new(ibschema::store::mem::MemStore::new(Arc::clone(&self.map))),
             map: Arc::clone(&self.map),
             schema_notes: self.schema_notes.clone(),
-            schema: Arc::clone(&self.schema),
+            schema: self.schema.clone(),
             storage: self.storage.clone(),
             collation: Arc::clone(&self.collation),
             collation_locale: self.collation_locale,
@@ -377,7 +377,7 @@ impl TestBase {
         v
     }
 
-    pub fn schema(&self) -> &Arc<QuerySchema> {
+    pub fn schema(&self) -> &query_ir::schema::SchemaOwner {
         &self.schema
     }
 
@@ -669,6 +669,31 @@ pub fn try_base_in_reporting(
         );
     }
     Ok(Some(base))
+}
+
+pub fn try_legacy_schema(name: &str) -> Result<Option<Arc<QuerySchema>>, String> {
+    let Some(bases) = bases_dir() else {
+        eprintln!("SKIP: QUERY_BASES is not set");
+        return Ok(None);
+    };
+    if let Some(reason) = absent_base(&bases, name) {
+        eprintln!("SKIP: {reason}");
+        return Ok(None);
+    }
+    let dir = bases.join(name);
+    let opts = OpenOptions {
+        locking: Locking::None,
+        schema_check: SchemaCheck::Warn,
+        load_profile: LoadProfile::Full,
+        ..OpenOptions::mode(OpenMode::ReadOnly)
+    };
+    let ib = Infobase::open(&dir, opts).map_err(|e| format!("open {}: {e}", dir.display()))?;
+    let cfg = ib
+        .configuration()
+        .ok_or_else(|| format!("{}: no configuration", dir.display()))?;
+    QuerySchema::build(&cfg, platform_catalog::catalog())
+        .map(Some)
+        .map_err(|e| format!("query schema: {e:?}"))
 }
 
 pub fn base(name: &str) -> Option<TestBase> {

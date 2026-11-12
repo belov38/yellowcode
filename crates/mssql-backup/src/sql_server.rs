@@ -88,7 +88,7 @@ const CLEANUP_WAIT_SECONDS: u32 = 30;
 
 const CHECK_OWNERSHIP: &str = r#"
 DECLARE @owned bit=0, @check nvarchar(max);
-SET @check=N'USE '+QUOTENAME(@db)+N'; SELECT @owned=CASE WHEN EXISTS (SELECT 1 FROM sys.extended_properties WHERE class=0 AND major_id=0 AND minor_id=0 AND name=N''yellowcode.bak.token'' AND DATALENGTH(CONVERT(nvarchar(128),value))=DATALENGTH(@token) AND CONVERT(varbinary(256),CONVERT(nvarchar(128),value))=CONVERT(varbinary(64),@token)) THEN 1 ELSE 0 END';
+SET @check=CONVERT(nvarchar(max),N'USE ')+QUOTENAME(@db)+N'; SELECT @owned=CASE WHEN EXISTS (SELECT 1 FROM sys.extended_properties WHERE class=0 AND major_id=0 AND minor_id=0 AND name=N''yellowcode.bak.token'' AND DATALENGTH(CONVERT(nvarchar(128),value))=DATALENGTH(@token) AND CONVERT(varbinary(256),CONVERT(nvarchar(128),value))=CONVERT(varbinary(64),@token)) THEN 1 ELSE 0 END';
 EXEC sys.sp_executesql @check,N'@token nvarchar(32), @owned bit OUTPUT',@token=@token,@owned=@owned OUTPUT;
 IF @owned<>1 THROW 51000,'temporary database ownership mismatch',1;
 "#;
@@ -100,11 +100,35 @@ fn valid_table_name(table: &str) -> bool {
         && !table.chars().any(char::is_control)
 }
 
+pub const SCRIPT_LINE_LIMIT: usize = 4000;
+
+pub fn lines_fit(script: &str) -> bool {
+    script
+        .lines()
+        .all(|line| line.chars().count() <= SCRIPT_LINE_LIMIT)
+}
+
+fn checked(script: String) -> String {
+    debug_assert!(
+        lines_fit(&script),
+        "a script line is longer than {SCRIPT_LINE_LIMIT} characters"
+    );
+    script
+}
+
 const HEX_UNITS_PER_LINE: usize = 500;
 
 fn backup_expression(path: &str) -> String {
     if path.is_ascii() {
-        return format!("N'{}'", path.replace('\'', "''"));
+        let lines: Vec<String> = path
+            .as_bytes()
+            .chunks(HEX_UNITS_PER_LINE)
+            .map(|line| {
+                let line: String = line.iter().copied().map(char::from).collect();
+                format!("N'{}'", line.replace('\'', "''"))
+            })
+            .collect();
+        return lines.join("\n+");
     }
     let units: Vec<u16> = path.encode_utf16().collect();
     let lines: Vec<String> = units
@@ -123,24 +147,24 @@ fn backup_expression(path: &str) -> String {
 
 impl SqlPlan {
     pub fn legacy_schema_script(&self) -> String {
-        format!(
+        checked(format!(
             r#"{}IF DB_ID(@db) IS NULL THROW 51000,'temporary database missing',1;
 {}
 IF DATABASEPROPERTYEX(@db,'Updateability')<>'READ_ONLY' THROW 51000,'temporary database is not read-only',1;
-DECLARE @query nvarchar(max)=N'USE '+QUOTENAME(@db)+N'; SELECT ''0x''+CONVERT(varchar(max),CONVERT(varbinary(max),[SerializedData]),2) AS [schema], (SELECT [Offset] FROM dbo._YearOffset) AS [year_offset] FROM dbo.DBSCHEMA FOR JSON PATH, INCLUDE_NULL_VALUES';
+DECLARE @query nvarchar(max)=CONVERT(nvarchar(max),N'USE ')+QUOTENAME(@db)+N'; SELECT ''0x''+CONVERT(varchar(max),CONVERT(varbinary(max),[SerializedData]),2) AS [schema], (SELECT [Offset] FROM dbo._YearOffset) AS [year_offset] FROM dbo.DBSCHEMA FOR JSON PATH, INCLUDE_NULL_VALUES';
 EXEC(@query);
 GO
 "#,
             self.declarations(),
             CHECK_OWNERSHIP
-        )
+        ))
     }
     pub fn legacy_support_script(&self) -> String {
-        format!(
+        checked(format!(
             r#"{}IF DB_ID(@db) IS NULL THROW 51000,'temporary database missing',1;
 {}
 IF DATABASEPROPERTYEX(@db,'Updateability')<>'READ_ONLY' THROW 51000,'temporary database is not read-only',1;
-DECLARE @query nvarchar(max)=N'USE '+QUOTENAME(@db)+N';
+DECLARE @query nvarchar(max)=CONVERT(nvarchar(max),N'USE ')+QUOTENAME(@db)+N';
 IF EXISTS(SELECT 1 FROM sys.tables t JOIN sys.schemas s ON s.schema_id=t.schema_id WHERE s.name=N''dbo'' AND t.name COLLATE Latin1_General_100_CI_AS IN (N''BinaryData'',N''BinaryDataStorageContent'',N''BinaryDataStorageVersion'',N''ExternalBinDataStrgsBList'',N''ExternalBinDataStrgsList'',N''V8CMSDPWDS'',N''V8USERPWDPLCS'',N''V8USERSMATKEYS'')) THROW 51000,''legacy profile has unexpected modern system table'',1;
 SELECT
 CASE WHEN EXISTS(SELECT 1 FROM dbo.V8USERS) THEN 1 ELSE 0 END AS [users],
@@ -156,25 +180,25 @@ GO
 "#,
             self.declarations(),
             CHECK_OWNERSHIP
-        )
+        ))
     }
     pub fn extra_table_presence_script(&self, table: &str) -> Result<String, Error> {
         if !valid_table_name(table) {
             return Err(Error::InvalidTable("invalid table name"));
         }
         let table = format!("[{}]", table.replace(']', "]]")).replace('\'', "''");
-        Ok(format!(
+        Ok(checked(format!(
             r#"{}IF DB_ID(@db) IS NULL THROW 51000,'temporary database missing',1;
 {}
 IF DATABASEPROPERTYEX(@db,'Updateability')<>'READ_ONLY' THROW 51000,'temporary database is not read-only',1;
-DECLARE @query nvarchar(max)=N'USE '+QUOTENAME(@db)+N'; SELECT CASE WHEN EXISTS(SELECT 1 FROM dbo.{}) THEN 1 ELSE 0 END AS [nonempty] FOR JSON PATH, WITHOUT_ARRAY_WRAPPER';
+DECLARE @query nvarchar(max)=CONVERT(nvarchar(max),N'USE ')+QUOTENAME(@db)+N'; SELECT CASE WHEN EXISTS(SELECT 1 FROM dbo.{}) THEN 1 ELSE 0 END AS [nonempty] FOR JSON PATH, WITHOUT_ARRAY_WRAPPER';
 EXEC(@query);
 GO
 "#,
             self.declarations(),
             CHECK_OWNERSHIP,
             table
-        ))
+        )))
     }
     pub fn new(backup: &str, token: &str) -> Result<Self, Error> {
         Self::new_with_backup_set(backup, token, 1)
@@ -243,17 +267,17 @@ GO
 
     #[doc(hidden)]
     pub fn decision_probe_script(&self, fabricated_rows: &str) -> String {
-        format!(
+        checked(format!(
             "{}SET @shape=22;\n{fabricated_rows}\n{}IF @refuse IS NULL BEGIN\n{FILES_DECISION}END;\nSELECT COALESCE(@refuse,'ok');\nGO\n",
             self.inspection_tables(),
             self.header_decision()
-        )
+        ))
     }
 
     pub fn restore_script(&self) -> String {
         let backup = backup_expression(&self.backup);
         let backup_set = self.backup_set;
-        format!(
+        checked(format!(
             r#"SET NOCOUNT ON;
 IF ISNULL(IS_SRVROLEMEMBER(N'sysadmin'),0)<>1 BEGIN SELECT 'YC_BAK_REFUSED:not_sysadmin'; RETURN; END;
 {tables}SELECT 'YC_BAK_INSPECTING';
@@ -283,7 +307,7 @@ SELECT 'YC_BAK_RESTORING';
 RESTORE DATABASE @db FROM DISK=@backup WITH FILE={backup_set}, MOVE @data TO @df, MOVE @log TO @lf, RECOVERY;
 IF DATABASEPROPERTYEX(@db,'Status')<>'ONLINE' THROW 51000,'restored database is not online',1;
 IF DATABASEPROPERTYEX(@db,'Updateability')='READ_ONLY' BEGIN SET @query=N'ALTER DATABASE '+QUOTENAME(@db)+N' SET READ_WRITE'; EXEC(@query); END;
-SET @query=N'USE '+QUOTENAME(@db)+N'; IF EXISTS(SELECT 1 FROM sys.extended_properties WHERE class=0 AND major_id=0 AND minor_id=0 AND name=N''yellowcode.bak.token'') EXEC sys.sp_updateextendedproperty @name=N''yellowcode.bak.token'',@value=@token ELSE EXEC sys.sp_addextendedproperty @name=N''yellowcode.bak.token'',@value=@token';
+SET @query=CONVERT(nvarchar(max),N'USE ')+QUOTENAME(@db)+N'; IF EXISTS(SELECT 1 FROM sys.extended_properties WHERE class=0 AND major_id=0 AND minor_id=0 AND name=N''yellowcode.bak.token'') EXEC sys.sp_updateextendedproperty @name=N''yellowcode.bak.token'',@value=@token ELSE EXEC sys.sp_addextendedproperty @name=N''yellowcode.bak.token'',@value=@token';
 EXEC sys.sp_executesql @query,N'@token nvarchar(32)',@token=@token;
 SET @query=N'ALTER DATABASE '+QUOTENAME(@db)+N' SET READ_ONLY'; EXEC(@query);
 SELECT 'YC_BAK_READY';
@@ -291,85 +315,85 @@ GO
 "#,
             tables = self.inspection_tables(),
             header_decision = self.header_decision()
-        )
+        ))
     }
 
     pub fn year_offset_script(&self) -> String {
-        format!(
+        checked(format!(
             r#"{}IF DB_ID(@db) IS NULL THROW 51000,'temporary database missing',1;
 {}
 IF DATABASEPROPERTYEX(@db,'Updateability')<>'READ_ONLY' THROW 51000,'temporary database is not read-only',1;
-DECLARE @query nvarchar(max)=N'USE '+QUOTENAME(@db)+N'; SELECT COUNT_BIG(*) AS [rows], MIN(CONVERT(int,[Offset])) AS [year_offset] FROM dbo._YearOffset FOR JSON PATH, WITHOUT_ARRAY_WRAPPER, INCLUDE_NULL_VALUES';
+DECLARE @query nvarchar(max)=CONVERT(nvarchar(max),N'USE ')+QUOTENAME(@db)+N'; SELECT COUNT_BIG(*) AS [rows], MIN(CONVERT(int,[Offset])) AS [year_offset] FROM dbo._YearOffset FOR JSON PATH, WITHOUT_ARRAY_WRAPPER, INCLUDE_NULL_VALUES';
 EXEC(@query);
 GO
 "#,
             self.declarations(),
             CHECK_OWNERSHIP
-        )
+        ))
     }
 
     pub fn framed_config_script(&self) -> String {
-        format!(
+        checked(format!(
             r#"{}IF DB_ID(@db) IS NULL THROW 51000,'temporary database missing',1;
 {}
 IF DATABASEPROPERTYEX(@db,'Updateability')<>'READ_ONLY' THROW 51000,'temporary database is not read-only',1;
-DECLARE @query nvarchar(max)=N'USE '+QUOTENAME(@db)+N'; SELECT N''YC_ROWS_BEGIN''; SELECT N''R''+(SELECT N''0x''+CONVERT(varchar(max),CONVERT(varbinary(max),CONVERT(nvarchar(max),FileName)),2) AS [name], CONVERT(varchar(33),Creation,126) AS [creation], CONVERT(varchar(33),Modified,126) AS [modified], CONVERT(bigint,Attributes) AS [attributes], CONVERT(bigint,PartNo) AS [part_no], CONVERT(bigint,DataSize) AS [data_size], CONVERT(bigint,DATALENGTH(BinaryData)) AS [stored_size], CONVERT(varbinary(max),BinaryData) AS [data] FOR JSON PATH, WITHOUT_ARRAY_WRAPPER, INCLUDE_NULL_VALUES) FROM dbo.CONFIG ORDER BY FileName COLLATE Latin1_General_100_BIN2,PartNo; SELECT N''YC_ROWS_END:''+CONVERT(nvarchar(20),COUNT_BIG(*)) FROM dbo.CONFIG';
+DECLARE @query nvarchar(max)=CONVERT(nvarchar(max),N'USE ')+QUOTENAME(@db)+N'; SELECT N''YC_ROWS_BEGIN''; SELECT N''R''+(SELECT N''0x''+CONVERT(varchar(max),CONVERT(varbinary(max),CONVERT(nvarchar(max),FileName)),2) AS [name], CONVERT(varchar(33),Creation,126) AS [creation], CONVERT(varchar(33),Modified,126) AS [modified], CONVERT(bigint,Attributes) AS [attributes], CONVERT(bigint,PartNo) AS [part_no], CONVERT(bigint,DataSize) AS [data_size], CONVERT(bigint,DATALENGTH(BinaryData)) AS [stored_size], CONVERT(varbinary(max),BinaryData) AS [data] FOR JSON PATH, WITHOUT_ARRAY_WRAPPER, INCLUDE_NULL_VALUES) FROM dbo.CONFIG ORDER BY FileName COLLATE Latin1_General_100_BIN2,PartNo; SELECT N''YC_ROWS_END:''+CONVERT(nvarchar(20),COUNT_BIG(*)) FROM dbo.CONFIG';
 EXEC(@query);
 GO
 "#,
             self.declarations(),
             CHECK_OWNERSHIP
-        )
+        ))
     }
 
     pub fn export_script(&self) -> String {
-        format!(
+        checked(format!(
             r#"{}IF DB_ID(@db) IS NULL THROW 51000,'temporary database missing',1;
 {}
 IF DATABASEPROPERTYEX(@db,'Updateability')<>'READ_ONLY' THROW 51000,'temporary database is not read-only',1;
-DECLARE @query nvarchar(max)=N'USE '+QUOTENAME(@db)+N'; SELECT (SELECT [Offset] FROM dbo._YearOffset) AS [year_offset], JSON_QUERY((SELECT FileName AS [name], CONVERT(varchar(33),Creation,126) AS [creation], CONVERT(varchar(33),Modified,126) AS [modified], CONVERT(bigint,Attributes) AS [attributes], CONVERT(bigint,PartNo) AS [part_no], CONVERT(bigint,DataSize) AS [data_size], CONVERT(bigint,DATALENGTH(BinaryData)) AS [stored_size], CONVERT(varbinary(max),BinaryData) AS [data] FROM dbo.CONFIG FOR JSON PATH, INCLUDE_NULL_VALUES)) AS [rows] FOR JSON PATH, WITHOUT_ARRAY_WRAPPER, INCLUDE_NULL_VALUES';
+DECLARE @query nvarchar(max)=CONVERT(nvarchar(max),N'USE ')+QUOTENAME(@db)+N'; SELECT (SELECT [Offset] FROM dbo._YearOffset) AS [year_offset], JSON_QUERY((SELECT FileName AS [name], CONVERT(varchar(33),Creation,126) AS [creation], CONVERT(varchar(33),Modified,126) AS [modified], CONVERT(bigint,Attributes) AS [attributes], CONVERT(bigint,PartNo) AS [part_no], CONVERT(bigint,DataSize) AS [data_size], CONVERT(bigint,DATALENGTH(BinaryData)) AS [stored_size], CONVERT(varbinary(max),BinaryData) AS [data] FROM dbo.CONFIG FOR JSON PATH, INCLUDE_NULL_VALUES)) AS [rows] FOR JSON PATH, WITHOUT_ARRAY_WRAPPER, INCLUDE_NULL_VALUES';
 EXEC(@query);
 GO
 "#,
             self.declarations(),
             CHECK_OWNERSHIP
-        )
+        ))
     }
 
     pub fn schema_script(&self) -> String {
-        format!(
+        checked(format!(
             r#"{}IF DB_ID(@db) IS NULL THROW 51000,'temporary database missing',1;
 {}
 IF DATABASEPROPERTYEX(@db,'Updateability')<>'READ_ONLY' THROW 51000,'temporary database is not read-only',1;
-DECLARE @query nvarchar(max)=N'USE '+QUOTENAME(@db)+N'; SELECT ''0x''+CONVERT(varchar(max),[SerializedData],2) AS [schema], (SELECT [Offset] FROM dbo._YearOffset) AS [year_offset] FROM dbo.DBSCHEMA FOR JSON PATH, INCLUDE_NULL_VALUES';
+DECLARE @query nvarchar(max)=CONVERT(nvarchar(max),N'USE ')+QUOTENAME(@db)+N'; SELECT ''0x''+CONVERT(varchar(max),[SerializedData],2) AS [schema], (SELECT [Offset] FROM dbo._YearOffset) AS [year_offset] FROM dbo.DBSCHEMA FOR JSON PATH, INCLUDE_NULL_VALUES';
 EXEC(@query);
 GO
 "#,
             self.declarations(),
             CHECK_OWNERSHIP
-        )
+        ))
     }
 
     pub fn inventory_script(&self) -> String {
-        format!(
+        checked(format!(
             r#"{}IF DB_ID(@db) IS NULL THROW 51000,'temporary database missing',1;
 {}
 IF DATABASEPROPERTYEX(@db,'Updateability')<>'READ_ONLY' THROW 51000,'temporary database is not read-only',1;
-DECLARE @query nvarchar(max)=N'USE '+QUOTENAME(@db)+N'; SELECT s.name AS [schema],t.name AS [name] FROM sys.tables t JOIN sys.schemas s ON s.schema_id=t.schema_id ORDER BY s.name,t.name FOR JSON PATH, INCLUDE_NULL_VALUES';
+DECLARE @query nvarchar(max)=CONVERT(nvarchar(max),N'USE ')+QUOTENAME(@db)+N'; SELECT s.name AS [schema],t.name AS [name] FROM sys.tables t JOIN sys.schemas s ON s.schema_id=t.schema_id ORDER BY s.name,t.name FOR JSON PATH, INCLUDE_NULL_VALUES';
 EXEC(@query);
 GO
 "#,
             self.declarations(),
             CHECK_OWNERSHIP
-        )
+        ))
     }
 
     pub fn support_script(&self) -> String {
-        format!(
+        checked(format!(
             r#"{}IF DB_ID(@db) IS NULL THROW 51000,'temporary database missing',1;
 {}
 IF DATABASEPROPERTYEX(@db,'Updateability')<>'READ_ONLY' THROW 51000,'temporary database is not read-only',1;
-DECLARE @query nvarchar(max)=N'USE '+QUOTENAME(@db)+N'; SELECT
+DECLARE @query nvarchar(max)=CONVERT(nvarchar(max),N'USE ')+QUOTENAME(@db)+N'; SELECT
 CASE WHEN EXISTS(SELECT 1 FROM dbo.V8USERS) THEN 1 ELSE 0 END AS [users],
 CASE WHEN EXISTS(SELECT 1 FROM dbo.Params WHERE FileName COLLATE Latin1_General_100_CI_AS=N''users.usr'') THEN 1 ELSE 0 END AS [legacy_users],
 CASE WHEN EXISTS(SELECT 1 FROM dbo.V8USERPWDPLCS) THEN 1 ELSE 0 END AS [policies],
@@ -382,14 +406,17 @@ CASE WHEN EXISTS(SELECT 1 FROM dbo.ExternalBinDataStrgsBList) THEN 1 ELSE 0 END 
 CASE WHEN EXISTS(SELECT 1 FROM dbo.ConfigCAS) THEN 1 ELSE 0 END AS [config_cas],
 CASE WHEN EXISTS(SELECT 1 FROM dbo.ConfigCASSave) THEN 1 ELSE 0 END AS [config_cas_save],
 CASE WHEN (SELECT COUNT_BIG(*) FROM dbo.SchemaStorage)=1 AND (SELECT COUNT_BIG(*) FROM dbo.DBSchema)=1 AND EXISTS(SELECT 1 FROM dbo.SchemaStorage s CROSS JOIN dbo.DBSchema d WHERE s.SchemaID=0 AND s.Status=100 AND DATALENGTH(s.CurrentSchema)=DATALENGTH(d.SerializedData) AND s.CurrentSchema=d.SerializedData AND DATALENGTH(s.NewGenCreated)=14 AND s.NewGenCreated=0xEFBBBF7B302C0D0A7B307D0D0A7D AND DATALENGTH(s.NewGenDropped)=14 AND s.NewGenDropped=0xEFBBBF7B302C0D0A7B307D0D0A7D) THEN 0 ELSE 1 END AS [schema_unstable],
-CASE WHEN (SELECT COUNT_BIG(*) FROM dbo.IBVersion)=1 AND EXISTS(SELECT 1 FROM dbo.IBVersion WHERE IBVersion=7 AND PlatformVersionReq=80313) THEN 0 ELSE 1 END AS [version_unverified]
+CASE WHEN (SELECT COUNT_BIG(*) FROM dbo.IBVersion)=1 AND EXISTS(SELECT 1 FROM dbo.IBVersion WHERE IBVersion=7 AND PlatformVersionReq=80313) THEN 0 ELSE 1 END AS [version_unverified],
+(SELECT COUNT_BIG(*) FROM dbo.IBVersion) AS [ib_version_rows],
+(SELECT TOP (1) CONVERT(bigint,IBVersion) FROM dbo.IBVersion ORDER BY IBVersion,PlatformVersionReq) AS [ib_version],
+(SELECT TOP (1) CONVERT(bigint,PlatformVersionReq) FROM dbo.IBVersion ORDER BY IBVersion,PlatformVersionReq) AS [platform_version_req]
 FOR JSON PATH, WITHOUT_ARRAY_WRAPPER, INCLUDE_NULL_VALUES';
 EXEC(@query);
 GO
 "#,
             self.declarations(),
             CHECK_OWNERSHIP
-        )
+        ))
     }
 
     pub fn catalog_script(&self, table: &str) -> Result<String, Error> {
@@ -397,47 +424,47 @@ GO
             return Err(Error::InvalidTable("invalid table name"));
         }
         let table = table.replace('\'', "''");
-        Ok(format!(
+        Ok(checked(format!(
             r#"{}DECLARE @table nvarchar(128)=N'{}';
 IF DB_ID(@db) IS NULL THROW 51000,'temporary database missing',1;
 {}
 IF DATABASEPROPERTYEX(@db,'Updateability')<>'READ_ONLY' THROW 51000,'temporary database is not read-only',1;
-DECLARE @query nvarchar(max)=N'USE '+QUOTENAME(@db)+N'; SELECT c.name AS [column_name], ty.name AS [sql_type], c.max_length, c.precision, c.scale, c.is_nullable FROM sys.tables t JOIN sys.schemas s ON s.schema_id=t.schema_id JOIN sys.columns c ON c.object_id=t.object_id JOIN sys.types ty ON ty.user_type_id=c.user_type_id WHERE s.name=N''dbo'' AND t.name=@table ORDER BY c.column_id FOR JSON PATH, INCLUDE_NULL_VALUES';
+DECLARE @query nvarchar(max)=CONVERT(nvarchar(max),N'USE ')+QUOTENAME(@db)+N'; SELECT c.name AS [column_name], ty.name AS [sql_type], c.max_length, c.precision, c.scale, c.is_nullable FROM sys.tables t JOIN sys.schemas s ON s.schema_id=t.schema_id JOIN sys.columns c ON c.object_id=t.object_id JOIN sys.types ty ON ty.user_type_id=c.user_type_id WHERE s.name=N''dbo'' AND t.name=@table ORDER BY c.column_id FOR JSON PATH, INCLUDE_NULL_VALUES';
 EXEC sys.sp_executesql @query,N'@table nvarchar(128)',@table=@table;
 GO
 "#,
             self.declarations(),
             table,
             CHECK_OWNERSHIP
-        ))
+        )))
     }
 
     pub fn blob_count_script(&self) -> String {
-        format!(
+        checked(format!(
             r#"{}IF DB_ID(@db) IS NULL THROW 51000,'temporary database missing',1;
 {}
 IF DATABASEPROPERTYEX(@db,'Updateability')<>'READ_ONLY' THROW 51000,'temporary database is not read-only',1;
-DECLARE @query nvarchar(max)=N'USE '+QUOTENAME(@db)+N'; SELECT COUNT_BIG(*) AS [rows] FROM dbo.BINARYDATA FOR JSON PATH, WITHOUT_ARRAY_WRAPPER';
+DECLARE @query nvarchar(max)=CONVERT(nvarchar(max),N'USE ')+QUOTENAME(@db)+N'; SELECT COUNT_BIG(*) AS [rows] FROM dbo.BINARYDATA FOR JSON PATH, WITHOUT_ARRAY_WRAPPER';
 EXEC(@query);
 GO
 "#,
             self.declarations(),
             CHECK_OWNERSHIP
-        )
+        ))
     }
 
     pub fn users_email_script(&self) -> String {
-        format!(
+        checked(format!(
             r#"{}IF DB_ID(@db) IS NULL THROW 51000,'temporary database missing',1;
 {}
 IF DATABASEPROPERTYEX(@db,'Updateability')<>'READ_ONLY' THROW 51000,'temporary database is not read-only',1;
-DECLARE @query nvarchar(max)=N'USE '+QUOTENAME(@db)+N'; SELECT CASE WHEN EXISTS(SELECT 1 FROM dbo.V8USERS WHERE Email IS NOT NULL) THEN 1 ELSE 0 END AS [present] FOR JSON PATH, WITHOUT_ARRAY_WRAPPER';
+DECLARE @query nvarchar(max)=CONVERT(nvarchar(max),N'USE ')+QUOTENAME(@db)+N'; SELECT CASE WHEN EXISTS(SELECT 1 FROM dbo.V8USERS WHERE Email IS NOT NULL) THEN 1 ELSE 0 END AS [present] FOR JSON PATH, WITHOUT_ARRAY_WRAPPER';
 EXEC(@query);
 GO
 "#,
             self.declarations(),
             CHECK_OWNERSHIP
-        )
+        ))
     }
 
     pub fn blob_script(
@@ -445,39 +472,13 @@ GO
         reference: &crate::sql_blob::StorageRef,
         actual: &[crate::sql_catalog::SqlColumn],
     ) -> Result<String, Error> {
-        use ibschema::columns::{ColRole, ColType, Column, Origin, Part};
         use std::fmt::Write as _;
-        if reference.size > 64 * 1024 * 1024 || actual.len() != 4 {
+        if reference.size > 64 * 1024 * 1024 {
             return Err(Error::InvalidTable(
                 "unsupported binary storage catalog or size",
             ));
         }
-        let column = |name: &str, ty, role| Column {
-            name: name.into(),
-            ty,
-            role,
-            nullable: false,
-            origin: Origin::Field(0),
-            part: Part::Single,
-        };
-        let expected = [
-            column("f_key", ColType::B(16), ColRole::Binary),
-            column("f_off", ColType::N(18, 0), ColRole::Number),
-            column("f_num", ColType::N(18, 0), ColRole::Number),
-            column("f_data", ColType::I, ColRole::Binary),
-        ];
-        crate::sql_catalog::validate_columns(&expected, actual)?;
-        let physical = |name: &str| -> Result<String, Error> {
-            let item = actual
-                .iter()
-                .find(|c| c.name.eq_ignore_ascii_case(name))
-                .ok_or(Error::InvalidTable("validated storage column missing"))?;
-            Ok(format!("[{}]", item.name.replace(']', "]]")))
-        };
-        let key = physical("f_key")?;
-        let offset = physical("f_off")?;
-        let number = physical("f_num")?;
-        let data = physical("f_data")?;
+        let [key, offset, number, data] = storage_columns(actual)?;
         let mut literal = String::from("0x");
         for byte in reference.key {
             write!(&mut literal, "{byte:02X}")
@@ -487,20 +488,59 @@ GO
             "IF EXISTS (SELECT 1 FROM dbo.[BINARYDATA] WHERE {key}={literal}) SELECT '0x'+CONVERT(varchar(max),{key},2) AS [key],CONVERT(varchar(100),{offset}) AS [offset],CONVERT(varchar(100),{number}) AS [number],'0x'+CONVERT(varchar(max),{data},2) AS [data] FROM dbo.[BINARYDATA] WHERE {key}={literal} FOR JSON PATH, INCLUDE_NULL_VALUES ELSE SELECT N'[]'"
         );
         let query = query.replace('\'', "''");
-        Ok(format!(
+        Ok(checked(format!(
             r#"{}IF DB_ID(@db) IS NULL THROW 51000,'temporary database missing',1;
 {}
 IF DATABASEPROPERTYEX(@db,'Updateability')<>'READ_ONLY' THROW 51000,'temporary database is not read-only',1;
-DECLARE @query nvarchar(max)=N'USE '+QUOTENAME(@db)+N'; {}';
+DECLARE @query nvarchar(max)=CONVERT(nvarchar(max),N'USE ')+QUOTENAME(@db)+N'; {}';
 EXEC(@query);
 GO
 "#,
             self.declarations(),
             CHECK_OWNERSHIP,
             query
-        ))
+        )))
     }
+}
 
+fn storage_columns(actual: &[crate::sql_catalog::SqlColumn]) -> Result<[String; 4], Error> {
+    use ibschema::columns::{ColRole, ColType, Column, Origin, Part};
+    if actual.len() != 4 {
+        return Err(Error::InvalidTable(
+            "unsupported binary storage catalog or size",
+        ));
+    }
+    let column = |name: &str, ty, role| Column {
+        name: name.into(),
+        ty,
+        role,
+        nullable: false,
+        origin: Origin::Field(0),
+        part: Part::Single,
+    };
+    let expected = [
+        column("f_key", ColType::B(16), ColRole::Binary),
+        column("f_off", ColType::N(18, 0), ColRole::Number),
+        column("f_num", ColType::N(18, 0), ColRole::Number),
+        column("f_data", ColType::I, ColRole::Binary),
+    ];
+    crate::sql_catalog::validate_columns(&expected, actual)?;
+    let physical = |name: &str| -> Result<String, Error> {
+        let item = actual
+            .iter()
+            .find(|c| c.name.eq_ignore_ascii_case(name))
+            .ok_or(Error::InvalidTable("validated storage column missing"))?;
+        Ok(format!("[{}]", item.name.replace(']', "]]")))
+    };
+    Ok([
+        physical("f_key")?,
+        physical("f_off")?,
+        physical("f_num")?,
+        physical("f_data")?,
+    ])
+}
+
+impl SqlPlan {
     pub fn folder_table_script(
         &self,
         head: &dtfile::TableHead,
@@ -626,33 +666,33 @@ GO
         ) {
             format!(
                 "SELECT N'YC_ROWS_BEGIN'; SELECT N'R'+(SELECT {columns} FOR JSON PATH, WITHOUT_ARRAY_WRAPPER, INCLUDE_NULL_VALUES) FROM dbo.{table}; SELECT N'YC_ROWS_END:'+CONVERT(nvarchar(20),COUNT_BIG(*)) FROM dbo.{table}",
-                columns = projections.join(","),
+                columns = projections.join(",\n"),
                 table = quote(table),
             )
         } else {
             format!(
                 "IF EXISTS (SELECT 1 FROM dbo.{table}) SELECT {columns} FROM dbo.{table}{order} FOR JSON PATH, INCLUDE_NULL_VALUES ELSE SELECT N'[]'",
-                columns = projections.join(","),
+                columns = projections.join(",\n"),
                 table = quote(table),
             )
         };
         let query = query.replace('\'', "''");
-        Ok(format!(
+        Ok(checked(format!(
             r#"{}IF DB_ID(@db) IS NULL THROW 51000,'temporary database missing',1;
 {}
 IF DATABASEPROPERTYEX(@db,'Updateability')<>'READ_ONLY' THROW 51000,'temporary database is not read-only',1;
-DECLARE @query nvarchar(max)=N'USE '+QUOTENAME(@db)+N'; {}';
+DECLARE @query nvarchar(max)=CONVERT(nvarchar(max),N'USE ')+QUOTENAME(@db)+N'; {}';
 EXEC(@query);
 GO
 "#,
             self.declarations(),
             CHECK_OWNERSHIP,
             query
-        ))
+        )))
     }
 
     pub fn abandoned_restore_script(&self, wait_seconds: u32) -> String {
-        format!(
+        checked(format!(
             r#"{declarations}DECLARE @wait int={wait_seconds}, @waited int=0, @id int, @state nvarchar(60), @session int, @verdict varchar(30);
 CREATE TABLE #files (physical_name nvarchar(260) NOT NULL, size_mb bigint NOT NULL);
 WHILE 1=1 BEGIN
@@ -698,7 +738,7 @@ SELECT @verdict;
 GO
 "#,
             declarations = self.declarations()
-        )
+        ))
     }
 
     pub fn cleanup_script(&self) -> String {
@@ -706,7 +746,7 @@ GO
     }
 
     pub fn cleanup_script_with_wait(&self, wait_seconds: u32) -> String {
-        format!(
+        checked(format!(
             r#"{declarations}DECLARE @wait int={wait_seconds}, @waited int=0, @id int, @state nvarchar(60), @step varchar(5), @error int, @text nvarchar(400);
 SELECT @id=d.database_id, @state=d.state_desc FROM sys.databases AS d WHERE d.name COLLATE Latin1_General_100_BIN2=@db COLLATE Latin1_General_100_BIN2 AND DATALENGTH(d.name)=DATALENGTH(@db);
 IF @id IS NULL BEGIN SELECT 'YC_BAK_GONE'; RETURN; END;
@@ -740,6 +780,111 @@ GO
 "#,
             declarations = self.declarations(),
             ownership = CHECK_OWNERSHIP,
+        ))
+    }
+}
+
+fn table_list(tables: &[&str]) -> Result<String, Error> {
+    if tables.is_empty() || tables.iter().any(|table| !valid_table_name(table)) {
+        return Err(Error::InvalidTable("invalid table name"));
+    }
+    let mut list = String::from(
+        "CREATE TABLE #yc_tables (idx int NOT NULL PRIMARY KEY, name nvarchar(128) NOT NULL);\n",
+    );
+    for (chunk, names) in tables.chunks(1000).enumerate() {
+        list.push_str("INSERT #yc_tables (idx,name) VALUES\n");
+        for (offset, name) in names.iter().enumerate() {
+            let separator = if offset + 1 == names.len() { ";" } else { "," };
+            list.push_str(&format!(
+                "({},N'{}'){separator}\n",
+                chunk * 1000 + offset + 1,
+                name.replace('\'', "''")
+            ));
+        }
+    }
+    Ok(list)
+}
+
+impl SqlPlan {
+    pub fn catalog_batch_script(&self, tables: &[&str]) -> Result<String, Error> {
+        let list = table_list(tables)?;
+        Ok(checked(format!(
+            r#"{}IF DB_ID(@db) IS NULL THROW 51000,'temporary database missing',1;
+{}
+IF DATABASEPROPERTYEX(@db,'Updateability')<>'READ_ONLY' THROW 51000,'temporary database is not read-only',1;
+{}DECLARE @query nvarchar(max)=CONVERT(nvarchar(max),N'USE ')+QUOTENAME(@db)+N'; SELECT CONVERT(nvarchar(max),N''YC_C:'')+CONVERT(nvarchar(20),n.idx)+N'':''+CONVERT(nvarchar(20),ISNULL((SELECT SUM(CONVERT(bigint,a.used_pages)) FROM sys.tables t JOIN sys.schemas s ON s.schema_id=t.schema_id JOIN sys.partitions p ON p.object_id=t.object_id JOIN sys.allocation_units a ON a.container_id IN (p.partition_id,p.hobt_id) WHERE s.name=N''dbo'' AND t.name=n.name COLLATE DATABASE_DEFAULT),0))+N'':''+ISNULL((SELECT c.name AS [column_name], ty.name AS [sql_type], c.max_length, c.precision, c.scale, c.is_nullable FROM sys.tables t JOIN sys.schemas s ON s.schema_id=t.schema_id JOIN sys.columns c ON c.object_id=t.object_id JOIN sys.types ty ON ty.user_type_id=c.user_type_id WHERE s.name=N''dbo'' AND t.name=n.name COLLATE DATABASE_DEFAULT ORDER BY c.column_id FOR JSON PATH, INCLUDE_NULL_VALUES),N''[]'') FROM #yc_tables n ORDER BY n.idx; SELECT CONVERT(nvarchar(max),N''YC_C_END:'')+CONVERT(nvarchar(20),COUNT_BIG(*)) FROM #yc_tables';
+EXEC(@query);
+GO
+"#,
+            self.declarations(),
+            CHECK_OWNERSHIP,
+            list
+        )))
+    }
+
+    pub fn data_batch_script(
+        &self,
+        tables: &[crate::sql_batch::Table<'_>],
+    ) -> Result<String, Error> {
+        const OWNED: &str = "DECLARE @owned bit=0, @check nvarchar(max);";
+        const QUERY: &str = "DECLARE @query nvarchar(max)=";
+        const END: &str = "\nEXEC(@query);\nGO\n";
+        if tables.is_empty() {
+            return Err(Error::InvalidTable("empty batch"));
+        }
+        let declarations = self.declarations();
+        let mut script = format!(
+            "{declarations}SET XACT_ABORT ON;\nDECLARE @owned bit, @check nvarchar(max), @query nvarchar(max);\n"
+        );
+        for table in tables {
+            let one = self.data_table_script(table.name, table.columns, table.actual)?;
+            let (Some(body), 1, 1) = (
+                one.strip_prefix(&declarations)
+                    .and_then(|body| body.strip_suffix(END)),
+                one.matches(OWNED).count(),
+                one.matches(QUERY).count(),
+            ) else {
+                return Err(Error::InvalidTable("unexpected data table script"));
+            };
+            let count = format!(
+                "SELECT CONVERT(nvarchar(max),N'YC_T_END:{}:')+CONVERT(nvarchar(20),COUNT_BIG(*)) FROM dbo.[{}]",
+                table.index,
+                table.name.replace(']', "]]")
+            )
+            .replace('\'', "''");
+            script.push_str(&body.replacen(OWNED, "SET @owned=0;", 1).replacen(
+                QUERY,
+                &format!("SELECT N'YC_T:{}';\nSET @query=", table.index),
+                1,
+            ));
+            script.push_str(&format!(
+                "\nEXEC(@query);\nSET @query=CONVERT(nvarchar(max),N'USE ')+QUOTENAME(@db)+N'; {count}';\nEXEC(@query);\n"
+            ));
+        }
+        script.push_str("GO\n");
+        Ok(checked(script))
+    }
+
+    pub fn blob_spool_script(
+        &self,
+        actual: &[crate::sql_catalog::SqlColumn],
+    ) -> Result<String, Error> {
+        let [key, offset, number, data] = storage_columns(actual)?;
+        let query = format!(
+            "SELECT N'YC_T:1'; IF EXISTS (SELECT 1 FROM dbo.[BINARYDATA]) SELECT '0x'+CONVERT(varchar(max),{key},2) AS [key],CONVERT(varchar(100),{offset}) AS [offset],CONVERT(varchar(100),{number}) AS [number],'0x'+CONVERT(varchar(max),{data},2) AS [data] FROM dbo.[BINARYDATA] FOR JSON PATH, INCLUDE_NULL_VALUES ELSE SELECT N'[]'; SELECT CONVERT(nvarchar(max),N'YC_T_END:1:')+CONVERT(nvarchar(20),COUNT_BIG(*)) FROM dbo.[BINARYDATA]"
         )
+        .replace('\'', "''");
+        Ok(checked(format!(
+            r#"{}IF DB_ID(@db) IS NULL THROW 51000,'temporary database missing',1;
+{}
+IF DATABASEPROPERTYEX(@db,'Updateability')<>'READ_ONLY' THROW 51000,'temporary database is not read-only',1;
+DECLARE @query nvarchar(max)=CONVERT(nvarchar(max),N'USE ')+QUOTENAME(@db)+N'; {}';
+EXEC(@query);
+GO
+"#,
+            self.declarations(),
+            CHECK_OWNERSHIP,
+            query
+        )))
     }
 }

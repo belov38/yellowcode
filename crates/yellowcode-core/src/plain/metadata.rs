@@ -1,3 +1,4 @@
+use super::scope::{Scope, ScopeArgs};
 use crate::{
     Result,
     viewer::{
@@ -24,6 +25,7 @@ pub enum Command {
         depth: Option<usize>,
         path: Option<String>,
         kind: Option<String>,
+        subsystems: Vec<String>,
         flat: bool,
         format: Format,
     },
@@ -119,6 +121,14 @@ fn prune(node: &mut Node, depth: usize) {
     }
 }
 
+fn prune_scope(node: &mut Node, scope: &Scope) -> bool {
+    node.children.retain_mut(|c| prune_scope(c, scope));
+    node.has_children = !node.children.is_empty();
+    node.node_type == "configuration"
+        || node.has_children
+        || node.path.as_deref().is_some_and(|p| scope.contains(p))
+}
+
 fn flatten(
     node: &Node,
     parent: Option<&str>,
@@ -178,6 +188,7 @@ pub fn run_with_memory_limit(
             depth,
             path,
             kind,
+            subsystems,
             flat,
             format,
         } => {
@@ -200,11 +211,22 @@ pub fn run_with_memory_limit(
                 })
                 .transpose()?
                 .unwrap_or_default();
+            let scope = Scope::resolve(
+                &cfg,
+                &ScopeArgs {
+                    subsystems,
+                    ..Default::default()
+                },
+            )?;
             let mut root = project(&cfg, &tree::tree(&cfg, None, &kinds, Lang::Ru), "");
+            if !scope.is_all() {
+                prune_scope(&mut root, &scope);
+            }
             if let Some(path) = path {
                 let target = path::resolve(&cfg, &path)?;
                 let id = uuid(&target).ok_or("metadata target has no UUID")?;
-                let selected = find(&root, &id).ok_or("metadata path excluded by kind filter")?;
+                let selected =
+                    find(&root, &id).ok_or("metadata path excluded by kind or subsystem filter")?;
                 root = selected.clone();
             }
             if let Some(depth) = depth {

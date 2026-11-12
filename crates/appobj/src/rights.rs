@@ -55,6 +55,7 @@ pub(crate) struct RightsMatrix {
     index: HashMap<MdRight, usize>,
     role_ix: HashMap<Uuid16, usize>,
     roles: Vec<RoleRights>,
+    default_roles: Vec<Uuid16>,
 }
 
 impl RightsMatrix {
@@ -78,7 +79,12 @@ impl RightsMatrix {
             m.role_ix.insert(role.id, m.roles.len());
             m.roles.push(rr);
         }
+        m.default_roles = default_roles(config);
         m
+    }
+
+    pub(crate) fn is_default_role(&self, id: &Uuid16) -> bool {
+        self.default_roles.contains(id)
     }
 
     pub(crate) fn any_role(&self, roles: &[Uuid16], target: Option<&Uuid16>, right: Right) -> bool {
@@ -100,6 +106,27 @@ impl RightsMatrix {
     pub(crate) fn has_role(&self, id: &Uuid16) -> bool {
         self.role_ix.contains_key(id)
     }
+}
+
+fn default_roles(config: &md_model::Configuration) -> Vec<Uuid16> {
+    let Some(md_model::Value::RefList(refs)) = config
+        .props
+        .iter()
+        .find(|p| p.name == "DefaultRoles")
+        .map(|p| &p.value)
+    else {
+        return Vec::new();
+    };
+    let by_name = |name: &str| -> Option<Uuid16> {
+        let name = bsl_prim::fold_name(name.strip_prefix("Role.")?);
+        config
+            .of_kind(MdKind::Role)
+            .find(|o| bsl_prim::fold_name(&o.name) == name)
+            .map(|o| o.id)
+    };
+    refs.iter()
+        .filter_map(|r| r.id.or_else(|| by_name(&r.name)))
+        .collect()
 }
 
 fn role_rights(r: &Rights, index: &HashMap<MdRight, usize>, words: usize) -> RoleRights {
@@ -199,9 +226,13 @@ pub(crate) fn register(app: &std::sync::Arc<crate::Application>, reg: &mut bsl_v
                 let Some(role) = role.filter(|r| app.rights.has_role(r)) else {
                     return Err(bad());
                 };
-                let member = call_ctx(ex)
-                    .map(|c| c.sess.user())
-                    .is_some_and(|u| !u.no_users && u.roles.contains(&role));
+                let member = call_ctx(ex).map(|c| c.sess.user()).is_some_and(|u| {
+                    if u.no_users {
+                        app.rights.is_default_role(&role)
+                    } else {
+                        u.roles.contains(&role)
+                    }
+                });
                 Ok(Value::Bool(member))
             },
         ),

@@ -1,0 +1,9 @@
+exit 2
+--- stdout
+--- stderr
+error: the following required arguments were not provided:
+  --set <НАБОР>
+
+Usage: yellowcode template show --query --set <НАБОР> <SOURCE> <TEMPLATE>
+
+For more information, try '--help'.

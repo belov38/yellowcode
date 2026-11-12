@@ -1,9 +1,8 @@
 use crate::source::{DataSource, ExecEnv};
 use ibschema::storage::{StorageMap, TableId};
 use query_ir::host::{AccessPolicy, HostError, PresentationInput, SessionValues, TxnId};
-use query_ir::{BindHost, QStr, QuerySchema, StorageBinding};
+use query_ir::{BindHost, QStr, StorageBinding};
 use query_syntax::Lang;
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 pub trait ExecHost: BindHost {
@@ -14,7 +13,7 @@ pub trait ExecHost: BindHost {
     ) -> Result<(), query_ir::ExecError> {
         Ok(())
     }
-    fn schema(&self) -> &Arc<QuerySchema>;
+    fn schema(&self) -> &query_ir::schema::SchemaOwner;
     fn storage(&self) -> &StorageBinding;
     fn map(&self) -> &StorageMap;
     fn access(&self) -> &dyn AccessPolicy;

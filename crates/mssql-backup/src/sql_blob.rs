@@ -1,4 +1,7 @@
-use std::{collections::HashSet, io::Read};
+use std::{
+    collections::{HashMap, HashSet},
+    io::{BufWriter, Read, Seek, SeekFrom, Write},
+};
 
 const MAX_BLOB_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -138,24 +141,7 @@ pub fn read_blob_parts(input: impl Read, reference: &StorageRef) -> Result<Vec<B
         if !parts.is_empty() {
             return Err("multiple storage parts".into());
         }
-        let wire: WirePart = serde_json::from_slice(row).map_err(|e| e.to_string())?;
-        let key: [u8; 16] = crate::sql_json_row::binary(&wire.key)
-            .map_err(|e| e.to_string())?
-            .try_into()
-            .map_err(|_| "invalid storage key")?;
-        let number = |s: &str| {
-            if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
-                return Err("invalid nonnegative storage number".to_string());
-            }
-            s.parse::<u64>()
-                .map_err(|_| "storage number out of range".to_string())
-        };
-        parts.push(BlobPart {
-            key,
-            offset: number(&wire.offset)?,
-            number: number(&wire.number)?,
-            data: crate::sql_json_row::binary(&wire.data).map_err(|e| e.to_string())?,
-        });
+        parts.push(wire_part(row)?);
         Ok(())
     })
     .map_err(|_| Error("invalid SQL storage output"))?;
@@ -163,4 +149,117 @@ pub fn read_blob_parts(input: impl Read, reference: &StorageRef) -> Result<Vec<B
         return Err(Error("expected exactly one part"));
     }
     Ok(parts)
+}
+
+fn wire_part(row: &[u8]) -> Result<BlobPart, String> {
+    let wire: WirePart = serde_json::from_slice(row).map_err(|e| e.to_string())?;
+    let key: [u8; 16] = crate::sql_json_row::binary(&wire.key)
+        .map_err(|e| e.to_string())?
+        .try_into()
+        .map_err(|_| "invalid storage key")?;
+    let number = |s: &str| {
+        if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
+            return Err("invalid nonnegative storage number".to_string());
+        }
+        s.parse::<u64>()
+            .map_err(|_| "storage number out of range".to_string())
+    };
+    Ok(BlobPart {
+        key,
+        offset: number(&wire.offset)?,
+        number: number(&wire.number)?,
+        data: crate::sql_json_row::binary(&wire.data).map_err(|e| e.to_string())?,
+    })
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SpoolError {
+    #[error(transparent)]
+    Storage(#[from] Error),
+    #[error("reading SQL binary storage: {0}")]
+    Frame(#[from] crate::sql_rows::Error),
+    #[error("binary storage staging file: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+struct Stored {
+    offset: u64,
+    number: u64,
+    at: u64,
+    len: u64,
+}
+
+pub struct Spool {
+    file: std::fs::File,
+    index: HashMap<[u8; 16], Vec<Stored>>,
+    rows: u64,
+}
+
+pub fn read_spool(
+    input: impl Read,
+    directory: &std::path::Path,
+    max_rows: u64,
+) -> Result<Spool, SpoolError> {
+    let mut file = tempfile::tempfile_in(directory)?;
+    let mut index: HashMap<[u8; 16], Vec<Stored>> = HashMap::new();
+    let mut frames = crate::sql_rows::Frames::new(input);
+    crate::sql_batch::begin(&mut frames, 1)?;
+    let max_row = MAX_BLOB_BYTES
+        .checked_mul(2)
+        .and_then(|n| n.checked_add(4096))
+        .and_then(|n| usize::try_from(n).ok())
+        .ok_or(Error("row limit overflow"))?;
+    let mut writer = BufWriter::new(&mut file);
+    let mut at = 0_u64;
+    let mut kept = 0_u64;
+    let rows = frames.rows(max_row, |row| {
+        if kept >= max_rows {
+            return Err(Error("storage key limit exceeded").to_string());
+        }
+        kept += 1;
+        let part = wire_part(row)?;
+        let len = u64::try_from(part.data.len()).map_err(|_| "payload size overflow")?;
+        writer
+            .write_all(&part.data)
+            .map_err(|e| format!("binary storage staging file: {e}"))?;
+        index.entry(part.key).or_default().push(Stored {
+            offset: part.offset,
+            number: part.number,
+            at,
+            len,
+        });
+        at += len;
+        Ok(())
+    })?;
+    crate::sql_batch::end(&mut frames, 1, rows)?;
+    frames.end()?;
+    writer.flush()?;
+    drop(writer);
+    Ok(Spool { file, index, rows })
+}
+
+impl Spool {
+    pub fn rows(&self) -> u64 {
+        self.rows
+    }
+
+    pub fn parts(&mut self, reference: &StorageRef) -> Result<Vec<BlobPart>, SpoolError> {
+        if reference.size > MAX_BLOB_BYTES {
+            return Err(Error("payload limit exceeded").into());
+        }
+        let mut parts = Vec::new();
+        for stored in self.index.get(&reference.key).into_iter().flatten() {
+            let mut data =
+                vec![0; usize::try_from(stored.len).map_err(|_| Error("payload limit exceeded"))?];
+            self.file.seek(SeekFrom::Start(stored.at))?;
+            self.file.read_exact(&mut data)?;
+            parts.push(BlobPart {
+                key: reference.key,
+                offset: stored.offset,
+                number: stored.number,
+                data,
+            });
+        }
+        Ok(parts)
+    }
 }

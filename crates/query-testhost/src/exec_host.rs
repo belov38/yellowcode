@@ -7,11 +7,10 @@ use query_ir::host::{
     Access, AccessPolicy, FieldSet, HostError, PredefinedName, PresentationInput, SeparatorFilter,
     SessionValues, SourceTable, TxnId, UserRef,
 };
-use query_ir::{BindHost, QStr, QTableId, QValue, QuerySchema, StorageBinding};
+use query_ir::{BindHost, QStr, QTableId, QValue, StorageBinding};
 use query_syntax::Lang;
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 const LEGACY_MEM_LIMIT: u64 = 1 << 30;
@@ -181,7 +180,7 @@ impl BindHost for TestHost<'_> {
 }
 
 impl ExecHost for TestHost<'_> {
-    fn schema(&self) -> &Arc<QuerySchema> {
+    fn schema(&self) -> &query_ir::schema::SchemaOwner {
         &self.base.schema
     }
     fn storage(&self) -> &StorageBinding {

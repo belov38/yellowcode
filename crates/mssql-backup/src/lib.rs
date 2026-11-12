@@ -28,6 +28,7 @@ pub mod media;
 pub mod page_source;
 pub mod pages;
 pub mod records;
+pub mod sql_batch;
 pub mod sql_blob;
 pub mod sql_catalog;
 pub mod sql_config;

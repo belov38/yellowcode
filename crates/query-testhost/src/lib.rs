@@ -32,6 +32,7 @@ pub use exec_host::TestHost;
 pub use failure::FailureChain;
 pub use host::{
     TestBase, absent_base, base, project_root, try_base, try_base_in, try_base_in_reporting,
+    try_legacy_schema,
 };
 pub use managed_store::{ManagedStoredOwnedRows, ManagedStoredRows, ManagedStoredTable};
 pub use params::{CaseParams, ParamError, parse_params};

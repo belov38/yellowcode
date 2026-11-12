@@ -1,0 +1,8 @@
+exit 2
+--- stdout
+--- stderr
+error: the argument '--files-with-matches' cannot be used with '--count'
+
+Usage: yellowcode grep --files-with-matches <PATTERN> <SOURCE>
+
+For more information, try '--help'.

@@ -3,6 +3,7 @@ use crate::meta::{MdKey, MdPath, arg_value, full_name, key_with_app, type_idx};
 use crate::model::AppModel;
 use crate::session::{call_ctx, internal};
 use crate::session_info::outside_call;
+use crate::users::{UserValue, user_value};
 use bsl_prim::fold_name;
 use bsl_vm::{Arg, CallResult, Execution, HostError, Registry, Value};
 use md_model::MdKind;
@@ -200,6 +201,25 @@ fn given(args: &[Arg], i: usize) -> bool {
     matches!(args.get(i), Some(Arg::Val(_) | Arg::Place(_)))
 }
 
+fn third_parameter_refusal(who: &Value) -> Option<&'static str> {
+    match user_value(who) {
+        Some(UserValue::Anonymous) => None,
+        Some(UserValue::OfSessionWithUsers) => Some("пользователь сеанса с пользователями"),
+        Some(UserValue::Restored) => Some("пользователь из внутренней строки"),
+        None => {
+            let role = key_with_app(who).is_some_and(|(key, owner)| {
+                matches!(key, MdKey::Path(MdPath::Other(i))
+                    if owner.model().config.objects.get(i).is_some_and(|o| o.kind == MdKind::Role))
+            });
+            Some(if role {
+                "роль"
+            } else {
+                "пользователь или роль"
+            })
+        }
+    }
+}
+
 fn kind_label(app: &Application, key: MdKey) -> String {
     let Some(cx) = app.md_ctx() else {
         return String::new();
@@ -221,8 +241,10 @@ fn kind_label(app: &Application, key: MdKey) -> String {
 }
 
 fn access_right(ex: &mut Execution, args: &mut [Arg]) -> CallResult<Value> {
-    if given(args, 2) {
-        return Err(refused("пользователь или роль").into());
+    if given(args, 2)
+        && let Some(what) = third_parameter_refusal(&arg_value(ex, args, 2)?)
+    {
+        return Err(refused(what).into());
     }
     if given(args, 3) {
         return Err(refused("стандартный реквизит").into());

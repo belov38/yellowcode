@@ -407,13 +407,44 @@ impl Console {
         cancel: &AtomicBool,
     ) -> Result<Report, RunRefusal> {
         let started = Instant::now();
-        self.independent_complete(cancel, |cancel| self.run_budgeted_active(req, cancel))
-            .unwrap_or_else(|error| {
-                let cancelled = error.chain.iter().any(|s| s.contains("прервано"));
-                let mut report = Report::failed(started, error, None);
-                report.cancelled = cancelled || cancel.load(std::sync::atomic::Ordering::Acquire);
-                Ok(report)
-            })
+        let outcome = self
+            .lifecycle
+            .admit()
+            .and_then(|slot| self.run_budgeted_on(slot, req, cancel));
+        outcome.unwrap_or_else(|error| Self::failed_run(started, error, cancel))
+    }
+
+    pub(crate) fn run_budgeted_admitted(
+        &self,
+        slot: crate::lifecycle::Operation,
+        req: &RunRequest,
+        cancel: &AtomicBool,
+    ) -> Result<Report, RunRefusal> {
+        let started = Instant::now();
+        self.run_budgeted_on(slot, req, cancel)
+            .unwrap_or_else(|error| Self::failed_run(started, error, cancel))
+    }
+
+    fn run_budgeted_on(
+        &self,
+        slot: crate::lifecycle::Operation,
+        req: &RunRequest,
+        cancel: &AtomicBool,
+    ) -> Result<Result<Report, RunRefusal>, ErrorOut> {
+        crate::lifecycle::run_admitted(slot, cancel, self.base.memory_budget(), false, |cancel| {
+            self.run_budgeted_active(req, cancel)
+        })
+    }
+
+    fn failed_run(
+        started: Instant,
+        error: ErrorOut,
+        cancel: &AtomicBool,
+    ) -> Result<Report, RunRefusal> {
+        let cancelled = error.chain.iter().any(|s| s.contains("прервано"));
+        let mut report = Report::failed(started, error, None);
+        report.cancelled = cancelled || cancel.load(std::sync::atomic::Ordering::Acquire);
+        Ok(report)
     }
 
     pub(crate) fn run_budgeted_active(

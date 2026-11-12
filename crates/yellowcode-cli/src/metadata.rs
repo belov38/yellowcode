@@ -49,6 +49,12 @@ pub(crate) enum Command {
         )]
         kind: Option<String>,
         #[arg(
+            long = "subsystem",
+            value_name = "SUBSYSTEM",
+            help = "Только объекты подсистемы и её вложенных подсистем, например Продажи.Заказы; можно повторять"
+        )]
+        subsystems: Vec<String>,
+        #[arg(
             long,
             help = "JSON плоским списком узлов (с parentId и depth) вместо вложенного дерева"
         )]
@@ -82,6 +88,7 @@ impl From<Command> for metadata::Command {
                 depth,
                 path,
                 kind,
+                subsystems,
                 flat,
                 format,
             } => metadata::Command::Tree {
@@ -89,6 +96,7 @@ impl From<Command> for metadata::Command {
                 depth,
                 path,
                 kind,
+                subsystems,
                 flat,
                 format,
             },

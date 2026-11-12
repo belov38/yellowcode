@@ -28,7 +28,7 @@ impl Lifecycle {
             token.store(true, Ordering::Release);
         }
     }
-    fn admit(&self) -> Result<Operation<'_>, ErrorOut> {
+    pub(crate) fn admit(self: &Arc<Self>) -> Result<Operation, ErrorOut> {
         let mut state = lock(&self.state);
         if state.closed {
             return Err(ErrorOut::new(Phase::Runtime, "query session is closed"));
@@ -39,12 +39,12 @@ impl Lifecycle {
         let token = Arc::new(AtomicBool::new(false));
         state.active.push(Arc::clone(&token));
         Ok(Operation {
-            lifecycle: self,
+            lifecycle: Arc::clone(self),
             token,
         })
     }
     pub(crate) fn run<T>(
-        &self,
+        self: &Arc<Self>,
         external: &AtomicBool,
         budget: Option<&memory_budget::MemoryBudget>,
         strict: bool,
@@ -53,7 +53,17 @@ impl Lifecycle {
         if strict && external.load(Ordering::Acquire) {
             return Err(interrupted());
         }
-        let operation = self.admit()?;
+        run_admitted(self.admit()?, external, budget, strict, work)
+    }
+}
+pub(crate) fn run_admitted<T>(
+    operation: Operation,
+    external: &AtomicBool,
+    budget: Option<&memory_budget::MemoryBudget>,
+    strict: bool,
+    work: impl FnOnce(&AtomicBool) -> T,
+) -> Result<T, ErrorOut> {
+    {
         if external.load(Ordering::Acquire) {
             operation.token.store(true, Ordering::Release);
         }
@@ -100,11 +110,11 @@ impl Lifecycle {
         })
     }
 }
-struct Operation<'a> {
-    lifecycle: &'a Lifecycle,
+pub(crate) struct Operation {
+    lifecycle: Arc<Lifecycle>,
     token: Arc<AtomicBool>,
 }
-impl Drop for Operation<'_> {
+impl Drop for Operation {
     fn drop(&mut self) {
         lock(&self.lifecycle.state)
             .active
@@ -125,13 +135,5 @@ impl crate::Console {
     ) -> Result<T, ErrorOut> {
         self.lifecycle
             .run(cancel, self.base.memory_budget(), true, work)
-    }
-    pub(crate) fn independent_complete<T>(
-        &self,
-        cancel: &AtomicBool,
-        work: impl FnOnce(&AtomicBool) -> T,
-    ) -> Result<T, ErrorOut> {
-        self.lifecycle
-            .run(cancel, self.base.memory_budget(), false, work)
     }
 }

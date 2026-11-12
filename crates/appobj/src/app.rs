@@ -99,7 +99,7 @@ pub struct Application {
 }
 
 pub(crate) struct QueryCtx {
-    pub schema: Arc<query_ir::QuerySchema>,
+    pub schema: query_ir::schema::SchemaOwner,
     pub binding: query_ir::StorageBinding,
     pub map: Arc<ibschema::storage::StorageMap>,
     pub collation: Arc<dyn bsl_prim::Collation>,
@@ -179,7 +179,7 @@ impl Application {
                 .bind_storage(map)
                 .map_err(|e| format!("query storage binding: {e}"))?;
             Ok(Arc::new(QueryCtx {
-                schema,
+                schema: query_ir::schema::SchemaOwner::from_legacy(schema),
                 binding,
                 map: Arc::new(map.clone()),
                 collation: Arc::new(bsl_prim::IcuCollation::new(&self.options.locale)),

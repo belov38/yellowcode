@@ -27,6 +27,7 @@ pub(super) fn step_for(script: &str) -> &'static str {
         ("AS [nonempty]", "extra_table"),
         ("FROM dbo.BINARYDATA FOR JSON", "blob_count"),
         ("dbo.[BINARYDATA] WHERE", "blob"),
+        ("FROM dbo.[BINARYDATA] FOR JSON", "blob"),
         ("JOIN sys.columns c", "catalog"),
         ("ORDER BY s.name,t.name", "inventory"),
         ("FROM dbo.DBSCHEMA", "schema"),
@@ -471,6 +472,11 @@ pub fn failure_kind(message: &str) -> (&'static str, &'static str) {
             "apply",
         ),
         ("writing staged CONFIG as CF", "output_failed", "publish"),
+        (
+            "DT profile of the configuration is refused",
+            "dt_profile_refused",
+            "profile",
+        ),
     ];
     if message.contains("does not accept the options of the Microsoft ODBC sqlcmd") {
         return ("wrong_client", "connect");
@@ -482,6 +488,14 @@ pub fn failure_kind(message: &str) -> (&'static str, &'static str) {
 }
 
 pub fn failure_refusal(message: &str) -> Option<(&'static str, &'static str)> {
+    if let Some(rest) = message.strip_prefix(crate::sql_metadata::PROFILE_REFUSAL_START) {
+        let (code, _) = rest.split_once(']')?;
+        let field = crate::sql_metadata::PROFILE_REFUSAL_CODES
+            .iter()
+            .find(|known| **known == code)
+            .copied();
+        return Some(("dt_profile", field.unwrap_or("other")));
+    }
     const START: &str = "dynamic-update leftovers of the CONFIG cannot be applied [";
     const CODES: &[&str] = &[
         "marker",

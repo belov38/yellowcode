@@ -278,15 +278,24 @@ impl Jobs {
     pub fn start(&self, console: Arc<Console>, req: RunRequest) -> Result<u64, String> {
         self.register_console(&console)?;
         let (id, job) = self.inner.admit(MAX_RUNNING)?;
-        let inner = Arc::clone(&self.inner);
-        let j = Arc::clone(&job);
         let worker = WorkerGuard {
-            inner: Arc::clone(&inner),
+            inner: Arc::clone(&self.inner),
             id,
         };
+        let slot = match console.lifecycle.admit() {
+            Ok(slot) => slot,
+            Err(e) => {
+                lock(&self.inner.map).remove(&id);
+                return Err(e.chain.first().cloned().unwrap_or_default());
+            }
+        };
+        let inner = Arc::clone(&self.inner);
+        let j = Arc::clone(&job);
         let work = move || {
             let _worker = worker;
-            let out = catch_unwind(AssertUnwindSafe(|| console.run_budgeted(&req, &j.cancel)));
+            let out = catch_unwind(AssertUnwindSafe(|| {
+                console.run_budgeted_admitted(slot, &req, &j.cancel)
+            }));
             let state = match out {
                 Ok(Ok(r)) if r.cancelled => JobState::Cancelled,
                 Ok(Ok(r)) => {

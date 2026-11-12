@@ -1,0 +1,31 @@
+exit 0
+--- stdout
+Список макетов конфигурации с типами, по одному на строку
+
+Usage: yellowcode template list [OPTIONS] <SOURCE>
+
+Arguments:
+  <SOURCE>  Конфигурация: CF, DT, файл 1Cv8.1CD или каталог базы
+
+Options:
+      --memory-limit <MEMORY_LIMIT>  Бюджет памяти на чтение конфигурации из DT; память самой модели расходуется сверх него
+      --platform-build <BUILD>       Точная версия эмулируемой платформы (не режим совместимости конфигурации) [default: 8.5.1.1529]
+      --kind <KIND>                  Только объекты этих видов через запятую или повтором флага, например Справочник,Документ
+      --path <PATH>                  Объект и всё под ним, например Справочник.Номенклатура; флаг можно повторять
+      --subsystem <SUBSYSTEM>        Только объекты подсистемы, полный (Подсистема.А.Подсистема.Б) или краткий (А.Б) путь; флаг можно повторять
+      --type <ТИПЫ>                  Только макеты этих типов через запятую: dcs — схема компоновки данных, sheet — табличный документ, text, html, binary — двоичные данные, other — остальные и неизвестные
+      --format <FORMAT>              Формат вывода [default: text] [possible values: json, text]
+  -h, --help                         Print help
+
+Строка текста: `путь<TAB>тип`, путь вида `Вид.Объект.Template.Имя` у макета объекта и `CommonTemplate.Имя` у общего; тип — `DataCompositionSchema`, `SpreadsheetDocument`, `TextDocument`, `HTMLDocument`, `BinaryData` и т. д., `Unknown` — если конфигурация тип не называет. Путь из списка принимает `template show`. Макеты без данных не перечисляются. `--format json`: объект с `schemaVersion: 1` и `templates[]` (`path`, `type`).
+
+Примеры:
+  # Схемы компоновки данных отчётов подсистемы
+  yellowcode template list configuration.cf --type dcs --subsystem СтандартныеПодсистемы.Пользователи
+
+  # Содержимое схемы: наборы, запросы, параметры, варианты
+  yellowcode template show configuration.cf Отчет.СведенияОПользователях.Макет.ОсновнаяСхемаКомпоновкиДанных
+
+  # Только текст запроса одного набора
+  yellowcode template show configuration.cf Отчет.СведенияОПользователях.Макет.ОсновнаяСхемаКомпоновкиДанных --set Пользователи --query
+--- stderr

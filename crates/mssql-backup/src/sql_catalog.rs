@@ -42,6 +42,14 @@ pub enum ReadError {
     Invalid,
     #[error("invalid SQL catalog output: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("invalid SQL catalog output: {0}")]
+    Frame(#[from] crate::sql_rows::Error),
+}
+
+#[derive(Debug, Clone)]
+pub struct TableCatalog {
+    pub pages: u64,
+    pub columns: Vec<SqlColumn>,
 }
 
 pub fn read_catalog(input: impl Read, limits: Limits) -> Result<Vec<SqlColumn>, ReadError> {
@@ -58,11 +66,47 @@ pub fn read_catalog(input: impl Read, limits: Limits) -> Result<Vec<SqlColumn>, 
         return Err(ReadError::Invalid);
     }
     bytes.retain(|&b| b != b'\r' && b != b'\n');
-    let columns: Vec<SqlColumn> = serde_json::from_slice(&bytes)?;
+    parse_columns(&bytes, limits)
+}
+
+fn parse_columns(bytes: &[u8], limits: Limits) -> Result<Vec<SqlColumn>, ReadError> {
+    let columns: Vec<SqlColumn> = serde_json::from_slice(bytes)?;
     if columns.is_empty() || columns.len() > limits.max_columns {
         return Err(ReadError::Invalid);
     }
     Ok(columns)
+}
+
+pub fn read_catalog_batch(
+    input: impl Read,
+    tables: usize,
+    limits: Limits,
+) -> Result<Vec<TableCatalog>, ReadError> {
+    let mut frames = crate::sql_rows::Frames::new(input);
+    let mut catalog = Vec::new();
+    for index in 1..=tables {
+        frames.expect(b"YC_C:")?;
+        if usize::try_from(frames.number()?).ok() != Some(index) {
+            return Err(ReadError::Invalid);
+        }
+        frames.expect(b":")?;
+        let pages = frames.number()?;
+        frames.expect(b":")?;
+        let bytes = match frames.json(limits.max_json_bytes) {
+            Err(crate::sql_rows::Error::Limit) => return Err(ReadError::Invalid),
+            other => other?,
+        };
+        catalog.push(TableCatalog {
+            pages,
+            columns: parse_columns(&bytes, limits)?,
+        });
+    }
+    frames.expect(b"YC_C_END:")?;
+    if usize::try_from(frames.number()?).ok() != Some(tables) {
+        return Err(ReadError::Invalid);
+    }
+    frames.end()?;
+    Ok(catalog)
 }
 
 fn name(s: &str) -> Result<String, Error> {

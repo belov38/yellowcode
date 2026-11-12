@@ -38,6 +38,15 @@ const CASES: &[(&str, &[&str], &str)] = cases![
     ("metadata-h", ["metadata", "-h"]),
     ("metadata-tree--help", ["metadata", "tree", "--help"]),
     ("metadata-show--help", ["metadata", "show", "--help"]),
+    ("module--help", ["module", "--help"]),
+    ("module-list--help", ["module", "list", "--help"]),
+    ("module-show--help", ["module", "show", "--help"]),
+    ("module-outline--help", ["module", "outline", "--help"]),
+    ("template--help", ["template", "--help"]),
+    ("template-list--help", ["template", "list", "--help"]),
+    ("template-show--help", ["template", "show", "--help"]),
+    ("grep--help", ["grep", "--help"]),
+    ("export--help", ["export", "--help"]),
     ("help-query", ["help", "query"]),
     ("err-query-no-source", ["query", "base"]),
     (
@@ -188,6 +197,26 @@ const CASES: &[(&str, &[&str], &str)] = cases![
     (
         "err-metadata-format",
         ["metadata", "tree", "source.cf", "--format", "xml"]
+    ),
+    (
+        "err-module-lines",
+        [
+            "module",
+            "show",
+            "source.cf",
+            "Module.Path",
+            "--lines",
+            "5:1"
+        ]
+    ),
+    (
+        "err-grep-conflict",
+        ["grep", "x", "source.cf", "--files-with-matches", "--count"]
+    ),
+    ("err-export-no-output", ["export", "source.cf"]),
+    (
+        "err-template-query-without-set",
+        ["template", "show", "source.cf", "Макет", "--query"]
     ),
     ("err-unknown", ["bogus"]),
 ];

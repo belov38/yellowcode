@@ -1,0 +1,25 @@
+exit 0
+--- stdout
+Макеты: список, содержимое, запросы схем компоновки данных
+
+Usage: yellowcode template [OPTIONS] <COMMAND>
+
+Commands:
+  list  Список макетов конфигурации с типами, по одному на строку
+  show  Содержимое макета; для схемы компоновки данных — наборы, запросы, параметры, варианты
+  help  Print this message or the help of the given subcommand(s)
+
+Options:
+      --platform-build <BUILD>  Точная версия эмулируемой платформы (не режим совместимости конфигурации) [default: 8.5.1.1529]
+  -h, --help                    Print help
+
+Примеры:
+  # Схемы компоновки данных отчётов подсистемы
+  yellowcode template list configuration.cf --type dcs --subsystem СтандартныеПодсистемы.Пользователи
+
+  # Содержимое схемы: наборы, запросы, параметры, варианты
+  yellowcode template show configuration.cf Отчет.СведенияОПользователях.Макет.ОсновнаяСхемаКомпоновкиДанных
+
+  # Только текст запроса одного набора
+  yellowcode template show configuration.cf Отчет.СведенияОПользователях.Макет.ОсновнаяСхемаКомпоновкиДанных --set Пользователи --query
+--- stderr
