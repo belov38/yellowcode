@@ -30,6 +30,7 @@ query = { path = "../query" }
 query-syntax = { path = "../query-syntax" }
 query-exec = { path = "../query-exec" }
 query-ir = { path = "../query-ir" }
+zraw = { path = "../zraw" }
 
 [lints.clippy]
 dbg_macro = "warn"

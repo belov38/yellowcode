@@ -294,7 +294,11 @@ fn standard(ex: &mut Execution, app: &Application, obj: ObjId, row: &ReadRow) ->
     if has_number {
         let number = attr(ex, StdAttr::Number)?.unwrap_or_default();
         let date = attr(ex, StdAttr::Date)?.unwrap_or_default();
-        let title = strict_synonym(&def.synonym, &def.name, &app.model().lang_code);
+        let lang = &app.model().lang_code;
+        let title = crate::types::localized(&def.object_presentation, lang).map_or_else(
+            || strict_synonym(&def.synonym, &def.name, lang),
+            str::to_string,
+        );
         let text = format!(
             "{title} {} от {}",
             number.to_string_lossy().trim_end_matches(' '),

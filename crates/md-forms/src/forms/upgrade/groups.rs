@@ -72,6 +72,10 @@ fn dflt(cx: &mut Cx<'_>, name: &str) -> Result<Node, Refusal> {
     cx.parse_default(&text)
 }
 
+fn events(v: &Node, cx: &mut Cx<'_>, tag: &str) -> Result<Node, Refusal> {
+    cx.upgrade_value("Events", v, tag)
+}
+
 fn enum2(x: bool) -> i64 {
     if x { 2 } else { 0 }
 }
@@ -183,7 +187,7 @@ fn usual_group(v: &Node, cx: &mut Cx<'_>) -> Result<Node, Refusal> {
         f188 = r.int()?;
         f190 = r.int()?;
         f198 = cx.upgrade_value("Picture", &r.get()?, "UsualGroup")?;
-        f20 = r.get()?;
+        f20 = events(&r.get()?, cx, "UsualGroup")?;
     }
     if ver > 30 {
         f18c = r.int()?;
@@ -368,7 +372,7 @@ fn page(v: &Node, cx: &mut Cx<'_>) -> Result<Node, Refusal> {
     ]))
 }
 
-fn pages(v: &Node) -> Result<Node, Refusal> {
+fn pages(v: &Node, cx: &mut Cx<'_>) -> Result<Node, Refusal> {
     let mut r = R::new("group-kind", "3", v)?;
     let ver = r.ver;
     let (mut f48, mut f4c, mut f50) = (1i64, 2i64, 0i64);
@@ -379,7 +383,7 @@ fn pages(v: &Node) -> Result<Node, Refusal> {
         f4c = r.int()?;
         f50 = r.int()?;
     }
-    let f20 = r.get()?;
+    let f20 = events(&r.get()?, cx, "Pages")?;
     if ver > 2 {
         f4c = r.int()?;
         f50 = r.int()?;
@@ -560,7 +564,7 @@ pub(crate) fn group_kind(kind: &str, v: &Node, cx: &mut Cx<'_>) -> Result<Node, 
     match kind {
         "5" => usual_group(v, cx),
         "4" => page(v, cx),
-        "3" => pages(v),
+        "3" => pages(v, cx),
         "1" => popup(v, cx),
         "2" => column_group(v, cx),
         "0" => command_bar(v, cx),
@@ -593,7 +597,7 @@ fn label_decoration(v: &Node, cx: &mut Cx<'_>) -> Result<Node, Refusal> {
     if ver > 2 {
         f54 = r.int()?;
     }
-    let f20 = r.get()?;
+    let f20 = events(&r.get()?, cx, "LabelDecoration")?;
     if ver > 4 {
         f58 = cx.upgrade_value("Color", &r.get()?, "LabelDecoration")?;
         f74 = cx.upgrade_value("Color", &r.get()?, "LabelDecoration")?;
@@ -633,7 +637,7 @@ fn picture_decoration(v: &Node, owner_color: &Node, cx: &mut Cx<'_>) -> Result<N
         f17c = r.int()?;
         f17d = r.int()?;
     }
-    let f20 = r.get()?;
+    let f20 = events(&r.get()?, cx, "PictureDecoration")?;
     let f180 = if ver >= 3 { r.int()? } else { 0 };
     if ver > 3 {
         fe4 = r.int()?;
@@ -680,4 +684,49 @@ pub(crate) fn decoration_kind(
             version: v.at(0).and_then(Node::text).unwrap_or("?").into(),
         }),
     }
+}
+
+pub(crate) fn addition_kind(kind: &str, v: &Node, cx: &mut Cx<'_>) -> Result<Node, Refusal> {
+    let mut r = R::new("addition-kind", kind, v)?;
+    let ver = r.ver;
+    let tag = "Addition";
+    let mut out = vec![i(1)];
+    match kind {
+        "0" | "1" => {
+            out.push(r.get()?);
+            out.push(r.get()?);
+            let colors = if kind == "0" { 3 } else { 5 };
+            for _ in 0..colors {
+                out.push(cx.upgrade_value("Color", &r.get()?, tag)?);
+            }
+            let fonts = if kind == "0" { 1 } else { 2 };
+            for _ in 0..fonts {
+                out.push(cx.upgrade_value("Font", &r.get()?, tag)?);
+            }
+            if kind == "1" {
+                out.push(cx.upgrade_value("Border", &r.get()?, tag)?);
+                out.push(r.get()?);
+            }
+        }
+        "2" => {
+            out.push(r.get()?);
+            for _ in 0..3 {
+                out.push(cx.upgrade_value("Color", &r.get()?, tag)?);
+            }
+            out.push(cx.upgrade_value("Font", &r.get()?, tag)?);
+        }
+        _ => return Err(r.refuse()),
+    }
+    out.push(events(&r.get()?, cx, tag)?);
+    let mut tail = vec![1i64, 0, 0];
+    if kind == "2" {
+        tail.push(2);
+    }
+    if ver > 0 {
+        for x in &mut tail {
+            *x = r.int()?;
+        }
+    }
+    out.extend(tail.into_iter().map(i));
+    Ok(Node::list(out))
 }

@@ -86,10 +86,6 @@ pub fn read_support_findings(input: impl Read) -> Result<Result<UsersPresence, E
     found_as_value(read_support_for_separated_users(input))
 }
 
-pub fn read_email_findings(input: impl Read) -> Result<Result<(), Error>, Error> {
-    found_as_value(read_empty_user_email(input))
-}
-
 fn found_as_value<T>(result: Result<T, Error>) -> Result<Result<T, Error>, Error> {
     match result {
         Ok(value) => Ok(Ok(value)),
@@ -98,11 +94,11 @@ fn found_as_value<T>(result: Result<T, Error>) -> Result<Result<T, Error>, Error
     }
 }
 
-pub fn read_empty_user_email(input: impl Read) -> Result<(), Error> {
+pub fn read_user_email_count(input: impl Read) -> Result<u64, Error> {
     #[derive(serde::Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Email {
-        present: u8,
+        addresses: u64,
     }
     let mut bytes = Vec::new();
     input.take(8193).read_to_end(&mut bytes)?;
@@ -111,16 +107,7 @@ pub fn read_empty_user_email(input: impl Read) -> Result<(), Error> {
     }
     bytes.retain(|&b| b != b'\r' && b != b'\n');
     let email: Email = serde_json::from_slice(&bytes)?;
-    if email.present > 1 {
-        return Err(Error::Unsupported("invalid email presence flag"));
-    }
-    if email.present != 0 {
-        return Err(Error::Found(vec![
-            "у пользователя информационной базы задан адрес электронной почты (V8USERS.Email); DT с адресами пользователей пока не поддерживается"
-                .to_owned(),
-        ]));
-    }
-    Ok(())
+    Ok(email.addresses)
 }
 
 pub fn read_support_for_separated_users(input: impl Read) -> Result<UsersPresence, Error> {

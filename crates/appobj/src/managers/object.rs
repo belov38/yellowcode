@@ -220,9 +220,19 @@ impl HostObject for ObjMgr {
                 crate::recordset::create_key(ex, &self.app, self.obj, args)
             }
             "ПустаяСсылка" => Ok(empty_ref(&self.app, self.obj)?),
+            "ЭтотУзел" => crate::select::this_node(ex, &self.app, self.obj),
+            "Получить" if self.kind() == ObjKind::InformationRegister => {
+                crate::recordset::manager_get(ex, &self.app, self.obj, args)
+            }
             "ПолучитьСсылку" => self.get_ref(ex, args),
             "Получить" if self.kind() == ObjKind::Constant => {
                 super::constants::get(ex, &self.app, self.obj)
+            }
+            "Установить" if self.kind() == ObjKind::Constant => {
+                super::constants::set(ex, &self.app, self.obj, args)
+            }
+            "СоздатьМенеджерЗначения" if self.kind() == ObjKind::Constant => {
+                super::constants::ValueManager::create(&self.app, self.obj)
             }
             "Количество" if self.is_enum() => Ok(Value::from(
                 i64::try_from(enums::count(&self.app, self.obj)).unwrap_or(i64::MAX),
@@ -257,6 +267,9 @@ impl HostObject for ObjMgr {
             "Индекс" if self.is_enum() => {
                 let v = arg_value(ex, args, 0)?;
                 Ok(Value::from(enums::index_of(&self.app, self.obj, &v)?))
+            }
+            n if crate::regread::serves(self.kind(), n) => {
+                crate::regread::manager_call(ex, &self.app, self.obj, n, args)
             }
             n if crate::select::serves(n) && crate::select::selectable(self.kind()) => {
                 let names = self.param_names(ex, m);

@@ -434,8 +434,6 @@ pub enum ProfileRefusal {
     OldCompatibility { found: u32 },
     UnverifiedCompatibility { found: u32 },
     LockMode { found: mdconf::DataLockControlMode },
-    NoUsersSeparator { attributes: usize },
-    SeveralUsersSeparators { separators: usize },
     SeparatorWithoutData,
     PartialSeparatorCompatibility { found: u32 },
     UnreadableAttribute { listed: usize, read: usize },
@@ -448,8 +446,6 @@ impl ProfileRefusal {
             Self::OldCompatibility { .. } => "compatibility_old",
             Self::UnverifiedCompatibility { .. } => "compatibility_unverified",
             Self::LockMode { .. } => "lock_mode",
-            Self::NoUsersSeparator { .. } => "no_users_separator",
-            Self::SeveralUsersSeparators { .. } => "several_users_separators",
             Self::SeparatorWithoutData => "separator_without_data",
             Self::PartialSeparatorCompatibility { .. } => "partial_separator_compatibility",
             Self::UnreadableAttribute { .. } => "unreadable_attribute",
@@ -462,8 +458,6 @@ pub const PROFILE_REFUSAL_CODES: &[&str] = &[
     "compatibility_old",
     "compatibility_unverified",
     "lock_mode",
-    "no_users_separator",
-    "several_users_separators",
     "separator_without_data",
     "partial_separator_compatibility",
     "unreadable_attribute",
@@ -502,20 +496,12 @@ impl std::fmt::Display for ProfileRefusal {
                     mdconf::DataLockControlMode::Managed => "Управляемый",
                 }
             ),
-            Self::NoUsersSeparator { attributes } => write!(
-                f,
-                "в конфигурации общих реквизитов: {attributes}, и ни один не разделяет пользователей или аутентификацию; какую таблицу пользователей платформа пишет в DT такой базы, не проверено"
-            ),
-            Self::SeveralUsersSeparators { separators } => write!(
-                f,
-                "пользователей или аутентификацию разделяют несколько общих реквизитов ({separators}); проверен только случай одного такого реквизита"
-            ),
             Self::SeparatorWithoutData => f.write_str(
                 "общий реквизит разделяет пользователей или аутентификацию, но не разделяет данные; такая конфигурация не проверена",
             ),
             Self::PartialSeparatorCompatibility { found } => write!(
                 f,
-                "общий реквизит разделяет только пользователей или только аутентификацию, а режим совместимости {}; такой случай проверен только при 8.5.1",
+                "общие реквизиты разделяют только пользователей или только аутентификацию, а режим совместимости {}; такой случай проверен только при 8.5.1",
                 version(*found)
             ),
             Self::UnreadableAttribute { listed, read } => write!(
@@ -706,22 +692,19 @@ pub fn classify(
             found: compatibility,
         });
     }
-    let mut separators = attributes.iter().filter(|a| a.users || a.authentication);
-    let Some(separator) = separators.next() else {
-        return Err(ProfileRefusal::NoUsersSeparator {
-            attributes: attributes.len(),
-        });
-    };
-    let more = separators.count();
-    if more != 0 {
-        return Err(ProfileRefusal::SeveralUsersSeparators {
-            separators: more + 1,
-        });
+    let separators: Vec<&Separation> = attributes
+        .iter()
+        .filter(|a| a.users || a.authentication)
+        .collect();
+    if separators.is_empty() {
+        return Ok(UsersLayout::Users8);
     }
-    if !separator.data {
+    if separators.iter().any(|a| !a.data) {
         return Err(ProfileRefusal::SeparatorWithoutData);
     }
-    if !(separator.users && separator.authentication) && compatibility != 80501 {
+    let users = separators.iter().any(|a| a.users);
+    let authentication = separators.iter().any(|a| a.authentication);
+    if !(users && authentication) && compatibility != 80501 {
         return Err(ProfileRefusal::PartialSeparatorCompatibility {
             found: compatibility,
         });

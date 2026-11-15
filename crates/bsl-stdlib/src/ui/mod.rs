@@ -3,8 +3,10 @@ mod font;
 mod formatted;
 mod frame;
 mod picture;
+mod picture_lib;
 mod style;
 
+pub use picture_lib::{PictureNames, picture_library};
 pub use style::{StyleItem, StyleItemKind, StyleItems};
 
 use crate::enums::{enum_value, manager, type_by_id};

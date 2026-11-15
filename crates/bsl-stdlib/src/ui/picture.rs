@@ -5,6 +5,7 @@ use crate::collections::{
 };
 use crate::fs::{fs, fs_error};
 use crate::serial::codec::{InternalReader, InternalWriter, ValueCodec};
+use crate::serial::kind::guid_text;
 use crate::values::{binary_data_arc, binary_data_bytes, new_binary_data_arc};
 use crate::xdto::{XdtoCodec, XdtoCtx, XdtoData};
 use brace::Node;
@@ -20,6 +21,7 @@ use std::sync::Arc;
 pub(crate) struct Picture {
     data: Option<Arc<[u8]>>,
     transparent: bool,
+    library: Option<[u8; 16]>,
 }
 
 pub(super) fn comparison_resources(value: &Value) -> Option<(u64, u64)> {
@@ -30,10 +32,22 @@ pub(super) fn comparison_resources(value: &Value) -> Option<(u64, u64)> {
     ))
 }
 
-type PictureData = (Option<Arc<[u8]>>, bool);
+type PictureData = (Option<Arc<[u8]>>, bool, Option<[u8; 16]>);
 
 fn new_picture(data: Option<Arc<[u8]>>, transparent: bool) -> Value {
-    Value::Object(Rc::new(Picture { data, transparent }))
+    Value::Object(Rc::new(Picture {
+        data,
+        transparent,
+        library: None,
+    }))
+}
+
+pub(super) fn library_picture(common_picture: [u8; 16]) -> Value {
+    Value::Object(Rc::new(Picture {
+        data: None,
+        transparent: false,
+        library: Some(common_picture),
+    }))
 }
 
 pub(super) fn ctor(ex: &mut Execution, args: &mut [Arg]) -> CallResult<Value> {
@@ -93,7 +107,9 @@ fn format_of(b: &[u8]) -> &'static str {
 
 impl Picture {
     fn kind_name(&self) -> &'static str {
-        if self.data.is_some() {
+        if self.library.is_some() {
+            "FromLib"
+        } else if self.data.is_some() {
             "Absolute"
         } else {
             "Empty"
@@ -141,6 +157,9 @@ impl HostObject for Picture {
 
     fn call(&self, ex: &mut Execution, m: MemberId, _args: &mut [Arg]) -> CallResult<Value> {
         let t = types().picture;
+        if self.library.is_some() {
+            return Err(not_implemented(t, m).into());
+        }
         match method_name(t, m) {
             Some("Format") => match &self.data {
                 Some(b) => Ok(enum_val(types().picture_format, format_of(b))),
@@ -165,23 +184,34 @@ impl HostObject for Picture {
 
     fn equals(&self, other: &dyn HostObject) -> Option<bool> {
         let o = other.as_any().downcast_ref::<Picture>()?;
-        Some(self.transparent == o.transparent && self.data == o.data)
+        Some(self.library == o.library && self.transparent == o.transparent && self.data == o.data)
     }
 
     fn boost_hash(&self) -> Option<i32> {
+        if let Some(g) = &self.library {
+            return Some(bsl_prim::boost_hash::bytes(g));
+        }
         let h = bsl_prim::boost_hash::bytes(self.data.as_deref().unwrap_or(&[]));
         Some(h ^ i32::from(self.transparent))
     }
 
     fn to_shared(&self) -> Option<SharedValue> {
-        let data: PictureData = (self.data.clone(), self.transparent);
+        let data: PictureData = (self.data.clone(), self.transparent, self.library);
         Some(SharedValue::Object(Arc::new(SharedOf::new(data, |d| {
-            new_picture(d.0.clone(), d.1)
+            Value::Object(Rc::new(Picture {
+                data: d.0.clone(),
+                transparent: d.1,
+                library: d.2,
+            }))
         }))))
     }
 }
 
 pub(super) struct PictureCodec;
+
+fn not_implemented_member(what: &str) -> HostError {
+    HostError::not_implemented(crate::collections::type_name_ru(types().picture), what)
+}
 
 fn picture_of(v: &ObjRef) -> Option<&Picture> {
     v.as_any().downcast_ref::<Picture>()
@@ -198,6 +228,24 @@ impl ValueCodec for PictureCodec {
             return Ok(None);
         };
         let int = Node::int;
+        if let Some(g) = &p.library {
+            if w.is_storage() {
+                return Err(ex.error(not_implemented_member("ХранилищеЗначения")));
+            }
+            w.account(ex, 80)?;
+            let body = vec![
+                int(4),
+                int(1),
+                Node::List(vec![int(0), Node::Atom(guid_text(g))]),
+                Node::str(""),
+                int(-1),
+                int(-1),
+                int(0),
+                int(0),
+                Node::str(""),
+            ];
+            return Ok(Some(vec![Node::List(body)]));
+        }
         let body = match &p.data {
             None => vec![
                 int(4),
@@ -278,6 +326,7 @@ impl ValueCodec for PictureCodec {
                     None => Err(r.format_error(ex)),
                 }
             }
+            Some(1) => Err(ex.error(not_implemented_member("ЗначениеИзСтрокиВнутр"))),
             _ => Err(r.format_error(ex)),
         }
     }
@@ -297,6 +346,9 @@ impl XdtoCodec for PictureCodec {
         let Some(p) = picture_of(v) else {
             return Err(s.mismatch(ex));
         };
+        if p.library.is_some() {
+            return Err(ex.error(not_implemented_member("XDTO")));
+        }
         let mut props = vec![("t".to_string(), vec![data_bool(p.transparent)])];
         if let Some(b) = &p.data {
             let len = (b.len() as u64).div_ceil(3).saturating_mul(4);

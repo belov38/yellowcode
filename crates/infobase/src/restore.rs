@@ -20,8 +20,11 @@ use crate::raw::FolderFile;
 use crate::seed::seed;
 use crate::{Error, Infobase, OpenMode, OpenOptions, Result, SchemaCheck, Warning, folder};
 
+mod fit;
 mod ibcmd;
 mod users;
+
+pub use fit::{Decision, FitOptions, ReducedIndexes, TablePlan, plan_dt};
 
 const SYSTEM: [&str; 14] = [
     "IBVERSION",
@@ -95,6 +98,7 @@ impl Default for RestoreLimits {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
+    Fit,
     Read,
     Metadata,
     Sync,
@@ -126,6 +130,7 @@ pub struct RestoreOptions<'a> {
     pub memory_budget: Option<memory_budget::MemoryBudget>,
     pub without_users: bool,
     pub events: Option<&'a mut dyn FnMut(&RestoreEvent)>,
+    pub fit: FitOptions,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -140,6 +145,7 @@ pub struct RestoreReport {
     pub source_sha256: String,
     pub index_constraints: onecd::IndexConstraintSummary,
     pub warnings: Vec<OpenWarning>,
+    pub reduced_indexes: Vec<ReducedIndexes>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -255,10 +261,64 @@ fn application_import_scope(heads: &[TableHead], catalog: &[String]) -> Result<H
     Ok(scope)
 }
 
+const EXTENSIONS_REFUSED: &str =
+    "the DT holds data of configuration extensions; restoring it is not supported";
+
+fn reduced(logical: Vec<TableDescr>, plans: &[TablePlan]) -> Vec<TableDescr> {
+    let mut kept: HashMap<String, &[String]> = HashMap::new();
+    for p in plans {
+        if matches!(p.decision, Decision::ClusteredOnly { .. }) {
+            kept.entry(p.table.to_ascii_uppercase())
+                .or_insert(p.kept.as_slice());
+        }
+    }
+    if kept.is_empty() {
+        return logical;
+    }
+    logical
+        .into_iter()
+        .map(|d| match kept.get(&d.name.to_ascii_uppercase()) {
+            Some(k) => fit::reduce(&d, k),
+            None => d,
+        })
+        .collect()
+}
+
+fn cap_hit(error: Error, plan: Option<&TablePlan>) -> Error {
+    let (
+        Some(p),
+        Error::Engine(onecd::Error::Constraint(onecd::Constraint::ValueDoesNotFit {
+            field,
+            why,
+            ..
+        })),
+    ) = (plan, &error)
+    else {
+        return error;
+    };
+    if why != "internal file length limit" {
+        return error;
+    }
+    let what = match field.as_str() {
+        "index" => format!(
+            "indexes estimated {} GiB",
+            fit::gib(fit::loaded_estimate(p))
+        ),
+        "data" => format!("data {} GiB", fit::gib(p.data_bytes)),
+        "blob" => format!("blobs {} GiB", fit::gib(p.blob_bytes)),
+        _ => return error,
+    };
+    bad(format!(
+        "{error}; table {}: {} rows, {what}",
+        p.table, p.rows
+    ))
+}
+
 fn descriptors(
     schema: &LogicalSchema,
     users: &TableDescr,
     configured: bool,
+    plans: &[TablePlan],
 ) -> Result<Vec<TableDescr>> {
     let mut all: Vec<TableDescr> = system_descriptors()?
         .into_iter()
@@ -270,7 +330,7 @@ fn descriptors(
             }
         })
         .collect();
-    all.extend(descrs(schema, NameCase::Upper)?);
+    all.extend(reduced(descrs(schema, NameCase::Upper)?, plans));
     if configured || ibcmd::matches(schema)? {
         all.extend(ibcmd::extra_tables()?);
     }
@@ -834,6 +894,7 @@ struct Expected {
     users_dropped: u64,
     matching_keys: u64,
     users_descr: TableDescr,
+    plans: Vec<TablePlan>,
 }
 
 struct Run<'o, 'e> {
@@ -918,13 +979,10 @@ fn parse_locale(bytes: &[u8], parse_share: u64) -> Result<&'static str> {
     }
 }
 
-fn probe_locale(
-    source: &Path,
+fn open_f3<R: Read>(
+    mut input: R,
     limits: &RestoreLimits,
-    without_users: bool,
-    file_limit: u64,
-) -> Result<&'static str> {
-    let mut input = BufReader::with_capacity(1 << 20, io(File::open(source))?);
+) -> Result<(DtReader<zraw::InflateReader<R>>, ReadLimits)> {
     let header = read_header(&mut input)?;
     if header.version != DtVersion::F3 || header.ev {
         return Err(bad("only ordinary F3"));
@@ -936,11 +994,14 @@ fn probe_locale(
     };
     let mut raw = RawReader::from_payload(inflate_reader(input)?, header);
     raw.set_read_limits(row_limits);
-    let mut reader = DtReader::from_raw(raw);
-    match reader.next_event()? {
-        Some(Event::CompatibilityMode(mode)) if COMPAT.contains(&mode) => {}
+    Ok((DtReader::from_raw(raw), row_limits))
+}
+
+fn read_preamble<R: Read>(reader: &mut DtReader<R>) -> Result<i64> {
+    let compat = match reader.next_event()? {
+        Some(Event::CompatibilityMode(mode)) if COMPAT.contains(&mode) => mode,
         _ => return Err(bad("compatibility mode outside 8.3.11-8.5.1")),
-    }
+    };
     for name in ["IndexCompatibility", "UseMVCC"] {
         expect(
             reader.next_event()?,
@@ -950,32 +1011,84 @@ fn probe_locale(
             },
         )?;
     }
-    let header_share = (limits.row_bytes / 4).min(FOLDER_HEADER_SHARE);
+    Ok(compat)
+}
+
+fn folder_header_limits(limits: &RestoreLimits, row_limits: ReadLimits) -> (u64, ReadLimits) {
+    let share = (limits.row_bytes / 4).min(FOLDER_HEADER_SHARE);
+    (
+        share,
+        ReadLimits {
+            atom_bytes: row_limits.atom_bytes.min(share),
+            retained_bytes: share,
+            nodes: row_limits.nodes,
+        },
+    )
+}
+
+fn folder_header<R: Read>(
+    reader: &mut DtReader<R>,
+    head: &TableHead,
+) -> Result<Option<Vec<ColumnValue>>> {
+    let Some(metadata) = reader.folder_row_header()? else {
+        return Ok(None);
+    };
+    if metadata.len() != 5 {
+        return Err(bad("folder transfer columns"));
+    }
+    for (column, value) in head.columns.iter().take(5).zip(&metadata) {
+        column.check(value).map_err(bad)?;
+    }
+    Ok(Some(metadata))
+}
+
+fn folder_file_name(metadata: &[ColumnValue]) -> Result<&str> {
+    match metadata {
+        [ColumnValue::Str(name), _, _, _, ColumnValue::Number(_)] => Ok(name),
+        _ => Err(bad("folder transfer columns")),
+    }
+}
+
+fn folder_length(metadata: &[ColumnValue]) -> Result<u64> {
+    match metadata {
+        [_, _, _, _, ColumnValue::Number(size)] => size
+            .to_string()
+            .parse()
+            .map_err(|_| bad("invalid folder DATASIZE")),
+        _ => Err(bad("folder transfer columns")),
+    }
+}
+
+fn counted_file(without_users: bool, table: &str, name: &str) -> bool {
+    !(without_users && table == "PARAMS" && name.eq_ignore_ascii_case("users.usr"))
+}
+
+fn discard_file<R: Read>(reader: &mut DtReader<R>, length: u64) -> Result<()> {
+    if reader.copy_folder_binary_with_work_limit(&mut io::sink(), length, ROW_NODES)? != length {
+        return Err(bad("folder DATASIZE differs from stored bytes"));
+    }
+    Ok(())
+}
+
+fn probe_locale(
+    source: &Path,
+    limits: &RestoreLimits,
+    without_users: bool,
+    file_limit: u64,
+) -> Result<&'static str> {
+    let input = BufReader::with_capacity(1 << 20, io(File::open(source))?);
+    let (mut reader, row_limits) = open_f3(input, limits)?;
+    read_preamble(&mut reader)?;
+    let (header_share, header_limits) = folder_header_limits(limits, row_limits);
     let mut files = 0u64;
     for folder_name in FOLDERS.iter().take(3) {
         let head = TableHead::system(&Source::Folder((*folder_name).into()))
             .ok_or_else(|| bad("system head"))?;
         expect(reader.next_event()?, Event::TableStart(head.clone()))?;
-        reader.set_read_limits(ReadLimits {
-            atom_bytes: row_limits.atom_bytes.min(header_share),
-            retained_bytes: header_share,
-            nodes: row_limits.nodes,
-        });
-        while let Some(metadata) = reader.folder_row_header()? {
-            if metadata.len() != 5 {
-                return Err(bad("folder transfer columns"));
-            }
-            for (column, value) in head.columns.iter().take(5).zip(&metadata) {
-                column.check(value).map_err(bad)?;
-            }
-            let [ColumnValue::Str(name), _, _, _, ColumnValue::Number(size)] = metadata.as_slice()
-            else {
-                return Err(bad("folder transfer columns"));
-            };
-            if !(without_users
-                && *folder_name == "Params"
-                && name.eq_ignore_ascii_case("users.usr"))
-            {
+        reader.set_read_limits(header_limits);
+        while let Some(metadata) = folder_header(&mut reader, &head)? {
+            let name = folder_file_name(&metadata)?;
+            if counted_file(without_users, &head.phys_name, name) {
                 files = files
                     .checked_add(1)
                     .ok_or_else(|| bad("folder file limit"))?;
@@ -983,11 +1096,8 @@ fn probe_locale(
                     return Err(bad("folder file limit"));
                 }
             }
-            let length: u64 = size
-                .to_string()
-                .parse()
-                .map_err(|_| bad("invalid folder DATASIZE"))?;
-            if *folder_name == "Params" && name.eq_ignore_ascii_case("locale.inf") {
+            let length = folder_length(&metadata)?;
+            if head.phys_name == "PARAMS" && name.eq_ignore_ascii_case("locale.inf") {
                 if length.saturating_add(header_share) > limits.row_bytes {
                     return Err(bad(
                         "folder file exceeds the row share; increase --memory-limit",
@@ -1014,11 +1124,7 @@ fn probe_locale(
                     limits.row_bytes - header_share - bytes.capacity() as u64,
                 );
             }
-            if reader.copy_folder_binary_with_work_limit(&mut io::sink(), length, ROW_NODES)?
-                != length
-            {
-                return Err(bad("folder DATASIZE differs from stored bytes"));
-            }
+            discard_file(&mut reader, length)?;
         }
         reader.set_read_limits(row_limits);
     }
@@ -1050,25 +1156,18 @@ fn run(
     if stamp(&before) != stamp(&io(fs::metadata(source))?) {
         return Err(bad("the source changed while it was read"));
     }
+    let plans = fit::prepass(source, staging.path(), locale, opts, notes)?;
+    if stamp(&before) != stamp(&io(fs::metadata(source))?) {
+        return Err(bad("the source changed while it was read"));
+    }
     let read = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     let hash = std::sync::Arc::new(std::sync::Mutex::new(Sha256::new()));
-    let mut input = Tap {
+    let input = Tap {
         inner: BufReader::with_capacity(1 << 20, io(File::open(source))?),
         read: read.clone(),
         hash: hash.clone(),
     };
-    let header = read_header(&mut input)?;
-    if header.version != DtVersion::F3 || header.ev {
-        return Err(bad("only ordinary F3"));
-    }
-    let mut raw = RawReader::from_payload(inflate_reader(input)?, header);
-    let row_limits = ReadLimits {
-        atom_bytes: opts.limits.atom_bytes,
-        retained_bytes: opts.limits.row_bytes,
-        nodes: ROW_NODES,
-    };
-    raw.set_read_limits(row_limits);
-    let mut reader = DtReader::from_raw(raw);
+    let (mut reader, row_limits) = open_f3(input, &opts.limits)?;
     let database = staging.path().join(DATABASE_NAME);
     let mut state = Run {
         opts,
@@ -1081,8 +1180,9 @@ fn run(
         table: String::new(),
         last_progress: 0,
     };
-    let (expected, commits, peak) = stream(&mut reader, &mut state, notes, row_limits, locale)
-        .map_err(|e| row_limit(e, &opts.limits))?;
+    let (expected, commits, peak) =
+        stream(&mut reader, &mut state, notes, row_limits, locale, plans)
+            .map_err(|e| row_limit(e, &opts.limits))?;
     drop(reader);
 
     let after = io(fs::metadata(source))?;
@@ -1131,7 +1231,38 @@ fn run(
         source_sha256,
         index_constraints: checked.index_constraints,
         warnings: checked.warnings,
+        reduced_indexes: ReducedIndexes::of(&expected.plans),
     })
+}
+
+fn read_schema<R: Read>(
+    reader: &mut DtReader<R>,
+    limits: &RestoreLimits,
+    row_limits: ReadLimits,
+) -> Result<LogicalSchema> {
+    reader.set_read_limits(ReadLimits {
+        atom_bytes: SCHEMA_TEXT_MAX as u64,
+        retained_bytes: SCHEMA_TEXT_MAX as u64,
+        nodes: limits.schema_nodes,
+    });
+    let schema = match reader.next_event() {
+        Ok(Some(Event::DataBaseStart(schema))) => schema,
+        Ok(_) => return Err(bad("expected one DataBase")),
+        Err(dtfile::Error::Limit { what: "nodes", .. }) => {
+            return Err(bad(if limits.schema_nodes < SCHEMA_NODES_CAP {
+                format!(
+                    "schema node limit {} (a share of the memory budget); increase --memory-limit",
+                    limits.schema_nodes
+                )
+            } else {
+                format!("schema node limit {}", limits.schema_nodes)
+            }));
+        }
+        Err(dtfile::Error::Limit { .. }) => return Err(bad("schema byte limit")),
+        Err(e) => return Err(e.into()),
+    };
+    reader.set_read_limits(row_limits);
+    Ok(schema)
 }
 
 fn stream<R: Read>(
@@ -1140,21 +1271,10 @@ fn stream<R: Read>(
     notes: &mut Notes<'_, '_>,
     row_limits: ReadLimits,
     locale: &str,
+    plans: Vec<TablePlan>,
 ) -> Result<(Expected, u64, usize)> {
     let limits = run.opts.limits;
-    let compat = match reader.next_event()? {
-        Some(Event::CompatibilityMode(mode)) if COMPAT.contains(&mode) => mode,
-        _ => return Err(bad("compatibility mode outside 8.3.11-8.5.1")),
-    };
-    for name in ["IndexCompatibility", "UseMVCC"] {
-        expect(
-            reader.next_event()?,
-            Event::CustomFlag {
-                name: name.into(),
-                value: BinNode::Atom(brace::binary::Atom::int(1)),
-            },
-        )?;
-    }
+    let compat = read_preamble(reader)?;
     let mut db = Database::create(
         &run.database,
         onecd::CreateOptions {
@@ -1223,19 +1343,9 @@ fn stream<R: Read>(
             .ok_or_else(|| bad("folder FILENAME"))?;
         let mut keys = HashSet::new();
         let mut count = 0;
-        let header_share = (limits.row_bytes / 4).min(FOLDER_HEADER_SHARE);
-        reader.set_read_limits(ReadLimits {
-            atom_bytes: row_limits.atom_bytes.min(header_share),
-            retained_bytes: header_share,
-            nodes: row_limits.nodes,
-        });
-        while let Some(metadata) = reader.folder_row_header()? {
-            if metadata.len() != 5 {
-                return Err(bad("folder transfer columns"));
-            }
-            for (column, value) in head.columns.iter().take(5).zip(&metadata) {
-                column.check(value).map_err(bad)?;
-            }
+        let (header_share, header_limits) = folder_header_limits(&limits, row_limits);
+        reader.set_read_limits(header_limits);
+        while let Some(metadata) = folder_header(reader, &head)? {
             if !matches!(
                 head.phys_name.as_str(),
                 "CONFIG" | "PARAMS" | "FILES" | "DEPOTFILES" | "CONFIGCAS"
@@ -1252,10 +1362,7 @@ fn stream<R: Read>(
             else {
                 return Err(bad("folder transfer columns"));
             };
-            let length: u64 = size
-                .to_string()
-                .parse()
-                .map_err(|_| bad("invalid folder DATASIZE"))?;
+            let length = folder_length(&metadata)?;
             let f = FolderFile {
                 name: name.clone(),
                 creation: *creation,
@@ -1275,15 +1382,8 @@ fn stream<R: Read>(
             let locale_file =
                 head.phys_name == "PARAMS" && f.name.eq_ignore_ascii_case("locale.inf");
             let dbnames_file = head.phys_name == "PARAMS" && f.name.eq_ignore_ascii_case("DBNames");
-            let drop_user_file = run.opts.without_users
-                && head.phys_name == "PARAMS"
-                && f.name.eq_ignore_ascii_case("users.usr");
-            if drop_user_file {
-                if reader.copy_folder_binary_with_work_limit(&mut io::sink(), length, ROW_NODES)?
-                    != length
-                {
-                    return Err(bad("folder DATASIZE differs from stored bytes"));
-                }
+            if !counted_file(run.opts.without_users, &head.phys_name, &f.name) {
+                discard_file(reader, length)?;
                 continue;
             }
             run.files += 1;
@@ -1449,28 +1549,7 @@ fn stream<R: Read>(
         counts.push(count);
     }
 
-    reader.set_read_limits(ReadLimits {
-        atom_bytes: SCHEMA_TEXT_MAX as u64,
-        retained_bytes: SCHEMA_TEXT_MAX as u64,
-        nodes: limits.schema_nodes,
-    });
-    let schema = match reader.next_event() {
-        Ok(Some(Event::DataBaseStart(schema))) => schema,
-        Ok(_) => return Err(bad("expected one DataBase")),
-        Err(dtfile::Error::Limit { what: "nodes", .. }) => {
-            return Err(bad(if limits.schema_nodes < SCHEMA_NODES_CAP {
-                format!(
-                    "schema node limit {} (a share of the memory budget); increase --memory-limit",
-                    limits.schema_nodes
-                )
-            } else {
-                format!("schema node limit {}", limits.schema_nodes)
-            }));
-        }
-        Err(dtfile::Error::Limit { .. }) => return Err(bad("schema byte limit")),
-        Err(e) => return Err(e.into()),
-    };
-    reader.set_read_limits(row_limits);
+    let schema = read_schema(reader, &limits, row_limits)?;
     let text = schema.to_text();
     if text.len() > SCHEMA_TEXT_MAX {
         return Err(bad("schema byte limit"));
@@ -1479,7 +1558,15 @@ fn stream<R: Read>(
         return Err(bad("schema table limit"));
     }
     let heads = TableHead::database(&schema)?;
-    let mut logical = descrs(&schema, NameCase::Upper)?;
+    if plans.len() != heads.len()
+        || plans
+            .iter()
+            .zip(&heads)
+            .any(|(p, h)| !p.table.eq_ignore_ascii_case(&h.phys_name))
+    {
+        return Err(bad("the tables differ from the pre-pass"));
+    }
+    let mut logical = reduced(descrs(&schema, NameCase::Upper)?, &plans);
     {
         let catalog: Vec<String> = logical
             .iter()
@@ -1560,6 +1647,7 @@ fn stream<R: Read>(
         users_dropped,
         matching_keys,
         users_descr,
+        plans,
     };
     run.table.clear();
     run.progress(notes, Phase::Metadata);
@@ -1571,7 +1659,7 @@ fn stream<R: Read>(
     let scope = application_import_scope(&heads, &db.info().tables)?;
     let mut batches = Batches::new(&db, &limits);
     let mut counts = partial.counts;
-    for head in heads {
+    for (head, table_plan) in heads.into_iter().zip(&partial.plans) {
         expect(reader.next_event()?, Event::TableStart(head.clone()))?;
         run.table = head.phys_name.clone();
         run.progress(notes, Phase::Read);
@@ -1593,7 +1681,9 @@ fn stream<R: Read>(
                     let tx =
                         batches.unit(plan.estimate(&row), &format!("a row of {}", plan.table))?;
                     let row = plan.row(row)?;
-                    tx.table_for_restore(&plan.table)?.insert(&row)?;
+                    tx.table_for_restore(&plan.table)?
+                        .insert(&row)
+                        .map_err(|e| cap_hit(e.into(), Some(table_plan)))?;
                     count += 1;
                     run.rows += 1;
                     run.tick(notes);
@@ -1601,9 +1691,21 @@ fn stream<R: Read>(
                 _ => return Err(bad("missing logical table end")),
             }
         }
+        if count != table_plan.rows {
+            return Err(bad(format!(
+                "table {}: {count} rows, the pre-pass counted {}",
+                head.phys_name, table_plan.rows
+            )));
+        }
         counts.push(count);
     }
-    expect(reader.next_event()?, Event::DataBaseEnd)?;
+    match reader.next_event()? {
+        Some(Event::DataBaseEnd) => {}
+        Some(Event::ExtensionsStart) => {
+            return Err(bad(EXTENSIONS_REFUSED));
+        }
+        _ => return Err(bad("element order, layout or value")),
+    }
     if reader.next_event()?.is_some() {
         return Err(bad("element after DataBase"));
     }
@@ -1724,7 +1826,12 @@ fn final_checks(path: &Path, expected: &Expected, opts: &RestoreOptions<'_>) -> 
     if !report.violations.is_empty() {
         return Err(bad("engine verification"));
     }
-    let expected_descrs = descriptors(&expected.schema, &expected.users_descr, configured)?;
+    let expected_descrs = descriptors(
+        &expected.schema,
+        &expected.users_descr,
+        configured,
+        &expected.plans,
+    )?;
     let mut names: Vec<_> = expected_descrs.iter().map(|d| d.name.clone()).collect();
     names.sort();
     let mut actual = db.info().tables;

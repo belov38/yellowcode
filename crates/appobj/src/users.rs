@@ -11,6 +11,7 @@ use bsl_vm::{
 use md_model::MdKind;
 use platform_catalog::{TypeIdx, catalog};
 use std::any::Any;
+use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -43,6 +44,7 @@ impl Types {
 pub(crate) fn register(app: &Arc<Application>, reg: &mut Registry) -> Result<()> {
     let types = Types::find()?;
     register_codec(types.user, Arc::new(UserCodec));
+    register_codec(types.roles, Arc::new(RolesCodec));
     let app = app.clone();
     reg.global_prop(
         "ПользователиИнформационнойБазы",
@@ -94,6 +96,7 @@ impl HostObject for UsersManager {
                 self.find_by_uuid(ex, args)
             }
             (true, "НайтиПоИмени") => self.find_by_name(ex, args),
+            (true, "СоздатьПользователя") => Ok(self.new_user()),
             (_, name) => Err(HostError::not_implemented(MANAGER, name).into()),
         }
     }
@@ -106,6 +109,23 @@ impl UsersManager {
             app: Some(self.app.clone()),
             user,
             restored: None,
+            created: None,
+        }))
+    }
+
+    fn new_user(&self) -> Value {
+        Value::Object(Rc::new(InfoBaseUser {
+            types: self.types,
+            app: Some(self.app.clone()),
+            user: SessionUser {
+                uuid: crate::model::Uuid16::NIL,
+                name: String::new(),
+                full_name: String::new(),
+                roles: Vec::new(),
+                no_users: false,
+            },
+            restored: None,
+            created: Some(Rc::new(RefCell::new(Vec::new()))),
         }))
     }
 
@@ -161,11 +181,14 @@ pub(crate) enum UserValue {
     Anonymous,
     OfSessionWithUsers,
     Restored,
+    Created,
 }
 
 pub(crate) fn user_value(v: &Value) -> Option<UserValue> {
     let user = v.as_object()?.as_any().downcast_ref::<InfoBaseUser>()?;
-    Some(if user.app.is_none() {
+    Some(if user.created.is_some() {
+        UserValue::Created
+    } else if user.app.is_none() {
         UserValue::Restored
     } else if user.user.no_users {
         UserValue::Anonymous
@@ -179,6 +202,7 @@ struct InfoBaseUser {
     app: Option<Arc<Application>>,
     user: SessionUser,
     restored: Option<[u8; 16]>,
+    created: Option<Rc<RefCell<Vec<MdKey>>>>,
 }
 
 impl InfoBaseUser {
@@ -221,7 +245,22 @@ impl InfoBaseUser {
         Ok(Value::Object(Rc::new(UserRoles {
             ty: self.types.roles,
             cx,
-            items,
+            items: Rc::new(RefCell::new(items)),
+            editable: false,
+        })))
+    }
+
+    fn created_roles(&self, items: &Rc<RefCell<Vec<MdKey>>>) -> CallResult<Value> {
+        let cx = self
+            .app
+            .as_ref()
+            .and_then(|app| app.md_ctx())
+            .ok_or_else(|| internal("the metadata context is gone"))?;
+        Ok(Value::Object(Rc::new(UserRoles {
+            ty: self.types.roles,
+            cx,
+            items: items.clone(),
+            editable: true,
         })))
     }
 }
@@ -234,6 +273,9 @@ impl HostObject for InfoBaseUser {
         let text = self.user.name.capacity() + self.user.full_name.capacity();
         let roles = self.user.roles.capacity() * std::mem::size_of::<crate::model::Uuid16>();
         visit.bytes((text + roles) as u64)?;
+        if let Some(items) = &self.created {
+            roles_memory(items, true, visit)?;
+        }
         Ok(true)
     }
     fn type_id(&self) -> TypeId {
@@ -246,6 +288,14 @@ impl HostObject for InfoBaseUser {
         let Some((false, ru, en)) = member_name(catalog(), self.types.user, m) else {
             return Err(internal("unknown property of an infobase user").into());
         };
+        if let Some(items) = &self.created {
+            return match en {
+                "Roles" => self.created_roles(items),
+                _ => Err(
+                    HostError::not_implemented(USER, &format!("{ru}: новый пользователь")).into(),
+                ),
+            };
+        }
         match en {
             "Name" => Ok(Value::from(self.user.name.as_str())),
             "FullName" => Ok(Value::from(self.user.full_name.as_str())),
@@ -264,37 +314,92 @@ impl HostObject for InfoBaseUser {
         Err(HostError::not_implemented(USER, name).into())
     }
     fn presentation(&self, _: &mut Execution) -> CallResult<Option<bsl_prim::Str>> {
+        if self.created.is_some() {
+            return Err(HostError::not_implemented(USER, "Строка: новый пользователь").into());
+        }
         Ok(self.user.no_users.then(|| bsl_prim::Str::from("")))
     }
+}
+
+fn roles_memory(
+    items: &Rc<RefCell<Vec<MdKey>>>,
+    editable: bool,
+    visit: &mut dyn bsl_vm::RetainedMemory,
+) -> std::result::Result<(), Exception> {
+    visit.work(1)?;
+    if editable {
+        visit.mutable();
+    }
+    let cell = std::mem::size_of::<RefCell<Vec<MdKey>>>() + 2 * std::mem::size_of::<usize>();
+    if visit.allocation(Rc::as_ptr(items) as usize, cell as u64)? {
+        let roles = items.borrow();
+        if roles.capacity() != 0 {
+            visit.allocation(
+                roles.as_ptr() as usize,
+                crate::read_budget::slots::<MdKey>(roles.capacity()),
+            )?;
+        }
+    }
+    Ok(())
 }
 
 struct UserRoles {
     ty: TypeIdx,
     cx: Arc<MdCtx>,
-    items: Vec<MdKey>,
+    items: Rc<RefCell<Vec<MdKey>>>,
+    editable: bool,
+}
+
+fn role_key<'v>(v: &'v Value, method: &str) -> CallResult<(MdKey, &'v Arc<Application>)> {
+    let refuse = |what: &str| HostError::not_implemented(ROLES, &format!("{method}: {what}"));
+    let Some((key, owner)) = key_with_app(v) else {
+        return Err(refuse("не объект метаданных").into());
+    };
+    let is_role = matches!(
+        key,
+        MdKey::Path(MdPath::Other(i))
+            if owner.model().config.objects.get(i).is_some_and(|o| o.kind == MdKind::Role)
+    );
+    if !is_role {
+        return Err(refuse("не роль").into());
+    }
+    Ok((key, owner))
 }
 
 impl UserRoles {
     fn contains(&self, ex: &mut Execution, args: &[Arg]) -> CallResult<Value> {
         let v = arg_value(ex, args, 0)?;
-        let Some((key, owner)) = key_with_app(&v) else {
-            return Err(HostError::not_implemented(ROLES, "Содержит: не объект метаданных").into());
-        };
-        let is_role = matches!(
-            key,
-            MdKey::Path(MdPath::Other(i))
-                if owner.model().config.objects.get(i).is_some_and(|o| o.kind == MdKind::Role)
-        );
-        if !is_role {
-            return Err(HostError::not_implemented(ROLES, "Содержит: не роль").into());
-        }
+        let (key, owner) = role_key(&v, "Содержит")?;
         Ok(Value::Bool(
-            Arc::ptr_eq(owner, &self.cx.app) && self.items.contains(&key),
+            Arc::ptr_eq(owner, &self.cx.app) && self.items.borrow().contains(&key),
         ))
+    }
+
+    fn add(&self, ex: &mut Execution, args: &[Arg]) -> CallResult<Value> {
+        let v = arg_value(ex, args, 0)?;
+        let (key, owner) = role_key(&v, "Добавить")?;
+        if !Arc::ptr_eq(owner, &self.cx.app) {
+            return Err(
+                HostError::not_implemented(ROLES, "Добавить: роль другой конфигурации").into(),
+            );
+        }
+        let mut items = self.items.borrow_mut();
+        if items.contains(&key) {
+            return Err(HostError::not_implemented(ROLES, "Добавить: роль уже в коллекции").into());
+        }
+        items.push(key);
+        Ok(Value::Undefined)
     }
 }
 
 impl HostObject for UserRoles {
+    fn retained_memory(
+        &self,
+        visit: &mut dyn bsl_vm::RetainedMemory,
+    ) -> std::result::Result<bool, Exception> {
+        roles_memory(&self.items, self.editable, visit)?;
+        Ok(true)
+    }
     fn type_id(&self) -> TypeId {
         TypeId::of_catalog(self.ty)
     }
@@ -313,17 +418,81 @@ impl HostObject for UserRoles {
     fn call(&self, ex: &mut Execution, m: MemberId, args: &mut [Arg]) -> CallResult<Value> {
         match member_of(self.ty, m)? {
             (true, "Содержит") => self.contains(ex, args),
+            (true, "Добавить") if self.editable => self.add(ex, args),
             (_, name) => Err(HostError::not_implemented(ROLES, name).into()),
         }
     }
     fn iter_len(&self, _: &mut Execution) -> Option<usize> {
-        Some(self.items.len())
+        Some(self.items.borrow().len())
     }
     fn iter_get(&self, ex: &mut Execution, i: usize) -> CallResult<Value> {
-        match self.items.get(i) {
-            Some(key) => Ok(value_of(&self.cx, ex, *key)),
+        let items = self.items.borrow();
+        if self.editable && items.len() > 1 {
+            return Err(HostError::not_implemented(
+                ROLES,
+                "Для Каждого: несколько ролей нового пользователя",
+            )
+            .into());
+        }
+        let key = items.get(i).copied();
+        drop(items);
+        match key {
+            Some(key) => Ok(value_of(&self.cx, ex, key)),
             None => Err(HostError::key(bsl_stdlib::bind::msg::INDEX_OFFBOUND).into()),
         }
+    }
+}
+
+struct RolesCodec;
+
+impl ValueCodec for RolesCodec {
+    fn internal_write(
+        &self,
+        ex: &mut Execution,
+        v: &ObjRef,
+        w: &mut InternalWriter,
+    ) -> std::result::Result<Option<Vec<Node>>, Exception> {
+        let Some(roles) = v.as_any().downcast_ref::<UserRoles>() else {
+            return Err(ex.error(internal("the codec of the user roles got another object")));
+        };
+        let role = match roles.items.borrow().as_slice() {
+            [MdKey::Path(MdPath::Other(i))] => *i,
+            [_] => {
+                return Err(ex.error(internal(
+                    "a user role that is no object of the configuration",
+                )));
+            }
+            _ => {
+                return Err(ex.error(HostError::not_implemented(
+                    ROLES,
+                    "ЗначениеВСтрокуВнутр: не одна роль",
+                )));
+            }
+        };
+        let Some(object) = roles.cx.model().config.objects.get(role) else {
+            return Err(ex.error(internal("a user role outside of the configuration")));
+        };
+        w.account(ex, 64)?;
+        Ok(Some(vec![
+            Node::list(vec![
+                Node::int(1),
+                Node::atom(bsl_stdlib::values::uuid_string(object.id.as_bytes())),
+            ]),
+            Node::list(vec![Node::int(0)]),
+        ]))
+    }
+
+    fn internal_read(
+        &self,
+        ex: &mut Execution,
+        _: &[Node],
+        _: &mut InternalReader,
+    ) -> std::result::Result<Value, Exception> {
+        Err(ex.error(HostError::not_implemented(ROLES, "ЗначениеИзСтрокиВнутр")))
+    }
+
+    fn storable(&self) -> bool {
+        false
     }
 }
 
@@ -387,6 +556,12 @@ impl ValueCodec for UserCodec {
                 "the codec of the infobase user got another object",
             )));
         };
+        if user.created.is_some() {
+            return Err(ex.error(HostError::not_implemented(
+                USER,
+                "ЗначениеВСтрокуВнутр: новый пользователь",
+            )));
+        }
         if !user.user.no_users {
             return Err(ex.error(HostError::not_implemented(
                 USER,
@@ -439,6 +614,7 @@ impl ValueCodec for UserCodec {
                 no_users: true,
             },
             restored: Some(uid),
+            created: None,
         })))
     }
 

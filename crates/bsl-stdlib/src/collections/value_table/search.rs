@@ -9,6 +9,13 @@ fn number_work(value: &Value) -> u64 {
     }
 }
 
+fn column_not_in_collection() -> HostError {
+    HostError::text(
+        "Недопустимое значение параметра (параметр номер '1') (Колонка не принадлежит коллекции)",
+        "Invalid parameter value (parameter number '1') (Column does not belong to collection)",
+    )
+}
+
 impl TableState {
     pub(super) fn search_column(
         &self,
@@ -25,6 +32,35 @@ impl TableState {
                 .saturating_add(2048),
         )?;
         self.columns.cell_column(ex, key)
+    }
+
+    fn total_column(
+        &self,
+        ex: &mut Execution,
+        key: &Value,
+        live: u64,
+    ) -> CallResult<Rc<ColumnRecord>> {
+        match key {
+            Value::String(name) => {
+                ex.reserve(
+                    live.saturating_add((name.len() as u64).saturating_mul(40))
+                        .saturating_add(2048),
+                )?;
+                match self.columns.named_cell_column(ex, name)? {
+                    Some(column) => Ok(column),
+                    None => Err(column_not_in_collection().into()),
+                }
+            }
+            Value::Number(n)
+                if n.is_integer()
+                    && !n.is_negative()
+                    && position(n).is_none_or(|i| i >= self.columns.len()) =>
+            {
+                Err(column_not_in_collection().into())
+            }
+            Value::Bool(_) => Err(type_mismatch(1).into()),
+            _ => self.search_column(ex, key, live),
+        }
     }
 
     pub(super) fn search_columns(
@@ -89,7 +125,7 @@ impl TableState {
         let live = self.live(ex)?;
         let key = arg_value_cached(ex, args.first(), live)?;
         let live = live.saturating_add(scalar_clone_bytes(&key));
-        let column = self.search_column(ex, &key, live)?;
+        let column = self.total_column(ex, &key, live)?;
         self.check_revision(rev, schema)?;
         ex.charge(self.len() as u64)?;
         let mut sum = Number::from_i64(0);

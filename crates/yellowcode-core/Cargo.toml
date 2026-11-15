@@ -38,6 +38,7 @@ mdconf = { path = "../mdconf" }
 memory-budget = { path = "../memory-budget" }
 query-console = { path = "../query-console" }
 onecd = { path = "../onecd", default-features = false }
+onec-client = { path = "../onec-client" }
 platform-catalog = { path = "../platform-catalog" }
 ui-style = { path = "../ui-style", features = ["font-files", "skin", "packages"] }
 v8cont = { path = "../v8cont" }

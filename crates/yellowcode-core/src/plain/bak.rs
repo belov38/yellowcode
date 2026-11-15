@@ -50,6 +50,22 @@ pub fn dynamic_update_notice(summary: &mssql_backup::dynamic_update::Summary) ->
     )
 }
 
+pub fn users_email_notice(count: u64) -> String {
+    format!(
+        "адреса электронной почты пользователей не перенесены (в DT нет такого поля, выгрузка платформы их тоже не переносит): пользователей с адресом {count}"
+    )
+}
+
+fn note_users_email(count: u64, status: &mut serde_json::Value, err: &mut dyn Write) {
+    if count == 0 {
+        return;
+    }
+    let _ = writeln!(err, "{}", users_email_notice(count));
+    if let Some(fields) = status.as_object_mut() {
+        fields.insert("usersWithEmail".into(), count.into());
+    }
+}
+
 fn cf_status(output: &Path, report: &mssql_backup::sqlcmd::Report) -> serde_json::Value {
     let mut status = serde_json::json!({"schemaVersion": 1, "output": output, "format": "cf", "rows": report.rows, "complete": true});
     if let (Some(summary), Some(fields)) = (&report.dynamic_update, status.as_object_mut()) {
@@ -304,7 +320,8 @@ pub fn convert_dt_with_backup_set(
 ) -> Result<()> {
     let _watch = watch_interrupts(err);
     let report = mssql_backup::sqlcmd::convert_dt_with_backup_set(&request, backup_set, err)?;
-    let status = serde_json::json!({"schemaVersion": 1, "output": request.output, "format": "dt", "tables": report.tables, "rows": report.rows, "files": report.files, "complete": true, "experimental": true});
+    let mut status = serde_json::json!({"schemaVersion": 1, "output": request.output, "format": "dt", "tables": report.tables, "rows": report.rows, "files": report.files, "complete": true, "experimental": true});
+    note_users_email(report.users_with_email, &mut status, err);
     if let Err(error) = serde_json::to_writer(&mut *out, &status) {
         return if error.io_error_kind() == Some(std::io::ErrorKind::BrokenPipe) {
             Ok(())
@@ -358,10 +375,10 @@ pub fn convert_onecd_with_memory_and_backup_set(
         .prefix(".yellowcode-")
         .tempdir_in(parent)?;
     request.output = staging.path().join("source.dt");
-    {
+    let report = {
         let _watch = watch_interrupts(err);
-        mssql_backup::sqlcmd::convert_dt_with_backup_set(&request, backup_set, err)?;
-    }
+        mssql_backup::sqlcmd::convert_dt_with_backup_set(&request, backup_set, err)?
+    };
     let mut result = Vec::new();
     let code = crate::plain::convert::run(
         crate::plain::convert::Request {
@@ -380,6 +397,7 @@ pub fn convert_onecd_with_memory_and_backup_set(
     }
     let mut status: serde_json::Value = serde_json::from_slice(&result)?;
     label_onecd_status(&mut status);
+    note_users_email(report.users_with_email, &mut status, err);
     if let Err(error) = serde_json::to_writer(&mut *out, &status) {
         return if error.io_error_kind() == Some(std::io::ErrorKind::BrokenPipe) {
             Ok(())

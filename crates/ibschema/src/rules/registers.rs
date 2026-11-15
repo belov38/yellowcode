@@ -286,7 +286,7 @@ pub(crate) fn accumulation(cx: &Ctx, names: &mut Names) -> Result<Vec<(Table, Ta
         t.rule(cx, names, "ByDims", true, &toks, None)?;
         let toks = [p.clone(), Tok::Attr];
         for d in indexed_dims(cx) {
-            t.rule(cx, names, "ByDims{n}", false, &toks, Some(d))?;
+            t.rule_unless_prefix(cx, names, "ByDims{n}", false, &toks, Some(d))?;
         }
         out.push(t.finish());
     } else {

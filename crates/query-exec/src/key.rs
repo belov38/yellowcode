@@ -1,6 +1,6 @@
 use crate::coll::{ExecCollation, Keys, infallible};
 use bsl_prim::{Collation, Number, Strength};
-use ibschema::values::type_code;
+use ibschema::values::{RefId, Uuid16, type_code};
 use query_ir::ExecError;
 use query_ir::QValue;
 
@@ -92,7 +92,7 @@ pub(crate) fn key_with<C: Keys>(v: &QValue, coll: C) -> Result<Key, C::Error> {
         }
         QValue::Uuid(u) => {
             k.push(type_code::UUID);
-            k.extend_from_slice(u);
+            k.extend_from_slice(&RefId::from_uuid(Uuid16::from_bytes(*u)).0);
         }
         QValue::Ref { table, id } => {
             k.push(type_code::REF);

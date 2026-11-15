@@ -1,6 +1,6 @@
 use super::hash::ref_hash;
 use crate::Application;
-use crate::model::{ObjId, ObjKind};
+use crate::model::{ObjId, ObjKind, StdAttr};
 use crate::read::{field_index, is_std_name, read_object_row, tabular_index};
 use crate::readtab::tabular_value;
 use crate::types::Category;
@@ -70,6 +70,31 @@ impl RefObject {
     fn attr(&self, ex: &mut Execution, i: usize) -> CallResult<Value> {
         let row = read_object_row(ex, &self.app, self.r)?;
         row.value(ex, &self.app, self.r.obj, i)
+    }
+
+    fn kind(&self) -> ObjKind {
+        self.app.model().obj(self.r.obj).kind
+    }
+
+    fn point_in_time(&self, ex: &mut Execution) -> CallResult<Value> {
+        if self.r.is_empty() {
+            return Err(self.not_implemented("МоментВремени: пустая ссылка").into());
+        }
+        let row = read_object_row(ex, &self.app, self.r)?;
+        if !row.found {
+            return Err(self.not_implemented("МоментВремени: битая ссылка").into());
+        }
+        let def = self.app.model().obj(self.r.obj);
+        let i = def
+            .fields
+            .iter()
+            .position(|f| f.std == Some(StdAttr::Date))
+            .ok_or_else(|| self.not_implemented("МоментВремени"))?;
+        let Value::Date(date) = row.value(ex, &self.app, self.r.obj, i)? else {
+            return Err(self.not_implemented("МоментВремени").into());
+        };
+        let me = ref_value(&self.app, self.r)?;
+        Ok(bsl_stdlib::api::new_point_in_time(ex, date, &me)?)
     }
 
     fn no_field(name: &str) -> HostError {
@@ -201,15 +226,25 @@ impl HostObject for RefObject {
                 if let Some(i) = tabular_index(def, ru) {
                     return tabular_value(ex, &self.app, self.r, i);
                 }
-                match field_index(def, ru) {
-                    Some(i) => self.attr(ex, i),
-                    None if bsl_prim::fold_name(ru) == "этогруппа"
-                        && def.kind == crate::model::ObjKind::Catalog =>
-                    {
-                        Ok(Value::Bool(false))
-                    }
-                    None if is_std_name(ru) => Err(Self::no_field(ru).into()),
-                    None => Err(self.not_implemented(ru).into()),
+                if let Some(i) = field_index(def, ru) {
+                    return self.attr(ex, i);
+                }
+                let absent = (def.kind == ObjKind::Catalog)
+                    .then(|| crate::read::std_attr_named(ru))
+                    .flatten();
+                match absent {
+                    Some(
+                        attr @ (StdAttr::IsFolder
+                        | StdAttr::Owner
+                        | StdAttr::Parent
+                        | StdAttr::Code
+                        | StdAttr::Description),
+                    ) => match crate::read::catalog_std_default(&self.app, self.r.obj, attr)? {
+                        Some(v) => Ok(v),
+                        None => Err(Self::no_field(ru).into()),
+                    },
+                    _ if is_std_name(ru) => Err(Self::no_field(ru).into()),
+                    _ => Err(self.not_implemented(ru).into()),
                 }
             }
             Some((_, ru)) => Err(self.not_implemented(ru).into()),
@@ -242,6 +277,9 @@ impl HostObject for RefObject {
                 if !self.is_enum() =>
             {
                 crate::hierarchy::call(ex, &self.app, self.r, ru, args)
+            }
+            Some((true, "МоментВремени")) if self.kind() == ObjKind::Document => {
+                self.point_in_time(ex)
             }
             Some((true, "Метаданные")) => {
                 use crate::meta::{MdKey, MdPath, value_of};

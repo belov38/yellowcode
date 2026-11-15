@@ -238,7 +238,8 @@ fn std_type(a: StdAttr, b: &Behavior, cx: &StdCtx<'_>) -> TypeSet {
     use StdAttr as S;
     let one = |x: TypeAtom| TypeSet::of_atom(x);
     match a {
-        S::Ref | S::Parent | S::ThisNode => one(TypeAtom::Ref(cx.me)),
+        S::Ref | S::Parent => one(TypeAtom::Ref(cx.me)),
+        S::ThisNode => one(TypeAtom::Bool),
         S::DeletionMark
         | S::Predefined
         | S::IsFolder

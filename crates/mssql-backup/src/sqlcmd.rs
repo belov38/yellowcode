@@ -52,6 +52,7 @@ pub struct DtReport {
     pub rows: u64,
     pub files: u64,
     pub users: u64,
+    pub users_with_email: u64,
 }
 
 pub use process_containment::interrupt::{Kind as Interrupt, Watch as InterruptWatch};
@@ -1022,6 +1023,29 @@ enum SqlCleanup {
 }
 
 const USERS_WITHOUT_SEPARATION: &str = "SQL system data check failed: в базе есть пользователи информационной базы (таблица V8USERS или файл users.usr не пусты), а конфигурация не разделяет пользователей; DT для такой базы пока не поддерживается";
+const USER_EMAIL_REFUSED: &str = "у пользователя информационной базы задан адрес электронной почты (V8USERS.Email); DT с адресами пользователей пока не поддерживается";
+
+fn ordinary_users_admitted(strict: bool, users: bool, legacy_users: bool) -> Result<(), String> {
+    if !strict && (users || legacy_users) {
+        return Err(USERS_WITHOUT_SEPARATION.to_owned());
+    }
+    if legacy_users && !users {
+        return Err(LEGACY_USERS_ONLY.to_owned());
+    }
+    Ok(())
+}
+
+fn user_emails_admitted(strict: bool, with_email: u64, rows: u64) -> Result<(), String> {
+    if with_email > rows {
+        return Err("SQL user email count exceeds the user rows".to_owned());
+    }
+    if !strict && with_email != 0 {
+        return Err(format!("SQL user email check failed: {USER_EMAIL_REFUSED}"));
+    }
+    Ok(())
+}
+
+const LEGACY_USERS_ONLY: &str = "SQL system data check failed: в базе есть только старый список пользователей (файл users.usr), а таблица V8USERS пуста; DT для такой базы пока не поддерживается";
 
 #[derive(Clone, Copy)]
 enum DtMode {
@@ -1128,7 +1152,7 @@ fn convert_dt_inner_owned(
                 .map_err(|e| e.to_string())
         })
         .map_err(|e| err(format!("SQL inventory export failed: {}", e.message)))?;
-        if legacy {
+        let depot_files = if legacy {
             let report = sql_inventory::inspect_legacy_inventory(&schema.schema, &inventory)
                 .map_err(|e| err(e.to_string()))?;
             let expected = [
@@ -1156,10 +1180,12 @@ fn convert_dt_inner_owned(
                     return Err(err("unsupported nonempty SQL table"));
                 }
             }
+            true
         } else {
             sql_inventory::validate_inventory(&schema.schema, &inventory)
-                .map_err(|e| err(e.to_string()))?;
-        }
+                .map_err(|e| err(e.to_string()))?
+                .depot_files
+        };
         let support_script = if legacy {
             plan.legacy_support_script()
         } else {
@@ -1261,9 +1287,12 @@ fn convert_dt_inner_owned(
         } else {
             match layout {
                 sql_metadata::UsersLayout::Users8 => {
-                    if presence.users_present || presence.legacy_users_present {
-                        return Err(err(USERS_WITHOUT_SEPARATION));
-                    }
+                    ordinary_users_admitted(
+                        strict,
+                        presence.users_present,
+                        presence.legacy_users_present,
+                    )
+                    .map_err(err)?;
                     (
                         if strict {
                             strict_compatibility
@@ -1382,6 +1411,9 @@ fn convert_dt_inner_owned(
             "ConfigCAS",
             "ConfigCASSave",
         ] {
+            if name == sql_inventory::OPTIONAL_SYSTEM_TABLE && !depot_files {
+                continue;
+            }
             let head = TableHead::system(&Source::Folder(name.into()))
                 .ok_or_else(|| err("missing DT folder layout"))?;
             let actual = catalog(&head.phys_name)?;
@@ -1431,40 +1463,52 @@ fn convert_dt_inner_owned(
                 .checked_add(count)
                 .ok_or_else(|| err("folder row count overflow"))?;
         }
-        let users = match layout {
-            sql_metadata::UsersLayout::Users8 => {
-                let head = TableHead::system(&Source::Users)
-                    .ok_or_else(|| err("missing DT users layout"))?;
+        let (users, users_with_email) = {
+            let (source, missing) = match layout {
+                sql_metadata::UsersLayout::Users8 => (Source::Users, "missing DT users layout"),
+                sql_metadata::UsersLayout::UsersSpr11 => {
+                    (Source::UsersSpr, "missing DT separated users layout")
+                }
+            };
+            let head = TableHead::system(&source).ok_or_else(|| err(missing))?;
+            if source == Source::Users && !presence.users_present {
                 dt.begin_table(&head)
                     .and_then(|()| dt.end_table())
                     .map_err(|e| err(e.to_string()))?;
-                0
-            }
-            sql_metadata::UsersLayout::UsersSpr11 => {
-                let head = TableHead::system(&Source::UsersSpr)
-                    .ok_or_else(|| err("missing DT separated users layout"))?;
+                (0, 0)
+            } else {
                 let actual = catalog(&head.phys_name)?;
-                let (columns, email) =
-                    sql_users::users_spr_catalog(&actual).map_err(|e| err(e.to_string()))?;
-                if email {
+                let (columns, email) = match source {
+                    Source::Users => sql_users::users_catalog(&actual),
+                    _ => sql_users::users_spr_catalog(&actual),
+                }
+                .map_err(|e| err(e.to_string()))?;
+                let with_email = if email {
                     run(request, &plan.users_email_script(), |stdout| {
-                        sql_support::read_email_findings(stdout).map_err(|e| e.to_string())
+                        sql_support::read_user_email_count(stdout).map_err(|e| e.to_string())
                     })
                     .map_err(|e| err(format!("SQL user email check failed: {}", e.message)))?
-                    .map_err(|found| err(format!("SQL user email check failed: {found}")))?;
-                }
+                } else {
+                    0
+                };
                 let script = plan
                     .data_table_script(&head.phys_name, &head.columns, &columns)
                     .map_err(|e| err(e.to_string()))?;
                 let count = run(request, &script, |stdout| {
-                    sql_users::write_users_spr(&mut dt, &head, stdout, schema.year_offset)
-                        .map_err(|e| e.to_string())
+                    match source {
+                        Source::Users => {
+                            sql_users::write_users(&mut dt, &head, stdout, schema.year_offset)
+                        }
+                        _ => sql_users::write_users_spr(&mut dt, &head, stdout, schema.year_offset),
+                    }
+                    .map_err(|e| e.to_string())
                 })
                 .map_err(|e| err(format!("SQL users export failed: {}", e.message)))?;
                 if (count != 0) != presence.users_present {
                     return Err(err("SQL user count mismatch"));
                 }
-                count
+                user_emails_admitted(strict, with_email, count).map_err(err)?;
+                (count, with_email)
             }
         };
         for source in [Source::PasswordPolicies, Source::CompromisedPasswords] {
@@ -1633,6 +1677,7 @@ fn convert_dt_inner_owned(
             rows,
             files,
             users,
+            users_with_email,
         })
     })();
     let result = match (cleanup_policy, requested()) {

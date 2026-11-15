@@ -68,6 +68,13 @@ fn hierarchical_catalog(app: &Application, obj: ObjId) -> bool {
         && std_field(app, obj, StdAttr::IsFolder).is_some()
 }
 
+pub(crate) fn parent_field(app: &Application, obj: ObjId) -> Option<usize> {
+    if !hierarchical_catalog(app, obj) {
+        return None;
+    }
+    std_field(app, obj, StdAttr::Parent)
+}
+
 fn selected(app: &Application, r: RefValue) -> CallResult<()> {
     if r.is_empty() && hierarchical_catalog(app, r.obj) {
         return Err(not_selected().into());

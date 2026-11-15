@@ -95,9 +95,18 @@ impl HostObject for CollMgr {
             .into())
     }
 
-    fn call(&self, ex: &mut Execution, m: MemberId, _: &mut [Arg]) -> CallResult<Value> {
+    fn call(&self, ex: &mut Execution, m: MemberId, args: &mut [Arg]) -> CallResult<Value> {
         let platform = platform_catalog::catalog();
         let (_, ru, en) = member_name(platform, self.tidx, m).unwrap_or((false, "", ""));
+        match (ru, self.kind) {
+            ("ЗарегистрироватьИзменения", ObjKind::ExchangePlan) => {
+                return crate::changes::manager_call(ex, &self.app, true, args);
+            }
+            ("УдалитьРегистрациюИзменений", ObjKind::ExchangePlan) => {
+                return crate::changes::manager_call(ex, &self.app, false, args);
+            }
+            _ => {}
+        }
         match (en, self.kind) {
             ("AllRefsType", _) => crate::values::typedesc::all_refs(&self.app, ex, self.kind),
             ("RoutePointsAllRefsType", ObjKind::BusinessProcess) => {

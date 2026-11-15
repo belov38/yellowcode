@@ -404,7 +404,7 @@ impl StoreSource<'_> {
         } else {
             info.indexes
                 .iter()
-                .position(|ix| only_id(&ix.fields))
+                .position(|ix| !ix.absent && only_id(&ix.fields))
                 .and_then(|k| u16::try_from(k).ok())
                 .map(IndexId::Named)
         };

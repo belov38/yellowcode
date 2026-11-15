@@ -116,7 +116,11 @@ impl HostObject for Moment {
         Some(0)
     }
     fn presentation(&self, ex: &mut Execution) -> CallResult<Option<Str>> {
-        let date = Value::String(ex.present(&Value::Date(self.date))?);
+        let text = ex.present(&Value::Date(self.date))?;
+        if matches!(self.reference, Value::Undefined) {
+            return Ok(Some(text));
+        }
+        let date = Value::String(text);
         let prefix = bsl_vm::ops::binary(ex, bsl_vm::ops::BinOp::Add, &date, &Value::from("; "))?;
         let text = bsl_vm::ops::binary(ex, bsl_vm::ops::BinOp::Add, &prefix, &self.reference)?;
         match text {

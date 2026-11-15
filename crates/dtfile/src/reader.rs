@@ -5,6 +5,7 @@ use brace::binary::BinNode;
 use ibschema::columns::{Column, dt_columns, phys_table_name};
 use ibschema::logical::LogicalSchema;
 use ibschema::values::ColumnValue;
+use onecd::Numeric;
 
 use crate::container::DtHeader;
 use crate::elements::{RawEvent, RawReader, Source};
@@ -22,13 +23,26 @@ pub struct TableHead {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
     CompatibilityMode(i64),
-    CustomFlag { name: String, value: BinNode },
+    CustomFlag {
+        name: String,
+        value: BinNode,
+    },
     TableStart(TableHead),
     Row(Vec<ColumnValue>),
     TableEnd,
     DataBaseStart(LogicalSchema),
     DataBaseEnd,
-    Unknown { name: String, items: Vec<BinNode> },
+    Unknown {
+        name: String,
+        items: Vec<BinNode>,
+    },
+    ExtensionsStart,
+    ExtensionStart {
+        schema_id: u32,
+        schema: LogicalSchema,
+    },
+    ExtensionEnd,
+    ExtensionsEnd,
 }
 
 impl TableHead {
@@ -47,7 +61,12 @@ impl TableHead {
                 "V8CMSDPWDS".into(),
                 layout::compromised_passwords(),
             ),
-            Source::DataBase => return None,
+            Source::SchemaStorage => (
+                "SchemaStorage".into(),
+                "SCHEMASTORAGE".into(),
+                layout::schema_storage(),
+            ),
+            Source::DataBase | Source::Extension(_) => return None,
         };
         Some(TableHead {
             source: source.clone(),
@@ -55,6 +74,21 @@ impl TableHead {
             phys_name,
             columns: Arc::new(columns),
         })
+    }
+
+    pub fn extension(schema_id: u32, schema: &LogicalSchema) -> Result<Vec<TableHead>> {
+        schema
+            .walk()
+            .into_iter()
+            .map(|(t, o)| {
+                Ok(TableHead {
+                    source: Source::Extension(schema_id),
+                    name: t.name.clone(),
+                    phys_name: format!("{}X{schema_id}", phys_table_name(t, o)),
+                    columns: Arc::new(dt_columns(t, o)?),
+                })
+            })
+            .collect()
     }
 
     pub fn database(schema: &LogicalSchema) -> Result<Vec<TableHead>> {
@@ -73,11 +107,19 @@ impl TableHead {
     }
 }
 
+pub fn extension_schema(text: &[u8]) -> ibschema::Result<LogicalSchema> {
+    LogicalSchema::from_text(text)
+        .or_else(|full| LogicalSchema::from_text_legacy_indexes(text).map_err(|_| full))
+}
+
 pub struct DtReader<R: Read> {
     raw: RawReader<R>,
     db: Vec<TableHead>,
     started: usize,
     cur: Option<TableHead>,
+    storage: Vec<(Numeric, Vec<u8>)>,
+    ext: Vec<TableHead>,
+    ext_started: usize,
     failed: Option<Error>,
 }
 
@@ -177,6 +219,9 @@ impl<R: Read> DtReader<R> {
             db: Vec::new(),
             started: 0,
             cur: None,
+            storage: Vec::new(),
+            ext: Vec::new(),
+            ext_started: 0,
             failed: None,
         }
     }
@@ -227,6 +272,14 @@ impl<R: Read> DtReader<R> {
             RawEvent::TableStart { source, ordinal } => {
                 let head = match TableHead::system(&source) {
                     Some(h) => h,
+                    None if matches!(source, Source::Extension(_)) => {
+                        let h = self.ext.get(ordinal).cloned();
+                        let h = h.ok_or_else(|| {
+                            dt("more data lists than the extension schema has tables")
+                        })?;
+                        self.ext_started = ordinal.saturating_add(1);
+                        h
+                    }
                     None => {
                         let h = self.db.get(ordinal).cloned();
                         let h = h.ok_or_else(|| dt("more data lists than DBSchema tables"))?;
@@ -239,7 +292,19 @@ impl<R: Read> DtReader<R> {
             }
             RawEvent::Row(cells) => {
                 let head = self.cur.as_ref().ok_or_else(|| dt("row outside a table"))?;
-                Event::Row(rows::decode_in(&head.phys_name, &head.columns, &cells, at)?)
+                let values = rows::decode_in(&head.phys_name, &head.columns, &cells, at)?;
+                if head.source == Source::SchemaStorage {
+                    let (Some(ColumnValue::Number(id)), Some(ColumnValue::Bytes(schema))) =
+                        (values.first(), values.get(2))
+                    else {
+                        return Err(dt("SCHEMASTORAGE row without SCHEMAID or CURRENTSCHEMA"));
+                    };
+                    if self.storage.iter().any(|(i, _)| i.eq_value(id)) {
+                        return Err(dt("SCHEMASTORAGE: two rows with one SCHEMAID"));
+                    }
+                    self.storage.push((id.clone(), schema.clone()));
+                }
+                Event::Row(values)
             }
             RawEvent::TableEnd => {
                 self.cur = None;
@@ -267,6 +332,58 @@ impl<R: Read> DtReader<R> {
                 Event::DataBaseEnd
             }
             RawEvent::Unknown { name, items } => Event::Unknown { name, items },
+            RawEvent::ExtensionsStart => {
+                if self.started < self.db.len() {
+                    return Err(dt(&format!(
+                        "extension block before all DBSchema tables ({} of {})",
+                        self.started,
+                        self.db.len()
+                    )));
+                }
+                self.storage.clear();
+                Event::ExtensionsStart
+            }
+            RawEvent::ExtensionStart { schema_id } => {
+                let id = Numeric::from_i64(i64::from(schema_id));
+                let text = self
+                    .storage
+                    .iter()
+                    .find(|(i, _)| i.eq_value(&id))
+                    .map(|(_, t)| t)
+                    .ok_or_else(|| {
+                        dt(&format!(
+                            "no SCHEMASTORAGE row for extension schema {schema_id}"
+                        ))
+                    })?;
+                let place = |e| {
+                    Error::Schema(schema_note(
+                        e,
+                        &format!("SCHEMASTORAGE {schema_id} at {at}"),
+                    ))
+                };
+                let schema = extension_schema(text).map_err(place)?;
+                self.ext = TableHead::extension(schema_id, &schema).map_err(|e| match e {
+                    Error::Schema(e) => place(e),
+                    other => other,
+                })?;
+                self.ext_started = 0;
+                Event::ExtensionStart { schema_id, schema }
+            }
+            RawEvent::ExtensionEnd => {
+                if self.ext_started < self.ext.len() {
+                    return Err(dt(&format!(
+                        "fewer data lists than the extension schema has tables ({} of {})",
+                        self.ext_started,
+                        self.ext.len()
+                    )));
+                }
+                self.ext.clear();
+                Event::ExtensionEnd
+            }
+            RawEvent::ExtensionsEnd => {
+                self.storage.clear();
+                Event::ExtensionsEnd
+            }
         }))
     }
 }

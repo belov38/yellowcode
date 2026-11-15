@@ -2,7 +2,7 @@ use std::path::Path;
 
 pub fn failure_written(path: &Path) -> String {
     format!(
-        "yellowcode: отчёт о сбое записан: {}; приложите его к сообщению об ошибке (имена в нём заменены хешами; что скрыто и что нет — в docs/bak-failure-report.md)",
+        "yellowcode: отчёт о сбое записан: {}; приложите его к сообщению об ошибке (имена в нём заменены хешами; что скрыто и что нет — https://yellowcode.dev/guide/bak-failure-report/)",
         path.display()
     )
 }

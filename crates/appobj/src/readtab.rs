@@ -23,6 +23,7 @@ enum Op {
     Total,
     Find,
     Unload,
+    UnloadColumn,
     Later,
 }
 
@@ -65,7 +66,14 @@ const METHODS: &[Method] = &[
     m("Сдвинуть", "Move", false, 2, Some(2), Op::Write),
     m("Свернуть", "GroupBy", false, 1, Some(2), Op::Write),
     m("Выгрузить", "Unload", true, 0, Some(2), Op::Unload),
-    m("ВыгрузитьКолонку", "UnloadColumn", true, 1, None, Op::Later),
+    m(
+        "ВыгрузитьКолонку",
+        "UnloadColumn",
+        true,
+        1,
+        None,
+        Op::UnloadColumn,
+    ),
     m("Найти", "Find", true, 1, Some(2), Op::Find),
     m("НайтиСтроки", "FindRows", true, 0, None, Op::Later),
     m("Итог", "Total", true, 1, Some(1), Op::Total),
@@ -271,6 +279,29 @@ impl TabView<'_> {
         }
     }
 
+    pub(crate) fn unload_column(&self, ex: &mut Execution, args: &[Arg]) -> CallResult<Value> {
+        let at = match crate::meta::arg_value(ex, args, 0)? {
+            Value::String(name) => self.column("ВыгрузитьКолонку", &name.to_string_lossy())?,
+            _ => {
+                return Err(self
+                    .refuse("ВыгрузитьКолонку", "колонка задана не именем")
+                    .into());
+            }
+        };
+        ex.charge(self.rows.len() as u64)?;
+        let values: Vec<Value> = self
+            .rows
+            .iter()
+            .map(|row| row.get(at).cloned().unwrap_or(Value::Undefined))
+            .collect();
+        let bytes = values.iter().fold(
+            crate::read_budget::slots::<Value>(values.len()).saturating_add(256),
+            |n, v| n.saturating_add(crate::read_budget::value_heap(v)),
+        );
+        crate::read_budget::reserve(ex, bytes)?;
+        Ok(bsl_stdlib::new_array(values))
+    }
+
     pub(crate) fn total(&self, ex: &mut Execution, args: &[Arg]) -> CallResult<Value> {
         let at = match crate::meta::arg_value(ex, args, 0)? {
             Value::String(name) => {
@@ -350,6 +381,36 @@ impl TabView<'_> {
             }
         }
         Ok(None)
+    }
+
+    pub(crate) fn find_rows(&self, ex: &mut Execution, args: &[Arg]) -> CallResult<Vec<usize>> {
+        let filter = crate::meta::arg_value(ex, args, 0)?;
+        let Some(fields) = bsl_stdlib::structure_fields(&filter) else {
+            return Err(self.refuse("НайтиСтроки", "отбор не структура").into());
+        };
+        let def = self.def().ok_or_else(|| internal("no such section"))?;
+        let mut wanted = Vec::with_capacity(fields.len());
+        for (name, value) in &fields {
+            if column_index(def, name).is_none() {
+                return Err(HostError::key("core85:IDS_VT_COLUMNCODE_ERROR").into());
+            }
+            wanted.push((self.column("НайтиСтроки", name)?, value));
+        }
+        let mut found = Vec::new();
+        'rows: for (i, row) in self.rows.iter().enumerate() {
+            ex.charge(1)?;
+            for (c, value) in &wanted {
+                let Some(cell) = row.get(*c) else {
+                    continue 'rows;
+                };
+                bsl_vm::ops::charge_equal(ex, cell, value)?;
+                if !same_value(cell, value) {
+                    continue 'rows;
+                }
+            }
+            found.push(i);
+        }
+        Ok(found)
     }
 
     fn attribute(&self, name: &str) -> Option<usize> {
@@ -587,6 +648,7 @@ impl HostObject for ReadTab {
             Op::Total => self.total(ex, args),
             Op::Find => self.find(ex, args),
             Op::Unload => self.unload(ex, args),
+            Op::UnloadColumn => self.view().unload_column(ex, args),
             Op::Later => Err(HostError::not_implemented(&self.type_name(), method.ru).into()),
         }
     }

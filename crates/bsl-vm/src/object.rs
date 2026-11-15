@@ -106,6 +106,10 @@ pub trait HostObject: Any {
         None
     }
 
+    fn lacks_property(&self, _name: &str) -> bool {
+        false
+    }
+
     fn index_get(&self, _ex: &mut Execution, _key: &Value) -> CallResult<Value> {
         Err(HostError::key(NOT_INDEXED).raw().into())
     }

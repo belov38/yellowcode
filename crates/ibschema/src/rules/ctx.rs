@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use brace::Guid;
 use md_model::{Child, ChildTag, Configuration, MdKind, MdObject, MdRef, Value};
@@ -99,6 +99,40 @@ pub(crate) struct Lookup<'a> {
     by_name: HashMap<(MdKind, &'a str), &'a MdObject>,
     by_kind: HashMap<MdKind, Vec<&'a MdObject>>,
     pub common: super::common::CommonAttrs<'a>,
+    pub filter_items: HashSet<Guid>,
+    pub filter_unresolved: Vec<FilterRef>,
+}
+
+pub(crate) struct FilterRef {
+    pub owner: Option<Guid>,
+    pub what: String,
+}
+
+fn unique<T>(mut it: impl Iterator<Item = T>) -> Option<T> {
+    let first = it.next()?;
+    it.next().is_none().then_some(first)
+}
+
+pub(crate) fn same_name(a: &str, b: &str) -> bool {
+    fn fold(s: &str) -> impl Iterator<Item = char> + '_ {
+        s.trim().chars().map(|c| {
+            let mut l = c.to_lowercase();
+            let c = match (l.next(), l.next()) {
+                (Some(x), None) => x,
+                _ => c,
+            };
+            if c == 'ё' { 'е' } else { c }
+        })
+    }
+    fold(a).eq(fold(b))
+}
+
+fn describe(r: &MdRef) -> String {
+    match (&r.id, r.name.is_empty()) {
+        (_, false) => r.name.clone(),
+        (Some(id), true) => id.to_string(),
+        (None, true) => "<empty>".into(),
+    }
 }
 
 impl<'a> Lookup<'a> {
@@ -109,6 +143,8 @@ impl<'a> Lookup<'a> {
             by_name: HashMap::new(),
             by_kind: HashMap::new(),
             common: Default::default(),
+            filter_items: HashSet::new(),
+            filter_unresolved: Vec::new(),
         };
         for o in &cfg.objects {
             l.by_id.entry(o.id).or_insert(o);
@@ -116,7 +152,92 @@ impl<'a> Lookup<'a> {
             l.by_kind.entry(o.kind).or_default().push(o);
         }
         l.common = super::common::CommonAttrs::new(l.of_kind(MdKind::CommonAttribute));
+        (l.filter_items, l.filter_unresolved) = l.filter_criteria();
         l
+    }
+
+    fn filter_criteria(&self) -> (HashSet<Guid>, Vec<FilterRef>) {
+        let (mut items, mut unresolved) = (HashSet::new(), Vec::new());
+        let criteria = self.of_kind(MdKind::FilterCriterion);
+        let mut by_id: HashMap<Guid, (&'a MdObject, &'a Child)> = HashMap::new();
+        if criteria.iter().any(|fc| matches!(fc.value("Content"), Some(Value::RefList(r)) if r.iter().any(|r| r.id.is_some()))) {
+            for o in &self.cfg.objects {
+                for c in &o.children {
+                    by_id.entry(c.id).or_insert((o, c));
+                    for n in &c.children {
+                        by_id.entry(n.id).or_insert((o, n));
+                    }
+                }
+            }
+        }
+        for fc in criteria {
+            let Some(Value::RefList(refs)) = fc.value("Content") else {
+                continue;
+            };
+            for r in refs {
+                let (owner, item) = match r.id {
+                    Some(id) => match by_id.get(&id) {
+                        Some(&(o, c)) => (Some(o), Some(c)),
+                        None => (self.object(id), None),
+                    },
+                    None => self.item_by_name(&r.name),
+                };
+                match item.filter(|c| c.tag == ChildTag::Attribute) {
+                    Some(c) => {
+                        items.insert(c.id);
+                    }
+                    None => unresolved.push(FilterRef {
+                        owner: owner
+                            .filter(|o| o.kind != MdKind::CommonAttribute)
+                            .map(|o| o.id),
+                        what: format!("{}: {}", full_name(fc), describe(r)),
+                    }),
+                }
+            }
+        }
+        (items, unresolved)
+    }
+
+    fn item_by_name(&self, full: &str) -> (Option<&'a MdObject>, Option<&'a Child>) {
+        let parts: Vec<&str> = full.split('.').collect();
+        let Some(o) = parts
+            .first()
+            .and_then(|k| MdKind::from_name(k))
+            .zip(parts.get(1))
+            .and_then(|(k, n)| self.find_by_1c_name(k, n))
+        else {
+            return (None, None);
+        };
+        let child = |list: &'a [Child], tag: ChildTag, name: &str| -> Option<&'a Child> {
+            list.iter()
+                .find(|c| c.tag == tag && c.name == name)
+                .or_else(|| {
+                    unique(
+                        list.iter()
+                            .filter(|c| c.tag == tag && same_name(&c.name, name)),
+                    )
+                })
+        };
+        let item = match parts.as_slice() {
+            [_, _, "Attribute", a] => child(&o.children, ChildTag::Attribute, a),
+            [_, _, "TabularSection", t, "Attribute", a] => {
+                child(&o.children, ChildTag::TabularSection, t)
+                    .and_then(|ts| child(&ts.children, ChildTag::Attribute, a))
+            }
+            _ => None,
+        };
+        (Some(o), item)
+    }
+
+    fn find_by_1c_name(&self, kind: MdKind, name: &str) -> Option<&'a MdObject> {
+        self.find(kind, name).or_else(|| {
+            unique(
+                self.of_kind(kind)
+                    .iter()
+                    .copied()
+                    .filter(|o| same_name(&o.name, name)),
+            )
+        })
     }
 
     pub fn object(&self, id: Guid) -> Option<&'a MdObject> {

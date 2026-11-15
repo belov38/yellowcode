@@ -309,6 +309,10 @@ pub(crate) fn special_prop(kind: &str, name: &str, raw: &Node) -> Option<Value> 
     }
 }
 
+pub(crate) fn absent_value(tag: &str, name: &str) -> Option<&'static str> {
+    (tag == "TabularSection" && name == "LineNumberLength").then_some("5")
+}
+
 pub(crate) fn observed_order(s: &'static Schema, tag: &str) -> Option<ObservedOrder<'static>> {
     if let Some((_, order)) = ORDERS.iter().find(|(name, _)| *name == tag) {
         return Some(*order);

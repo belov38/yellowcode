@@ -1,3 +1,5 @@
+mod fill_names;
+
 use crate::Application;
 use crate::errors::{self, keys};
 use crate::exchange_params::ExchangeParams;
@@ -29,7 +31,7 @@ const METHOD_BASE: u32 = 1 << 23;
 
 const EXPORT_CALL_WEIGHT: u32 = 120;
 
-const BODY_WEIGHT: u32 = 516;
+pub(crate) const BODY_WEIGHT: u32 = 516;
 
 const NEW_VERSION: &str = "            ";
 
@@ -49,11 +51,14 @@ pub(crate) struct State {
     pub(crate) data_version: String,
     pub(crate) extra: Option<Value>,
     pub(crate) exchange: Option<Rc<ExchangeParams>>,
+    pub(crate) movements: Option<Value>,
     pub(crate) module: Option<ModuleInstanceRef>,
     pub(crate) attributes: Vec<Option<Value>>,
     pub(crate) new_ref: Option<RefValue>,
     pub(crate) dead: bool,
     pub(crate) written: Option<WriteStamp>,
+    pub(crate) group_without_hierarchy: bool,
+    pub(crate) issued: Option<crate::codes::IssuedInTxn>,
 }
 
 impl State {
@@ -105,11 +110,22 @@ pub fn get_object(ex: &mut Execution, app: &Application, r: RefValue) -> CallRes
     if r.is_empty() {
         return Err(not_selected().into());
     }
+    Ok(match stored_instance(ex, app, r)? {
+        Some(inst) => Value::Object(inst),
+        None => Value::Undefined,
+    })
+}
+
+pub(crate) fn stored_instance(
+    ex: &mut Execution,
+    app: &Application,
+    r: RefValue,
+) -> CallResult<Option<Rc<ObjectInstance>>> {
     let row = read_fresh(ex, app, r)?;
     if !row.found {
-        return Ok(Value::Undefined);
+        return Ok(None);
     }
-    Ok(Value::Object(instance(ex, app, r, row, false, false)?))
+    instance(ex, app, r, row, false, false).map(Some)
 }
 
 pub(crate) fn create_item(ex: &mut Execution, app: &Application, obj: ObjId) -> CallResult<Value> {
@@ -118,10 +134,9 @@ pub(crate) fn create_item(ex: &mut Execution, app: &Application, obj: ObjId) -> 
 
 pub(crate) fn create_group(ex: &mut Execution, app: &Application, obj: ObjId) -> CallResult<Value> {
     let def = app.model().obj(obj);
-    let folders = def.behavior.hierarchical
-        && def.behavior.hierarchy_folders
+    let folders = def.behavior.hierarchy_folders
         && def.fields.iter().any(|f| f.std == Some(StdAttr::IsFolder));
-    if !folders {
+    if def.behavior.hierarchical && !folders {
         return Err(crate::write::use_error(keys::CATALOG_HAS_NO_FOLDERS).into());
     }
     Ok(Value::Object(new_instance(ex, app, obj, true)?))
@@ -190,13 +205,11 @@ fn instance(
     } else {
         Vec::new()
     };
-    if folder
-        && let Some(slot) = def
-            .fields
-            .iter()
-            .position(|f| f.std == Some(StdAttr::IsFolder))
-            .and_then(|i| attributes.get_mut(i))
-    {
+    let folder_field = def
+        .fields
+        .iter()
+        .position(|f| f.std == Some(StdAttr::IsFolder));
+    if folder && let Some(slot) = folder_field.and_then(|i| attributes.get_mut(i)) {
         *slot = Some(Value::Bool(true));
     }
     let inst = Rc::new_cyclic(|me| ObjectInstance {
@@ -213,11 +226,14 @@ fn instance(
             data_version,
             extra: None,
             exchange: None,
+            movements: None,
             module: None,
             attributes,
             new_ref: None,
             dead: false,
             written: None,
+            group_without_hierarchy: folder && folder_field.is_none(),
+            issued: None,
         }),
     });
     if let Some(m) = app
@@ -279,6 +295,25 @@ impl ObjectInstance {
         Ok(())
     }
 
+    pub(crate) fn refuse_group_without_hierarchy(&self, method: &str) -> Result<(), HostError> {
+        if self.state.borrow().group_without_hierarchy {
+            return Err(self.not_implemented(&format!("{method}: группа справочника без иерархии")));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn take_ref(&self, txn: &Rc<CallTxn>, id: RefId) {
+        let mut st = self.state.borrow_mut();
+        st.r = Some(RefValue { obj: self.obj, id });
+        st.is_new = false;
+        st.new_ref = None;
+        st.written = Some(WriteStamp {
+            txn: Rc::downgrade(txn),
+            id: txn.id().unwrap_or(0),
+            was_new: true,
+        });
+    }
+
     pub(crate) fn snapshot(&self) -> Snapshot {
         let st = self.state.borrow();
         Snapshot {
@@ -292,6 +327,21 @@ impl ObjectInstance {
             written: st.written.clone(),
             tabs: st.tabular.iter().map(|t| t.state()).collect(),
         }
+    }
+
+    pub(crate) fn forget(&self, blank: ReadRow) {
+        let mut st = self.state.borrow_mut();
+        st.dead = true;
+        st.r = None;
+        st.new_ref = None;
+        st.row = Rc::new(blank);
+        for slot in st.attributes.iter_mut() {
+            *slot = None;
+        }
+        for tab in &st.tabular {
+            tab.replace(Vec::new());
+        }
+        st.modified.set(false);
     }
 
     pub(crate) fn restore(&self, s: Snapshot) {
@@ -392,6 +442,38 @@ impl ObjectInstance {
             .raw()
     }
 
+    fn std_without_field(&self, ru: &str) -> CallResult<Value> {
+        let Some(attr) = crate::read::std_attr_named(ru) else {
+            return Err(self.not_implemented(ru).into());
+        };
+        if attr == StdAttr::IsFolder {
+            self.refuse_group_without_hierarchy(ru)?;
+        }
+        match crate::read::catalog_std_default(&self.app, self.obj, attr)? {
+            Some(v) => Ok(v),
+            None => Err(Self::no_field(ru).into()),
+        }
+    }
+
+    fn indexed(&self, ex: &Execution, key: &Value) -> Result<(MemberId, bool, String), HostError> {
+        let Value::String(name) = key else {
+            return Err(self.not_implemented("[ключ не строка]"));
+        };
+        let name = name.to_string_lossy();
+        if self.app.model().obj(self.obj).kind != ObjKind::Catalog {
+            return Err(self.not_implemented("[индекс]"));
+        }
+        if let Some((m, MemberKind::Property { writable, .. })) =
+            ex.runtime().types().member(self.ty, &name)
+        {
+            return Ok((m, writable, name));
+        }
+        match self.find_member(&name) {
+            Some(m) if (ATTR_BASE..VAR_BASE).contains(&m.0) => Ok((m, true, name)),
+            _ => Err(self.not_implemented(&format!("[{name}]"))),
+        }
+    }
+
     fn var_place(&self, i: u32) -> Result<bsl_vm::Place, HostError> {
         let module = self
             .module()
@@ -426,7 +508,20 @@ impl ObjectInstance {
         Ok(v)
     }
 
-    fn exchange(&self) -> Result<Rc<ExchangeParams>, HostError> {
+    fn movements(&self, ex: &mut Execution) -> CallResult<Value> {
+        if let Some(v) = self.state.borrow().movements.clone() {
+            return Ok(v);
+        }
+        let r = {
+            let st = self.state.borrow();
+            st.r.filter(|_| !st.is_new && !st.new_write_rolled_back())
+        };
+        let v = crate::regread::Movements::create(ex, &self.app, self.obj, r)?;
+        self.state.borrow_mut().movements = Some(v.clone());
+        Ok(v)
+    }
+
+    pub(crate) fn exchange(&self) -> Result<Rc<ExchangeParams>, HostError> {
         if let Some(e) = self.state.borrow().exchange.clone() {
             return Ok(e);
         }
@@ -463,7 +558,17 @@ impl ObjectInstance {
             }
             .into());
         }
-        let cast = crate::values::typedesc::cast_to_field(&self.app, ex, field, v)?;
+        let storage = def.kind == crate::model::ObjKind::Catalog
+            && matches!(field.types.single(), Some(TypeAtom::ValueStorage))
+            && bsl_stdlib::value_storage_bytes(&v).is_some();
+        let cast = if storage {
+            v
+        } else {
+            crate::values::typedesc::cast_to_field(&self.app, ex, field, v)?
+        };
+        if field.std == Some(StdAttr::PredefinedDataName) {
+            self.check_predefined_name(&cast)?;
+        }
         let bytes = {
             let state = self.state.borrow();
             state
@@ -490,6 +595,28 @@ impl ObjectInstance {
         *slot = Some(cast);
         state.modified.set(true);
         Ok(())
+    }
+
+    fn check_predefined_name(&self, v: &Value) -> Result<(), HostError> {
+        let name = match v {
+            Value::String(s) => s.to_string_lossy(),
+            _ => return Ok(()),
+        };
+        if name.is_empty() {
+            return Ok(());
+        }
+        let folded = fold_name(&name);
+        let known = self
+            .app
+            .predefined()
+            .names(&self.app, self.obj)
+            .iter()
+            .any(|(_, n)| fold_name(n) == folded);
+        if known {
+            Ok(())
+        } else {
+            Err(crate::write::use_error(keys::PREDEFINED_ITEM_NOT_EXISTS))
+        }
     }
 
     fn set_new_ref(&self, ex: &mut Execution, args: &[Arg]) -> CallResult<Value> {
@@ -526,7 +653,7 @@ impl ObjectInstance {
             (st.r, st.is_new)
         };
         let Some(r) = r.filter(|_| !is_new) else {
-            return Ok(Value::Undefined);
+            return self.read_new();
         };
         let row = read_fresh(ex, &self.app, r)?;
         if !row.found {
@@ -555,7 +682,33 @@ impl ObjectInstance {
         Ok(Value::Undefined)
     }
 
+    fn read_new(&self) -> CallResult<Value> {
+        self.refuse_group_without_hierarchy("Прочитать")?;
+        let unknown = {
+            let st = self.state.borrow();
+            if self.folder_flag() == Some(true) {
+                Some("новая группа")
+            } else if st.tabular.iter().any(|t| !t.is_empty()) {
+                Some("новый объект со строками табличной части")
+            } else if st.new_ref.is_some() {
+                Some("новый объект со ссылкой УстановитьСсылкуНового")
+            } else {
+                None
+            }
+        };
+        if let Some(what) = unknown {
+            return Err(self.not_implemented(&format!("Прочитать: {what}")).into());
+        }
+        let mut st = self.state.borrow_mut();
+        for slot in st.attributes.iter_mut() {
+            *slot = None;
+        }
+        st.modified.set(false);
+        Ok(Value::Undefined)
+    }
+
     fn copy(&self, ex: &mut Execution) -> CallResult<Value> {
+        self.refuse_group_without_hierarchy("Скопировать")?;
         let new = new_instance(ex, &self.app, self.obj, self.folder_flag().unwrap_or(false))?;
         let def = self.app.model().obj(self.obj);
         let mut values: Vec<(usize, Value)> = Vec::with_capacity(def.fields.len());
@@ -575,13 +728,20 @@ impl ObjectInstance {
                 continue;
             }
             let v = self.attr(ex, i)?;
-            if matches!(v, Value::Undefined)
+            if (matches!(v, Value::Undefined) || crate::values::field::is_empty_storage(&v))
                 && f.types
                     .atoms
                     .iter()
                     .any(|a| matches!(a, TypeAtom::ValueStorage | TypeAtom::Binary))
             {
                 continue;
+            }
+            if def.kind != crate::model::ObjKind::Catalog
+                && bsl_stdlib::value_storage_bytes(&v).is_some()
+            {
+                return Err(self
+                    .not_implemented(&format!("Скопировать: {} со значением", f.name))
+                    .into());
             }
             values.push((i, v));
         }
@@ -606,9 +766,10 @@ impl ObjectInstance {
             for (tab, lines) in st.tabular.iter().zip(sources) {
                 tab.fill_from(lines);
             }
-            st.modified.set(false);
+            st.modified.set(true);
         }
         crate::write_hooks::after_copy(ex, &new, self)?;
+        new.state.borrow().modified.set(false);
         Ok(Value::Object(new))
     }
 
@@ -617,9 +778,23 @@ impl ObjectInstance {
             let st = self.state.borrow();
             if st.is_new { None } else { st.r }
         };
-        match stored {
-            Some(r) => crate::hierarchy::call(ex, &self.app, r, "Уровень", &[]),
-            None => Err(self.not_implemented("Уровень: новый объект").into()),
+        if let Some(r) = stored {
+            return crate::hierarchy::call(ex, &self.app, r, "Уровень", &[]);
+        }
+        let parent = match crate::hierarchy::parent_field(&self.app, self.obj) {
+            Some(i) => as_ref(&self.attr(ex, i)?).filter(|p| !p.is_empty()),
+            None => None,
+        };
+        let Some(parent) = parent else {
+            return Err(self.not_implemented("Уровень: новый объект").into());
+        };
+        let up = crate::hierarchy::call(ex, &self.app, parent, "Уровень", &[])?;
+        match &up {
+            Value::Number(n) => match n.to_i64().and_then(|n| n.checked_add(1)) {
+                Some(level) => Ok(Value::from(level)),
+                None => Err(self.not_implemented("Уровень: новый объект").into()),
+            },
+            _ => Err(self.not_implemented("Уровень: новый объект").into()),
         }
     }
 
@@ -634,22 +809,114 @@ impl ObjectInstance {
                 return Err(self.not_implemented("Заполнить: данные заполнения").into());
             }
         }
-        let text = bsl_vm::Place::temp(Value::from(""));
+        let text = bsl_vm::Place::temp(Value::Undefined);
         let standard = bsl_vm::Place::temp(Value::Bool(true));
         crate::events::filling(ex, &self.rc()?, data.clone(), &text, &standard)?;
         if def.kind == ObjKind::Catalog {
             let on = !matches!(standard.temp_value(), Some(Value::Bool(false)));
             if on {
-                if as_ref(&data).is_some() {
+                if let Some(r) = as_ref(&data)
+                    && let Some(name) = self.ref_fill_target(r)
+                {
                     return Err(self
-                        .not_implemented("Заполнить: ссылка как данные заполнения")
+                        .not_implemented(&format!(
+                            "Заполнить: ссылка как данные заполнения ({name})"
+                        ))
                         .into());
                 }
+                self.fill_from_structure(ex, &data)?;
                 self.apply_fill_values(ex)?;
             }
             self.state.borrow().modified.set(true);
         }
         Ok(Value::Undefined)
+    }
+
+    fn fill_from_structure(&self, ex: &mut Execution, data: &Value) -> CallResult<()> {
+        let def = self.app.model().obj(self.obj);
+        if let Some(md) = self.app.model().config.object(def.md) {
+            for f in def.fields.iter().filter(|f| f.std.is_none()) {
+                let on =
+                    f.md.and_then(|id| md.children.iter().find(|c| c.id == id))
+                        .and_then(|c| c.props.iter().find(|p| p.name == "FillFromFillingValue"))
+                        .is_some_and(|p| match &p.value {
+                            md_model::Value::Bool(b) => *b,
+                            md_model::Value::Text(t) => t == "true",
+                            _ => false,
+                        });
+                if on && bsl_stdlib::structure_get(data, &f.name).is_some() {
+                    return Err(self
+                        .not_implemented(&format!("Заполнить: {} из структуры", f.name))
+                        .into());
+                }
+            }
+        }
+        for attr in [StdAttr::Parent, StdAttr::Owner] {
+            let name = attr.names().0;
+            let Some(v) = bsl_stdlib::structure_get(data, name) else {
+                continue;
+            };
+            if attr == StdAttr::Owner && matches!(v, Value::String(_)) {
+                continue;
+            }
+            let Some((i, field)) = def
+                .fields
+                .iter()
+                .enumerate()
+                .find(|(_, f)| f.std == Some(attr))
+            else {
+                continue;
+            };
+            let plain = platform_catalog::catalog()
+                .find_type("Структура")
+                .is_some_and(|t| data.type_id() == TypeId::of_catalog(t));
+            let fits = as_ref(&v).is_some_and(|r| {
+                let kind = self.app.model().obj(r.obj).kind;
+                field.types.atoms.iter().any(|a| match a {
+                    TypeAtom::Ref(o) => *o == r.obj,
+                    TypeAtom::AnyRef(k) => k.is_none_or(|k| k == kind),
+                    _ => false,
+                })
+            });
+            if !plain || !fits {
+                return Err(self
+                    .not_implemented(&format!("Заполнить: {name} из структуры"))
+                    .into());
+            }
+            self.assign(ex, i, v)?;
+        }
+        Ok(())
+    }
+
+    fn ref_fill_target(&self, r: RefValue) -> Option<String> {
+        let model = self.app.model();
+        let def = model.obj(self.obj);
+        let kind = model.obj(r.obj).kind;
+        let md = model.config.object(def.md);
+        def.fields
+            .iter()
+            .find(|f| {
+                let candidate = match (f.std, f.md) {
+                    (Some(StdAttr::Parent | StdAttr::Owner), _) => true,
+                    (_, Some(id)) => md
+                        .and_then(|md| md.children.iter().find(|c| c.id == id))
+                        .and_then(|c| c.props.iter().find(|p| p.name == "FillFromFillingValue"))
+                        .is_some_and(|p| match &p.value {
+                            md_model::Value::Bool(b) => *b,
+                            md_model::Value::Text(t) => t == "true",
+                            _ => false,
+                        }),
+                    _ => false,
+                };
+                candidate
+                    && f.types.atoms.iter().any(|a| match a {
+                        TypeAtom::Ref(o) => *o == r.obj,
+                        TypeAtom::AnyRef(k) => k.is_none_or(|k| k == kind),
+                        TypeAtom::Platform(_) => true,
+                        _ => false,
+                    })
+            })
+            .map(|f| f.name.clone())
     }
 
     fn apply_fill_values(&self, ex: &mut Execution) -> CallResult<()> {
@@ -788,6 +1055,11 @@ impl HostObject for ObjectInstance {
                 Ok(Value::from(self.state.borrow().data_version.as_str()))
             }
             Some((false, "ЭтотОбъект")) => self.this(),
+            Some((false, "Движения"))
+                if self.app.model().obj(self.obj).kind == ObjKind::Document =>
+            {
+                self.movements(ex)
+            }
             Some((false, "ДополнительныеСвойства")) => self.extra(ex),
             Some((false, "ОбменДанными")) => {
                 let e: ObjRef = self.exchange()?;
@@ -800,9 +1072,7 @@ impl HostObject for ObjectInstance {
                 }
                 match field_index(def, ru) {
                     Some(i) => self.attr(ex, i),
-                    None if bsl_prim::fold_name(ru) == "этогруппа" && def.behavior.hierarchical => {
-                        Ok(Value::Bool(false))
-                    }
+                    None if def.kind == ObjKind::Catalog => self.std_without_field(ru),
                     None if is_std_name(ru) => Err(Self::no_field(ru).into()),
                     None => Err(self.not_implemented(ru).into()),
                 }
@@ -841,6 +1111,12 @@ impl HostObject for ObjectInstance {
             Some((false, ru)) if def.kind == ObjKind::Catalog => match field_index(def, ru) {
                 Some(i) => self.assign(ex, i, v),
                 None => match crate::read::std_attr_named(ru) {
+                    Some(StdAttr::Owner) => {
+                        Err(crate::write::use_error(keys::CATALOG_HAS_NO_OWNER).into())
+                    }
+                    Some(StdAttr::Parent) => {
+                        Err(crate::write::use_error(keys::CATALOG_NOT_MULTILEVEL).into())
+                    }
                     Some(attr)
                         if !matches!(
                             attr,
@@ -848,7 +1124,7 @@ impl HostObject for ObjectInstance {
                         ) =>
                     {
                         Err(self
-                            .not_implemented(&format!("{ru}: у справочника нет такого реквизита"))
+                            .not_implemented(&format!("{ru}: реквизит нулевой длины"))
                             .into())
                     }
                     _ => Err(not_writable(ru).into()),
@@ -913,7 +1189,7 @@ impl HostObject for ObjectInstance {
                 self.get_new_ref()
             }
             Some((true, ru @ ("Удалить" | "УстановитьПометкуУдаления"))) if catalog => {
-                crate::write_hooks::delete(ex, self, ru)
+                crate::write_hooks::delete(ex, self, ru, args)
             }
             Some((_, ru)) => Err(self.not_implemented(ru).into()),
             None => Err(self.not_implemented(&m.0.to_string()).into()),
@@ -965,6 +1241,34 @@ impl HostObject for ObjectInstance {
             min_args: clamp(required),
             max_args: Some(clamp(code.params.len())),
         })
+    }
+
+    fn property_names(
+        &self,
+        ex: &mut Execution,
+        retained: u64,
+    ) -> CallResult<Option<Vec<bsl_prim::Str>>> {
+        fill_names::names(self, ex, retained)
+    }
+
+    fn index_get(&self, ex: &mut Execution, key: &Value) -> CallResult<Value> {
+        let (m, _, _) = self.indexed(ex, key)?;
+        self.get(ex, m)
+    }
+
+    fn index_set(&self, ex: &mut Execution, key: &Value, v: Value) -> CallResult<()> {
+        let (_, writable, name) = self.indexed(ex, key)?;
+        let def = self.app.model().obj(self.obj);
+        let zero_length = field_index(def, &name).is_none()
+            && matches!(
+                crate::read::std_attr_named(&name),
+                Some(StdAttr::Code | StdAttr::Description)
+            );
+        if !writable || zero_length {
+            return Err(not_writable(&name).into());
+        }
+        let me = self.this()?;
+        ex.set_member(&me, &name, v).map_err(CallError::Exc)
     }
 
     fn presentation(&self, ex: &mut Execution) -> CallResult<Option<bsl_prim::Str>> {
@@ -1023,6 +1327,22 @@ impl HostObject for ObjectCtx {
 
     fn member_kind(&self, m: MemberId) -> Option<MemberKind> {
         self.inst.upgrade()?.member_kind(m)
+    }
+
+    fn index_get(&self, ex: &mut Execution, key: &Value) -> CallResult<Value> {
+        self.target()?.index_get(ex, key)
+    }
+
+    fn index_set(&self, ex: &mut Execution, key: &Value, v: Value) -> CallResult<()> {
+        self.target()?.index_set(ex, key, v)
+    }
+
+    fn property_names(
+        &self,
+        ex: &mut Execution,
+        retained: u64,
+    ) -> CallResult<Option<Vec<bsl_prim::Str>>> {
+        self.target()?.property_names(ex, retained)
     }
 
     fn equals(&self, other: &dyn HostObject) -> Option<bool> {

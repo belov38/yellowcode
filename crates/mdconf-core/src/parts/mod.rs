@@ -12,7 +12,7 @@ mod help;
 mod misc;
 mod pictures;
 mod predefined;
-mod rights;
+pub(crate) mod rights;
 
 pub(crate) use md_model::parts::MiscSource;
 pub use md_model::parts::{

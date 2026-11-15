@@ -2,8 +2,8 @@ use brace::Node;
 use mdschema::forms_upgrade::{Context, Domain, Op};
 
 use super::{Cx, Refusal, at, created, fields, groups};
-use crate::forms::decode::Item;
-use crate::forms::variant::TABLE_BAG_AT;
+use crate::forms::decode::{self, Item};
+use crate::forms::variant::{self, TABLE_BAG_AT};
 
 pub(crate) struct Env<'a> {
     pub class: &'a str,
@@ -15,9 +15,9 @@ fn context_name(it: &Item) -> Result<String, Refusal> {
     Ok(match it.class {
         Some(c) => format!("{c}/{}", it.version),
         None => match it.version.as_str() {
-            "22" => "Nested22/22".to_string(),
-            "11" | "12" => format!("Tooltip/{}", it.version),
-            "5" | "6" => format!("Addition/{}", it.version),
+            "19" | "21" | "22" => format!("Nested22/{}", it.version),
+            "8" | "10" | "11" | "12" => format!("Tooltip/{}", it.version),
+            "3" | "4" | "5" | "6" => format!("Addition/{}", it.version),
             _ => {
                 return Err(Refusal::NoRule {
                     class: "nested".into(),
@@ -77,6 +77,16 @@ pub(crate) fn xf(name: &str, v: &Node) -> Result<Node, Refusal> {
     Ok(match name {
         "editmode26" => Node::atom(if t == "2" || t == "3" { "2" } else { t }),
         "editmode61" => Node::atom(if t == "2" { "3" } else { t }),
+        "clamp1" => Node::atom(if v.as_i64().is_some_and(|n| n > 1) {
+            "1"
+        } else {
+            t
+        }),
+        "le1_else0" => Node::atom(if v.as_i64().is_some_and(|n| n > 1) {
+            "0"
+        } else {
+            t
+        }),
         "clamp3" => Node::atom(if v.as_i64().is_some_and(|n| n < 3) {
             t
         } else {
@@ -125,10 +135,14 @@ fn derived(op: &Op, env: &Env<'_>) -> Result<Node, Refusal> {
         "cpl5007" => fields::cpl5007(at(env.body, op.old.unwrap_or(26), "InputField[26]")?)?,
         "importance" => {
             let default_button = at(env.body, 11, "Button[11]")?;
-            let shape = at(env.body, 45, "Button[45]")?;
+            let shape = if op.inputs.contains(&45) {
+                at(env.body, 45, "Button[45]")?.text()
+            } else {
+                Some("0")
+            };
             Node::atom(if default_button.text() == Some("1") {
                 "0"
-            } else if shape.text() == Some("3") {
+            } else if shape == Some("3") {
                 "2"
             } else {
                 "1"
@@ -147,37 +161,9 @@ fn sublist(env: &Env<'_>, old: &Node, cx: &mut Cx<'_>) -> Result<Node, Refusal> 
                 cx.upgrade_value("Color", at(env.body, 14, "Decoration[14]")?, env.class)?;
             groups::decoration_kind(env.kind, old, &owner_color, cx)
         }
-        "Addition" => addition_sublist(env.kind, old, cx),
+        "Addition" => groups::addition_kind(env.kind, old, cx),
         _ => Err(Refusal::Shape("sublist class")),
     }
-}
-
-fn addition_sublist(kind: &str, old: &Node, cx: &mut Cx<'_>) -> Result<Node, Refusal> {
-    let a = cx
-        .tables
-        .addition_sublists
-        .get(kind)
-        .ok_or_else(|| Refusal::NoRuleKind {
-            what: "addition-kind",
-            kind: kind.into(),
-            version: old.at(0).and_then(Node::text).unwrap_or("?").into(),
-        })?;
-    let l = old.as_list().ok_or(Refusal::Shape("Addition[13]"))?;
-    if l.len() != a.len {
-        return Err(Refusal::NoRuleKind {
-            what: "addition-kind",
-            kind: kind.into(),
-            version: l.first().and_then(Node::text).unwrap_or("?").into(),
-        });
-    }
-    let mut out = Vec::with_capacity(l.len());
-    for (i, x) in l.iter().enumerate() {
-        out.push(match a.types.get(&i) {
-            Some(ty) => cx.upgrade_value(ty, x, "Addition")?,
-            None => x.clone(),
-        });
-    }
-    Ok(Node::list(out))
 }
 
 pub(crate) fn apply(c: &Context, env: &Env<'_>, cx: &mut Cx<'_>) -> Result<Vec<Node>, Refusal> {
@@ -236,7 +222,7 @@ pub(crate) fn translate_item(
             class: it.class.unwrap_or("nested").into(),
             version: it.version.clone(),
         })?;
-    if it.body.len() != c.old_len {
+    if it.body.len() != c.old_len && Some(it.body.len()) != c.read_len {
         return Err(Refusal::NoRule {
             class: it.class.unwrap_or("nested").into(),
             version: it.version.clone(),
@@ -259,6 +245,15 @@ pub(crate) fn translate_item(
     for (p, n) in &it.nested {
         nested.push((*p, translate_item(n, Some(class), cx)?));
     }
+    for (p, x) in body.iter_mut().enumerate() {
+        if decode::is_item(x) {
+            let created = decode::Item::parse_in(x, None, &variant::V4_59)
+                .ok_or(Refusal::Shape("created item"))?;
+            *x = Node::atom(decode::NESTED);
+            nested.push((p, created));
+        }
+    }
+    nested.sort_by_key(|(p, _)| *p);
     let mut children = Vec::with_capacity(it.children.len());
     for ch in &it.children {
         children.push(translate_item(ch, Some(class), cx)?);

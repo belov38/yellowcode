@@ -1,6 +1,6 @@
 use crate::events::{self, Event};
 use crate::objects::ObjectInstance;
-use bsl_vm::{CallResult, Execution, HostError, Value};
+use bsl_vm::{Arg, CallResult, Execution, Value};
 use std::rc::Rc;
 
 pub(crate) struct WriteCtx<'a> {
@@ -39,9 +39,14 @@ pub(crate) fn after_copy(
 }
 
 pub(crate) fn delete(
-    _ex: &mut Execution,
+    ex: &mut Execution,
     inst: &ObjectInstance,
     member: &str,
+    args: &[Arg],
 ) -> CallResult<Value> {
-    Err(HostError::not_implemented(&inst.type_name(), member).into())
+    if member == "Удалить" {
+        crate::delete::delete(ex, inst)
+    } else {
+        crate::delete::set_mark(ex, inst, args)
+    }
 }

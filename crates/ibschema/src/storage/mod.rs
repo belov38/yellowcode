@@ -35,6 +35,7 @@ pub struct IndexInfo {
     pub unique: bool,
     pub fields: Vec<FieldId>,
     pub prefix: usize,
+    pub absent: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -300,6 +301,7 @@ fn build_table(t: &Table, owner: Option<&Table>, owner_id: Option<TableId>) -> R
             unique: ix.unique,
             fields: ids,
             prefix: prefix.len(),
+            absent: false,
         });
     }
     let key_index = if owner.is_some() {
@@ -311,6 +313,7 @@ fn build_table(t: &Table, owner: Option<&Table>, owner_id: Option<TableId>) -> R
             unique: true,
             fields: ids,
             prefix: prefix.len(),
+            absent: false,
         })
     } else if is_own_id(t) {
         let mut ids = prefix.clone();
@@ -320,6 +323,7 @@ fn build_table(t: &Table, owner: Option<&Table>, owner_id: Option<TableId>) -> R
             unique: true,
             fields: ids,
             prefix: prefix.len(),
+            absent: false,
         })
     } else {
         None
@@ -611,6 +615,16 @@ impl StorageMap {
 
     pub fn try_table(&self, t: TableId) -> Option<&TableInfo> {
         usize::try_from(t.0).ok().and_then(|i| self.tables.get(i))
+    }
+
+    pub fn set_index_absent(&mut self, t: TableId, k: usize) {
+        if let Some(ix) = usize::try_from(t.0)
+            .ok()
+            .and_then(|i| self.tables.get_mut(i))
+            .and_then(|ti| ti.indexes.get_mut(k))
+        {
+            ix.absent = true;
+        }
     }
 
     pub fn table_by_name(&self, logical: &str) -> Option<TableId> {

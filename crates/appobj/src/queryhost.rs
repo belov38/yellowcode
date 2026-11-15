@@ -120,12 +120,10 @@ pub(crate) fn to_value(
         QValue::Date(d) => Value::Date(*d),
         QValue::Uuid(b) => bsl_stdlib::values::new_uuid(*b),
         QValue::Ref { table, id } => ref_of(app, *table, RefId(*id))?,
-        QValue::Type(_)
-        | QValue::SysEnum(..)
-        | QValue::Binary(_)
-        | QValue::Storage(_)
-        | QValue::PointInTime(_)
-        | QValue::Boundary(_) => {
+        QValue::Storage(b) if b.is_empty() => crate::values::field::empty_storage(),
+        QValue::Storage(b) => crate::values::field::storage_of(app, &b[..])?,
+        QValue::SysEnum(t, i) => sys_enum_value(*t, *i)?,
+        QValue::Type(_) | QValue::Binary(_) | QValue::PointInTime(_) | QValue::Boundary(_) => {
             return Err(bsl_vm::HostError::not_implemented(
                 "Выборка",
                 "значение этого типа",
@@ -138,4 +136,18 @@ pub(crate) fn to_value(
             ));
         }
     })
+}
+
+fn sys_enum_value(t: platform_catalog::TypeIdx, i: u32) -> Result<Value, bsl_vm::HostError> {
+    let refuse = || bsl_vm::HostError::not_implemented("Выборка", "значение этого типа");
+    let info = platform_catalog::catalog()
+        .types()
+        .get(usize::from(t.0))
+        .ok_or_else(refuse)?;
+    let member = info.values.get(i as usize).ok_or_else(refuse)?;
+    let v = bsl_stdlib::enums::enum_value(t, &member.name_ru).ok_or_else(refuse)?;
+    match bsl_stdlib::enums::as_enum_value(&v) {
+        Some(e) if e.type_idx() == t && e.index() == i as usize => Ok(v),
+        _ => Err(refuse()),
+    }
 }

@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use crate::{
     events::Outcome,
     hasher::fold_char,
-    literals::{LiteralSet, is_gap},
+    literals::{LiteralSet, Skeleton, is_gap, is_word_char},
     utc,
     value::json_string,
 };
@@ -258,7 +258,26 @@ pub(crate) fn scrub_across(lines: &mut [String], set: &LiteralSet) -> u64 {
             if waits {
                 break;
             }
-            let Some((length, _)) = set.longest_skeleton_at(&skeleton, at) else {
+            let touches_a_word = |inner: usize, outer: Option<usize>| {
+                let (Some((inside, line)), Some((outside, outer_line))) =
+                    (window.get(inner), outer.and_then(|o| window.get(o)))
+                else {
+                    return false;
+                };
+                (line, inside.value) == (outer_line, outside.value) && is_word_char(outside.c)
+            };
+            let accept = |length: usize, entry: &Skeleton| {
+                if !entry.whole_words {
+                    return true;
+                }
+                let (Some(&first), Some(&last)) = (origin.get(at), origin.get(at + length - 1))
+                else {
+                    return true;
+                };
+                !touches_a_word(first, first.checked_sub(1))
+                    && !touches_a_word(last, Some(last + 1))
+            };
+            let Some((length, _)) = set.longest_skeleton_at_where(&skeleton, at, accept) else {
                 at += 1;
                 continue;
             };

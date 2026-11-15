@@ -185,6 +185,11 @@ impl CallQueryHost<'_> {
     }
 
     fn reference_type(&self, t: &QType) -> Option<bsl_vm::TypeId> {
+        if let [query_ir::Other::SysEnum(idx)] = t.others.as_slice()
+            && *t == QType::other(query_ir::Other::SysEnum(*idx))
+        {
+            return Some(bsl_vm::TypeId::of_catalog(*idx));
+        }
         let [atom] = t.refs.as_slice() else {
             return None;
         };
@@ -226,6 +231,7 @@ impl QueryHost for CallQueryHost<'_> {
         if batch.stmts.len() > 1
             && self.provider.app.options().read_only_scope.is_none()
             && !super::admission::scalar_batch(batch, temp, &self.provider.ctx.schema)
+            && self.own_writer().is_none()
         {
             return Err(later("Q7e-BatchSnapshot", "P4 native/ruling"));
         }
@@ -347,9 +353,12 @@ impl QueryHost for CallQueryHost<'_> {
     }
     fn from_value(
         &self,
-        _: &mut Execution,
+        ex: &mut Execution,
         v: &Value,
     ) -> Result<Option<QValue>, bsl_vm::HostError> {
+        if let Some(q) = point_or_boundary(self, ex, v)? {
+            return Ok(Some(q));
+        }
         let Value::Object(obj) = v else {
             return Ok(None);
         };
@@ -373,6 +382,65 @@ impl QueryHost for CallQueryHost<'_> {
             id: r.r.id.0,
         }))
     }
+}
+
+fn copy_failed(_: bsl_vm::Exception) -> bsl_vm::HostError {
+    bsl_vm::HostError::text(
+        "internal: the copy of a parameter of the query failed",
+        "internal: the copy of a parameter of the query failed",
+    )
+}
+
+fn point_or_boundary(
+    host: &CallQueryHost<'_>,
+    ex: &mut Execution,
+    v: &Value,
+) -> Result<Option<QValue>, bsl_vm::HostError> {
+    if let Some((point, kind)) = bsl_stdlib::api::boundary_parts(ex, v).map_err(copy_failed)? {
+        let point = match point {
+            Value::Date(d) => QValue::Date(d),
+            other => match moment_of(host, ex, &other)? {
+                Some(m) => m,
+                None => return Ok(None),
+            },
+        };
+        let include = matches!(kind, bsl_stdlib::api::BoundaryKind::Including);
+        return Ok(Some(QValue::Boundary(Box::new(
+            query_ir::value::Boundary { point, include },
+        ))));
+    }
+    moment_of(host, ex, v)
+}
+
+fn moment_of(
+    host: &CallQueryHost<'_>,
+    ex: &mut Execution,
+    v: &Value,
+) -> Result<Option<QValue>, bsl_vm::HostError> {
+    let Some((date, reference)) =
+        bsl_stdlib::api::point_in_time_parts(ex, v).map_err(copy_failed)?
+    else {
+        return Ok(None);
+    };
+    let reference = match &reference {
+        Value::Undefined => None,
+        Value::Object(o) => {
+            let Some(r) = o.as_any().downcast_ref::<crate::values::refs::RefObject>() else {
+                return Ok(None);
+            };
+            if !r.belongs_to(&host.provider.app) {
+                return Ok(None);
+            }
+            let Some(table) = r.table_number() else {
+                return Ok(None);
+            };
+            Some((table, r.r.id.0))
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(QValue::PointInTime(Box::new(
+        query_ir::value::Moment { date, reference },
+    ))))
 }
 
 struct FailedSource<'a> {

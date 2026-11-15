@@ -458,7 +458,7 @@ GO
             r#"{}IF DB_ID(@db) IS NULL THROW 51000,'temporary database missing',1;
 {}
 IF DATABASEPROPERTYEX(@db,'Updateability')<>'READ_ONLY' THROW 51000,'temporary database is not read-only',1;
-DECLARE @query nvarchar(max)=CONVERT(nvarchar(max),N'USE ')+QUOTENAME(@db)+N'; SELECT CASE WHEN EXISTS(SELECT 1 FROM dbo.V8USERS WHERE Email IS NOT NULL) THEN 1 ELSE 0 END AS [present] FOR JSON PATH, WITHOUT_ARRAY_WRAPPER';
+DECLARE @query nvarchar(max)=CONVERT(nvarchar(max),N'USE ')+QUOTENAME(@db)+N'; SELECT COUNT_BIG(CASE WHEN DATALENGTH(Email)>0 THEN 1 END) AS [addresses] FROM dbo.V8USERS FOR JSON PATH, WITHOUT_ARRAY_WRAPPER';
 EXEC(@query);
 GO
 "#,

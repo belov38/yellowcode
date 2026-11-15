@@ -484,11 +484,21 @@ pub struct Store1cd {
 impl Store1cd {
     pub fn new(
         db: Arc<onecd::Database>,
-        map: Arc<StorageMap>,
+        mut map: Arc<StorageMap>,
         gate: Arc<WriterGate>,
         refusal: Option<String>,
     ) -> Result<Store1cd> {
         let phys = Arc::new(PhysMap::build(&db, &map)?);
+        for (n, p) in phys.tables.iter().enumerate() {
+            for (k, name) in p.indexes.iter().enumerate() {
+                if name.is_none() {
+                    let t = TableId(
+                        u32::try_from(n).map_err(|_| Error::InconsistentStatic("table count"))?,
+                    );
+                    Arc::make_mut(&mut map).set_index_absent(t, k);
+                }
+            }
+        }
         Ok(Store1cd {
             db,
             map,
@@ -496,6 +506,10 @@ impl Store1cd {
             gate,
             refusal,
         })
+    }
+
+    pub fn map(&self) -> &Arc<StorageMap> {
+        &self.map
     }
 
     #[must_use]

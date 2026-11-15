@@ -183,20 +183,35 @@ pub(crate) fn font_data(v: &Value) -> Option<&FontData> {
 }
 
 impl FontData {
-    pub(crate) fn normal_bold_only(&self) -> Option<i32> {
-        let ok = self.kind == FontKind::Style
-            && self.face.is_none()
-            && self.size.is_none()
-            && self.bold == Some(true)
-            && self.italic.is_none()
-            && self.underline.is_none()
-            && self.strike.is_none()
-            && self.scale == 100;
-        let st = self.style.as_ref()?;
-        if ok && st.name == Some("NormalTextFont") {
-            st.id
-        } else {
-            None
+    pub(crate) fn formatted_tags(&self) -> Option<Vec<String>> {
+        if self.scale != 100 || self.underline.is_some() || self.strike.is_some() {
+            return None;
+        }
+        let points = |tenths: i64| (tenths % 10 == 0 && tenths > 0).then_some(tenths / 10);
+        match self.kind {
+            FontKind::Style => {
+                let st = self.style.as_ref()?;
+                let id = st.id.filter(|_| st.name == Some("NormalTextFont"))?;
+                if self.face.is_some() {
+                    return None;
+                }
+                let second = match (self.size, self.bold, self.italic) {
+                    (None, Some(true), None) => "b".to_string(),
+                    (None, None, Some(true)) => "i".to_string(),
+                    (Some(s), None, None) => format!("fontsize {}", points(s)?),
+                    _ => return None,
+                };
+                Some(vec![format!("fontstyle {id}"), second])
+            }
+            FontKind::Absolute => {
+                let face = self.face.as_ref()?;
+                if face != "Arial" || self.bold.is_some() || self.italic.is_some() {
+                    return None;
+                }
+                let size = points(self.size?)?;
+                Some(vec![format!("font {face}"), format!("fontsize {size}")])
+            }
+            FontKind::Auto => None,
         }
     }
 }

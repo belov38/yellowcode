@@ -10,6 +10,7 @@ use crate::{
 };
 use brace::{Guid, Node};
 use memory_budget::{BudgetError, BudgetedText, BudgetedVec, Category, Charged, MemoryBudget};
+use std::collections::{HashMap, HashSet};
 #[derive(Debug)]
 pub(super) enum Error<'a> {
     Memory(BudgetError),
@@ -280,11 +281,55 @@ fn object_rights<'a>(
     }
     Ok(output)
 }
+pub(super) fn dangling<S: crate::ManagedEntrySource + ?Sized>(
+    entries: &crate::ManagedEntries<'_, S>,
+    index: &ManagedIndex,
+    node: &Node,
+    checked: &mut HashMap<Guid, bool>,
+) -> std::result::Result<HashSet<Guid>, crate::entries::ManagedEntriesError<S::Error>> {
+    let ids = crate::parts::rights::unresolved_ids(node, |id| {
+        id == index.cfg_id || index.names.get(&id).is_some()
+    });
+    let fresh: Vec<Guid> = ids
+        .iter()
+        .copied()
+        .filter(|id| !checked.contains_key(id))
+        .collect();
+    if !fresh.is_empty() {
+        let rights_entry = |name: &str| {
+            name.strip_suffix(".0")
+                .and_then(Guid::parse)
+                .and_then(|id| index.objs.get(&id))
+                .is_some_and(|(kind, _)| *kind == crate::MdKind::Role)
+        };
+        let mut seen = HashSet::new();
+        for meta in entries.list() {
+            if rights_entry(&meta.name) {
+                continue;
+            }
+            if let Some(bytes) = entries.raw(&meta.name)? {
+                seen.extend(crate::parts::rights::mentioned(&bytes, &fresh));
+            }
+            if seen.len() == fresh.len() {
+                break;
+            }
+        }
+        for id in fresh {
+            checked.insert(id, !seen.contains(&id));
+        }
+    }
+    Ok(ids
+        .into_iter()
+        .filter(|id| checked.get(id) == Some(&true))
+        .collect())
+}
+
 pub(super) fn decode<'a>(
     index: &ManagedIndex,
     settings: &ConfigSettings,
     node: &'a Node,
     keep: bool,
+    dangling: &HashSet<Guid>,
 ) -> Result<'a, Charged<Rights>> {
     let budget = index.memory_budget();
     let set_for_new_objects = flag(node.at(3))?;
@@ -296,13 +341,26 @@ pub(super) fn decode<'a>(
     for (ordinal, object) in objects.iter().enumerate() {
         let object = self::list(Some(object))?;
         let raw = object.get(1);
-        let mut res = resolve(
+        let mut res = match resolve(
             index,
             settings,
             object.first(),
             raw.unwrap_or(node),
             ordinal,
-        )?;
+        ) {
+            Ok(res) => res,
+            Err(Error::Semantic("unresolved_object", None))
+                if object
+                    .first()
+                    .and_then(|r| r.at(1))
+                    .and_then(Node::text)
+                    .and_then(Guid::parse)
+                    .is_some_and(|id| dangling.contains(&id)) =>
+            {
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
         res.raw = raw.ok_or_else(bad)?;
         resolved.try_push(res)?;
     }

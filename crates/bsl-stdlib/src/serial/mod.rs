@@ -6,6 +6,7 @@ pub mod internal;
 pub(crate) mod kind;
 mod nodes;
 pub(crate) mod oldxml;
+pub(crate) mod opaque;
 pub(crate) mod s4_codecs;
 pub mod storage;
 pub(crate) mod textdoc;

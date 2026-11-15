@@ -402,6 +402,9 @@ fn comparison_resources(value: &Value) -> (u64, u64) {
     if let Some(bytes) = crate::values::binary_data_bytes(value) {
         return (bytes.len() as u64 / 64 + 1, 0);
     }
+    if let Some(bytes) = crate::serial::storage::value_storage_bytes(value) {
+        return (bytes.len() as u64 / 64 + 1, 0);
+    }
     if let Some(td) = value
         .as_object()
         .and_then(|o| o.as_any().downcast_ref::<TypeDescription>())

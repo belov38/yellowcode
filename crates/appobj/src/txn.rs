@@ -36,6 +36,7 @@ pub enum TxnError {
     Poisoned,
     InUse,
     Store(StoreError),
+    Unsupported(String),
 }
 
 impl std::fmt::Display for TxnError {
@@ -49,6 +50,7 @@ impl std::fmt::Display for TxnError {
             }
             TxnError::InUse => f.write_str("the write transaction of the call is in use"),
             TxnError::Store(e) => write!(f, "{e}"),
+            TxnError::Unsupported(what) => write!(f, "commit refused: {what}"),
         }
     }
 }
@@ -83,6 +85,7 @@ impl TxnError {
             }
             TxnError::Store(StoreError::WriterBusy) => lock_conflict(),
             TxnError::Store(e) => crate::read::store_error(e),
+            TxnError::Unsupported(what) => HostError::not_implemented("Фиксация транзакции", what),
         }
     }
 
@@ -134,6 +137,7 @@ pub struct CallTxn {
     undo: RefCell<Vec<Box<dyn FnOnce()>>>,
     held: RefCell<Option<Held>>,
     control: Cell<Option<LockControl>>,
+    refused_commit: RefCell<Option<String>>,
 }
 
 impl Drop for CallTxn {
@@ -240,6 +244,7 @@ impl CallTxn {
         let writer = self.take_writer()?;
         let id = self.id.get();
         let poisoned = self.poisoned.get();
+        let refused = self.refused_commit.borrow_mut().take();
         self.reset();
         if poisoned {
             let wrote = writer.is_some();
@@ -250,6 +255,16 @@ impl CallTxn {
                 env.txn_data_changed();
             }
             return Ok(Commit::RolledBack);
+        }
+        if let Some(what) = refused {
+            let wrote = writer.is_some();
+            drop(writer);
+            self.mark_rolled_back(id);
+            self.ended(true);
+            if wrote {
+                env.txn_data_changed();
+            }
+            return Err(TxnError::Unsupported(what));
         }
         let Some(writer) = writer else {
             self.ended(false);
@@ -309,6 +324,17 @@ impl CallTxn {
     pub fn poison(&self) {
         if self.depth.get() > 0 {
             self.poisoned.set(true);
+        }
+    }
+
+    pub fn refuse_commit(&self, what: String) {
+        if self.depth.get() == 0 {
+            return;
+        }
+        if let Ok(mut slot) = self.refused_commit.try_borrow_mut()
+            && slot.is_none()
+        {
+            *slot = Some(what);
         }
     }
 
@@ -402,6 +428,9 @@ impl CallTxn {
     }
 
     fn reset(&self) {
+        if let Ok(mut slot) = self.refused_commit.try_borrow_mut() {
+            *slot = None;
+        }
         self.depth.set(0);
         self.poisoned.set(false);
         self.id.set(0);

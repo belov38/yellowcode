@@ -1,0 +1,28 @@
+[package]
+name = "onec-client"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99.1"
+license = "MIT OR Apache-2.0"
+autotests = false
+autoexamples = false
+autobenches = false
+
+[dependencies]
+aes = "0.8"
+ruzstd = "0.9"
+base64 = "0.22"
+crc32fast = "1"
+getrandom = "0.3"
+roxmltree = "0.21"
+sha1 = "0.10"
+sha2 = "0.10"
+thiserror = "2"
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+undocumented_unsafe_blocks = "warn"
+unused_result_ok = "warn"

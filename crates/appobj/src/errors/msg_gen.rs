@@ -152,9 +152,19 @@ pub(crate) static MESSAGES: &[L5Msg] = &[
         en: "Cannot insert a record with a nonunique reference value.",
     },
     L5Msg {
+        key: "backend:IDS_DBERROR_TEST_VALID",
+        ru: "Запись не верна!",
+        en: "Record is invalid!",
+    },
+    L5Msg {
         key: "backend:IDS_DBERROR_TXNPREERROR",
         ru: "В данной транзакции уже происходили ошибки!",
         en: "Errors occurred earlier in this transaction!",
+    },
+    L5Msg {
+        key: "backend:IDS_DBERROR_UNIQUE",
+        ru: "Запись с такими ключевыми полями существует!",
+        en: "Record with these key fields exists!",
     },
     L5Msg {
         key: "backend:IDS_DBOBJECT_NOTFOUND",
@@ -177,9 +187,24 @@ pub(crate) static MESSAGES: &[L5Msg] = &[
         en: "Property %s does not belong to metadata object %s.",
     },
     L5Msg {
+        key: "backend:IDS_ERR_NOTEXCLUSIVEMODE",
+        ru: "Должен быть установлен монопольный режим",
+        en: "Exclusive mode must be set",
+    },
+    L5Msg {
         key: "backend:IDS_ERR_TRANSNOTACTIVE",
         ru: "Транзакция не активна",
         en: "Transaction is not active",
+    },
+    L5Msg {
+        key: "backend:IDS_FIELD",
+        ru: "Поле",
+        en: "Field",
+    },
+    L5Msg {
+        key: "backend:IDS_FIELD_VALUE_DISABLED_BY_SELECT_CONDITIONS",
+        ru: "Значение поля не соответствует установленному отбору",
+        en: "Field value does not match the filter selected",
     },
     L5Msg {
         key: "backend:IDS_PREDEFINEDOBJ_NOT_EXISTS",
@@ -195,6 +220,11 @@ pub(crate) static MESSAGES: &[L5Msg] = &[
         key: "backend:IDS_PREDEFINED_ITEM_NOT_UNIQUE",
         ru: "Предопределенный элемент не уникален",
         en: "Predefined object is not unique",
+    },
+    L5Msg {
+        key: "backend:IDS_RECORDLINENO_PRESENT",
+        ru: "Номер строки",
+        en: "Line number",
     },
     L5Msg {
         key: "backend:IDS_SDBLERR_REFSELFISNTUNIQUE",
@@ -352,6 +382,11 @@ pub(crate) static MESSAGES: &[L5Msg] = &[
         en: "Enumeration Ref",
     },
     L5Msg {
+        key: "basic:IDS_INFOREG_CANTSAVE",
+        ru: "Не удалось записать",
+        en: "Failed to save",
+    },
+    L5Msg {
         key: "basic:IDS_INFOREG_LIST_TYPE_PRESENT",
         ru: "Регистр сведений список",
         en: "Information register List",
@@ -360,6 +395,11 @@ pub(crate) static MESSAGES: &[L5Msg] = &[
         key: "basic:IDS_INFOREG_MANAGER_TYPE_PRESENT",
         ru: "Регистр сведений менеджер",
         en: "Information register Manager",
+    },
+    L5Msg {
+        key: "basic:IDS_INFOREG_MDCLASS",
+        ru: "Регистр сведений",
+        en: "Information register",
     },
     L5Msg {
         key: "basic:IDS_INFOREG_RECORDKEY_TYPE_PRESENT",
@@ -467,6 +507,11 @@ pub(crate) static MESSAGES: &[L5Msg] = &[
         en: "This catalog cannot contain groups!",
     },
     L5Msg {
+        key: "basic:IDS_REFERENCE_HAVE_NOT_OWNER",
+        ru: "Справочник не имеет владельца",
+        en: "Catalog does not have owner",
+    },
+    L5Msg {
         key: "basic:IDS_REFERENCE_LIST_TYPE_PRESENT",
         ru: "Справочник список",
         en: "Catalog List",
@@ -475,6 +520,11 @@ pub(crate) static MESSAGES: &[L5Msg] = &[
         key: "basic:IDS_REFERENCE_MANAGER_TYPE_PRESENT",
         ru: "Справочник менеджер",
         en: "Catalog Manager",
+    },
+    L5Msg {
+        key: "basic:IDS_REFERENCE_NOT_MULTILEVEL",
+        ru: "Справочник не многоуровневый",
+        en: "Catalog does not have multiple levels",
     },
     L5Msg {
         key: "basic:IDS_REFERENCE_REF_TYPE_PRESENT",
@@ -780,6 +830,8 @@ pub mod keys {
     pub const CANT_ORDER_BY_THIS_FIELD: &str = "backend:IDS_CANT_ORDER_BY_THIS_FIELD";
     pub const CANT_SET_NEW_REF: &str = "backend:IDS_CANT_SET_NEWOBJECTREF";
     pub const CATALOG_HAS_NO_FOLDERS: &str = "basic:IDS_REFERENCE_CANT_CONSIST_FOLDERS";
+    pub const CATALOG_HAS_NO_OWNER: &str = "basic:IDS_REFERENCE_HAVE_NOT_OWNER";
+    pub const CATALOG_NOT_MULTILEVEL: &str = "basic:IDS_REFERENCE_NOT_MULTILEVEL";
     pub const CODE_NOT_UNIQUE: &str = "basic:IDS_REFOBJERROR_CODENOTUNIQUE";
     pub const DATALOCK_OUTSIDE_TRANSACTION: &str =
         "backend:IDS_DATALOCK_CAN_USE_ONLY_IN_TRANSACTION";
@@ -787,13 +839,17 @@ pub mod keys {
     pub const DB_OBJECT_NOT_FOUND: &str = "backend:IDS_DBOBJECT_NOTFOUND";
     pub const ELEMENT_NOT_SELECTED: &str = "basic:IDS_ELEMENT_NOT_SELECTED";
     pub const ENUMERATED_PROPERTY_TYPE: &str = "backend:IDS_TYPE_PRESENTATION_OBJECTPROPERTY";
+    pub const FIELD_WORD: &str = "backend:IDS_FIELD";
     pub const HANDLER_FAILED: &str = "backend:IDS_DBOBJERROR_CALLBACK";
+    pub const INFOREG_CANT_SAVE: &str = "basic:IDS_INFOREG_CANTSAVE";
+    pub const INFOREG_CLASS: &str = "basic:IDS_INFOREG_MDCLASS";
     pub const INVALID_PROPERTY_NAME: &str = "backend:IDS_ERR_INVALID_PROPERTY_NAME";
     pub const LEVELS_LIMIT: &str = "basic:IDS_REFOBJERROR_LEVELSLIMIT";
     pub const LEVELS_LOOP: &str = "basic:IDS_REFOBJERROR_LEVELSLOOP";
     pub const LIST_STREAM_ERROR: &str = "core85:IDS_LISTSTREAMERROR";
     pub const MD_OBJECT_TYPE: &str = "backend:IDS_TYPE_PRESENTATION_MDCONTEXT";
     pub const NON_HIERARCHICAL: &str = "basic:IDS_CANT_PROCEE_FOR_NON_HIERACICAL";
+    pub const NOT_EXCLUSIVE_MODE: &str = "backend:IDS_ERR_NOTEXCLUSIVEMODE";
     pub const OBJECT_VERSION_MISMATCH: &str = "backend:IDS_DBOBJERROR_VERSION";
     pub const OWNER_EMPTY: &str = "basic:IDS_REFOBJERROR_EMPTYOWNER";
     pub const PARAMETER_TYPE_MISMATCH: &str = "core85:IDS_PARAMETER_N_TYPE_MISMATCH";
@@ -952,6 +1008,10 @@ pub mod keys {
     pub const PRES_TASK_SELECTION: &str = "bp:IDS_BPTASK_SEL_TYPE_PRESENT";
     pub const PRES_TASK_TABULARSECTION: &str = "bp:IDS_BPTASK_TABULARPART_TYPE_PRESENT";
     pub const PRES_TASK_TABULARSECTIONROW: &str = "bp:IDS_BPTASK_TABULARPARTROW_TYPE_PRESENT";
+    pub const RECORD_INVALID: &str = "backend:IDS_DBERROR_TEST_VALID";
+    pub const RECORD_KEY_NOT_UNIQUE: &str = "backend:IDS_DBERROR_UNIQUE";
+    pub const RECORD_LINE_NUMBER: &str = "backend:IDS_RECORDLINENO_PRESENT";
+    pub const RECORD_OUTSIDE_FILTER: &str = "backend:IDS_FIELD_VALUE_DISABLED_BY_SELECT_CONDITIONS";
     pub const REFERENCE_CANT_DELETE: &str = "basic:IDS_REFERENCE_CANTDELETE";
     pub const REFERENCE_CANT_SAVE: &str = "basic:IDS_REFERENCE_CANTSAVE";
     pub const REF_NOT_UNIQUE: &str = "backend:IDS_DBERROR_REFISNOTUNIQUE";

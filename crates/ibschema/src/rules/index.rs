@@ -40,6 +40,10 @@ pub(crate) fn indexed(c: &Child) -> bool {
     )
 }
 
+pub(crate) fn indexed_in(cx: &Ctx, c: &Child) -> bool {
+    indexed(c) || cx.md.filter_items.contains(&c.id)
+}
+
 pub(crate) fn add_order(c: &Child) -> bool {
     c.text("Indexing") == Some("IndexWithAdditionalOrder")
 }

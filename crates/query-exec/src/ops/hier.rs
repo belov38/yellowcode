@@ -1214,7 +1214,9 @@ fn hierarchy_index(table: &HierTable, use_index: bool, cx: &Cx<'_>) -> Option<In
         .try_table(table.table)?
         .indexes
         .iter()
-        .position(|index| index.prefix == 0 && index.fields.first() == Some(&table.parent))?;
+        .position(|index| {
+            index.prefix == 0 && !index.absent && index.fields.first() == Some(&table.parent)
+        })?;
     Some(IndexId::Named(u16::try_from(index).ok()?))
 }
 

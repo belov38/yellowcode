@@ -17,6 +17,8 @@ pub enum Source {
     PasswordPolicies,
     CompromisedPasswords,
     DataBase,
+    SchemaStorage,
+    Extension(u32),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -29,6 +31,10 @@ pub enum RawEvent {
     DataBaseStart(BinNode),
     DataBaseEnd,
     Unknown { name: String, items: Vec<BinNode> },
+    ExtensionsStart,
+    ExtensionStart { schema_id: u32 },
+    ExtensionEnd,
+    ExtensionsEnd,
 }
 
 #[derive(Default)]
@@ -85,10 +91,22 @@ impl<R: Read> Read for Input<R> {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum In {
+    System,
+    Db,
+    SchemaStorage,
+    Extension,
+}
+
 enum State {
     Top,
-    Rows { db: bool },
+    Rows { place: In },
     Db,
+    ExtHead,
+    Ext,
+    ExtSchema { id: u32 },
+    DbTail,
     FolderData,
 }
 
@@ -98,6 +116,7 @@ pub struct RawReader<R: Read> {
     trace: Arc<Trace>,
     state: State,
     ordinal: usize,
+    ext_id: u32,
     failed: Option<Error>,
     limits: Option<brace::binary::ReadLimits>,
 }
@@ -160,6 +179,7 @@ impl<R: Read> RawReader<R> {
             trace,
             state: State::Top,
             ordinal: 0,
+            ext_id: 0,
             failed: None,
             limits: None,
         }
@@ -225,23 +245,31 @@ impl<R: Read> RawReader<R> {
 
     fn open_rows(&mut self, what: &str) -> Result<()> {
         self.expect_open(what)?;
+        self.rows_head(what)
+    }
+
+    fn rows_head(&mut self, what: &str) -> Result<()> {
         match self.value(what)? {
             BinNode::Atom(a) if a.as_int() == Some(0) => Ok(()),
             _ => self.fail(&format!("{what}: row list must start with 0")),
         }
     }
 
-    fn table_start(&mut self, source: Source, db: bool, what: &str) -> Result<RawEvent> {
+    fn table_start(&mut self, source: Source, place: In, what: &str) -> Result<RawEvent> {
         self.open_rows(what)?;
-        self.state = State::Rows { db };
-        let ordinal = if db {
+        Ok(self.started(source, place))
+    }
+
+    fn started(&mut self, source: Source, place: In) -> RawEvent {
+        self.state = State::Rows { place };
+        let ordinal = if matches!(place, In::Db | In::Extension) {
             let o = self.ordinal;
             self.ordinal = o.saturating_add(1);
             o
         } else {
             0
         };
-        Ok(RawEvent::TableStart { source, ordinal })
+        RawEvent::TableStart { source, ordinal }
     }
 
     fn top(&mut self) -> Result<Option<RawEvent>> {
@@ -266,16 +294,18 @@ impl<R: Read> RawReader<R> {
             }
             "folder" => {
                 let f = self.string("Folder name")?;
-                self.table_start(Source::Folder(f), false, "Folder")?
+                self.table_start(Source::Folder(f), In::System, "Folder")?
             }
-            "users" => self.table_start(Source::Users, false, "Users")?,
-            "usersspr" => self.table_start(Source::UsersSpr, false, "UsersSpr")?,
+            "users" => self.table_start(Source::Users, In::System, "Users")?,
+            "usersspr" => self.table_start(Source::UsersSpr, In::System, "UsersSpr")?,
             "passwordpolicies" => {
-                self.table_start(Source::PasswordPolicies, false, "PasswordPolicies")?
+                self.table_start(Source::PasswordPolicies, In::System, "PasswordPolicies")?
             }
-            "compromisedpasswords" => {
-                self.table_start(Source::CompromisedPasswords, false, "CompromisedPasswords")?
-            }
+            "compromisedpasswords" => self.table_start(
+                Source::CompromisedPasswords,
+                In::System,
+                "CompromisedPasswords",
+            )?,
             "database" => {
                 self.expect_open("DataBase")?;
                 let schema = self.value("DataBase schema")?;
@@ -295,15 +325,18 @@ impl<R: Read> RawReader<R> {
         Ok(Some(ev))
     }
 
-    fn rows(&mut self, db: bool) -> Result<RawEvent> {
+    fn rows(&mut self, place: In) -> Result<RawEvent> {
         if self.at_close()? {
             self.expect_close("row list")?;
-            if db {
-                self.state = State::Db;
-            } else {
-                self.expect_close("element")?;
-                self.state = State::Top;
-            }
+            self.state = match place {
+                In::System => {
+                    self.expect_close("element")?;
+                    State::Top
+                }
+                In::Db => State::Db,
+                In::SchemaStorage => State::Ext,
+                In::Extension => State::ExtSchema { id: self.ext_id },
+            };
             return Ok(RawEvent::TableEnd);
         }
         match self.value("row")? {
@@ -314,12 +347,54 @@ impl<R: Read> RawReader<R> {
 
     fn db(&mut self) -> Result<RawEvent> {
         if self.at_close()? {
-            self.expect_close("DataBase")?;
-            self.expect_close("DataBase")?;
-            self.state = State::Top;
-            return Ok(RawEvent::DataBaseEnd);
+            return self.db_end();
         }
-        self.table_start(Source::DataBase, true, "DataBase table")
+        self.expect_open("DataBase table")?;
+        if matches!(
+            self.rd.peek_event().map_err(|e| bin_err(e, &self.trace))?,
+            Some(Event::Open)
+        ) {
+            self.state = State::ExtHead;
+            return Ok(RawEvent::ExtensionsStart);
+        }
+        self.rows_head("DataBase table")?;
+        Ok(self.started(Source::DataBase, In::Db))
+    }
+
+    fn db_end(&mut self) -> Result<RawEvent> {
+        self.expect_close("DataBase")?;
+        self.expect_close("DataBase")?;
+        self.state = State::Top;
+        Ok(RawEvent::DataBaseEnd)
+    }
+
+    fn ext(&mut self) -> Result<RawEvent> {
+        if self.at_close()? {
+            self.expect_close("extension block")?;
+            self.state = State::DbTail;
+            return Ok(RawEvent::ExtensionsEnd);
+        }
+        self.expect_open("extension schema")?;
+        let id = match self.value("extension SCHEMAID")? {
+            BinNode::Atom(a) => a.as_int().and_then(|i| u32::try_from(i).ok()),
+            BinNode::List(_) => None,
+        };
+        let Some(id) = id.filter(|&i| i > 0) else {
+            return self.fail("extension SCHEMAID must be a positive integer");
+        };
+        self.ext_id = id;
+        self.ordinal = 0;
+        self.state = State::ExtSchema { id };
+        Ok(RawEvent::ExtensionStart { schema_id: id })
+    }
+
+    fn ext_schema(&mut self, id: u32) -> Result<RawEvent> {
+        if self.at_close()? {
+            self.expect_close("extension schema")?;
+            self.state = State::Ext;
+            return Ok(RawEvent::ExtensionEnd);
+        }
+        self.table_start(Source::Extension(id), In::Extension, "extension table")
     }
 
     pub fn folder_header(&mut self) -> Result<Option<Vec<BinNode>>> {
@@ -337,11 +412,11 @@ impl<R: Read> RawReader<R> {
     }
 
     fn folder_header_inner(&mut self) -> Result<Option<Vec<BinNode>>> {
-        if !matches!(self.state, State::Rows { db: false }) {
+        if !matches!(self.state, State::Rows { place: In::System }) {
             return self.fail("streamed folder header out of order");
         }
         if self.at_close()? {
-            self.rows(false)?;
+            self.rows(In::System)?;
             return Ok(None);
         }
         self.expect_open("folder row")?;
@@ -404,7 +479,7 @@ impl<R: Read> RawReader<R> {
             }
             .map_err(|e| bin_err(e, &self.trace))?;
             self.expect_close("folder row")?;
-            self.state = State::Rows { db: false };
+            self.state = State::Rows { place: In::System };
             Ok(len)
         })();
         if let Err(e) = &result {
@@ -423,8 +498,24 @@ impl<R: Read> RawReader<R> {
         }
         let r = match self.state {
             State::Top => self.top(),
-            State::Rows { db } => self.rows(db).map(Some),
+            State::Rows { place } => self.rows(place).map(Some),
             State::Db => self.db().map(Some),
+            State::ExtHead => self
+                .table_start(
+                    Source::SchemaStorage,
+                    In::SchemaStorage,
+                    "SCHEMASTORAGE rows",
+                )
+                .map(Some),
+            State::Ext => self.ext().map(Some),
+            State::ExtSchema { id } => self.ext_schema(id).map(Some),
+            State::DbTail => {
+                if self.at_close()? {
+                    self.db_end().map(Some)
+                } else {
+                    self.fail("DataBase: a list after the extension block")
+                }
+            }
             State::FolderData => self.fail("folder binary field is pending"),
         };
         if let Err(e) = &r {
@@ -458,6 +549,7 @@ pub struct RawWriter<W: Write> {
     w: Writer<Sink<W>>,
     state: State,
     ordinal: usize,
+    ext_id: u32,
 }
 
 fn order(what: &str) -> Error {
@@ -480,6 +572,7 @@ impl<W: Write> RawWriter<W> {
             w: Writer::new(s),
             state: State::Top,
             ordinal: 0,
+            ext_id: 0,
         }
     }
 
@@ -521,10 +614,12 @@ impl<W: Write> RawWriter<W> {
                     Source::UsersSpr => self.head("UsersSpr")?,
                     Source::PasswordPolicies => self.head("PasswordPolicies")?,
                     Source::CompromisedPasswords => self.head("CompromisedPasswords")?,
-                    Source::DataBase => return Err(order("DataBase table outside DataBase")),
+                    Source::DataBase | Source::SchemaStorage | Source::Extension(_) => {
+                        return Err(order("DataBase table outside DataBase"));
+                    }
                 }
                 self.list_start()?;
-                self.state = State::Rows { db: false };
+                self.state = State::Rows { place: In::System };
             }
             (State::Top, RawEvent::DataBaseStart(schema)) => {
                 self.head("DataBase")?;
@@ -546,12 +641,52 @@ impl<W: Write> RawWriter<W> {
                 }
                 self.list_start()?;
                 self.ordinal = self.ordinal.saturating_add(1);
-                self.state = State::Rows { db: true };
+                self.state = State::Rows { place: In::Db };
             }
-            (State::Db, RawEvent::DataBaseEnd) => {
+            (State::Db | State::DbTail, RawEvent::DataBaseEnd) => {
                 self.w.close()?;
                 self.w.close()?;
                 self.state = State::Top;
+            }
+            (State::Db, RawEvent::ExtensionsStart) => {
+                self.w.open()?;
+                self.state = State::ExtHead;
+            }
+            (State::ExtHead, RawEvent::TableStart { source, ordinal })
+                if *source == Source::SchemaStorage && *ordinal == 0 =>
+            {
+                self.list_start()?;
+                self.state = State::Rows {
+                    place: In::SchemaStorage,
+                };
+            }
+            (State::Ext, RawEvent::ExtensionStart { schema_id }) => {
+                if *schema_id == 0 {
+                    return Err(order("extension SCHEMAID must be positive"));
+                }
+                self.w.open()?;
+                self.w.atom(&Atom::int(i128::from(*schema_id)))?;
+                self.ordinal = 0;
+                self.ext_id = *schema_id;
+                self.state = State::ExtSchema { id: *schema_id };
+            }
+            (State::ExtSchema { id }, RawEvent::TableStart { source, ordinal }) => {
+                if *source != Source::Extension(*id) || *ordinal != self.ordinal {
+                    return Err(order("expected the next table of the extension schema"));
+                }
+                self.list_start()?;
+                self.ordinal = self.ordinal.saturating_add(1);
+                self.state = State::Rows {
+                    place: In::Extension,
+                };
+            }
+            (State::ExtSchema { .. }, RawEvent::ExtensionEnd) => {
+                self.w.close()?;
+                self.state = State::Ext;
+            }
+            (State::Ext, RawEvent::ExtensionsEnd) => {
+                self.w.close()?;
+                self.state = State::DbTail;
             }
             (State::Rows { .. }, RawEvent::Row(row)) => {
                 self.w.open()?;
@@ -560,15 +695,18 @@ impl<W: Write> RawWriter<W> {
                 }
                 self.w.close()?;
             }
-            (State::Rows { db }, RawEvent::TableEnd) => {
-                let db = *db;
+            (State::Rows { place }, RawEvent::TableEnd) => {
+                let place = *place;
                 self.w.close()?;
-                if db {
-                    self.state = State::Db;
-                } else {
-                    self.w.close()?;
-                    self.state = State::Top;
-                }
+                self.state = match place {
+                    In::System => {
+                        self.w.close()?;
+                        State::Top
+                    }
+                    In::Db => State::Db,
+                    In::SchemaStorage => State::Ext,
+                    In::Extension => State::ExtSchema { id: self.ext_id },
+                };
             }
             _ => return Err(order("event not allowed here")),
         }

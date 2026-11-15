@@ -4,7 +4,7 @@ use super::common::{self, common_group, separators_group};
 use super::ctx::{Ctx, Props, md_name};
 use super::exchange;
 use super::fields::{self, RefForm};
-use super::index::{Tok, add_order, indexed};
+use super::index::{Tok, add_order, indexed, indexed_in};
 use super::types::{classes, logical_types, main_target};
 use super::{Names, TableBuilder, TableRole};
 use crate::error::{Error, Result};
@@ -43,7 +43,7 @@ pub(super) fn attributes(
 }
 
 pub(super) fn indexed_attributes<'a>(cx: &Ctx<'a>) -> Vec<&'a Child> {
-    cx.obj.attributes().filter(|a| indexed(a)).collect()
+    cx.obj.attributes().filter(|a| indexed_in(cx, a)).collect()
 }
 
 fn reference_head(b: &mut TableBuilder) {
@@ -153,13 +153,14 @@ fn field_indexes(b: &mut TableBuilder, cx: &Ctx, names: &mut Names, numbered: bo
         .filter(|a| add_order(a))
         .map(|a| Ok((a.name.clone(), fields::item_name(a, names)?)))
         .collect::<Result<_>>()?;
-    let mut items: Vec<(String, bool, Option<String>, Uuid16)> = Vec::new();
+    let mut items: Vec<(String, bool, Option<String>, Uuid16, bool)> = Vec::new();
     for a in indexed_attributes(cx) {
         items.push((
             fields::item_name(a, names)?,
             add_order(a),
             Some(a.name.clone()),
             a.id,
+            indexed(a),
         ));
     }
     for ca in common::applied(cx) {
@@ -173,6 +174,7 @@ fn field_indexes(b: &mut TableBuilder, cx: &Ctx, names: &mut Names, numbered: bo
                 ca.text("Indexing") == Some("IndexWithAdditionalOrder"),
                 None,
                 ca.id,
+                true,
             ));
         }
     }
@@ -184,7 +186,7 @@ fn field_indexes(b: &mut TableBuilder, cx: &Ctx, names: &mut Names, numbered: bo
         None
     };
     let owner = (!cx.owners.is_empty()).then(|| f::OWNER_ID.to_string());
-    for (field, ao, own_name, id) in items {
+    for (field, ao, own_name, id, own_indexing) in items {
         let mut name = |pre: &str| -> Result<String> {
             Ok(if numbered {
                 format!("{pre}{}", names.number(id, pre)?)
@@ -205,11 +207,11 @@ fn field_indexes(b: &mut TableBuilder, cx: &Ctx, names: &mut Names, numbered: bo
                 }
             }
         }
-        if let Some(o) = &owner {
+        if let Some(o) = owner.as_ref().filter(|_| own_indexing) {
             let fields = [vec![o.clone()], tail.clone()].concat();
             b.rule_fields(cx, name("ByOwnerField")?, true, fields)?;
         }
-        if cx.hier {
+        if cx.hier && own_indexing {
             let mut fields: Vec<String> = owner.iter().cloned().collect();
             fields.push(f::PARENT_ID.to_string());
             if b.table.field(f::FOLDER).is_some() {
@@ -360,7 +362,7 @@ fn sections(cx: &Ctx, names: &mut Names, owner: &str) -> Result<Vec<(Table, Tabl
             let fl = fields::item(cx, a, &at, false, false, names)?;
             b.item(fl, a.id, at);
         }
-        for a in attrs.iter().filter(|a| indexed(a)) {
+        for a in attrs.iter().filter(|a| indexed_in(cx, a)) {
             b.rule(
                 cx,
                 names,

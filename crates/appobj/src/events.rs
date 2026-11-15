@@ -39,10 +39,6 @@ impl Event {
             Event::FillCheck => ("ОбработкаПроверкиЗаполнения", "FillCheckProcessing"),
         }
     }
-
-    const fn disables_safe_mode(self) -> bool {
-        !matches!(self, Event::FillCheck)
-    }
 }
 
 pub(crate) enum Param {
@@ -65,16 +61,34 @@ fn internal(text: &str) -> HostError {
     HostError::text(&format!("internal: {text}"), &format!("internal: {text}"))
 }
 
-pub(crate) fn module_handler(inst: &ObjectInstance, event: Event) -> Option<&'static str> {
-    let module = inst.module()?;
+fn handler_in(module: &ModuleInstanceRef, event: Event) -> Option<&'static str> {
     let (ru, en) = event.names();
     [ru, en]
         .into_iter()
         .find(|n| module.module().method(n).is_some())
 }
 
-fn subscribed(app: &Application, def: &ObjDef, event: Event) -> Vec<(String, String)> {
-    let kind_word = format!("cfg:{}Object", def.kind.name(Lang::En));
+pub(crate) struct Owner<'a> {
+    pub(crate) app: &'a Application,
+    pub(crate) def: &'a ObjDef,
+    pub(crate) module: Option<ModuleInstanceRef>,
+    pub(crate) source: Value,
+    pub(crate) category: &'static str,
+}
+
+pub(crate) fn has_write_subscriptions(app: &Application, def: &ObjDef, category: &str) -> bool {
+    [Event::BeforeWrite, Event::OnWrite]
+        .into_iter()
+        .any(|e| !subscribed(app, def, category, e).is_empty())
+}
+
+fn subscribed(
+    app: &Application,
+    def: &ObjDef,
+    category: &str,
+    event: Event,
+) -> Vec<(String, String)> {
+    let kind_word = format!("cfg:{}{category}", def.kind.name(Lang::En));
     app.model()
         .subscriptions
         .iter()
@@ -193,6 +207,40 @@ fn pad_missing(module: &ModuleInstanceRef, name: &str, args: &mut Vec<Arg>) {
     }
 }
 
+fn fewer_fill_parameters(
+    owner: &Owner<'_>,
+    module: &ModuleInstanceRef,
+    name: &str,
+    event: Event,
+    args: &mut Vec<Arg>,
+    subscription: bool,
+) -> CallResult<()> {
+    if event != Event::Filling {
+        return Ok(());
+    }
+    let Some((_, method)) = module.module().method(name) else {
+        return Ok(());
+    };
+    let declared = method.params.len();
+    if declared >= args.len() {
+        return Ok(());
+    }
+    if subscription || declared != 2 {
+        let whose = if subscription {
+            "подписки"
+        } else {
+            "модуля объекта"
+        };
+        return Err(HostError::not_implemented(
+            &format!("{}Объект", owner.def.kind.name(Lang::Ru)),
+            &format!("ОбработкаЗаполнения {whose} с {declared} параметрами"),
+        )
+        .into());
+    }
+    args.truncate(declared);
+    Ok(())
+}
+
 fn call(
     ex: &mut Execution,
     app: &Application,
@@ -203,11 +251,9 @@ fn call(
     weight: u32,
 ) -> CallResult<()> {
     pad_missing(module, name, &mut args);
-    let frame = event.disables_safe_mode().then(|| HandlerFrame::enter(ex));
+    let frame = HandlerFrame::enter(ex);
     let outcome = ex.call_weighted(module, name, &mut args, weight);
-    if let Some(frame) = frame {
-        frame.leave(ex);
-    }
+    frame.leave(ex);
     match outcome {
         Ok(_) => Ok(()),
         Err(Exception::Catchable(info)) => Err(handler_failed(app, event, info).into()),
@@ -223,39 +269,54 @@ pub(crate) fn run(
     cancel: Option<&Place>,
 ) -> CallResult<bool> {
     let app = inst.app.clone();
+    let owner = Owner {
+        app: &app,
+        def: app.model().obj(inst.obj),
+        module: inst.module(),
+        source: Value::Object(inst.clone()),
+        category: "Object",
+    };
+    run_for(ex, &owner, event, params, cancel)
+}
+
+pub(crate) fn run_for(
+    ex: &mut Execution,
+    owner: &Owner<'_>,
+    event: Event,
+    params: &[Param],
+    cancel: Option<&Place>,
+) -> CallResult<bool> {
+    let app = owner.app;
     let stopped = || {
         cancel
             .and_then(Place::temp_value)
             .is_some_and(|v| matches!(v, Value::Bool(true)))
     };
-    if let (Some(module), Some(name)) = (inst.module(), module_handler(inst, event)) {
-        call(
-            ex,
-            &app,
-            event,
-            &module,
-            name,
-            args_of(None, params),
-            MODULE_WEIGHT,
-        )?;
+    if let Some(module) = &owner.module
+        && let Some(name) = handler_in(module, event)
+    {
+        let mut args = args_of(None, params);
+        fewer_fill_parameters(owner, module, name, event, &mut args, false)?;
+        call(ex, app, event, module, name, args, MODULE_WEIGHT)?;
         if stopped() {
             return Ok(true);
         }
     }
-    let source = Value::Object(inst.clone());
-    for (module_name, method) in subscribed(&app, app.model().obj(inst.obj), event) {
+    for (module_name, method) in subscribed(app, owner.def, owner.category, event) {
         let module = app
             .modules()
             .module_ref(&format!("ОбщийМодуль.{module_name}.Модуль"))
             .ok_or_else(|| internal(&format!("no common module {module_name}")))?;
         let instance = app.instance_in_call(ex, module).map_err(CallError::Exc)?;
+        let mut args = args_of(Some(&owner.source), params);
+        fewer_fill_parameters(owner, &instance, &method, event, &mut args, true)?;
         call(
             ex,
-            &app,
+            app,
             event,
             &instance,
             &method,
-            args_of(Some(&source), params),
+            args,
             SUBSCRIPTION_WEIGHT,
         )?;
     }
@@ -331,7 +392,6 @@ pub(crate) fn writing(
     Ok(())
 }
 
-#[allow(dead_code, reason = "called by the delete (G)")]
 pub(crate) fn before_delete(ex: &mut Execution, inst: &Rc<ObjectInstance>) -> CallResult<()> {
     let cancel = Place::temp(Value::Bool(false));
     if run(
@@ -402,6 +462,49 @@ fn shown(app: &Application, synonym: &md_model::LocalString, name: &str) -> Stri
 }
 
 pub(crate) fn check_filling(ex: &mut Execution, inst: &Rc<ObjectInstance>) -> CallResult<bool> {
+    let guard = FillCheck::enter();
+    let ok = check_filling_inner(ex, inst)?;
+    Ok(ok && !guard.failed())
+}
+
+thread_local! {
+    static FILL_CHECKS: std::cell::RefCell<Vec<bool>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+struct FillCheck;
+
+impl FillCheck {
+    fn enter() -> FillCheck {
+        FILL_CHECKS.with(|s| s.borrow_mut().push(false));
+        FillCheck
+    }
+
+    fn failed(&self) -> bool {
+        FILL_CHECKS.with(|s| s.borrow().last().copied().unwrap_or(false))
+    }
+}
+
+impl Drop for FillCheck {
+    fn drop(&mut self) {
+        FILL_CHECKS.with(|s| {
+            s.borrow_mut().pop();
+        });
+    }
+}
+
+pub(crate) fn in_fill_check() -> bool {
+    FILL_CHECKS.with(|s| !s.borrow().is_empty())
+}
+
+pub(crate) fn fail_fill_check() {
+    FILL_CHECKS.with(|s| {
+        if let Some(last) = s.borrow_mut().last_mut() {
+            *last = true;
+        }
+    });
+}
+
+fn check_filling_inner(ex: &mut Execution, inst: &Rc<ObjectInstance>) -> CallResult<bool> {
     let app = inst.app.clone();
     let def = app.model().obj(inst.obj);
     let mut paths: Vec<String> = def

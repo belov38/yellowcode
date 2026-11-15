@@ -475,7 +475,10 @@ impl ManagedValueContext<'_> {
                         path2.as_ref().map(BudgetedText::as_str),
                     )
                 })?,
-                None => None,
+                None => match crate::objects::overlay::absent_value(input.tag, name) {
+                    Some(t) => Some(text(budget, &[t])?.into_string()?.map(Value::Text)),
+                    None => None,
+                },
             };
             let Some(value) = value else {
                 diagnostics.miss(&["fail:", input.props_type, ".", name])?;

@@ -2,7 +2,7 @@ use crate::Application;
 use crate::app::QueryCtx;
 use crate::errors::{self, keys};
 use crate::meta::{arg_value, member_name, type_mismatch};
-use crate::model::{CodeType, NumberPeriodicity, ObjId, ObjKind, TypeAtom};
+use crate::model::{CodeType, NumberPeriodicity, ObjId, ObjKind, StdAttr, TypeAtom};
 use crate::queryhost::{CallBindHost, exec_error, to_value};
 use crate::read::{field_index, read_view, store_call_error, tabular_index};
 use crate::read_budget as budget;
@@ -47,6 +47,7 @@ pub(crate) struct SelectSpec {
     pub exact: Option<(String, Value)>,
     pub top: Option<u64>,
     pub ref_order: bool,
+    pub this_node: bool,
 }
 
 pub(crate) struct Params {
@@ -90,7 +91,7 @@ fn l5(key: &'static str, args: &[&str]) -> HostError {
     )
 }
 
-fn value_mismatch(n: usize) -> HostError {
+pub(crate) fn value_mismatch(n: usize) -> HostError {
     l5(keys::PARAMETER_VALUE_MISMATCH, &[&n.to_string()])
 }
 
@@ -293,6 +294,10 @@ fn prepare(app: &Application, obj: ObjId, spec: &SelectSpec) -> Result<Prepared,
                 None => empty = true,
             }
         }
+    }
+    if spec.this_node {
+        let f = std_field(qt, StdRole::ThisNode).ok_or_else(|| internal("no field ЭтотУзел"))?;
+        sel = sel.eq(f, BuildValue::Value(QValue::Bool(true)));
     }
     if let Some((name, prefix)) = &spec.starts_with {
         let f = field_index(def, name)
@@ -830,6 +835,18 @@ impl SelectionObject {
             .position(|c| *c == Some(i))
             .and_then(|c| row.get(c))
         {
+            Some(QValue::Binary(b))
+                if !b.is_empty() && fd.is_some_and(|f| f.std == Some(StdAttr::ValueType)) =>
+            {
+                let peak = self
+                    .bytes(&st)
+                    .saturating_add(budget::storage_copy(b).saturating_mul(2));
+                let stored = ibschema::fields::FieldValue::Binary(b.to_vec());
+                drop(st);
+                budget::reserve(ex, peak)?;
+                let fd = fd.ok_or_else(|| internal("no field"))?;
+                crate::values::field::stored_value(ex, &self.app, fd, &stored)
+            }
             Some(q) => {
                 let conversion = match q {
                     QValue::String(s) => (s.len_utf16() as u64)
@@ -1113,6 +1130,22 @@ pub(crate) fn find_one(
         Some(id) => Ok(crate::values::refs::ref_value(app, RefValue { obj, id })?),
         None => Ok(empty_ref(app, obj)?),
     }
+}
+
+pub(crate) fn this_node(ex: &mut Execution, app: &Application, obj: ObjId) -> CallResult<Value> {
+    let spec = SelectSpec {
+        this_node: true,
+        ..SelectSpec::default()
+    };
+    let found = find_one(ex, app, obj, spec)?;
+    if as_ref(&found).is_none_or(|r| r.is_empty()) {
+        return Err(HostError::not_implemented(
+            "ПланОбменаМенеджер",
+            "ЭтотУзел: в таблице плана нет строки этого узла",
+        )
+        .into());
+    }
+    Ok(found)
 }
 
 pub(crate) fn serves(name: &str) -> bool {

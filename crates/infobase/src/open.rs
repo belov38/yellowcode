@@ -429,17 +429,17 @@ impl Infobase {
         {
             return Err(Error::Unsupported(format!("{why}: read only")));
         }
-        let map = Arc::new(map);
         let gate = WriterGate::new();
         let store = Arc::new(
             Store1cd::new(
                 Arc::clone(raw.db_arc()),
-                Arc::clone(&map),
+                Arc::new(map),
                 Arc::clone(&gate),
                 write_refusal.clone(),
             )?
             .refusing_writes(&closed, PINNED_WHY),
         );
+        let map = Arc::clone(store.map());
         Ok(Infobase {
             path: file,
             mode: opts.mode,
@@ -621,14 +621,14 @@ impl Infobase {
         grow(model::PER_PHYS_BYTE.saturating_mul(schema_len), true)?;
         let readers = model::PER_STORE_TABLE.saturating_mul(map.tables().len() as u64);
         grow(readers, false)?;
-        let map = Arc::new(map);
         let gate = WriterGate::new();
         let store = Arc::new(Store1cd::new(
             Arc::clone(&db),
-            Arc::clone(&map),
+            Arc::new(map),
             Arc::clone(&gate),
             write_refusal.clone(),
         )?);
+        let map = Arc::clone(store.map());
         lease.shrink(readers).map_err(memory)?;
         probe("open:done");
         let lease = Arc::try_unwrap(lease).map_err(|_| {

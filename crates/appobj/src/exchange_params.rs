@@ -1,9 +1,10 @@
 use crate::meta::member_name;
-use crate::values::refs::as_ref;
+use crate::values::refs::{RefValue, as_ref};
 use bsl_vm::{
     Arg, CallResult, Exception, Execution, HostError, HostObject, MemberId, RetainedMemory, TypeId,
     Value,
 };
+use ibschema::values::RefId;
 use platform_catalog::{TypeIdx, catalog};
 use std::any::Any;
 use std::cell::{Cell, RefCell};
@@ -17,6 +18,8 @@ pub(crate) struct ExchangeParams {
     load: Cell<bool>,
     sender: RefCell<Value>,
     recipients: RefCell<Option<Value>>,
+    auto_fill: Rc<Cell<bool>>,
+    kept: RefCell<Vec<(u32, RefId)>>,
 }
 
 impl ExchangeParams {
@@ -29,7 +32,25 @@ impl ExchangeParams {
             load: Cell::new(false),
             sender: RefCell::new(Value::Undefined),
             recipients: RefCell::new(None),
+            auto_fill: Rc::new(Cell::new(true)),
+            kept: RefCell::new(Vec::new()),
         }))
+    }
+
+    pub(crate) fn auto_fill(&self) -> bool {
+        self.auto_fill.get()
+    }
+
+    pub(crate) fn sender_ref(&self) -> Option<RefValue> {
+        as_ref(&self.sender.borrow())
+    }
+
+    pub(crate) fn kept(&self) -> Vec<(u32, RefId)> {
+        self.kept.borrow().clone()
+    }
+
+    pub(crate) fn keep(&self, nodes: Vec<(u32, RefId)>) {
+        *self.kept.borrow_mut() = nodes;
     }
 
     pub(crate) fn loading(&self) -> bool {
@@ -80,7 +101,10 @@ impl HostObject for ExchangeParams {
                 let ty = catalog()
                     .find_type(NODE_SET)
                     .ok_or_else(|| Self::not_implemented("Получатели"))?;
-                let set = Value::Object(Rc::new(NodeSet { ty }));
+                let set = Value::Object(Rc::new(NodeSet {
+                    ty,
+                    auto_fill: self.auto_fill.clone(),
+                }));
                 *self.recipients.borrow_mut() = Some(set.clone());
                 Ok(set)
             }
@@ -119,6 +143,16 @@ impl HostObject for ExchangeParams {
 
 struct NodeSet {
     ty: TypeIdx,
+    auto_fill: Rc<Cell<bool>>,
+}
+
+impl NodeSet {
+    fn auto_fill_member(&self, m: MemberId) -> bool {
+        matches!(
+            member_name(catalog(), self.ty, m),
+            Some((false, _, "AutoFill"))
+        )
+    }
 }
 
 impl HostObject for NodeSet {
@@ -136,10 +170,26 @@ impl HostObject for NodeSet {
     }
 
     fn get(&self, _: &mut Execution, m: MemberId) -> CallResult<Value> {
+        if self.auto_fill_member(m) {
+            return Ok(Value::Bool(self.auto_fill.get()));
+        }
         Err(HostError::not_implemented(NODE_SET, &m.0.to_string()).into())
     }
 
-    fn set(&self, _: &mut Execution, m: MemberId, _: Value) -> CallResult<()> {
+    fn set(&self, _: &mut Execution, m: MemberId, v: Value) -> CallResult<()> {
+        if self.auto_fill_member(m) {
+            return match v {
+                Value::Bool(b) => {
+                    self.auto_fill.set(b);
+                    Ok(())
+                }
+                _ => Err(HostError::not_implemented(
+                    NODE_SET,
+                    "АвтоЗаполнение: значение не Булево",
+                )
+                .into()),
+            };
+        }
         Err(HostError::not_implemented(NODE_SET, &m.0.to_string()).into())
     }
 

@@ -1,0 +1,8 @@
+exit 2
+--- stdout
+--- stderr
+error: the argument '--list-indexes' cannot be used with '--cursor <CURSOR>'
+
+Usage: yellowcode table --list-indexes <BASE> <KIND> <NAME>
+
+For more information, try '--help'.

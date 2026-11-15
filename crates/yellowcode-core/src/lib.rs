@@ -13,6 +13,7 @@ pub mod heap;
 pub mod output;
 pub mod plain;
 pub mod platform;
+pub mod remote;
 pub mod service;
 pub mod users;
 pub mod viewer;

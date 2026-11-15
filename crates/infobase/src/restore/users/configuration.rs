@@ -14,13 +14,61 @@ fn memory(error: memory_budget::MemoryLimit) -> Error {
 fn config_error(error: mdconf::Error) -> Error {
     match error {
         mdconf::Error::Memory(m) => memory(m),
+        mdconf::Error::Format { what, .. } if what.starts_with("users RIGHTS") => bad(what),
         _ => bad("invalid CONFIG for users reconstruction"),
     }
 }
 fn format_error() -> mdconf::Error {
     mdconf::Error::Format {
         entry: "CONFIG".into(),
-        what: "unsupported users RIGHTS shape or size".into(),
+        what: "users RIGHTS of unsupported shape".into(),
+    }
+}
+fn size_error() -> mdconf::Error {
+    mdconf::Error::Format {
+        entry: "CONFIG".into(),
+        what: "users RIGHTS over 512 MiB of decoded rights".into(),
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct RightsShape {
+    objects: u64,
+    pairs: u64,
+    restrictions: u64,
+    fields: u64,
+    condition_bytes: u64,
+    template_bytes: u64,
+    templates: u64,
+}
+impl RightsShape {
+    const OBJECT: u64 = 1024;
+    const PAIR: u64 = 256;
+    const RESTRICTION: u64 = 512;
+    const FIELD: u64 = 128;
+    const TEMPLATE: u64 = 256;
+    const FIXED: u64 = 64 * 1024;
+
+    fn allowance(&self, max_name: u64) -> Option<u64> {
+        let name = max_name.checked_add(128)?;
+        let objects = self
+            .objects
+            .checked_mul(Self::OBJECT.checked_add(name.checked_mul(2)?)?)?;
+        let pairs = self.pairs.checked_mul(Self::PAIR)?;
+        let restrictions = self
+            .restrictions
+            .checked_mul(Self::RESTRICTION)?
+            .checked_add(self.condition_bytes.checked_mul(2)?)?;
+        let fields = self
+            .fields
+            .checked_mul(Self::FIELD.checked_add(name.checked_mul(2)?)?)?;
+        let templates = self
+            .templates
+            .checked_mul(Self::TEMPLATE)?
+            .checked_add(self.template_bytes.checked_mul(2)?)?;
+        [objects, pairs, restrictions, fields, templates]
+            .into_iter()
+            .try_fold(Self::FIXED, u64::checked_add)
     }
 }
 
@@ -28,13 +76,25 @@ struct RightsMeter {
     query: Arc<OpenLease>,
     roles: Vec<String>,
     max_name: u64,
-    retained: Mutex<u64>,
+    retained: Mutex<(std::collections::HashMap<String, u64>, u64)>,
+}
+impl RightsMeter {
+    fn lock(&self) -> std::sync::MutexGuard<'_, (std::collections::HashMap<String, u64>, u64)> {
+        self.retained
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 }
 impl LoadMeter for RightsMeter {
     fn admit(&self, entry: &str, inflated: u64) -> std::result::Result<(), MeterRefusal> {
         self.query.admit(entry, inflated)?;
         if self.roles.iter().any(|role| role == entry) {
-            let bytes = inflated * (4096 + 4 * (self.max_name + 128));
+            let bytes = self
+                .lock()
+                .0
+                .get(entry)
+                .copied()
+                .unwrap_or_else(|| inflated.saturating_mul(4096 + 4 * (self.max_name + 128)));
             self.query.grow(bytes, false).map_err(MeterRefusal)?;
         }
         Ok(())
@@ -70,29 +130,28 @@ impl EntrySource for RightsSource<'_> {
         };
         if self.meter.roles.iter().any(|role| role == name) {
             let len = data.bytes.len() as u64;
-            let allowance = len
-                .checked_mul(4096 + 4 * (self.meter.max_name + 128))
-                .ok_or_else(format_error)?;
-            let mut retained = self
-                .meter
-                .retained
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let total = retained
-                .checked_add(allowance)
-                .filter(|n| *n <= 512 * MIB)
-                .ok_or_else(format_error)?;
             let scratch = len
                 .checked_mul(128)
                 .and_then(|n| n.checked_add(MIB))
-                .ok_or_else(format_error)?;
+                .ok_or_else(size_error)?;
             let _lease = self
                 .budget
                 .try_reserve(Category::Metadata, scratch)
                 .map_err(mdconf::Error::Memory)?;
             let tree = brace::parse_bytes(&data.bytes).map_err(|_| format_error())?;
-            no_duplicate_associations(&tree)?;
-            *retained = total;
+            let allowance = rights_shape(&tree)?
+                .allowance(self.meter.max_name)
+                .ok_or_else(size_error)?;
+            let mut retained = self.meter.lock();
+            let previous = retained.0.get(name).copied().unwrap_or(0);
+            let total = retained
+                .1
+                .checked_sub(previous)
+                .and_then(|t| t.checked_add(allowance))
+                .filter(|n| *n <= 512 * MIB)
+                .ok_or_else(size_error)?;
+            retained.0.insert(name.to_string(), allowance);
+            retained.1 = total;
         }
         Ok(Some(data))
     }
@@ -106,7 +165,7 @@ fn count(node: Option<&brace::Node>) -> mdconf::Result<usize> {
         .map(|n| n as usize)
         .ok_or_else(format_error)
 }
-fn unique<'a>(nodes: impl Iterator<Item = &'a brace::Node>) -> mdconf::Result<()> {
+fn unique<'a>(nodes: impl Iterator<Item = &'a brace::Node>) -> mdconf::Result<u64> {
     let mut keys = BTreeSet::new();
     for node in nodes {
         let id = node
@@ -117,24 +176,30 @@ fn unique<'a>(nodes: impl Iterator<Item = &'a brace::Node>) -> mdconf::Result<()
             return Err(format_error());
         }
     }
-    Ok(())
+    Ok(keys.len() as u64)
 }
-fn no_duplicate_associations(tree: &brace::Node) -> mdconf::Result<()> {
+fn text_len(node: Option<&brace::Node>) -> u64 {
+    node.and_then(brace::Node::text)
+        .map_or(0, |t| t.len() as u64)
+}
+fn rights_shape(tree: &brace::Node) -> mdconf::Result<RightsShape> {
+    let mut shape = RightsShape::default();
     let objects = list(tree.at(1))?;
     let n = count(objects.first())?;
     let objects = objects
         .get(1..n.checked_add(1).ok_or_else(format_error)?)
         .ok_or_else(format_error)?;
+    shape.objects = n as u64;
     for object in objects {
         let rights = list(object.at(1))?;
         if rights.first().and_then(brace::Node::text) == Some("0") {
-            unique(rights.iter().skip(1).step_by(2))?;
+            shape.pairs += unique(rights.iter().skip(1).step_by(2))?;
         } else {
             let end = count(rights.get(1))?
                 .checked_mul(2)
                 .and_then(|n| n.checked_add(2))
                 .ok_or_else(format_error)?;
-            unique(
+            shape.pairs += unique(
                 rights
                     .get(2..end)
                     .ok_or_else(format_error)?
@@ -157,11 +222,28 @@ fn no_duplicate_associations(tree: &brace::Node) -> mdconf::Result<()> {
                     if !keys.insert(id) {
                         return Err(format_error());
                     }
+                    let items = item
+                        .at(1)
+                        .and_then(brace::Node::as_list)
+                        .unwrap_or_default();
+                    shape.restrictions += (items.len().saturating_sub(1) as u64).max(1);
+                    for rls in items.iter().skip(1) {
+                        let rls = rls.as_list().unwrap_or_default();
+                        shape.condition_bytes += text_len(rls.get(1));
+                        shape.fields += rls.len().saturating_sub(3) as u64;
+                    }
                 }
             }
         }
     }
-    Ok(())
+    if let Some(templates) = tree.at(2).and_then(brace::Node::as_list) {
+        for template in templates.iter().skip(1) {
+            let template = template.as_list().unwrap_or_default();
+            shape.templates += 1;
+            shape.template_bytes += text_len(template.first()) + text_len(template.get(1));
+        }
+    }
+    Ok(shape)
 }
 
 fn separated(object: &mdconf::MdObject, property: &str) -> bool {
@@ -328,7 +410,7 @@ fn load<T>(
             query: lease.clone(),
             roles,
             max_name,
-            retained: Mutex::new(0),
+            retained: Mutex::new(Default::default()),
         });
         let source = RightsSource {
             inner: source,

@@ -175,6 +175,30 @@ fn value(ctx: &Ctx, spec: &ConfigPropSpec, v: Option<&Node>) -> R<Option<Prop>> 
     Ok(Some(p))
 }
 
+const ROOT_VERSION: i64 = 76;
+
+enum OldRoot<'a> {
+    At(Option<&'a Node>),
+    Value(Node),
+}
+
+fn old_root<'a>(spec: &ConfigPropSpec, body: &'a Node) -> R<Option<OldRoot<'a>>> {
+    let Some(alt) = spec.extra.get("old_root") else {
+        return Ok(None);
+    };
+    let bad = || format!("{}:old_root", spec.name);
+    if let Some(path) = alt.get("path").and_then(|p| p.as_array()) {
+        let path = path
+            .iter()
+            .map(|i| i.as_u64().and_then(|i| usize::try_from(i).ok()))
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(bad)?;
+        return Ok(Some(OldRoot::At(body.get(&path))));
+    }
+    let text = alt.get("value").and_then(|v| v.as_str()).ok_or_else(bad)?;
+    Ok(Some(OldRoot::Value(brace::parse(text).map_err(|_| bad())?)))
+}
+
 fn decode(
     schema: &'static Schema,
     cfg: &Configuration,
@@ -202,9 +226,22 @@ fn decode(
         None => misses.push("Synonym:lstr".into()),
     }
     props.push(prop("Comment", Codec::Str, Value::Text(text_at(4)?)));
+    let old = body.at(0).and_then(int).is_some_and(|v| v < ROOT_VERSION);
     for spec in schema.config_props() {
+        let parsed: Node;
         let v = match &spec.path {
-            Some(ConfigPath::Body(p)) => Some(body.get(p)),
+            Some(ConfigPath::Body(p)) => match body.get(p) {
+                Some(n) => Some(Some(n)),
+                None if old => match old_root(spec, body)? {
+                    Some(OldRoot::At(n)) => Some(n),
+                    Some(OldRoot::Value(n)) => {
+                        parsed = n;
+                        Some(Some(&parsed))
+                    }
+                    None => Some(None),
+                },
+                None => Some(None),
+            },
             Some(ConfigPath::Part2) => Some(t.get(&PART2)),
             None => None,
         };

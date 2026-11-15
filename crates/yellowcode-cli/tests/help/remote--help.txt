@@ -1,0 +1,41 @@
+exit 0
+--- stdout
+Сервер 1С по сети: сводка, метаданные, вызов серверных функций, модули клиента
+
+Usage: yellowcode remote [OPTIONS] <COMMAND>
+
+Commands:
+  info      Сводка сервера: база, конфигурация, пользователь, сеанс, параметры входа, модули, разделы
+  metadata  Метаданные, которые сервер отдаёт тонкому клиенту: объекты и командный интерфейс
+  call      Вызвать экспортную функцию серверного общего модуля и вывести результат
+  modules   Модули, которые сервер отдаёт клиенту; с --out — тексты клиентских модулей
+  help      Print this message or the help of the given subcommand(s)
+
+Options:
+      --platform-build <BUILD>  Точная версия эмулируемой платформы (не режим совместимости конфигурации) [default: 8.5.1.1529]
+  -h, --help                    Print help
+
+Пароль пользователя (--user) не передаётся в командной строке и не набирается с клавиатуры: --password-env ИМЯ берёт его из переменной окружения, а без этого флага пароль читается одной строкой из stdin, поданного конвейером или из файла. Если stdin — терминал, команда отказывает до первого запроса. Пустой пароль — пустая строка: `printf '\n' | yellowcode remote …` в sh, bash, zsh; `echo.| yellowcode remote …` в cmd. Ввод, который кончился раньше первой строки, — ошибка.
+
+Примеры:
+  # Сводка сервера при входе без пользователя
+  yellowcode remote info http://127.0.0.1:28736
+
+  # Параметры входа базы с пользователями, без входа и без пароля
+  yellowcode remote info http://server/base --auth-settings-only
+
+  # Метаданные под пользователем, пароль из переменной окружения YC_PASSWORD
+  yellowcode remote metadata http://server/base --user Администратор --password-env YC_PASSWORD
+
+  # Пароль из файла
+  yellowcode remote info http://server/base --user Администратор < password.txt
+
+  # Пользователь без пароля (в cmd: echo.| yellowcode remote info …)
+  printf '\n' | yellowcode remote info http://server/base --user Гость
+
+  # Вызвать экспортную функцию общего модуля с параметрами
+  yellowcode remote call http://server/base --call МойМодуль.МояФункция --param n:10 --param s:текст
+
+  # Записать тексты клиентских модулей в каталог
+  yellowcode remote modules http://server/base --out client-modules
+--- stderr

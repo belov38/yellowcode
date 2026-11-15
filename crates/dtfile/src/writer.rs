@@ -19,6 +19,9 @@ pub struct DtWriter<W: Write> {
     next: usize,
     cur: Option<(TableHead, usize)>,
     poisoned: bool,
+    storage: Vec<(onecd::Numeric, Vec<u8>)>,
+    ext: Option<Vec<TableHead>>,
+    ext_next: usize,
 }
 
 fn head_diff(got: &TableHead, want: &TableHead) -> Option<String> {
@@ -48,6 +51,9 @@ impl<W: Write> DtWriter<W> {
             next: 0,
             cur: None,
             poisoned: false,
+            storage: Vec::new(),
+            ext: None,
+            ext_next: 0,
         })
     }
 
@@ -61,6 +67,10 @@ impl<W: Write> DtWriter<W> {
             Event::DataBaseStart(s) => self.begin_database(s),
             Event::DataBaseEnd => self.end_database(),
             Event::Unknown { name, items } => self.unknown(name, items),
+            Event::ExtensionsStart => self.begin_extensions(),
+            Event::ExtensionStart { schema_id, schema } => self.begin_extension(*schema_id, schema),
+            Event::ExtensionEnd => self.end_extension(),
+            Event::ExtensionsEnd => self.end_extensions(),
         }
     }
 
@@ -82,10 +92,26 @@ impl<W: Write> DtWriter<W> {
         let (want, ordinal, chunk) = match TableHead::system(&head.source) {
             Some(h) => {
                 let chunk = match head.source {
-                    Source::Folder(_) => FOLDER_CHUNK,
+                    Source::Folder(_) | Source::SchemaStorage => FOLDER_CHUNK,
                     _ => 0,
                 };
                 (h, 0, chunk)
+            }
+            None if matches!(head.source, Source::Extension(_)) => {
+                let ext = self.ext.as_ref().ok_or_else(|| {
+                    Error::Unsupported(format!(
+                        "{}: extension table outside its schema",
+                        head.phys_name
+                    ))
+                })?;
+                let h = ext.get(self.ext_next).ok_or_else(|| {
+                    Error::Unsupported(format!(
+                        "{}: more tables than the extension schema has ({})",
+                        head.phys_name,
+                        ext.len()
+                    ))
+                })?;
+                (h.clone(), self.ext_next, DB_CHUNK)
             }
             None => {
                 let db = self.db.as_ref().ok_or_else(|| {
@@ -111,8 +137,10 @@ impl<W: Write> DtWriter<W> {
             source: head.source.clone(),
             ordinal,
         })?;
-        if head.source == Source::DataBase {
-            self.next = self.next.saturating_add(1);
+        match head.source {
+            Source::DataBase => self.next = self.next.saturating_add(1),
+            Source::Extension(_) => self.ext_next = self.ext_next.saturating_add(1),
+            _ => {}
         }
         self.cur = Some((want, chunk));
         Ok(())
@@ -124,11 +152,28 @@ impl<W: Write> DtWriter<W> {
                 "writer has an incomplete streamed row".into(),
             ));
         }
-        let DtWriter { raw, cur, .. } = self;
+        let DtWriter {
+            raw, cur, storage, ..
+        } = self;
         let (head, chunk) = cur
             .as_ref()
             .ok_or_else(|| Error::Unsupported("element order: row outside a table".into()))?;
         rows::check_row(&head.phys_name, &head.columns, values)?;
+        if head.source == Source::SchemaStorage {
+            let (Some(ColumnValue::Number(id)), Some(ColumnValue::Bytes(schema))) =
+                (values.first(), values.get(2))
+            else {
+                return Err(Error::Unsupported(
+                    "SCHEMASTORAGE row without SCHEMAID or CURRENTSCHEMA".into(),
+                ));
+            };
+            if storage.iter().any(|(i, _)| i.eq_value(id)) {
+                return Err(Error::Unsupported(
+                    "SCHEMASTORAGE: two rows with one SCHEMAID".into(),
+                ));
+            }
+            storage.push((id.clone(), schema.clone()));
+        }
         raw.row_with(|w| rows::write_row(w, &head.columns, values, *chunk))
     }
 
@@ -204,6 +249,69 @@ impl<W: Write> DtWriter<W> {
         self.raw.event(&RawEvent::DataBaseEnd)?;
         self.db = None;
         self.next = 0;
+        Ok(())
+    }
+
+    pub fn begin_extensions(&mut self) -> Result<()> {
+        let db = self
+            .db
+            .as_ref()
+            .ok_or_else(|| Error::Unsupported("extension block outside DataBase".into()))?;
+        if self.next < db.len() {
+            return Err(Error::Unsupported(format!(
+                "extension block before all tables of DBSchema ({} of {})",
+                self.next,
+                db.len()
+            )));
+        }
+        self.raw.event(&RawEvent::ExtensionsStart)?;
+        self.storage.clear();
+        Ok(())
+    }
+
+    pub fn begin_extension(&mut self, schema_id: u32, schema: &LogicalSchema) -> Result<()> {
+        let id = onecd::Numeric::from_i64(i64::from(schema_id));
+        let stored = self
+            .storage
+            .iter()
+            .find(|(i, _)| i.eq_value(&id))
+            .map(|(_, t)| t)
+            .ok_or_else(|| {
+                Error::Unsupported(format!(
+                    "no SCHEMASTORAGE row for extension schema {schema_id}"
+                ))
+            })?;
+        if crate::reader::extension_schema(stored).ok().as_ref() != Some(schema) {
+            return Err(Error::Unsupported(format!(
+                "extension schema {schema_id} differs from its SCHEMASTORAGE row"
+            )));
+        }
+        let heads = TableHead::extension(schema_id, schema)?;
+        self.raw.event(&RawEvent::ExtensionStart { schema_id })?;
+        self.ext = Some(heads);
+        self.ext_next = 0;
+        Ok(())
+    }
+
+    pub fn end_extension(&mut self) -> Result<()> {
+        if let Some(ext) = &self.ext
+            && self.ext_next < ext.len()
+        {
+            return Err(Error::Unsupported(format!(
+                "fewer tables than the extension schema has ({} of {})",
+                self.ext_next,
+                ext.len()
+            )));
+        }
+        self.raw.event(&RawEvent::ExtensionEnd)?;
+        self.ext = None;
+        self.ext_next = 0;
+        Ok(())
+    }
+
+    pub fn end_extensions(&mut self) -> Result<()> {
+        self.raw.event(&RawEvent::ExtensionsEnd)?;
+        self.storage.clear();
         Ok(())
     }
 

@@ -60,9 +60,17 @@ pub(crate) fn main(cx: &Ctx, names: &mut Names) -> Result<Vec<(Table, TableRole)
         Tok::AddOrder(f::MARKED),
     ];
     for a in indexed_attributes(cx) {
-        b.rule(cx, names, "ByField{F}", true, &toks, Some(a))?;
+        b.rule(cx, names, field_index_name(a), true, &toks, Some(a))?;
     }
     Ok(vec![b.finish()])
+}
+
+fn field_index_name(a: &Child) -> &'static str {
+    if indexed(a) {
+        "ByField{F}"
+    } else {
+        "ByField{n}"
+    }
 }
 
 pub(super) fn table_of(

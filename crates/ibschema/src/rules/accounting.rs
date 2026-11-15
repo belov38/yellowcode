@@ -148,7 +148,7 @@ pub(crate) fn chart_of_accounts(cx: &Ctx, names: &mut Names) -> Result<Vec<(Tabl
         b.rule(cx, names, with_parent, true, &toks, None)?;
     }
     let items = indexed_attributes(cx);
-    for a in &items {
+    for a in items.iter().filter(|a| indexed(a)) {
         let toks = [par.clone(), Tok::Attr, id.clone()];
         b.rule(cx, names, "ByParentField{n}", true, &toks, Some(a))?;
     }

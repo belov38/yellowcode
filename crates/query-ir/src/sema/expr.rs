@@ -87,6 +87,12 @@ fn sys_enum_mismatch(a: &QType, b: &QType) -> bool {
     clash(a, b) || clash(b, a)
 }
 
+fn uuid_binary_mismatch(a: &QType, b: &QType) -> bool {
+    let only = |t: &QType, o: Other| t.atom_count() == 1 && t.others.as_slice() == [o];
+    (only(a, Other::Uuid) && only(b, Other::Binary))
+        || (only(a, Other::Binary) && only(b, Other::Uuid))
+}
+
 fn number0() -> QType {
     QType::num(NUM0)
 }
@@ -259,7 +265,11 @@ impl<'scope> Analyzer<'scope> {
                 let lr = self.pair(l_ast, r_ast, ctx, op_span.start);
                 self.frames.pop();
                 let (l, r) = lr?;
-                if !self.comparable(&l) || !self.comparable(&r) || sys_enum_mismatch(&l.ty, &r.ty) {
+                if !self.comparable(&l)
+                    || !self.comparable(&r)
+                    || sys_enum_mismatch(&l.ty, &r.ty)
+                    || uuid_binary_mismatch(&l.ty, &r.ty)
+                {
                     return Err(self.wrong_compare(op_span.start));
                 }
                 let ty = self.scalar_type(boolean_of(&[&l, &r]));

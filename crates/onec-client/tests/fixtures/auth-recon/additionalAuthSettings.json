@@ -1,0 +1,20 @@
+{
+"passwordRecoveryMethod": 3,
+"passwordRecoveryURL": "",
+"allowSaveForReauthentication": false,
+"saveForReauthenticationByDefault": false,
+"savedAuthenticationParametersLifeTime": 432000,
+"lcinfo": {
+"auth": {
+"allowSaveForReauthentication": false,
+"savedAuthenticationParametersLifeTime": 432000,
+"saveForReauthenticationByDefault": false
+},
+"authTypes": [
+"standard"
+]
+},
+"enablePasswordRecovery": false,
+"inactivityTimeForTerminateSession": 0,
+"inactivityTimeForTerminateSessionNotification": 0
+}

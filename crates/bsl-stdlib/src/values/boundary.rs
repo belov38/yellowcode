@@ -60,6 +60,10 @@ pub fn boundary_parts(
     Ok(Some((value, boundary.kind)))
 }
 
+pub(crate) fn is_boundary_of_date(value: &Value) -> bool {
+    of(value).is_some_and(|b| matches!(*b.value.borrow(), Value::Date(_)))
+}
+
 impl Boundary {
     pub(crate) fn take(&self) -> Value {
         self.value.replace(Value::Undefined)

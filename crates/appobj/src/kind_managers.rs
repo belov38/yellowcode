@@ -134,6 +134,12 @@ impl HostObject for KindManager {
     }
     fn get(&self, _: &mut Execution, m: MemberId) -> CallResult<Value> {
         match self.named(m) {
+            Some(name) if self.spec.kind == MdKind::FilterCriterion => {
+                match crate::regread::criterion_manager(&self.app, name)? {
+                    Some(v) => Ok(v),
+                    None => Err(self.refusal(name).into()),
+                }
+            }
             Some(name) => Err(self.refusal(name).into()),
             None => Err(internal("unknown member of a metadata kind manager").into()),
         }
@@ -169,6 +175,12 @@ impl HostObject for KindManager {
         };
         let name = s.to_string_lossy();
         match self.find(&name) {
+            Some((_, configured)) if self.spec.kind == MdKind::FilterCriterion => {
+                match crate::regread::criterion_manager(&self.app, configured)? {
+                    Some(v) => Ok(v),
+                    None => Err(self.refusal(configured).into()),
+                }
+            }
             Some((_, configured)) => Err(self.refusal(configured).into()),
             None => Err(no_field(&name).into()),
         }

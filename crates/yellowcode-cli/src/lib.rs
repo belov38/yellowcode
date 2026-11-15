@@ -22,6 +22,7 @@ mod grep;
 mod metadata;
 mod module;
 mod query;
+mod remote;
 mod scope;
 mod serve;
 mod table;
@@ -77,7 +78,7 @@ pub fn is_cli(args: &[OsString]) -> bool {
         }
         "open" => gui_has_cli_flag(args.get(2..).unwrap_or(&[])),
         "help" | "metadata" | "module" | "template" | "grep" | "export" | "convert" | "bak"
-        | "query" | "serve" | "table" | "users" => true,
+        | "query" | "serve" | "table" | "users" | "remote" => true,
         flag if flag.starts_with('-') => true,
         _ => {
             let path = std::path::Path::new(arg);
@@ -133,8 +134,8 @@ struct Cli {
 enum Command {
     #[command(
         subcommand,
-        about = "Осмотреть резервную копию MS SQL Server или получить из неё CF, DT, 1CD (экспериментально)",
-        after_help = bak::EXPERIMENTAL
+        about = "Осмотреть резервную копию MS SQL Server или получить из неё CF, DT, 1CD",
+        after_help = bak::SUMMARY
     )]
     Bak(bak::Command),
     #[command(
@@ -179,6 +180,12 @@ enum Command {
     Grep(grep::Args),
     #[command(about = "Выгрузить модули и макеты выбранной части конфигурации в каталог")]
     Export(export::Args),
+    #[command(
+        subcommand,
+        about = "Сервер 1С по сети: сводка, метаданные, вызов серверных функций, модули клиента",
+        after_help = remote::EXAMPLES
+    )]
+    Remote(remote::Command),
 }
 
 #[derive(clap::Args)]
@@ -231,6 +238,18 @@ pub fn run(
     out: &mut dyn Write,
     err: &mut dyn Write,
     tty: bool,
+) -> i32 {
+    use std::io::IsTerminal;
+    run_with_stdin_terminal(args, input, out, err, tty, std::io::stdin().is_terminal())
+}
+
+pub fn run_with_stdin_terminal(
+    args: impl IntoIterator<Item = OsString>,
+    input: &mut dyn Read,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+    tty: bool,
+    stdin_terminal: bool,
 ) -> i32 {
     let args: Vec<OsString> = args.into_iter().collect();
     let cli = match Cli::try_parse_from(&args) {
@@ -299,6 +318,9 @@ pub fn run(
         Some(Command::Query(args)) => query::run(args, input, &mut output, err, tty),
         Some(Command::Serve(args)) => serve::run(args, cli.platform_build, err).map(|()| 0),
         Some(Command::Table(args)) => table::run(args, &mut output, err, tty),
+        Some(Command::Remote(command)) => {
+            remote::run(command, input, &mut output, err, stdin_terminal)
+        }
         None => Cli::command()
             .write_long_help(&mut output)
             .map(|()| 0)

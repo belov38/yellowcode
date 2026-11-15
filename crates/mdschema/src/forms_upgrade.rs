@@ -30,6 +30,7 @@ pub struct Context {
     pub writer: String,
     pub new_version: String,
     pub old_len: usize,
+    pub read_len: Option<usize>,
     pub new_len: usize,
     pub ops: Vec<Op>,
 }
@@ -158,11 +159,29 @@ fn context(name: &str, v: &Value) -> Result<Context, SchemaError> {
     if ops.len() != new_len || ops.iter().enumerate().any(|(i, o)| o.new != i) {
         return Err(err(format!("{name}: ops must cover 0..{new_len} in order")));
     }
+    let old_len = usize_of(get("old_len"), name)?;
+    let read_len = match get("read_len") {
+        Value::Null => None,
+        v => Some(usize_of(v, name)?),
+    };
+    let beyond = |r: usize, o: &Op| {
+        o.old.is_some_and(|p| p >= r)
+            || o.flag.is_some_and(|p| p >= r)
+            || o.inputs.iter().any(|&p| p >= r)
+    };
+    if let Some(r) = read_len
+        && (r >= old_len || ops.iter().any(|o| beyond(r, o)))
+    {
+        return Err(err(format!(
+            "{name}: read_len {r} must be below old_len and cover every source position"
+        )));
+    }
     Ok(Context {
         reader: str_of(get("reader"), name)?.to_string(),
         writer: str_of(get("writer"), name)?.to_string(),
         new_version: str_of(get("new_version"), name)?.to_string(),
-        old_len: usize_of(get("old_len"), name)?,
+        old_len,
+        read_len,
         new_len,
         ops,
     })

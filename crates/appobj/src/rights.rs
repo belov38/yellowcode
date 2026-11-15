@@ -87,6 +87,10 @@ impl RightsMatrix {
         self.default_roles.contains(id)
     }
 
+    pub(crate) fn default_roles(&self) -> &[Uuid16] {
+        &self.default_roles
+    }
+
     pub(crate) fn any_role(&self, roles: &[Uuid16], target: Option<&Uuid16>, right: Right) -> bool {
         let Some(&i) = self.index.get(&right.0) else {
             return false;

@@ -165,10 +165,22 @@ pub fn inspect_legacy_inventory(
     })
 }
 
-pub fn validate_inventory(schema: &LogicalSchema, tables: &[String]) -> Result<(), Error> {
+pub const OPTIONAL_SYSTEM_TABLE: &str = "DepotFiles";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Inventory {
+    pub depot_files: bool,
+}
+
+pub fn validate_inventory(schema: &LogicalSchema, tables: &[String]) -> Result<Inventory, Error> {
+    let optional = name(OPTIONAL_SYSTEM_TABLE)?;
     let mut expected = HashSet::new();
     for table in SYSTEM_TABLES {
-        if !expected.insert(name(table)?) {
+        let key = name(table)?;
+        if key == optional {
+            continue;
+        }
+        if !expected.insert(key) {
             return Err(Error::Invalid("duplicate system table"));
         }
     }
@@ -177,14 +189,18 @@ pub fn validate_inventory(schema: &LogicalSchema, tables: &[String]) -> Result<(
             return Err(Error::Invalid("duplicate schema table"));
         }
     }
+    if expected.contains(&optional) {
+        return Err(Error::Invalid("duplicate schema table"));
+    }
     let mut actual = HashSet::new();
     for table in tables {
         if !actual.insert(name(table)?) {
             return Err(Error::Invalid("ambiguous SQL table"));
         }
     }
+    let depot_files = actual.remove(&optional);
     if actual != expected {
         return Err(Error::Invalid("missing or unexpected SQL table"));
     }
-    Ok(())
+    Ok(Inventory { depot_files })
 }

@@ -15,6 +15,8 @@ pub mod enums;
 mod fs;
 mod globals;
 mod json;
+mod mail;
+mod mail_message;
 pub mod present;
 pub mod serial;
 mod session;
@@ -35,13 +37,15 @@ pub use collections::{
 pub use fs::MemFs;
 pub use globals::data::encoding_from_value;
 pub use serial::codec::{InternalReader, InternalWriter, ValueCodec, register_codec};
-pub use serial::storage::{new_value_storage, value_storage_bytes, value_storage_from_bytes};
+pub use serial::storage::{
+    new_value_storage, value_storage_bytes, value_storage_from_bytes, value_storage_of_cell,
+};
 pub use serial::xmlvalue::{from_xml_string, to_xml_string};
 pub use typedesc::{
     AllowedLength, AllowedSign, BinaryQualifiers, DateParts, DateQualifiers, NumberQualifiers,
     StringQualifiers, TypeDescription, cast_value, new_type_description, type_description_of,
 };
-pub use ui::{StyleItem, StyleItemKind, StyleItems};
+pub use ui::{PictureNames, StyleItem, StyleItemKind, StyleItems, picture_library};
 pub use xdto::{
     ReservedXdtoName, ScalarProjection, XdtoCodec, XdtoCtx, XdtoData, register_xdto_codec,
 };
@@ -60,6 +64,8 @@ pub fn register(reg: &mut Registry) {
     binary::register(reg);
     globals::register(reg);
     json::register(reg);
+    mail::register(reg);
+    mail_message::register(reg);
     serial::register(reg);
     fs::register(reg);
     text::register(reg);

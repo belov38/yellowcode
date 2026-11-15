@@ -329,11 +329,21 @@ impl LiteralSet {
     }
 
     pub fn longest_skeleton_at(&self, skeleton: &[char], at: usize) -> Option<(usize, &Skeleton)> {
+        self.longest_skeleton_at_where(skeleton, at, |_, _| true)
+    }
+
+    pub fn longest_skeleton_at_where(
+        &self,
+        skeleton: &[char],
+        at: usize,
+        accept: impl Fn(usize, &Skeleton) -> bool,
+    ) -> Option<(usize, &Skeleton)> {
         let list = self.skeletons.get(skeleton.get(at)?)?;
         list.iter().find_map(|entry| {
             let end = at.checked_add(entry.chars.len())?;
-            (skeleton.get(at..end) == Some(entry.chars.as_slice()))
-                .then_some((entry.chars.len(), entry))
+            (skeleton.get(at..end) == Some(entry.chars.as_slice())
+                && accept(entry.chars.len(), entry))
+            .then_some((entry.chars.len(), entry))
         })
     }
 

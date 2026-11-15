@@ -1,6 +1,7 @@
+use super::color::{Color, ColorKind};
 use super::font::font_data;
 use super::{NS_UI, SharedOf, data_text, types};
-use crate::bind::arg_value;
+use crate::bind::{arg_value, value_mismatch};
 use crate::collections::{ctor_not_implemented, not_implemented};
 use crate::serial::codec::{InternalReader, InternalWriter, ValueCodec};
 use crate::serial::internal::text::{decode_str, encode_str};
@@ -9,16 +10,16 @@ use brace::Node;
 use bsl_lib::xdto::QName;
 use bsl_prim::Str;
 use bsl_vm::{
-    Arg, CallResult, Exception, Execution, HostError, HostObject, MemberId, ObjRef, SharedValue,
-    TypeId, Value,
+    Arg, CallResult, Exception, Execution, HostObject, MemberId, ObjRef, SharedValue, TypeId, Value,
 };
 use std::any::Any;
 use std::rc::Rc;
 use std::sync::Arc;
 
+const MAX_DEPTH: usize = 32;
+
 pub(crate) struct Formatted {
     markup: String,
-    unobserved: bool,
 }
 
 pub(super) fn presentation_input_len(value: &Value) -> Option<u64> {
@@ -26,73 +27,224 @@ pub(super) fn presentation_input_len(value: &Value) -> Option<u64> {
     Some(formatted.markup.len() as u64)
 }
 
-fn new_formatted(markup: String, unobserved: bool) -> Value {
-    Value::Object(Rc::new(Formatted { markup, unobserved }))
+fn new_formatted(markup: String) -> Value {
+    Value::Object(Rc::new(Formatted { markup }))
 }
 
-fn not_serializable(ex: &mut Execution) -> Exception {
-    ex.error(HostError::not_implemented(
-        "ФорматированнаяСтрока",
-        "Сериализация",
-    ))
+fn formatted_of(v: &Value) -> Option<&Formatted> {
+    v.as_object()?.as_any().downcast_ref::<Formatted>()
+}
+
+fn unsupported() -> bsl_vm::CallError {
+    ctor_not_implemented(types().formatted).into()
+}
+
+fn escape(text: &str, out: &mut String) {
+    for c in text.chars() {
+        match c {
+            '<' => out.push_str("<<"),
+            '>' => out.push_str(">>"),
+            _ => out.push(c),
+        }
+    }
+}
+
+fn text_of(markup: &str) -> String {
+    let mut out = String::new();
+    let mut chars = markup.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '<' if chars.peek() == Some(&'<') => {
+                chars.next();
+                out.push('<');
+            }
+            '>' if chars.peek() == Some(&'>') => {
+                chars.next();
+                out.push('>');
+            }
+            '<' => {
+                let mut tag = String::new();
+                for t in chars.by_ref() {
+                    if t == '>' {
+                        break;
+                    }
+                    tag.push(t);
+                }
+                if tag.starts_with("img ") {
+                    out.push(' ');
+                }
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+fn push_part(
+    ex: &mut Execution,
+    v: &Value,
+    single: bool,
+    depth: usize,
+    out: &mut String,
+) -> CallResult<Option<()>> {
+    match v {
+        Value::String(s) => {
+            let text = s.to_string_lossy();
+            ex.reserve((out.len() + text.len() * 2) as u64 * 3)?;
+            escape(&text, out);
+            Ok(Some(()))
+        }
+        Value::Object(_) => {
+            if let Some(f) = formatted_of(v) {
+                ex.reserve((out.len() + f.markup.len()) as u64 * 3)?;
+                out.push_str(&f.markup);
+                return Ok(Some(()));
+            }
+            let Some(items) = crate::collections::array_items(v) else {
+                return Ok(None);
+            };
+            if depth >= MAX_DEPTH {
+                return Ok(None);
+            }
+            for item in &items {
+                match item {
+                    Value::String(_) | Value::Object(_) => {}
+                    Value::Number(_) if single && depth == 0 => {
+                        return Err(value_mismatch(1).into());
+                    }
+                    _ => return Ok(None),
+                }
+                if push_part(ex, item, single, depth + 1, out)?.is_none() {
+                    return Ok(None);
+                }
+            }
+            Ok(Some(()))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn hex(r: u8, g: u8, b: u8) -> String {
+    format!("#{r:02x}{g:02x}{b:02x}")
+}
+
+fn text_color_tag(v: &Value) -> Option<String> {
+    let c = v.as_object()?.as_any().downcast_ref::<Color>()?;
+    match &c.kind {
+        ColorKind::Abs(r, g, b) => Some(format!("color {}", hex(*r, *g, *b))),
+        ColorKind::Auto => Some("color #000000".to_string()),
+        ColorKind::Web("Red") => Some("color #ff0000".to_string()),
+        ColorKind::Style { id: Some(-3), .. } => Some("colorstyle -3".to_string()),
+        _ => None,
+    }
+}
+
+fn back_color_tag(v: &Value) -> Option<String> {
+    let c = v.as_object()?.as_any().downcast_ref::<Color>()?;
+    match &c.kind {
+        ColorKind::Abs(r, g, b) => Some(format!("bgcolor {}", hex(*r, *g, *b))),
+        _ => None,
+    }
+}
+
+fn link_tag(link: &str) -> Option<String> {
+    let plain = !link
+        .chars()
+        .any(|c| c == '<' || c == '>' || c.is_whitespace() || c.is_control());
+    plain.then(|| format!("link {link}"))
 }
 
 pub(super) fn ctor(ex: &mut Execution, args: &mut [Arg]) -> CallResult<Value> {
-    let unsupported =
-        || -> CallResult<Value> { Err(ctor_not_implemented(types().formatted).into()) };
-    let plain = |s: &Str| {
-        let text = s.to_string_lossy();
-        (!text.contains(['<', '>', '&'])).then_some(text)
-    };
-    let first = arg_value(ex, args.first())?;
-    match (args.len(), &first) {
-        (5, Value::String(s)) => {
-            for i in 1..5 {
-                if !matches!(arg_value(ex, args.get(i))?, Value::Undefined) {
-                    return unsupported();
-                }
-            }
-            let Some(text) = plain(s) else {
-                return unsupported();
-            };
-            Ok(new_formatted(text, true))
-        }
-        (1, v) => {
-            let Some(items) = crate::collections::array_items(v) else {
-                return unsupported();
-            };
-            let mut markup = String::new();
-            for item in &items {
-                let part = match item {
-                    Value::String(s) => plain(s),
-                    other => other
-                        .as_object()
-                        .and_then(|o| o.as_any().downcast_ref::<Formatted>())
-                        .map(|f| f.markup.clone()),
-                };
-                let Some(part) = part else {
-                    return unsupported();
-                };
-                ex.reserve((markup.len() + part.len()) as u64 * 3)?;
-                markup.push_str(&part);
-            }
-            Ok(new_formatted(markup, true))
-        }
-        (2, Value::String(text)) => {
-            let font = arg_value(ex, args.get(1))?;
-            let Some(text) = plain(text) else {
-                return unsupported();
-            };
-            let Some(id) = font_data(&font).and_then(|f| f.normal_bold_only()) else {
-                return unsupported();
-            };
-            Ok(new_formatted(
-                format!("<fontstyle {id}><b>{text}</></>"),
-                false,
-            ))
-        }
-        _ => unsupported(),
+    let mut vals = Vec::with_capacity(args.len());
+    for i in 0..args.len() {
+        vals.push(arg_value(ex, args.get(i))?);
     }
+    if vals.is_empty() {
+        return Err(unsupported());
+    }
+    let none = |v: &Value| matches!(v, Value::Undefined);
+    let at = |i: usize| vals.get(i).cloned().unwrap_or(Value::Undefined);
+    let described = vals.len() <= 5
+        && (none(&at(1)) || font_data(&at(1)).is_some())
+        && (none(&at(4)) || matches!(at(4), Value::String(_)));
+    if described {
+        return described_form(ex, &vals);
+    }
+    let mut markup = String::new();
+    for v in &vals {
+        let part = matches!(v, Value::String(_)) || formatted_of(v).is_some();
+        if !part || push_part(ex, v, false, 0, &mut markup)?.is_none() {
+            return Err(unsupported());
+        }
+    }
+    Ok(new_formatted(markup))
+}
+
+fn described_form(ex: &mut Execution, vals: &[Value]) -> CallResult<Value> {
+    let at = |i: usize| vals.get(i).cloned().unwrap_or(Value::Undefined);
+    let font = at(1);
+    let color = at(2);
+    let back = at(3);
+    let link = match at(4) {
+        Value::String(s) => Some(s.to_string_lossy()).filter(|l| !l.is_empty()),
+        _ => None,
+    };
+    let mut tags: Vec<String> = Vec::new();
+    let mut kinds: Vec<char> = Vec::new();
+    if let Some(f) = font_data(&font) {
+        let Some(font_tags) = f.formatted_tags() else {
+            return Err(unsupported());
+        };
+        tags.extend(font_tags);
+        kinds.push('f');
+    }
+    if !matches!(color, Value::Undefined) {
+        tags.push(text_color_tag(&color).ok_or_else(unsupported)?);
+        kinds.push('c');
+    }
+    if !matches!(back, Value::Undefined) {
+        tags.push(back_color_tag(&back).ok_or_else(unsupported)?);
+        kinds.push('b');
+    }
+    if let Some(l) = &link {
+        tags.push(link_tag(l).ok_or_else(unsupported)?);
+        kinds.push('l');
+    }
+    let known = matches!(
+        kinds.as_slice(),
+        [] | [_] | ['f', 'c'] | ['c', 'b'] | ['c', 'l']
+    );
+    if !known {
+        return Err(unsupported());
+    }
+    let first = at(0);
+    if tags.is_empty() {
+        let mut markup = String::new();
+        if push_part(ex, &first, vals.len() == 1, 0, &mut markup)?.is_none() {
+            return Err(unsupported());
+        }
+        return Ok(new_formatted(markup));
+    }
+    let Value::String(s) = &first else {
+        return Err(unsupported());
+    };
+    let text = s.to_string_lossy();
+    if text.is_empty() {
+        return Err(unsupported());
+    }
+    let tag_len: usize = tags.iter().map(|t| t.len() + 5).sum();
+    ex.reserve((text.len() * 2 + tag_len) as u64 * 3)?;
+    let mut markup = String::new();
+    for t in &tags {
+        markup.push('<');
+        markup.push_str(t);
+        markup.push('>');
+    }
+    escape(&text, &mut markup);
+    for _ in &tags {
+        markup.push_str("</>");
+    }
+    Ok(new_formatted(markup))
 }
 
 impl HostObject for Formatted {
@@ -121,18 +273,13 @@ impl HostObject for Formatted {
         Err(not_implemented(types().formatted, m).into())
     }
 
-    fn presentation(&self, _ex: &mut Execution) -> CallResult<Option<Str>> {
-        let mut out = String::new();
-        let mut in_tag = false;
-        for c in self.markup.chars() {
-            match c {
-                '<' => in_tag = true,
-                '>' if in_tag => in_tag = false,
-                _ if !in_tag => out.push(c),
-                _ => {}
-            }
-        }
-        Ok(Some(Str::from(out.as_str())))
+    fn presentation(&self, ex: &mut Execution) -> CallResult<Option<Str>> {
+        ex.reserve(self.markup.len() as u64 * 2)?;
+        Ok(Some(Str::from(text_of(&self.markup).as_str())))
+    }
+
+    fn is_empty_value(&self) -> bool {
+        self.markup.is_empty()
     }
 
     fn equals(&self, other: &dyn HostObject) -> Option<bool> {
@@ -147,8 +294,8 @@ impl HostObject for Formatted {
 
     fn to_shared(&self) -> Option<SharedValue> {
         Some(SharedValue::Object(Arc::new(SharedOf::new(
-            (self.markup.clone(), self.unobserved),
-            |(m, u)| new_formatted(m.clone(), *u),
+            self.markup.clone(),
+            |m| new_formatted(m.clone()),
         ))))
     }
 }
@@ -165,9 +312,6 @@ impl ValueCodec for FormattedCodec {
         let Some(f) = v.as_any().downcast_ref::<Formatted>() else {
             return Ok(None);
         };
-        if f.unobserved {
-            return Err(not_serializable(ex));
-        }
         w.account(ex, f.markup.len() as u64 * 3)?;
         let u: Vec<u16> = f.markup.encode_utf16().collect();
         Ok(Some(vec![Node::int(1), encode_str(&u)]))
@@ -183,7 +327,7 @@ impl ValueCodec for FormattedCodec {
             ex.reserve((text.len() as u64).saturating_mul(4))?;
         }
         match items.get(1).and_then(decode_str) {
-            Some(u) => Ok(new_formatted(String::from_utf16_lossy(&u), false)),
+            Some(u) => Ok(new_formatted(String::from_utf16_lossy(&u))),
             None => Err(r.format_error(ex)),
         }
     }
@@ -203,12 +347,6 @@ impl XdtoCodec for FormattedCodec {
         let Some(f) = v.as_any().downcast_ref::<Formatted>() else {
             return Err(s.mismatch(ex));
         };
-        if f.unobserved {
-            return Err(s.fail(HostError::not_implemented(
-                "ФорматированнаяСтрока",
-                "Сериализация",
-            )));
-        }
         s.account(ex, f.markup.len() as u64)?;
         Ok(data_text(ui_type(), &f.markup))
     }
@@ -222,7 +360,7 @@ impl XdtoCodec for FormattedCodec {
         match d {
             XdtoData::Value { lexical, .. } => {
                 ex.reserve(lexical.len() as u64 * 2)?;
-                Ok(new_formatted(lexical.clone(), false))
+                Ok(new_formatted(lexical.clone()))
             }
             _ => Err(s.lexical_error(ex, "", &ui_type())),
         }

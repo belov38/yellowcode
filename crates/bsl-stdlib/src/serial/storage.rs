@@ -49,6 +49,7 @@ pub fn storable_without_data() -> &'static [&'static str] {
 
 struct ValueStorage {
     bytes: Arc<[u8]>,
+    cell: Option<[u8; 32]>,
 }
 
 impl ValueStorage {
@@ -128,7 +129,10 @@ impl HostObject for ValueStorage {
         out: &mut dyn bsl_vm::SessionExport,
     ) -> Result<Option<Box<dyn bsl_vm::SessionObject>>, Exception> {
         out.reserve(16)?;
-        Ok(Some(Box::new(SessionStorage(self.bytes.clone()))))
+        Ok(Some(Box::new(SessionStorage(
+            self.bytes.clone(),
+            self.cell,
+        ))))
     }
     fn retained_memory(
         &self,
@@ -174,12 +178,24 @@ impl HostObject for ValueStorage {
         }
     }
 
+    fn equals(&self, other: &dyn HostObject) -> Option<bool> {
+        let o = other.as_any().downcast_ref::<ValueStorage>()?;
+        let (Some(a), Some(b)) = (&self.cell, &o.cell) else {
+            return None;
+        };
+        Some(a == b && self.bytes == o.bytes)
+    }
+
+    fn boost_hash(&self) -> Option<i32> {
+        self.cell.as_ref().map(|c| bsl_prim::boost_hash::bytes(c))
+    }
+
     fn presentation(&self, _ex: &mut Execution) -> CallResult<Option<Str>> {
         Ok(Some(Str::from("ХранилищеЗначения")))
     }
 }
 
-struct SessionStorage(Arc<[u8]>);
+struct SessionStorage(Arc<[u8]>, Option<[u8; 32]>);
 impl bsl_vm::SessionObject for SessionStorage {
     fn retained_memory(&self, visit: &mut dyn bsl_vm::RetainedMemory) -> Result<(), Exception> {
         visit
@@ -195,6 +211,7 @@ impl bsl_vm::SessionObject for SessionStorage {
         _: &mut bsl_vm::SessionImports,
     ) -> Result<Value, Exception> {
         Ok(Value::Object(Rc::new(ValueStorage {
+            cell: self.1,
             bytes: self.0.clone(),
         })))
     }
@@ -243,7 +260,14 @@ pub fn value_storage_bytes(v: &Value) -> Option<Arc<[u8]>> {
 }
 
 pub fn value_storage_from_bytes(bytes: Arc<[u8]>) -> Value {
-    Value::Object(Rc::new(ValueStorage { bytes }))
+    Value::Object(Rc::new(ValueStorage { bytes, cell: None }))
+}
+
+pub fn value_storage_of_cell(bytes: Arc<[u8]>, cell: [u8; 32]) -> Value {
+    Value::Object(Rc::new(ValueStorage {
+        bytes,
+        cell: Some(cell),
+    }))
 }
 
 pub(crate) fn storage_type() -> TypeIdx {

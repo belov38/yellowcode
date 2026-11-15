@@ -22,6 +22,29 @@ pub(super) fn read_only(name: &str) -> HostError {
         .raw()
 }
 
+macro_rules! reusable {
+    () => {
+        fn retained_memory(
+            &self,
+            _: &mut dyn bsl_vm::RetainedMemory,
+        ) -> Result<bool, bsl_vm::Exception> {
+            Ok(true)
+        }
+        fn session_edges(&self, _: &mut dyn bsl_vm::SessionEdges) -> bool {
+            true
+        }
+        fn session_transfer_supported(&self) -> bool {
+            true
+        }
+        fn session_transfer(
+            &self,
+            out: &mut dyn bsl_vm::SessionExport,
+        ) -> Result<Option<Box<dyn bsl_vm::SessionObject>>, bsl_vm::Exception> {
+            super::transfer::export(&self.cx, self.md_key(), out)
+        }
+    };
+}
+
 pub(crate) struct Info<'a> {
     pub name: &'a str,
     pub synonym: Option<&'a LocalString>,
@@ -466,7 +489,14 @@ pub(crate) struct MdRoot {
     pub cx: Arc<MdCtx>,
 }
 
+impl MdRoot {
+    fn md_key(&self) -> MdKey {
+        MdKey::Path(MdPath::Configuration)
+    }
+}
+
 impl HostObject for MdRoot {
+    reusable!();
     fn type_id(&self) -> TypeId {
         self.cx.root.id
     }
@@ -580,7 +610,14 @@ impl MdObj {
     }
 }
 
+impl MdObj {
+    fn md_key(&self) -> MdKey {
+        MdKey::Path(self.path)
+    }
+}
+
 impl HostObject for MdObj {
+    reusable!();
     fn type_id(&self) -> TypeId {
         self.cx.t_obj
     }
@@ -760,7 +797,14 @@ fn default_std_presentation(kind: ObjKind, std: StdAttr) -> Option<&'static str>
     })
 }
 
+impl MdStd {
+    fn md_key(&self) -> MdKey {
+        MdKey::Std(self.obj, self.tab, self.idx)
+    }
+}
+
 impl HostObject for MdStd {
+    reusable!();
     fn type_id(&self) -> TypeId {
         self.cx.std.id
     }

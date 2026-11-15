@@ -238,6 +238,11 @@ impl Predefined {
         own: Option<&CallTxn>,
     ) -> Result<Arc<Pids>, HostError> {
         if let Some(txn) = own.filter(|t| t.has_writer()) {
+            txn.check().map_err(|e| e.host())?;
+            if let Some(writer) = txn.writer_ref() {
+                let rd: &dyn ReadTxn = &**writer;
+                return Ok(Arc::new(scan_pids(app, obj, rd)?));
+            }
             let mut view = txn.view(app).map_err(|e| e.host())?;
             return Ok(Arc::new(scan_pids(app, obj, view.txn())?));
         }

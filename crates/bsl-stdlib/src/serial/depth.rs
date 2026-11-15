@@ -1,6 +1,6 @@
 pub(crate) const MAX_VALUE_DEPTH: usize = 1000;
 
-pub(crate) const MAX_WALK_STACK: usize = 3 << 19;
+pub(crate) const MAX_WALK_STACK: usize = 7 << 18;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct DepthExceeded;

@@ -40,6 +40,7 @@ pub struct AppOptions {
     pub locale: String,
     pub file_system: Option<Arc<dyn bsl_vm::FileSystem>>,
     pub connection_string: Option<String>,
+    pub event_log_level: Option<u32>,
 }
 
 impl Default for AppOptions {
@@ -55,6 +56,7 @@ impl Default for AppOptions {
             locale: "ru_RU".to_string(),
             file_system: None,
             connection_string: None,
+            event_log_level: None,
         }
     }
 }
@@ -296,35 +298,45 @@ impl Application {
         crate::kind_managers::register(self, reg);
         crate::xml_strings::register(reg);
         crate::platform_values::register(reg);
+        crate::user_message::register(reg);
         crate::rights::register(self, reg);
         crate::access_right::register(reg);
         crate::functional_option::register(self, reg);
         crate::users::register(self, reg)?;
         crate::session_info::register(self, reg);
         crate::txn_globals::register(self, reg);
+        crate::event_log::register(self, reg);
+        crate::delete::register(self, reg);
         crate::data_lock::register(self, reg);
         crate::settings_storage::register(self, reg);
         crate::extensions::register(self, reg);
         crate::predefined::register(self, reg);
         crate::style::register(self, reg);
+        crate::picture_lib::register(self, reg);
         query::register(reg, query);
         Ok(())
     }
 
     pub fn has_right(&self, user: &SessionUser, target: RightTarget<'_>, right: Right) -> bool {
-        if user.no_users {
-            return true;
-        }
+        let roles = if user.no_users {
+            let main = self.rights.default_roles();
+            if main.is_empty() || right.0.name() == "Administration" {
+                return true;
+            }
+            main
+        } else {
+            user.roles.as_slice()
+        };
         match target {
-            RightTarget::Configuration => self.rights.any_role(&user.roles, None, right),
-            RightTarget::Object(id) => self.rights.any_role(&user.roles, Some(&id), right),
+            RightTarget::Configuration => self.rights.any_role(roles, None, right),
+            RightTarget::Object(id) => self.rights.any_role(roles, Some(&id), right),
             RightTarget::HttpMethod {
                 service,
                 template,
                 method,
             } => self
                 .http_method_id(service, template, method)
-                .is_some_and(|id| self.rights.any_role(&user.roles, Some(&id), right)),
+                .is_some_and(|id| self.rights.any_role(roles, Some(&id), right)),
         }
     }
 

@@ -23,7 +23,7 @@ pub(super) fn step_for(script: &str) -> &'static str {
         ("FROM dbo.CONFIG ORDER BY", "config_read"),
         ("FROM dbo.CONFIG FOR JSON", "config_read"),
         ("AS [schema_unstable]", "support"),
-        ("Email IS NOT NULL", "users_email"),
+        ("DATALENGTH(Email)>0", "users_email"),
         ("AS [nonempty]", "extra_table"),
         ("FROM dbo.BINARYDATA FOR JSON", "blob_count"),
         ("dbo.[BINARYDATA] WHERE", "blob"),

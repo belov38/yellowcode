@@ -1,3 +1,8 @@
+mod filter;
+mod record;
+mod store;
+
+use crate::exchange_params::ExchangeParams;
 use crate::meta::{MdKey, MdPath, arg_value, member_name, no_field, value_of};
 use crate::model::{FieldDef, FieldRole, ObjDef, ObjId, StdAttr, TypeAtom, TypeSet};
 use crate::session::internal;
@@ -6,13 +11,16 @@ use crate::values::refs::as_ref;
 use crate::{Application, read_budget};
 use bsl_prim::fold_name;
 use bsl_vm::{
-    Arg, CallResult, Exception, Execution, HostError, HostObject, MemberId, MemberKind,
-    RetainedMemory, TypeId, Value,
+    Arg, CallError, CallResult, Exception, Execution, HostError, HostObject, MemberId, MemberKind,
+    ModuleContext, ModuleInstanceRef, ObjRef, RetainedMemory, TypeId, Value,
 };
+use filter::Filter;
 use md_model::{MdKind, MdObject};
 use platform_catalog::messages::Lang;
+use record::Record;
 use std::any::Any;
-use std::rc::Rc;
+use std::cell::{Cell, RefCell};
+use std::rc::{Rc, Weak};
 use std::sync::Arc;
 
 const FIELD_BASE: u32 = 1 << 20;
@@ -25,12 +33,12 @@ const STANDARD: [(StdAttr, bool); 4] = [
 ];
 
 #[derive(Clone, Copy)]
-enum Source {
+pub(crate) enum Source {
     Field(usize),
     Separator(usize),
 }
 
-struct Column {
+pub(crate) struct Column {
     name: String,
     source: Source,
     std: Option<StdAttr>,
@@ -42,7 +50,7 @@ fn refusal(def: &ObjDef, suffix: &str, member: &str) -> HostError {
     HostError::not_implemented(&format!("{}{suffix}", def.kind.name(Lang::Ru)), member)
 }
 
-fn applies(ca: &MdObject, full: &str) -> bool {
+pub(crate) fn applies(ca: &MdObject, full: &str) -> bool {
     let auto = text(ca, "AutoUse").is_none_or(|u| u == "Use");
     let Some(md_model::Value::Xml(content)) = ca.prop("Content") else {
         return auto;
@@ -66,7 +74,7 @@ fn applies(ca: &MdObject, full: &str) -> bool {
     auto
 }
 
-fn text<'a>(o: &'a MdObject, name: &str) -> Option<&'a str> {
+pub(crate) fn text<'a>(o: &'a MdObject, name: &str) -> Option<&'a str> {
     match o.prop(name) {
         Some(md_model::Value::Text(t)) => Some(t.as_str()),
         _ => None,
@@ -209,6 +217,28 @@ fn column_type(
     }
 }
 
+pub(crate) fn field_type(
+    app: &Application,
+    ex: &mut Execution,
+    obj: ObjId,
+    i: usize,
+) -> CallResult<Value> {
+    let f = app
+        .model()
+        .obj(obj)
+        .fields
+        .get(i)
+        .ok_or_else(|| internal("no field of the register"))?;
+    let col = Column {
+        name: f.name.clone(),
+        source: Source::Field(i),
+        std: f.std,
+        types: f.types.clone(),
+        key: false,
+    };
+    column_type(app, ex, obj, &col)
+}
+
 fn member(ex: &Execution, ty: TypeId, m: MemberId) -> Option<(bool, &'static str, &'static str)> {
     let t = ex.runtime().types().app_type(ty)?.template?;
     member_name(platform_catalog::catalog(), t, m)
@@ -224,7 +254,7 @@ fn type_of(app: &Application, obj: ObjId, cat: Category) -> Result<TypeId, HostE
         .ok_or_else(|| internal("the register has no type of its record set"))
 }
 
-fn accepts_key_value(app: &Application, types: &TypeSet, v: &Value) -> bool {
+pub(crate) fn accepts_key_value(app: &Application, types: &TypeSet, v: &Value) -> bool {
     if !crate::session::accepts(types, v) {
         return false;
     }
@@ -250,18 +280,102 @@ fn accepts_key_value(app: &Application, types: &TypeSet, v: &Value) -> bool {
     })
 }
 
-pub(crate) fn create_set(
+pub(crate) fn is_structure(v: &Value) -> bool {
+    platform_catalog::catalog()
+        .find_type("Структура")
+        .is_some_and(|t| v.type_id() == TypeId::of_catalog(t))
+}
+
+pub(crate) fn manager_get(
     ex: &mut Execution,
     app: &Arc<Application>,
     obj: ObjId,
+    args: &[Arg],
 ) -> CallResult<Value> {
-    let ty = type_of(app, obj, Category::RecordSet)?;
-    read_budget::reserve(ex, read_budget::rc_size::<RecordSet>())?;
-    Ok(Value::Object(Rc::new(RecordSet {
+    let def = app.model().obj(obj);
+    let refuse = |what: &str| -> CallError {
+        refusal(def, "Менеджер", &format!("Получить: {what}")).into()
+    };
+    if def.behavior.write_mode == Some(crate::model::InfoRegWriteMode::RecorderSubordinate) {
+        return Err(refuse("регистр, подчинённый регистратору"));
+    }
+    if def.behavior.periodicity.unwrap_or_default() != crate::model::Periodicity::Nonperiodical {
+        return Err(refuse("периодический регистр"));
+    }
+    let core = SetCore {
         app: app.clone(),
         obj,
-        ty,
-    })))
+        cols: None,
+        modified: Cell::new(false),
+    };
+    let cols = core.cols()?;
+    let dims: Vec<usize> = cols
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| {
+            core.field(c)
+                .is_some_and(|f| f.std.is_none() && f.role == FieldRole::Dimension)
+        })
+        .map(|(i, _)| i)
+        .collect();
+    if dims.is_empty() {
+        return Err(refuse("регистр без измерений"));
+    }
+    if !matches!(arg_value(ex, args, 1)?, Value::Undefined | Value::Number(_)) {
+        return Err(refuse("второй параметр не число"));
+    }
+    let given = arg_value(ex, args, 0)?;
+    let entries = match &given {
+        Value::Undefined => return Err(crate::select::value_mismatch(1).into()),
+        _ if !is_structure(&given) => return Err(crate::meta::type_mismatch(1).into()),
+        _ => bsl_stdlib::structure_fields(&given).ok_or_else(|| crate::meta::type_mismatch(1))?,
+    };
+    let mut values: Vec<(usize, Value)> = Vec::with_capacity(dims.len());
+    for (name, v) in &entries {
+        let wanted = fold_name(name);
+        let Some(col) = dims
+            .iter()
+            .copied()
+            .find(|i| cols.get(*i).is_some_and(|c| fold_name(&c.name) == wanted))
+        else {
+            return Err(crate::select::value_mismatch(1).into());
+        };
+        let f = cols
+            .get(col)
+            .and_then(|c| core.field(c))
+            .ok_or_else(|| internal("a dimension without a field"))?;
+        let cast = crate::values::typedesc::cast_to_field(app, ex, f, v.clone())?;
+        values.push((col, cast));
+    }
+    if dims.iter().any(|i| !values.iter().any(|(c, _)| c == i)) {
+        return Err(crate::select::value_mismatch(1).into());
+    }
+    let core = Rc::new(core);
+    let record = store::get_record(ex, &core, &values)?;
+    let mut fields = Vec::new();
+    for (i, col) in cols.iter().enumerate() {
+        if !core
+            .field(col)
+            .is_some_and(|f| f.std.is_none() && f.role == FieldRole::Resource)
+        {
+            continue;
+        }
+        let v = match &record {
+            Some(rec) => rec.value(i)?,
+            None if matches!(col.types.single(), Some(TypeAtom::ValueStorage)) => {
+                crate::values::field::empty_storage()
+            }
+            None => empty_value(app, ex, obj, col)?,
+        };
+        fields.push((col.name.as_str(), v));
+    }
+    let bytes = fields.iter().fold(256u64, |n, (k, v)| {
+        n.saturating_add(k.len() as u64 * 2)
+            .saturating_add(read_budget::value_heap(v))
+            .saturating_add(64)
+    });
+    read_budget::reserve(ex, bytes)?;
+    Ok(bsl_stdlib::new_structure(fields))
 }
 
 pub(crate) fn create_key(
@@ -314,36 +428,223 @@ pub(crate) fn create_key(
     })))
 }
 
-pub(crate) struct RecordSet {
-    app: Arc<Application>,
+pub(crate) struct SetCore {
+    pub(crate) app: Arc<Application>,
+    pub(crate) obj: ObjId,
+    cols: Option<Rc<Vec<Column>>>,
+    pub(crate) modified: Cell<bool>,
+}
+
+impl SetCore {
+    pub(crate) fn def(&self) -> &ObjDef {
+        self.app.model().obj(self.obj)
+    }
+
+    pub(crate) fn cols(&self) -> Result<Rc<Vec<Column>>, HostError> {
+        match &self.cols {
+            Some(c) => Ok(c.clone()),
+            None => columns(&self.app, self.obj).map(Rc::new),
+        }
+    }
+
+    pub(crate) fn refusal(&self, member: &str) -> HostError {
+        refusal(self.def(), "НаборЗаписей", member)
+    }
+
+    pub(crate) fn field(&self, col: &Column) -> Option<&FieldDef> {
+        match col.source {
+            Source::Field(i) => self.def().fields.get(i),
+            Source::Separator(_) => None,
+        }
+    }
+}
+
+pub(crate) fn off_bound() -> HostError {
+    HostError::key(bsl_stdlib::bind::msg::RANGE)
+}
+
+pub(crate) fn create_set(
+    ex: &mut Execution,
+    app: &Arc<Application>,
     obj: ObjId,
+) -> CallResult<Value> {
+    let ty = type_of(app, obj, Category::RecordSet)?;
+    read_budget::reserve(
+        ex,
+        read_budget::rc_size::<RecordSet>().saturating_add(read_budget::rc_size::<SetCore>()),
+    )?;
+    let core = Rc::new(SetCore {
+        app: app.clone(),
+        obj,
+        cols: columns(app, obj).ok().map(Rc::new),
+        modified: Cell::new(false),
+    });
+    let set = Rc::new_cyclic(|me| RecordSet {
+        core,
+        ty,
+        me: me.clone(),
+        state: RefCell::new(SetState::default()),
+    });
+    if let Some(m) = app
+        .modules()
+        .of_object(obj, md_model::ModuleKind::RecordSetModule)
+    {
+        let compiled = app
+            .modules()
+            .compiled_or_fatal(m, ex.lang())
+            .map_err(CallError::Exc)?;
+        let ctx: ObjRef = Rc::new(SetCtx {
+            set: Rc::downgrade(&set),
+            ty,
+        });
+        let mi = ex
+            .instantiate_weighted(
+                &compiled,
+                ModuleContext::Object(ctx),
+                crate::objects::BODY_WEIGHT,
+            )
+            .map_err(CallError::Exc)?;
+        set.state.borrow_mut().module = Some(mi);
+    }
+    Ok(Value::Object(set))
+}
+
+#[derive(Default)]
+struct SetState {
+    records: Vec<Rc<Record>>,
+    filter: Option<Rc<Filter>>,
+    extra: Option<Value>,
+    exchange: Option<Rc<ExchangeParams>>,
+    module: Option<ModuleInstanceRef>,
+}
+
+pub(crate) struct RecordSet {
+    pub(crate) core: Rc<SetCore>,
     ty: TypeId,
+    me: Weak<RecordSet>,
+    state: RefCell<SetState>,
 }
 
 impl RecordSet {
     fn refusal(&self, member: &str) -> HostError {
-        refusal(self.app.model().obj(self.obj), "НаборЗаписей", member)
+        self.core.refusal(member)
     }
 
-    fn unload(&self, ex: &mut Execution, args: &[Arg]) -> CallResult<Value> {
-        if args.iter().any(|a| !matches!(a, Arg::Omitted)) {
-            return Err(self.refusal("Выгрузить: параметры").into());
+    pub(crate) fn rc(&self) -> Result<Rc<RecordSet>, HostError> {
+        self.me
+            .upgrade()
+            .ok_or_else(|| internal("the record set is gone"))
+    }
+
+    pub(crate) fn records(&self) -> Vec<Rc<Record>> {
+        self.state.borrow().records.clone()
+    }
+
+    pub(crate) fn replace_records(&self, records: Vec<Rc<Record>>) {
+        self.state.borrow_mut().records = records;
+    }
+
+    pub(crate) fn module(&self) -> Option<ModuleInstanceRef> {
+        self.state.borrow().module.clone()
+    }
+
+    pub(crate) fn filter(&self, ex: &mut Execution) -> CallResult<Rc<Filter>> {
+        if let Some(f) = self.state.borrow().filter.clone() {
+            return Ok(f);
         }
-        let cols = columns(&self.app, self.obj)?;
-        let table = ex.construct_by_name("ТаблицаЗначений", &mut [])?;
-        let list = ex.get_member(&table, "Колонки")?;
-        for col in &cols {
-            ex.charge(1)?;
-            let ty = column_type(&self.app, ex, self.obj, col)?;
-            let mut add = [Arg::Val(Value::from(col.name.as_str())), Arg::Val(ty)];
-            ex.call_method(&list, "Добавить", &mut add, true)?;
+        let f = Filter::new(ex, &self.core)?;
+        self.state.borrow_mut().filter = Some(f.clone());
+        Ok(f)
+    }
+
+    fn extra(&self, ex: &mut Execution) -> CallResult<Value> {
+        if let Some(v) = self.state.borrow().extra.clone() {
+            return Ok(v);
         }
-        Ok(table)
+        read_budget::reserve(ex, 512)?;
+        let v = bsl_stdlib::new_structure(Vec::new());
+        self.state.borrow_mut().extra = Some(v.clone());
+        Ok(v)
+    }
+
+    fn exchange(&self) -> Result<Rc<ExchangeParams>, HostError> {
+        if let Some(e) = self.state.borrow().exchange.clone() {
+            return Ok(e);
+        }
+        let e = ExchangeParams::new()?;
+        self.state.borrow_mut().exchange = Some(e.clone());
+        Ok(e)
+    }
+
+    fn record_at(&self, i: &Value) -> CallResult<Value> {
+        let Value::Number(n) = i else {
+            return Err(crate::meta::type_mismatch(1).into());
+        };
+        let i = usize::try_from(n.trunc_to_i64_saturating()).map_err(|_| off_bound())?;
+        let st = self.state.borrow();
+        let r = st.records.get(i).ok_or_else(off_bound)?;
+        let r: ObjRef = r.clone();
+        Ok(Value::Object(r))
+    }
+
+    fn add(&self, ex: &mut Execution) -> CallResult<Value> {
+        let cols = self.core.cols()?;
+        let rec = Record::blank(ex, &self.core, cols)?;
+        self.state.borrow_mut().records.push(rec.clone());
+        self.core.modified.set(true);
+        let rec: ObjRef = rec;
+        Ok(Value::Object(rec))
+    }
+
+    fn delete(&self, ex: &mut Execution, args: &[Arg]) -> CallResult<Value> {
+        let at = match arg_value(ex, args, 0)? {
+            Value::Number(n) => {
+                let i = usize::try_from(n.trunc_to_i64_saturating()).map_err(|_| off_bound())?;
+                if i >= self.state.borrow().records.len() {
+                    return Err(off_bound().into());
+                }
+                i
+            }
+            Value::Object(o) => {
+                let Some(r) = o.as_any().downcast_ref::<Record>() else {
+                    return Err(self.refusal("Удалить: не запись и не индекс").into());
+                };
+                self.state
+                    .borrow()
+                    .records
+                    .iter()
+                    .position(|x| std::ptr::eq(&**x, r))
+                    .ok_or_else(|| self.refusal("Удалить: запись другого набора"))?
+            }
+            _ => return Err(self.refusal("Удалить: не запись и не индекс").into()),
+        };
+        self.state.borrow_mut().records.remove(at);
+        self.core.modified.set(true);
+        Ok(Value::Undefined)
     }
 }
 
 impl HostObject for RecordSet {
-    fn retained_memory(&self, _: &mut dyn RetainedMemory) -> Result<bool, Exception> {
+    fn retained_memory(&self, visit: &mut dyn RetainedMemory) -> Result<bool, Exception> {
+        visit.work(1)?;
+        visit.mutable();
+        let st = self.state.borrow();
+        visit.bytes(read_budget::slots::<Rc<Record>>(st.records.capacity()))?;
+        for r in &st.records {
+            let r: ObjRef = r.clone();
+            visit.value(&Value::Object(r))?;
+        }
+        if let Some(extra) = &st.extra {
+            visit.value(extra)?;
+        }
+        if let Some(exchange) = &st.exchange {
+            let exchange: ObjRef = exchange.clone();
+            visit.value(&Value::Object(exchange))?;
+        }
+        if let Some(filter) = &st.filter {
+            let filter: ObjRef = filter.clone();
+            visit.value(&Value::Object(filter))?;
+        }
         Ok(true)
     }
 
@@ -356,7 +657,22 @@ impl HostObject for RecordSet {
     }
 
     fn get(&self, ex: &mut Execution, m: MemberId) -> CallResult<Value> {
-        Err(self.refusal(&member_ru(ex, self.ty, m)).into())
+        match member(ex, self.ty, m) {
+            Some((false, "ДополнительныеСвойства", _)) => self.extra(ex),
+            Some((false, "ОбменДанными", _)) => {
+                let e: ObjRef = self.exchange()?;
+                Ok(Value::Object(e))
+            }
+            Some((false, "Отбор", _)) => {
+                let f: ObjRef = self.filter(ex)?;
+                Ok(Value::Object(f))
+            }
+            Some((false, "ЭтотОбъект", _)) => {
+                let me: ObjRef = self.rc()?;
+                Ok(Value::Object(me))
+            }
+            _ => Err(self.refusal(&member_ru(ex, self.ty, m)).into()),
+        }
     }
 
     fn set(&self, ex: &mut Execution, m: MemberId, _: Value) -> CallResult<()> {
@@ -365,26 +681,128 @@ impl HostObject for RecordSet {
 
     fn call(&self, ex: &mut Execution, m: MemberId, args: &mut [Arg]) -> CallResult<Value> {
         match member(ex, self.ty, m) {
-            Some((true, "Количество", _)) => Ok(Value::from(0i64)),
+            Some((true, "Количество", _)) => Ok(Value::from(
+                i64::try_from(self.state.borrow().records.len()).unwrap_or(i64::MAX),
+            )),
             Some((true, "Метаданные", _)) => {
                 let cx = self
+                    .core
                     .app
                     .md_ctx()
                     .ok_or_else(|| internal("no Метаданные context"))?;
-                Ok(value_of(&cx, ex, MdKey::Path(MdPath::Object(self.obj))))
+                Ok(value_of(
+                    &cx,
+                    ex,
+                    MdKey::Path(MdPath::Object(self.core.obj)),
+                ))
             }
-            Some((true, "Выгрузить", _)) => self.unload(ex, args),
+            Some((true, "Выгрузить", _)) => store::unload(ex, self, args),
+            Some((true, "ВыгрузитьКолонки", _)) => store::unload_columns(ex, self),
+            Some((true, "Добавить", _)) => self.add(ex),
+            Some((true, "Удалить", _)) => self.delete(ex, args),
+            Some((true, "Получить", _)) => {
+                let i = arg_value(ex, args, 0)?;
+                self.record_at(&i)
+            }
+            Some((true, "Очистить", _)) => {
+                self.state.borrow_mut().records.clear();
+                self.core.modified.set(true);
+                Ok(Value::Undefined)
+            }
+            Some((true, "Модифицированность", _)) => {
+                Ok(Value::Bool(self.core.modified.get()))
+            }
+            Some((true, "Прочитать", _)) => store::read(ex, self),
+            Some((true, "Записать", _)) => store::write(ex, &self.rc()?, args),
+            Some((true, "Загрузить", _)) => store::load(ex, self, args),
             Some((_, ru, _)) => Err(self.refusal(ru).into()),
             None => Err(self.refusal(&m.0.to_string()).into()),
         }
     }
 
     fn iter_len(&self, _: &mut Execution) -> Option<usize> {
-        Some(0)
+        Some(self.state.borrow().records.len())
     }
 
-    fn index_get(&self, _: &mut Execution, _: &Value) -> CallResult<Value> {
-        Err(self.refusal("[индекс]").into())
+    fn iter_get(&self, _: &mut Execution, i: usize) -> CallResult<Value> {
+        let st = self.state.borrow();
+        let r = st.records.get(i).ok_or_else(off_bound)?;
+        let r: ObjRef = r.clone();
+        Ok(Value::Object(r))
+    }
+
+    fn index_get(&self, _: &mut Execution, key: &Value) -> CallResult<Value> {
+        self.record_at(key)
+    }
+
+    fn equals(&self, other: &dyn HostObject) -> Option<bool> {
+        let any = other.as_any();
+        if let Some(o) = any.downcast_ref::<RecordSet>() {
+            return Some(std::ptr::eq(self, o));
+        }
+        Some(
+            any.downcast_ref::<SetCtx>()
+                .is_some_and(|c| std::ptr::eq(self, c.set.as_ptr())),
+        )
+    }
+}
+
+struct SetCtx {
+    set: Weak<RecordSet>,
+    ty: TypeId,
+}
+
+impl SetCtx {
+    fn target(&self) -> Result<Rc<RecordSet>, HostError> {
+        self.set
+            .upgrade()
+            .ok_or_else(|| internal("the record set is gone"))
+    }
+}
+
+impl HostObject for SetCtx {
+    fn type_id(&self) -> TypeId {
+        self.ty
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn get(&self, ex: &mut Execution, m: MemberId) -> CallResult<Value> {
+        self.target()?.get(ex, m)
+    }
+
+    fn set(&self, ex: &mut Execution, m: MemberId, v: Value) -> CallResult<()> {
+        self.target()?.set(ex, m, v)
+    }
+
+    fn call(&self, ex: &mut Execution, m: MemberId, args: &mut [Arg]) -> CallResult<Value> {
+        self.target()?.call(ex, m, args)
+    }
+
+    fn iter_len(&self, ex: &mut Execution) -> Option<usize> {
+        self.set.upgrade()?.iter_len(ex)
+    }
+
+    fn iter_get(&self, ex: &mut Execution, i: usize) -> CallResult<Value> {
+        self.target()?.iter_get(ex, i)
+    }
+
+    fn index_get(&self, ex: &mut Execution, key: &Value) -> CallResult<Value> {
+        self.target()?.index_get(ex, key)
+    }
+
+    fn equals(&self, other: &dyn HostObject) -> Option<bool> {
+        let set = self.set.upgrade()?;
+        let any = other.as_any();
+        Some(
+            any.downcast_ref::<RecordSet>()
+                .is_some_and(|o| std::ptr::eq(o, &*set))
+                || any
+                    .downcast_ref::<SetCtx>()
+                    .is_some_and(|o| o.set.as_ptr() == self.set.as_ptr()),
+        )
     }
 }
 

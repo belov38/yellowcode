@@ -7,6 +7,7 @@ mod plan_content;
 mod props;
 mod stdtab;
 mod subsystems;
+mod transfer;
 mod web;
 
 use crate::errors::{self, keys};

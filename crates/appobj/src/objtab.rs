@@ -28,7 +28,9 @@ enum Op {
     Load,
     Total,
     Find,
+    FindRows,
     Unload,
+    UnloadColumn,
     Later,
 }
 
@@ -71,9 +73,16 @@ const METHODS: &[Method] = &[
     m("Сдвинуть", "Move", false, 2, Some(2), Op::Later),
     m("Свернуть", "GroupBy", false, 1, Some(2), Op::Later),
     m("Выгрузить", "Unload", true, 0, Some(2), Op::Unload),
-    m("ВыгрузитьКолонку", "UnloadColumn", true, 1, None, Op::Later),
+    m(
+        "ВыгрузитьКолонку",
+        "UnloadColumn",
+        true,
+        1,
+        None,
+        Op::UnloadColumn,
+    ),
     m("Найти", "Find", true, 1, Some(2), Op::Find),
-    m("НайтиСтроки", "FindRows", true, 0, None, Op::Later),
+    m("НайтиСтроки", "FindRows", true, 1, Some(1), Op::FindRows),
     m("Итог", "Total", true, 1, Some(1), Op::Total),
     m("Сортировать", "Sort", false, 0, None, Op::Later),
 ];
@@ -184,6 +193,10 @@ impl ObjTab {
 
     pub(crate) fn lines(&self) -> Vec<Vec<Value>> {
         self.rows.borrow().clone()
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.rows.borrow().is_empty()
     }
 
     pub(crate) fn state(&self) -> TabState {
@@ -418,6 +431,7 @@ impl ObjTab {
             match op {
                 Op::Total => return view.total(ex, args),
                 Op::Unload => return view.unload(ex, args),
+                Op::UnloadColumn => return view.unload_column(ex, args),
                 _ => view.find_index(ex, args)?,
             }
         };
@@ -548,7 +562,34 @@ impl HostObject for ObjTab {
                 Ok(Value::Undefined)
             }
             Op::Load => self.load(ex, args),
-            Op::Total | Op::Find | Op::Unload => self.view_call(method.op, ex, args),
+            Op::Total | Op::Find | Op::Unload | Op::UnloadColumn => {
+                self.view_call(method.op, ex, args)
+            }
+            Op::FindRows => {
+                let found = {
+                    let rows = self.rows.borrow();
+                    TabView {
+                        app: &self.app,
+                        obj: self.obj,
+                        tab: self.tab,
+                        rows: rows.as_slice(),
+                        bytes: self.bytes.get(),
+                    }
+                    .find_rows(ex, args)?
+                };
+                budget::reserve(
+                    ex,
+                    self.bytes.get().saturating_add(
+                        (found.len() as u64)
+                            .saturating_mul(budget::rc_size::<ObjTabRow>().saturating_add(64)),
+                    ),
+                )?;
+                let mut lines = Vec::with_capacity(found.len());
+                for at in found {
+                    lines.push(self.row_object(ex, at)?);
+                }
+                Ok(bsl_stdlib::new_array(lines))
+            }
             Op::Later => Err(HostError::not_implemented(&self.type_name(), method.ru).into()),
         }
     }

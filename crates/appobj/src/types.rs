@@ -233,6 +233,7 @@ pub struct AppTypes {
     by_tab: HashMap<(ObjId, usize, bool), TypeId>,
     origin: HashMap<TypeId, Origin>,
     managers: HashMap<ObjKind, TypeId>,
+    criteria: HashMap<String, TypeId>,
     xdto: HashMap<TypeId, XdtoName>,
     pub diagnostics: Vec<String>,
 }
@@ -242,6 +243,7 @@ impl AppTypes {
         self.by_obj == other.by_obj
             && self.by_tab == other.by_tab
             && self.managers == other.managers
+            && self.criteria == other.criteria
     }
 }
 
@@ -288,7 +290,7 @@ impl Registrar<'_> {
     }
 }
 
-fn localized<'a>(s: &'a LocalString, code: &str) -> Option<&'a str> {
+pub(crate) fn localized<'a>(s: &'a LocalString, code: &str) -> Option<&'a str> {
     s.0.iter()
         .find(|(l, t)| l == code && !t.is_empty())
         .map(|(_, t)| t.as_str())
@@ -472,6 +474,7 @@ impl AppTypes {
             }
             r.tabular(def, mds.get(&def.md).copied(), &model.lang_code);
         }
+        r.criteria(model, &tpl);
         for kind in KINDS {
             let name = format!("{}Менеджер", kind.collection(Lang::Ru));
             if let Some(t) = catalog.find_type(&name) {
@@ -493,6 +496,10 @@ impl AppTypes {
         self.by_tab.get(&(obj, tab, row)).copied()
     }
 
+    pub fn criterion_manager(&self, name: &str) -> Option<TypeId> {
+        self.criteria.get(name).copied()
+    }
+
     pub fn collection_manager(&self, kind: ObjKind) -> Option<TypeId> {
         self.managers.get(&kind).copied()
     }
@@ -508,6 +515,45 @@ impl AppTypes {
 }
 
 impl Registrar<'_> {
+    fn criteria(&mut self, model: &AppModel, tpl: &HashMap<String, TypeIdx>) {
+        let Some(template) = tpl.get(&fold_name("FilterCriterionManager")).copied() else {
+            return;
+        };
+        let ti = platform_catalog::catalog().type_info(template);
+        let stem = |n: &str| n.split_once(".<").map_or(n, |s| s.0).to_string();
+        let stems = (stem(&ti.name_ru), stem(&ti.name_en));
+        let all = model.config.objects.iter();
+        for o in all.filter(|o| o.kind == md_model::MdKind::FilterCriterion) {
+            let Some(g) = o.generated_types.iter().find(|g| g.category == "Manager") else {
+                continue;
+            };
+            let name = synonym(&o.synonym, &o.name, &model.lang_code);
+            let pres = (
+                format!("Критерий отбора менеджер: {name}"),
+                format!("Filter criterion manager: {name}"),
+            );
+            let ty = info(
+                stems.clone(),
+                &o.name,
+                pres,
+                *g.type_id.as_bytes(),
+                Some(template),
+                false,
+            );
+            let (ru, en) = (fold_name(&ty.name_ru), fold_name(&ty.name_en));
+            if self.seen.contains(&ru) || self.seen.contains(&en) {
+                self.out
+                    .diagnostics
+                    .push(format!("duplicate applied type name: {}", ty.name_ru));
+                continue;
+            }
+            self.seen.insert(ru);
+            self.seen.insert(en);
+            let id = self.reg.register_app_type(ty);
+            self.out.criteria.insert(o.name.clone(), id);
+        }
+    }
+
     fn tabular(&mut self, def: &ObjDef, md: Option<&MdObject>, code: &str) {
         for (i, tab) in def.tabular.iter().enumerate() {
             let child = md.and_then(|m| {

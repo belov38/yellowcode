@@ -82,6 +82,9 @@ pub fn to_q(v: &FieldValue) -> QValue {
 
 fn binary16(t: &TableInfo, f: FieldId) -> Option<bool> {
     let fi = t.field(f)?;
+    if fi.md.is_some() && fi.std.is_none() {
+        return None;
+    }
     if !matches!(fi.types.as_slice(), [ty] if ty.code == TypeCode::B) {
         return None;
     }

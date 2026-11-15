@@ -83,7 +83,7 @@ impl Planner<'_> {
             _ => None,
         };
         let mut candidates: Vec<(IndexId, &ibschema::storage::IndexInfo)> = Vec::new();
-        for (k, ix) in info.indexes.iter().enumerate() {
+        for (k, ix) in info.indexes.iter().enumerate().filter(|(_, ix)| !ix.absent) {
             candidates.push((IndexId::Named(u16::try_from(k).ok()?), ix));
         }
         if let Some(key) = &info.key_index {
@@ -191,7 +191,7 @@ impl Planner<'_> {
             return Some(make(Lookup::Id(a.clone())));
         }
         let mut candidates: Vec<(IndexId, &ibschema::storage::IndexInfo)> = Vec::new();
-        for (k, ix) in info.indexes.iter().enumerate() {
+        for (k, ix) in info.indexes.iter().enumerate().filter(|(_, ix)| !ix.absent) {
             candidates.push((IndexId::Named(u16::try_from(k).ok()?), ix));
         }
         if let Some(key) = info.key_index.as_ref().filter(|k| k.prefix > 0) {

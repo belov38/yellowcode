@@ -778,7 +778,35 @@ impl<'c, 'a, 'v> Decoder<'c, 'a, 'v> {
                     );
                     out.props.push(prop);
                 }
-                None => miss(diag, format!("fail:{}.{name}", of.props_type)),
+                None => match raw
+                    .is_none()
+                    .then(|| overlay::absent_value(of.tag, name))
+                    .flatten()
+                {
+                    Some(text) => {
+                        let prop = Prop {
+                            name: name.into(),
+                            codec: ent.codec,
+                            value: Value::Text(text.into()),
+                        };
+                        self.observe(
+                            of,
+                            &prop,
+                            SelectedSource {
+                                descriptor: Descriptor::Spec(ent),
+                                root: node,
+                                raw: None,
+                                path: path.as_deref(),
+                                path2: ent.path2.as_deref(),
+                                provenance: Provenance::Default,
+                            },
+                            false,
+                            false,
+                        );
+                        out.props.push(prop);
+                    }
+                    None => miss(diag, format!("fail:{}.{name}", of.props_type)),
+                },
             }
         }
         out

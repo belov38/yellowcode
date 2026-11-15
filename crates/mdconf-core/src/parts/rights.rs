@@ -32,6 +32,39 @@ impl Miss {
 
 type Decoded<T> = std::result::Result<T, Miss>;
 
+fn object_id(objref: Option<&Node>) -> Option<Guid> {
+    objref?.at(1)?.text().and_then(Guid::parse)
+}
+
+pub(crate) fn unresolved_ids(tree: &Node, known: impl Fn(Guid) -> bool) -> Vec<Guid> {
+    let mut out = Vec::new();
+    let Some(objects) = tree.at(1).and_then(Node::as_list) else {
+        return out;
+    };
+    for object in objects.iter().skip(1) {
+        if let Some(id) = object_id(object.at(0))
+            && !known(id)
+            && !out.contains(&id)
+        {
+            out.push(id);
+        }
+    }
+    out
+}
+
+pub(crate) fn mentioned(bytes: &[u8], ids: &[Guid]) -> Vec<Guid> {
+    ids.iter()
+        .copied()
+        .filter(|id| {
+            let lower = id.to_string();
+            let upper = lower.to_ascii_uppercase();
+            [lower, upper]
+                .iter()
+                .any(|t| bytes.windows(t.len()).any(|w| w == t.as_bytes()))
+        })
+        .collect()
+}
+
 fn list(n: Option<&Node>) -> Decoded<&[Node]> {
     n.and_then(Node::as_list).ok_or(Miss::Malformed)
 }
@@ -274,7 +307,12 @@ fn object_rights(
     Ok(out)
 }
 
-fn decode(cfg: &Configuration, t: &Node, keep_source: bool) -> Decoded<Rights> {
+fn decode(
+    cfg: &Configuration,
+    t: &Node,
+    keep_source: bool,
+    dangling: &HashSet<Guid>,
+) -> Decoded<Rights> {
     let schema = mdschema::schema().map_err(|_| Miss::Malformed)?;
     let cfg_full = format!("Configuration.{}", cfg.settings.name);
     let set_for_new_objects = bool3(t.at(3))?;
@@ -284,7 +322,15 @@ fn decode(cfg: &Configuration, t: &Node, keep_source: bool) -> Decoded<Rights> {
     let mut resolved = Vec::new();
     for o in counted(lst, 1, lst.first())? {
         let o = list(Some(o))?;
-        let res = resolve(cfg, schema, &cfg_full, o.first())?;
+        let res = match resolve(cfg, schema, &cfg_full, o.first()) {
+            Ok(res) => res,
+            Err(Miss::Unresolved)
+                if object_id(o.first()).is_some_and(|id| dangling.contains(&id)) =>
+            {
+                continue;
+            }
+            Err(m) => return Err(m),
+        };
         resolved.push((res, o.get(1).ok_or(Miss::Malformed)?));
     }
     let mut order: Vec<((Guid, u8, i32), usize)> = resolved
@@ -336,10 +382,17 @@ fn decode(cfg: &Configuration, t: &Node, keep_source: bool) -> Decoded<Rights> {
 
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn decode_rights(cfg: &Configuration, entry: &Node) -> Option<Rights> {
-    decode(cfg, entry, true).ok()
+    decode(cfg, entry, true, &HashSet::new()).ok()
 }
 
 pub(crate) fn load(cx: &LoadCtx, cfg: &mut Configuration) -> Result<()> {
+    let rights_entries: HashSet<String> = cfg
+        .objects
+        .iter()
+        .filter(|o| o.kind == MdKind::Role)
+        .map(|o| format!("{}.0", o.id))
+        .collect();
+    let mut checked: HashMap<Guid, bool> = HashMap::new();
     for i in 0..cfg.objects.len() {
         let Some(role) = cfg.objects.get(i).filter(|o| o.kind == MdKind::Role) else {
             continue;
@@ -347,7 +400,46 @@ pub(crate) fn load(cx: &LoadCtx, cfg: &mut Configuration) -> Result<()> {
         let name = format!("{}.0", role.id);
         let data = fetch(cx, &name)?;
         let res = match data.as_deref() {
-            Some(EntryData::Brace(doc)) => decode(cfg, &doc.root, cx.opts.keep_source),
+            Some(EntryData::Brace(doc)) => {
+                let first = decode(cfg, &doc.root, cx.opts.keep_source, &HashSet::new());
+                if first == Err(Miss::Unresolved) {
+                    let ids =
+                        unresolved_ids(&doc.root, |id| id == cfg.id || cfg.full_name(id).is_some());
+                    let fresh: Vec<Guid> = ids
+                        .iter()
+                        .copied()
+                        .filter(|id| !checked.contains_key(id))
+                        .collect();
+                    if !fresh.is_empty() {
+                        let mut seen = HashSet::new();
+                        for meta in cx.entries.list() {
+                            if rights_entries.contains(&meta.name) {
+                                continue;
+                            }
+                            if let Some(bytes) = cx.entries.raw(&meta.name)? {
+                                seen.extend(mentioned(&bytes, &fresh));
+                            }
+                            if seen.len() == fresh.len() {
+                                break;
+                            }
+                        }
+                        for id in fresh {
+                            checked.insert(id, !seen.contains(&id));
+                        }
+                    }
+                    let dangling: HashSet<Guid> = ids
+                        .into_iter()
+                        .filter(|id| checked.get(id) == Some(&true))
+                        .collect();
+                    if dangling.is_empty() {
+                        first
+                    } else {
+                        decode(cfg, &doc.root, cx.opts.keep_source, &dangling)
+                    }
+                } else {
+                    first
+                }
+            }
             _ if !cx.entries.contains(&name) => continue,
             _ => {
                 miss(cfg, &[NOT_BRACE]);

@@ -102,6 +102,35 @@ fn simple_spec(name: &str) -> Option<StaticPropSpec> {
         _ => return None,
     })
 }
+const ROOT_VERSION: i64 = 76;
+
+enum OldRoot<'a> {
+    At(Option<&'a Node>),
+    Value(Node),
+}
+
+fn old_root<'a>(budget: &MemoryBudget, name: &str, alt: &V, body: &'a Node) -> R<OldRoot<'a>> {
+    let why = [name, ":old_root"];
+    if let Some(path) = alt.get("path").and_then(V::as_array) {
+        let mut node = Some(body);
+        for at in path {
+            let at = required(
+                at.as_u64().and_then(|i| usize::try_from(i).ok()),
+                budget,
+                &why,
+            )?;
+            node = node.and_then(|n| n.at(at));
+        }
+        return Ok(OldRoot::At(node));
+    }
+    let text = required(alt.get("value").and_then(V::as_str), budget, &why)?;
+    Ok(OldRoot::Value(required(
+        brace::parse(text).ok(),
+        budget,
+        &why,
+    )?))
+}
+
 impl ManagedValueContext<'_> {
     fn config_value(
         &self,
@@ -293,10 +322,29 @@ impl ManagedValueContext<'_> {
                 )?;
             }
         }
+        let old = body
+            .at(0)
+            .and_then(Node::text)
+            .and_then(|v| v.parse::<i64>().ok())
+            .is_some_and(|v| v < ROOT_VERSION);
         for spec in mdschema::static_schema().config_props() {
+            let parsed: Node;
             let node = match spec.path() {
                 Some(StaticConfigPath::Body(path)) => {
-                    Some(path.iter().try_fold(body, |node, at| node.at(at)))
+                    match path.iter().try_fold(body, |node, at| node.at(at)) {
+                        Some(node) => Some(Some(node)),
+                        None if old => match spec.extra().get("old_root") {
+                            Some(alt) => match old_root(budget, spec.name(), alt, body)? {
+                                OldRoot::At(node) => Some(node),
+                                OldRoot::Value(node) => {
+                                    parsed = node;
+                                    Some(Some(&parsed))
+                                }
+                            },
+                            None => Some(None),
+                        },
+                        None => Some(None),
+                    }
                 }
                 Some(StaticConfigPath::Part2) => Some(raw.get(&PART2)),
                 None => None,

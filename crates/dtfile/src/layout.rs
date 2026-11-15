@@ -58,6 +58,16 @@ pub fn password_policies() -> Vec<Column> {
     ])
 }
 
+pub fn schema_storage() -> Vec<Column> {
+    columns(&[
+        ("SCHEMAID", ColType::N(10, 0), ColRole::Number, false),
+        ("STATUS", ColType::N(10, 0), ColRole::Number, false),
+        ("CURRENTSCHEMA", ColType::I, ColRole::Binary, false),
+        ("NEWGENCREATED", ColType::I, ColRole::Binary, false),
+        ("NEWGENDROPPED", ColType::I, ColRole::Binary, false),
+    ])
+}
+
 pub fn compromised_passwords() -> Vec<Column> {
     columns(&[("PWDHASH", ColType::NVC(256), ColRole::Str, false)])
 }

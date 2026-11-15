@@ -223,7 +223,7 @@ impl Planner<'_> {
             Range(&'c Cons),
         }
         let mut candidates: Vec<(IndexId, &IndexInfo)> = Vec::with_capacity(info.indexes.len() + 1);
-        for (k, ix) in info.indexes.iter().enumerate() {
+        for (k, ix) in info.indexes.iter().enumerate().filter(|(_, ix)| !ix.absent) {
             candidates.push((IndexId::Named(u16::try_from(k).ok()?), ix));
         }
         if (unique_id_key(info).is_none() || info.key_index.as_ref().is_some_and(|k| k.prefix > 0))
@@ -336,6 +336,7 @@ impl Planner<'_> {
         if rep && let Some(code) = info.field_by_std(StdField::Code) {
             for (k, ix) in info.indexes.iter().enumerate() {
                 if ix.fields.first() == Some(&code)
+                    && !ix.absent
                     && let Ok(k16) = u16::try_from(k)
                 {
                     return Plan::IndexRange {

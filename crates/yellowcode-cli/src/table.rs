@@ -9,10 +9,17 @@ use yellowcode_core::service::{
 #[command(after_help = "\
 Индекс читается так: --eq задаёт значения первых полей индекса по порядку, затем на следующее поле
 можно задать диапазон (--gt или --gte снизу, --lt или --lte сверху). Даты: 2024-01-31 или
-2024-01-31T12:00:00. Если указать несуществующий индекс, ошибка перечислит доступные индексы и их поля.
-Курсор следующей страницы выводится в stderr строкой «yellowcode: next cursor: ...».
+2024-01-31T12:00:00. Индексы таблицы, их поля и какие поля допускают условие показывает --list-indexes
+(для разбора программой — с --format json или csv); «window default» там — индекс, по которому читает окно
+«Данные», а сама команда без --index читает в порядке хранения.
+Курсор следующей страницы выводится в stderr строкой «yellowcode: next cursor: ...»; чтобы прочитать
+всю таблицу, повторяйте ту же команду с --cursor, пока курсор выводится. В JSON курсор — поле nextCursor
+(null на последней странице).
 
 Примеры:
+  # Индексы справочника: поля и на какие поля можно ставить условие
+  yellowcode table base Справочник Товары --list-indexes
+
   # Первые 100 строк документа в порядке хранения
   yellowcode table base Документ Счет --limit 100
 
@@ -126,6 +133,14 @@ pub(crate) struct Args {
         help = "Формат вывода; по умолчанию таблица в терминале и JSON при перенаправлении"
     )]
     format: Option<Format>,
+    #[arg(
+        long,
+        conflicts_with_all = [
+            "index", "eq", "gt", "gte", "lt", "lte", "order", "posted", "deletion_mark", "limit", "cursor",
+        ],
+        help = "Вместо строк вывести индексы таблицы: поля по порядку, допускает ли поле условие, индекс окна «Данные» по умолчанию и доступные фильтры"
+    )]
+    list_indexes: bool,
 }
 
 fn bound(exclusive: Option<String>, inclusive: Option<String>) -> Option<Bound> {
@@ -164,6 +179,7 @@ impl From<Args> for Request {
             },
             cursor: a.cursor,
             format: a.format,
+            list_indexes: a.list_indexes,
         }
     }
 }

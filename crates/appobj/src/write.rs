@@ -77,6 +77,7 @@ impl<'a> Plan<'a> {
         if def.kind != ObjKind::Catalog {
             return Err(refuse("вид объекта"));
         }
+        inst.refuse_group_without_hierarchy("Записать")?;
         if app.options().read_only_scope.is_some() {
             return Err(refuse("приложение только для чтения (read_scope)"));
         }
@@ -267,7 +268,7 @@ fn apply(row: &mut [FieldValue], edits: &[(usize, FieldValue)]) {
     }
 }
 
-fn row_version(row: &[FieldValue]) -> Option<String> {
+pub(crate) fn row_version(row: &[FieldValue]) -> Option<String> {
     row.iter().find_map(|v| match v {
         FieldValue::RowVersion(w) => Some(query_ir::convert::data_version(w)),
         _ => None,
@@ -296,9 +297,11 @@ pub(crate) fn write(ex: &mut Execution, inst: &Rc<ObjectInstance>) -> CallResult
     app.predefined()
         .ensure(&app, inst.obj, &AreaKey::default())?;
     let is_new = inst.state.borrow().is_new;
-    let snapshot = inst.snapshot();
+    let outermost = !txn.active();
+    let snapshot = outermost.then(|| inst.snapshot());
     txn.begin();
-    let ended = match steps(ex, &plan, &txn, inst, is_new, loading) {
+    let mut taken = None;
+    let ended = match steps(ex, &plan, &txn, inst, is_new, loading, &mut taken) {
         Ok(()) => txn.commit(&*app).map_err(|e| e.call_error(ex)),
         Err(e) => {
             let _ = txn.rollback(&*app);
@@ -306,7 +309,11 @@ pub(crate) fn write(ex: &mut Execution, inst: &Rc<ObjectInstance>) -> CallResult
         }
     };
     if !matches!(ended, Ok(Commit::Committed | Commit::Inner)) {
-        inst.restore(snapshot);
+        if let Some(snapshot) = snapshot {
+            inst.restore(snapshot);
+        } else if is_new && let Some(id) = taken {
+            inst.take_ref(&txn, id);
+        }
     }
     ended.map(|_| ())
 }
@@ -318,6 +325,7 @@ fn steps(
     inst: &Rc<ObjectInstance>,
     is_new: bool,
     loading: bool,
+    taken: &mut Option<RefId>,
 ) -> CallResult<()> {
     let app = plan.app;
     let ctx = WriteCtx {
@@ -325,9 +333,10 @@ fn steps(
         is_new,
         loading,
     };
+    let params = inst.exchange()?;
+    let auto_before = params.auto_fill();
     write_hooks::before_write(ex, &ctx)?;
     write_hooks::assign_code(ex, &ctx)?;
-    write_hooks::check_write(ex, &ctx)?;
     let (id, expected) = {
         let st = inst.state.borrow();
         let id = match st.r {
@@ -336,6 +345,8 @@ fn steps(
         };
         (id, st.data_version.clone())
     };
+    *taken = Some(id);
+    write_hooks::check_write(ex, &ctx)?;
     let edits = edits(ex, plan, inst, id, is_new)?;
     let hints: Vec<Option<&crate::model::FieldDef>> = {
         let mut hints = vec![None; plan.main.fields.len()];
@@ -370,6 +381,13 @@ fn steps(
     if crate::data_lock::lock_for_write(app, txn, plan.def).is_err() {
         return Err(crate::data_lock::conflict().into());
     }
+    let registration =
+        crate::changes::Registration::for_write(app, inst.obj, &params, auto_before)?;
+    let change_key = match &registration {
+        Some(r) => r.changes.key_ref(plan.number, id)?,
+        None => Vec::new(),
+    };
+    let mut registered = Vec::new();
     let stored = txn.with_write(app, |w: &mut dyn WriteTxn| -> StoreResult<Stored> {
         if is_new {
             w.insert(main_table, &fresh)?;
@@ -413,10 +431,19 @@ fn steps(
                 w.insert(job.table, row)?;
             }
         }
+        if let Some(r) = &registration {
+            registered = r.nodes(&*w)?;
+            r.apply(w, &registered, &change_key)?;
+        }
         Ok(Stored::Done)
     });
     match stored {
-        Ok(Stored::Done) => {}
+        Ok(Stored::Done) => {
+            if let Some(r) = &registration {
+                r.done(&registered);
+            }
+            crate::commit_guard::guard(app, txn, inst.obj);
+        }
         Ok(Stored::Conflict) => {
             return Err(other_error(l5(keys::OBJECT_VERSION_MISMATCH)).into());
         }
@@ -444,6 +471,7 @@ fn steps(
         }
         st.modified.set(false);
         st.new_ref = None;
+        st.issued = None;
         let id = txn.id().unwrap_or(0);
         let was_new = is_new || st.written.as_ref().is_some_and(|w| w.was_new && w.id == id);
         st.written = Some(WriteStamp {

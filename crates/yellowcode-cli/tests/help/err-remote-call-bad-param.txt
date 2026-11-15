@@ -1,0 +1,6 @@
+exit 2
+--- stdout
+--- stderr
+error: invalid value 'b:yes' for '--param <ЗНАЧЕНИЕ>': not a boolean: "yes" (true or false)
+
+For more information, try '--help'.

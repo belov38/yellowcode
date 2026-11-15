@@ -552,6 +552,29 @@ fn code_value(layout: &Layout<'_>, issued: &Issued) -> Result<Value, HostError> 
     }
 }
 
+#[derive(Clone)]
+pub(crate) struct IssuedInTxn {
+    txn: std::rc::Weak<CallTxn>,
+    id: u64,
+    series: SeriesKey,
+    prefix: String,
+    code: Value,
+}
+
+fn same_code(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::String(a), Value::String(b)) => a.to_string_lossy() == b.to_string_lossy(),
+        (Value::Number(a), Value::Number(b)) => a.to_xml_string() == b.to_xml_string(),
+        _ => false,
+    }
+}
+
+fn open_txn(ex: &mut Execution) -> Option<(Rc<CallTxn>, u64)> {
+    let txn = CallTxn::of_call(ex)?;
+    let id = txn.id()?;
+    Some((txn, id))
+}
+
 pub(crate) fn set_new_code(
     ex: &mut Execution,
     inst: &Rc<ObjectInstance>,
@@ -570,8 +593,36 @@ pub(crate) fn set_new_code(
         return Ok(());
     }
     let series = layout.series(ex, inst)?;
+    let open = open_txn(ex);
+    let earlier = open.as_ref().and_then(|(txn, id)| {
+        let st = inst.state.borrow();
+        st.issued
+            .clone()
+            .filter(|p| p.id == *id && p.txn.upgrade().is_some_and(|t| Rc::ptr_eq(&t, txn)))
+    });
+    if let Some(earlier) = earlier {
+        let current = inst.attr(ex, code)?;
+        if earlier.series == series.key
+            && earlier.prefix == event.prefix
+            && same_code(&current, &earlier.code)
+        {
+            return inst.assign(ex, code, earlier.code);
+        }
+        return Err(HostError::not_implemented(
+            &inst.type_name(),
+            "УстановитьНовыйКод: повторно в транзакции после смены серии, префикса или кода",
+        )
+        .into());
+    }
     let issued = issue(ex, layout, &series, &event.prefix)?;
     let value = code_value(layout, &issued)?;
+    inst.state.borrow_mut().issued = open.map(|(txn, id)| IssuedInTxn {
+        txn: Rc::downgrade(&txn),
+        id,
+        series: series.key,
+        prefix: event.prefix.clone(),
+        code: value.clone(),
+    });
     inst.assign(ex, code, value)
 }
 

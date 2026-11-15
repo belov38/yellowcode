@@ -80,7 +80,7 @@ pub(crate) struct Layout {
     items: &'static [(Option<&'static str>, &'static str, usize)],
     table_bag: &'static [&'static str],
     tails: &'static [usize],
-    command: &'static str,
+    command: &'static [&'static str],
 }
 
 pub(crate) const TABLE_BAG_AT: usize = 54;
@@ -104,7 +104,7 @@ pub(crate) const V4_59: Layout = Layout {
     items: &[],
     table_bag: &["73"],
     tails: &[],
-    command: "",
+    command: &[],
 };
 
 pub(crate) const V3_48: Layout = Layout {
@@ -122,7 +122,7 @@ pub(crate) const V3_48: Layout = Layout {
     ],
     table_bag: &["53"],
     tails: &[22, 23],
-    command: "9",
+    command: &["9"],
 };
 
 pub(crate) const V3_49: Layout = Layout {
@@ -139,7 +139,7 @@ pub(crate) const V3_49: Layout = Layout {
     ],
     table_bag: &["54"],
     tails: &[24],
-    command: "9",
+    command: &["9"],
 };
 
 pub(crate) const V4_49: Layout = Layout {
@@ -159,7 +159,7 @@ pub(crate) const V4_49: Layout = Layout {
     ],
     table_bag: &["55"],
     tails: &[24],
-    command: "9",
+    command: &["9"],
 };
 
 pub(crate) const V4_50: Layout = Layout {
@@ -177,10 +177,68 @@ pub(crate) const V4_50: Layout = Layout {
     ],
     table_bag: &["55"],
     tails: &[25],
-    command: "9",
+    command: &["9"],
 };
 
-const LAYOUTS: [&Layout; 5] = [&V4_59, &V3_48, &V3_49, &V4_49, &V4_50];
+pub(crate) const V2_35: Layout = Layout {
+    serialization: s(2, 35),
+    strict: true,
+    items: &[
+        (G, "19", 26),
+        (F, "32", 53),
+        (B, "21", 33),
+        (T, "44", 74),
+        (N, "19", 25),
+        (N, "8", 25),
+    ],
+    table_bag: &["44"],
+    tails: &[7],
+    command: &["6"],
+};
+
+pub(crate) const V2_37: Layout = Layout {
+    serialization: s(2, 37),
+    strict: true,
+    items: &[
+        (G, "19", 26),
+        (F, "32", 53),
+        (B, "22", 34),
+        (T, "47", 83),
+        (N, "19", 25),
+        (N, "8", 25),
+        (N, "3", 21),
+    ],
+    table_bag: &["47"],
+    tails: &[8],
+    command: &["7"],
+};
+
+pub(crate) const V3_42: Layout = Layout {
+    serialization: s(3, 42),
+    strict: true,
+    items: &[
+        (G, "21", 29),
+        (F, "33", 55),
+        (D, "10", 34),
+        (B, "28", 48),
+        (T, "49", 91),
+        (T, "50", 92),
+        (N, "21", 28),
+        (N, "10", 32),
+        (N, "4", 23),
+    ],
+    table_bag: &["49", "50"],
+    tails: &[17],
+    command: &["7", "8"],
+};
+
+const LAYOUTS: [&Layout; 8] = [
+    &V4_59, &V2_35, &V2_37, &V3_42, &V3_48, &V3_49, &V4_49, &V4_50,
+];
+
+const STRICT: [&Layout; 7] = [&V2_35, &V2_37, &V3_42, &V3_48, &V3_49, &V4_49, &V4_50];
+
+const STRICT_EXTRA: [(Option<&str>, &str, usize); 2] = [(Some("Addition"), "5", 24), (B, "30", 51)];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NoLayout {
@@ -199,14 +257,20 @@ pub(crate) fn detect(entry: &Node) -> Result<&'static Layout, NoLayout> {
 
 impl Layout {
     pub(crate) fn bag_at(&self, class: Option<&str>, version: &str) -> Option<usize> {
-        (class == Some("Table") && self.table_bag.contains(&version)).then_some(TABLE_BAG_AT)
+        let known = if self.strict {
+            STRICT.iter().any(|l| l.table_bag.contains(&version))
+        } else {
+            self.table_bag.contains(&version)
+        };
+        (class == Some("Table") && known).then_some(TABLE_BAG_AT)
     }
 
     pub(crate) fn accepts_item(&self, class: Option<&str>, version: &str, len: usize) -> bool {
         !self.strict
-            || self
-                .items
+            || STRICT
                 .iter()
+                .flat_map(|l| l.items.iter())
+                .chain(STRICT_EXTRA.iter())
                 .any(|(c, v, l)| *c == class && *v == version && *l == len)
     }
 
@@ -216,12 +280,11 @@ impl Layout {
 
     pub(crate) fn accepts_record(&self, section: Section, version: Option<&str>) -> bool {
         !self.strict
-            || version
-                == Some(match section {
-                    Section::Attribute => ATTRIBUTE,
-                    Section::Parameter => PARAMETER,
-                    Section::Command => self.command,
-                })
+            || version.is_some_and(|v| match section {
+                Section::Attribute => v == ATTRIBUTE,
+                Section::Parameter => v == PARAMETER,
+                Section::Command => self.command.contains(&v),
+            })
     }
 }
 

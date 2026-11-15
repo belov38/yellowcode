@@ -9,6 +9,8 @@ pub fn cast_value(ex: &mut Execution, td: &TypeDescription, v: Value) -> Result<
     }
     let value = if td.contains(v.type_id()) {
         v
+    } else if is_point_in_time_only(td) && becomes_empty_point(&v) {
+        return crate::values::moment::new_point_in_time(ex, BslDate::EMPTY, &Value::Undefined);
     } else if matches!(v, Value::Undefined) {
         default(ex, td.types[0])?
     } else {
@@ -98,6 +100,18 @@ pub fn cast_value(ex: &mut Execution, td: &TypeDescription, v: Value) -> Result<
             }
             Ok(v)
         }
+    }
+}
+
+fn is_point_in_time_only(td: &TypeDescription) -> bool {
+    td.types[..] == [TypeId::of_catalog(super::idx("PointInTime"))]
+}
+
+fn becomes_empty_point(v: &Value) -> bool {
+    match v {
+        Value::Undefined | Value::Number(_) | Value::String(_) | Value::Date(_) => true,
+        Value::Object(_) => crate::values::boundary::is_boundary_of_date(v),
+        _ => false,
     }
 }
 

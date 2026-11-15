@@ -489,6 +489,17 @@ pub(crate) fn events(v: &Node) -> Result<Node, Refusal> {
             mlist.push((g, rest.get(p + 2..p + 2 + k).ok_or(bad())?));
             p += 2 + k;
         }
+        if int_at(0)? == 0 {
+            for (g, names) in mlist {
+                let vecs: Vec<Handlers> =
+                    names.iter().map(|nm| vec![(nm.clone(), atom(0))]).collect();
+                match multi.iter_mut().find(|(k, _)| k.text() == g.text()) {
+                    Some(slot) => slot.1 = vecs,
+                    None => multi.push((g, vecs)),
+                }
+            }
+            return Ok(events_write(ev, multi));
+        }
         let pairs = |tail: &[Node]| -> Vec<(Node, Node)> {
             tail.as_chunks::<2>()
                 .0
@@ -537,6 +548,10 @@ pub(crate) fn events(v: &Node) -> Result<Node, Refusal> {
             }
         }
     }
+    Ok(events_write(ev, multi))
+}
+
+fn events_write(mut ev: Vec<(&Node, Handlers)>, mut multi: Vec<(&Node, Vec<Handlers>)>) -> Node {
     ev.sort_by_key(|(g, _)| guid_key(g));
     multi.sort_by_key(|(g, _)| guid_key(g));
     let count = |n: usize| atom(i64::try_from(n).unwrap_or(0));
@@ -584,7 +599,7 @@ pub(crate) fn events(v: &Node) -> Result<Node, Refusal> {
             }
         }
     }
-    Ok(Node::list(out))
+    Node::list(out)
 }
 
 pub(crate) fn choice_list_items(v: &Node, empty_picture: &Node) -> Node {
@@ -620,6 +635,39 @@ pub(crate) fn choice_list_items(v: &Node, empty_picture: &Node) -> Node {
     }
 }
 
+fn choice_list(v: &Node, empty_picture: &Node) -> Result<Node, Refusal> {
+    const T: &str = "ChoiceList";
+    let v = choice_list_items(v, empty_picture);
+    let l = v.as_list().ok_or_else(|| refuse(T, &v))?;
+    let ver = int_of(T, &v, l.first())?;
+    let n = usize::try_from(int_of(T, &v, l.get(1))?).map_err(|_| refuse(T, &v))?;
+    if n == 0 {
+        return Ok(Node::list(vec![atom(3), atom(0)]));
+    }
+    match ver {
+        3 => Ok(v.clone()),
+        2 => {
+            let body = l.get(2..).unwrap_or_default();
+            if body.len() / 4 < n {
+                return Err(refuse(T, &v));
+            }
+            let mut out = vec![atom(3), atom(i64::try_from(n).unwrap_or(0))];
+            let mut tails = Vec::with_capacity(n);
+            for item in body.chunks(4).take(n) {
+                let [text, value, check, pic] = item else {
+                    return Err(refuse(T, &v));
+                };
+                out.push(text.clone());
+                out.push(value.clone());
+                tails.push(Node::list(vec![check.clone(), picture(pic)?]));
+            }
+            out.extend(tails);
+            Ok(Node::list(out))
+        }
+        _ => Err(refuse(T, &v)),
+    }
+}
+
 pub(crate) fn upgrade(ty: &str, v: &Node, empty_picture: &Node) -> Result<Node, Refusal> {
     match ty {
         "Color" => color(v),
@@ -634,6 +682,7 @@ pub(crate) fn upgrade(ty: &str, v: &Node, empty_picture: &Node) -> Result<Node, 
         "Events" => events(v),
         "GuidSet" => guid_set(v),
         "Plain" => Ok(choice_list_items(v, empty_picture)),
+        "ChoiceList" => choice_list(v, empty_picture),
         "Raw" => Ok(v.clone()),
         _ => Err(Refusal::Shape("value type")),
     }

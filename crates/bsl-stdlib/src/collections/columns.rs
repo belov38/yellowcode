@@ -533,15 +533,24 @@ impl Columns {
                 .filter(|i| *i < self.len())
                 .ok_or_else(|| HostError::key(msg::INDEX_OFFBOUND))?,
             Value::String(name) => {
-                let folded = fold(ex, name, (name.len() as u64).saturating_mul(2))?;
-                let Some(i) = self.schema.find(ex, &folded)? else {
-                    return Err(missing_field(ex, key)?.into());
+                return match self.named_cell_column(ex, name)? {
+                    Some(column) => Ok(column),
+                    None => Err(missing_field(ex, key)?.into()),
                 };
-                i
             }
             _ => return Err(missing_field(ex, key)?.into()),
         };
         Ok(self.schema.entries.borrow()[i].clone())
+    }
+
+    pub(super) fn named_cell_column(
+        &self,
+        ex: &mut Execution,
+        name: &Str,
+    ) -> CallResult<Option<Rc<ColumnRecord>>> {
+        let folded = fold(ex, name, (name.len() as u64).saturating_mul(2))?;
+        let i = self.schema.find(ex, &folded)?;
+        Ok(i.map(|i| self.schema.entries.borrow()[i].clone()))
     }
 
     pub(crate) const fn allocation_bytes() -> u64 {

@@ -22,6 +22,7 @@ pub(crate) fn conversion_peak(value: &FieldValue) -> u64 {
     let payload = match value {
         FieldValue::String(s) => (s.len() as u64).saturating_mul(4),
         FieldValue::Number(n) => (n.digits().len() as u64).saturating_mul(16),
+        FieldValue::Storage(b) => b.len() as u64,
         _ => 0,
     };
     payload.saturating_add(256)

@@ -19,7 +19,8 @@ pub(crate) struct ReadRow {
     pub found: bool,
     pub version: String,
     raw: Vec<FieldValue>,
-    faulty: Vec<bool>,
+    deferred: Vec<bool>,
+    owner: Option<(ObjId, RefId)>,
 }
 
 impl ReadRow {
@@ -27,7 +28,7 @@ impl ReadRow {
         let base = budget::rc_size::<Self>()
             .saturating_add(budget::slots::<Value>(self.fields.capacity()))
             .saturating_add(budget::slots::<FieldValue>(self.raw.capacity()))
-            .saturating_add(budget::slots::<bool>(self.faulty.capacity()))
+            .saturating_add(budget::slots::<bool>(self.deferred.capacity()))
             .saturating_add(self.version.capacity() as u64);
         let fields = self
             .fields
@@ -44,13 +45,23 @@ impl ReadRow {
         obj: ObjId,
         i: usize,
     ) -> CallResult<Value> {
-        if self.faulty.get(i).copied().unwrap_or(false)
+        if self.deferred.get(i).copied().unwrap_or(false)
             && let (Some(f), Some(raw)) = (app.model().obj(obj).fields.get(i), self.raw.get(i))
         {
             budget::reserve(
                 ex,
                 self.bytes().saturating_add(budget::conversion_peak(raw)),
             )?;
+            if let (FieldValue::Storage(b), Some((o, r))) = (raw, self.owner) {
+                let mut cell = [0u8; 32];
+                cell[..4].copy_from_slice(&o.0.to_le_bytes());
+                cell[4..8].copy_from_slice(&u32::try_from(i).unwrap_or(u32::MAX).to_le_bytes());
+                cell[8..24].copy_from_slice(&r.0);
+                return Ok(crate::values::field::cell_storage_of(app, b, cell)?);
+            }
+            if crate::values::field::is_deferred(f, raw) {
+                return crate::values::field::stored_value(ex, app, f, raw);
+            }
             return Ok(convert(app, f, raw)?);
         }
         let value = self.fields.get(i).ok_or_else(|| {
@@ -370,6 +381,20 @@ pub(crate) fn is_std_name(name: &str) -> bool {
     std_attr_named(name).is_some()
 }
 
+pub(crate) fn catalog_std_default(
+    app: &Application,
+    obj: ObjId,
+    attr: StdAttr,
+) -> Result<Option<Value>, HostError> {
+    Ok(match attr {
+        StdAttr::Owner => Some(Value::Undefined),
+        StdAttr::Parent => Some(crate::values::refs::empty_ref(app, obj)?),
+        StdAttr::IsFolder => Some(Value::Bool(false)),
+        StdAttr::Code | StdAttr::Description => Some(Value::from("")),
+        _ => None,
+    })
+}
+
 fn convert(app: &Application, f: &FieldDef, v: &FieldValue) -> Result<Value, HostError> {
     let out = from_field(app, f, v)?;
     Ok(match (f.std, out) {
@@ -419,7 +444,7 @@ fn load_row(ex: &mut Execution, app: &Application, r: RefValue, live: u64) -> Ca
         return Ok(defaults(app, def, r)?);
     };
     let mut fields = Vec::with_capacity(def.fields.len());
-    let mut faulty = Vec::with_capacity(def.fields.len());
+    let mut deferred = Vec::with_capacity(def.fields.len());
     let mut raw = Vec::with_capacity(def.fields.len());
     for (i, f) in def.fields.iter().enumerate() {
         let fid = st.fields.get(i).copied().flatten();
@@ -428,29 +453,31 @@ fn load_row(ex: &mut Execution, app: &Application, r: RefValue, live: u64) -> Ca
             None => FieldValue::Null,
         };
         let built = match (f.std, fid) {
-            (Some(StdAttr::Predefined), _) => Ok(Value::Bool(is_predefined(def, st, &row))),
-            (Some(StdAttr::PredefinedDataName), _) => Ok(Value::from(
+            (Some(StdAttr::Predefined), _) => Some(Ok(Value::Bool(is_predefined(def, st, &row)))),
+            (Some(StdAttr::ThisNode), _) => Some(Ok(Value::Bool(is_this_node(app, st, &row)))),
+            (Some(StdAttr::PredefinedDataName), _) => Some(Ok(Value::from(
                 predefined_name(app, r.obj, &stored)
                     .unwrap_or_default()
                     .as_str(),
-            )),
-            (Some(StdAttr::Ref), _) => ref_value(app, r),
-            (_, Some(_)) => convert(app, f, &stored),
-            (_, None) => default_of(app, f),
+            ))),
+            (Some(StdAttr::Ref), _) => Some(ref_value(app, r)),
+            (_, Some(_)) if crate::values::field::is_deferred(f, &stored) => None,
+            (_, Some(_)) => Some(convert(app, f, &stored)),
+            (_, None) => Some(default_of(app, f)),
         };
         match built {
-            Ok(v) => {
+            Some(Ok(v)) => {
                 fields.push(v);
-                faulty.push(false);
+                deferred.push(false);
             }
-            Err(_) => {
+            Some(Err(_)) | None => {
                 fields.push(Value::Undefined);
-                faulty.push(true);
+                deferred.push(true);
             }
         }
         raw.push(stored);
     }
-    if !faulty.iter().any(|b| *b) {
+    if !deferred.iter().any(|b| *b) {
         raw = Vec::new();
     }
     apply_usage(def, &mut fields);
@@ -466,7 +493,8 @@ fn load_row(ex: &mut Execution, app: &Application, r: RefValue, live: u64) -> Ca
         found: true,
         version,
         raw,
-        faulty,
+        deferred,
+        owner: Some((r.obj, r.id)),
     })
 }
 
@@ -477,6 +505,18 @@ fn predefined_name(app: &Application, obj: ObjId, stored: &FieldValue) -> Option
         _ => return None,
     };
     app.predefined().name_of(app, obj, pid)
+}
+
+fn is_this_node(app: &Application, st: &crate::model::ObjStorage, row: &[FieldValue]) -> bool {
+    let Some(fid) = app
+        .store()
+        .storage()
+        .try_table(st.main)
+        .and_then(|t| t.field_by_std(ibschema::names::StdField::PredefinedId))
+    else {
+        return false;
+    };
+    matches!(row.get(usize::from(fid.0)), Some(FieldValue::Uuid(u)) if u.as_bytes().iter().any(|b| *b != 0))
 }
 
 fn is_predefined(def: &ObjDef, st: &crate::model::ObjStorage, row: &[FieldValue]) -> bool {
@@ -537,10 +577,11 @@ fn defaults(app: &Application, def: &ObjDef, r: RefValue) -> Result<ReadRow, Hos
         });
     }
     Ok(ReadRow {
-        faulty: vec![false; fields.len()],
+        deferred: vec![false; fields.len()],
         raw: Vec::new(),
         fields,
         found: false,
         version: String::new(),
+        owner: None,
     })
 }

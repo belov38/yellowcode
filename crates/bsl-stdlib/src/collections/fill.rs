@@ -181,7 +181,16 @@ fn field(ex: &mut Execution, object: &Value, name: &str) -> CallResult<Option<(b
     })
 }
 
+fn lacking(object: &Value, name: &str) -> bool {
+    object
+        .as_object()
+        .is_some_and(|object| object.lacks_property(name))
+}
+
 fn property(ex: &mut Execution, object: &Value, name: &str, write: bool) -> CallResult<bool> {
+    if lacking(object, name) {
+        return Ok(false);
+    }
     Ok(field(ex, object, name)?
         .is_some_and(|(readable, writable)| if write { writable } else { readable }))
 }
@@ -207,6 +216,15 @@ fn refusal(
     receiver: &Value,
     name: &str,
 ) -> CallResult<Option<HostError>> {
+    let unobserved = || {
+        HostError::not_implemented(
+            "ЗаполнитьЗначенияСвойств",
+            &format!("поле {name}, которого у объекта нет, в списке"),
+        )
+    };
+    if lacking(source, name) {
+        return Ok(Some(unobserved()));
+    }
     match field(ex, source, name)? {
         None => return Ok(Some(lacks(ex, 3, name, source, false))),
         Some((false, _)) => {
@@ -216,6 +234,9 @@ fn refusal(
             )));
         }
         Some(_) => {}
+    }
+    if lacking(receiver, name) {
+        return Ok(Some(unobserved()));
     }
     Ok(match field(ex, receiver, name)? {
         None => Some(lacks(ex, 3, name, receiver, false)),

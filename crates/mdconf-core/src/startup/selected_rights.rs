@@ -42,7 +42,29 @@ impl<S: ManagedEntrySource> ManagedViewerContext<S> {
                 return Ok(Some(result));
             }
         };
-        match remaining_rights::decode(self.index(), self.settings(), node, false) {
+        let mut decoded = remaining_rights::decode(
+            self.index(),
+            self.settings(),
+            node,
+            false,
+            &std::collections::HashSet::new(),
+        );
+        if matches!(
+            decoded,
+            Err(remaining_rights::Error::Semantic("unresolved_object", None))
+        ) {
+            let removed = remaining_rights::dangling(
+                &entries,
+                self.index(),
+                node,
+                &mut std::collections::HashMap::new(),
+            )?;
+            if !removed.is_empty() {
+                decoded =
+                    remaining_rights::decode(self.index(), self.settings(), node, false, &removed);
+            }
+        }
+        match decoded {
             Ok(rights) => result.rights = Some(rights),
             Err(remaining_rights::Error::Memory(error)) => return Err(error.into()),
             Err(remaining_rights::Error::Semantic(why, detail)) => {

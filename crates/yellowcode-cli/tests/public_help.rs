@@ -70,6 +70,18 @@ const CASES: &[(&str, &[&str], &str)] = cases![
         ["table", "base", "Document", "Doc", "--limit", "0"]
     ),
     (
+        "err-table-list-indexes-cursor",
+        [
+            "table",
+            "base",
+            "Document",
+            "Doc",
+            "--list-indexes",
+            "--cursor",
+            "c"
+        ]
+    ),
+    (
         "err-table-eq-without-index",
         ["table", "base", "Document", "Doc", "--eq", "1"]
     ),
@@ -217,6 +229,112 @@ const CASES: &[(&str, &[&str], &str)] = cases![
     (
         "err-template-query-without-set",
         ["template", "show", "source.cf", "Макет", "--query"]
+    ),
+    ("remote--help", ["remote", "--help"]),
+    ("remote-info--help", ["remote", "info", "--help"]),
+    ("remote-metadata--help", ["remote", "metadata", "--help"]),
+    ("remote-call--help", ["remote", "call", "--help"]),
+    ("remote-modules--help", ["remote", "modules", "--help"]),
+    (
+        "err-remote-call-no-call",
+        ["remote", "call", "http://127.0.0.1:1"]
+    ),
+    (
+        "err-remote-call-param-conflict",
+        [
+            "remote",
+            "call",
+            "http://127.0.0.1:1",
+            "--call",
+            "М.Ф",
+            "--param",
+            "x",
+            "--param-json",
+            "null"
+        ]
+    ),
+    (
+        "err-remote-call-bad-param",
+        [
+            "remote",
+            "call",
+            "http://127.0.0.1:1",
+            "--call",
+            "М.Ф",
+            "--param",
+            "b:yes"
+        ]
+    ),
+    (
+        "err-remote-call-bare-number",
+        [
+            "remote",
+            "call",
+            "http://127.0.0.1:1",
+            "--call",
+            "М.Ф",
+            "--param-json",
+            "1.5"
+        ]
+    ),
+    (
+        "err-remote-info-auth-settings-only-user",
+        [
+            "remote",
+            "info",
+            "http://127.0.0.1:1",
+            "--auth-settings-only",
+            "--user",
+            "u"
+        ]
+    ),
+    (
+        "err-remote-password",
+        [
+            "remote",
+            "info",
+            "http://127.0.0.1:1",
+            "--user",
+            "u",
+            "--password",
+            "p"
+        ]
+    ),
+    (
+        "err-remote-password-env-without-user",
+        [
+            "remote",
+            "metadata",
+            "http://127.0.0.1:1",
+            "--password-env",
+            "P"
+        ]
+    ),
+    (
+        "err-remote-strong-password-without-user",
+        ["remote", "info", "http://127.0.0.1:1", "--strong-password"]
+    ),
+    (
+        "err-remote-modules-id-without-out",
+        [
+            "remote",
+            "modules",
+            "http://127.0.0.1:1",
+            "--id",
+            "urn:module:md:6a1c0de0-0000-4a00-8000-00000000c0f1@property='d22e852a-cf8a-4f77-8ccb-3548e7792bea';version='cfc541901463f141846df230f689362900000000'"
+        ]
+    ),
+    (
+        "err-remote-modules-bad-id",
+        [
+            "remote",
+            "modules",
+            "http://127.0.0.1:1",
+            "--out",
+            "d",
+            "--id",
+            "urn:form:md:0:x"
+        ]
     ),
     ("err-unknown", ["bogus"]),
 ];

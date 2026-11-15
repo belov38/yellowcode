@@ -1,6 +1,7 @@
 use crate::Application;
 use crate::meta::{MdKey, MdPath, arg_value, full_name, key_with_app, type_idx};
-use crate::model::AppModel;
+use crate::model::{AppModel, Uuid16};
+use crate::rights::Right;
 use crate::session::{call_ctx, internal};
 use crate::session_info::outside_call;
 use crate::users::{UserValue, user_value};
@@ -193,6 +194,27 @@ fn vocabulary_kind(model: &AppModel, key: MdKey) -> Option<MdKind> {
     }
 }
 
+fn rights_target(model: &AppModel, key: MdKey) -> Option<Option<Uuid16>> {
+    match key {
+        MdKey::Path(MdPath::Configuration) => Some(None),
+        MdKey::Path(MdPath::Object(id)) => Some(Some(model.obj(id).md)),
+        MdKey::Path(MdPath::SessionParam(i)) => model.session_params.get(i).map(|p| Some(p.md)),
+        MdKey::Path(MdPath::Subsystem(k)) => model.subsystem(k).map(|o| Some(o.id)),
+        MdKey::Path(MdPath::Other(i)) => model.config.objects.get(i).map(|o| Some(o.id)),
+        _ => None,
+    }
+}
+
+fn session_right(app: &Application, key: MdKey, right: &str) -> Option<bool> {
+    let roles = app.rights.default_roles();
+    if right == "Administration" || roles.is_empty() {
+        return Some(true);
+    }
+    let target = rights_target(app.model(), key)?;
+    let right = Right(md_model::parts::Right::from_name(right)?);
+    Some(app.rights.any_role(roles, target.as_ref(), right))
+}
+
 fn refused(what: &str) -> HostError {
     HostError::not_implemented("Глобальный контекст", &format!("ПравоДоступа: {what}"))
 }
@@ -206,6 +228,7 @@ fn third_parameter_refusal(who: &Value) -> Option<&'static str> {
         Some(UserValue::Anonymous) => None,
         Some(UserValue::OfSessionWithUsers) => Some("пользователь сеанса с пользователями"),
         Some(UserValue::Restored) => Some("пользователь из внутренней строки"),
+        Some(UserValue::Created) => Some("новый пользователь"),
         None => {
             let role = key_with_app(who).is_some_and(|(key, owner)| {
                 matches!(key, MdKey::Path(MdPath::Other(i))
@@ -268,8 +291,16 @@ fn access_right(ex: &mut Execution, args: &mut [Arg]) -> CallResult<Value> {
         return Err(refused("объект не из Метаданные").into());
     };
     let verdict = vocabulary_kind(owner.model(), key).and_then(|kind| applies(kind, right));
+    let unknown = || {
+        refused(&format!(
+            "право {name} для вида «{}»",
+            kind_label(owner, key)
+        ))
+    };
     match (verdict, key) {
-        (Some(true), _) => Ok(Value::Bool(true)),
+        (Some(true), _) => session_right(owner, key, right)
+            .map(Value::Bool)
+            .ok_or_else(|| unknown().into()),
         (Some(false), MdKey::Path(path)) => {
             let cx = owner
                 .md_ctx()
@@ -281,11 +312,7 @@ fn access_right(ex: &mut Execution, args: &mut [Arg]) -> CallResult<Value> {
             )
             .into())
         }
-        _ => Err(refused(&format!(
-            "право {name} для вида «{}»",
-            kind_label(owner, key)
-        ))
-        .into()),
+        _ => Err(unknown().into()),
     }
 }
 

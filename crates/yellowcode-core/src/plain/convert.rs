@@ -198,6 +198,11 @@ pub fn run(args: Request, out: &mut dyn Write, err: &mut dyn Write) -> Result<i3
     let code = 0;
     let mut status =
         serde_json::json!({"schemaVersion": 1, "output": args.output, "complete": true});
+    if let Some((r, _)) = &report {
+        for reduced in &r.reduced_indexes {
+            let _ = writeln!(err, "{}", reduced_warning(reduced));
+        }
+    }
     if let (Some((r, seconds)), Some(map)) = (&report, status.as_object_mut()) {
         map.insert("rows".into(), r.rows.into());
         map.insert("files".into(), r.files.into());
@@ -214,6 +219,7 @@ pub fn run(args: Request, out: &mut dyn Write, err: &mut dyn Write) -> Result<i3
                 "omittedIndexes": r.index_constraints.omitted_indexes,
             }),
         );
+        map.insert("reducedIndexes".into(), reduced_json(&r.reduced_indexes));
         map.insert("warningCount".into(), r.warnings.len().into());
         map.insert(
             "warnings".into(),
@@ -235,6 +241,43 @@ pub fn run(args: Request, out: &mut dyn Write, err: &mut dyn Write) -> Result<i3
         Err(error) if error.kind() != std::io::ErrorKind::BrokenPipe => Err(error.into()),
         _ => Ok(code),
     }
+}
+
+fn reduced_warning(r: &infobase::restore::ReducedIndexes) -> String {
+    const GIB: f64 = (1u64 << 30) as f64;
+    let kept = if r.clustered_kept {
+        "с кластерным и служебными индексами"
+    } else {
+        "со служебными индексами"
+    };
+    format!(
+        "предупреждение: таблица {} ({} строк): индексы не помещаются в файловую базу \
+         (оценка {:.1} ГиБ при пределе {:.1} ГиБ); загружена только {kept} \
+         (оценка {:.1} ГиБ), сняты: {}",
+        r.table,
+        r.rows,
+        r.estimate_bytes as f64 / GIB,
+        r.cap_bytes as f64 / GIB,
+        r.kept_estimate_bytes as f64 / GIB,
+        r.dropped.join(", ")
+    )
+}
+
+fn reduced_json(rs: &[infobase::restore::ReducedIndexes]) -> serde_json::Value {
+    rs.iter()
+        .map(|r| {
+            serde_json::json!({
+                "table": r.table,
+                "rows": r.rows,
+                "kept": r.kept,
+                "dropped": r.dropped,
+                "estimateBytes": r.estimate_bytes,
+                "keptEstimateBytes": r.kept_estimate_bytes,
+                "capBytes": r.cap_bytes,
+            })
+        })
+        .collect::<Vec<_>>()
+        .into()
 }
 
 fn restore_dt(
@@ -270,6 +313,7 @@ fn restore_dt(
                 }
                 last = Some((p.phase, now));
                 let phase = match p.phase {
+                    Phase::Fit => "fit",
                     Phase::Read => "read",
                     Phase::Metadata => "metadata",
                     Phase::Sync => "sync",
@@ -302,6 +346,7 @@ fn restore_dt(
         memory_budget: Some(ledger.clone()),
         without_users,
         events: Some(&mut sink),
+        fit: Default::default(),
     };
     let report = restore_dt_new_file_with(source, output, &mut opts);
     drop(opts);

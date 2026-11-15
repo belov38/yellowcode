@@ -217,28 +217,30 @@ fn head_tail(
             .get("EmptyLocalString")
             .map_or("{1,0}", String::as_str),
     )?;
+    let ctor = |k: usize, d: Node| or_default(k, d);
+    let s = || Node::str("");
     let slots: [Slot; 36] = [
-        Slot::One(one(&t, 0)?),
-        Slot::One(one(&t, 1)?),
+        Slot::One(ctor(0, s())?),
+        Slot::One(ctor(1, s())?),
         Slot::FlagObj(navigator),
-        Slot::One(one(&t, 3)?),
-        Slot::One(one(&t, 4)?),
+        Slot::One(ctor(3, i(0))?),
+        Slot::One(ctor(4, s())?),
         Slot::One(i(if f144 > 2 { 0 } else { f144 })),
         Slot::One(i(f124)),
         Slot::FlagObj(None),
         Slot::FlagObj(None),
-        Slot::One(one(&t, 9)?),
-        Slot::One(one(&t, 10)?),
-        Slot::One(one(&t, 11)?),
-        Slot::One(one(&t, 12)?),
-        Slot::One(one(&t, 13)?),
+        Slot::One(ctor(9, i(0))?),
+        Slot::One(ctor(10, i(0))?),
+        Slot::One(ctor(11, i(3))?),
+        Slot::One(ctor(12, i(3))?),
+        Slot::One(ctor(13, i(0))?),
         Slot::One(i(if f100 > 2 { 1 } else { f100 })),
         Slot::One(i(f144)),
-        Slot::One(one(&t, 16)?),
+        Slot::One(ctor(16, i(100))?),
         Slot::One(i(i64::from(f1b0 != 0))),
-        Slot::One(one(&t, 18)?),
-        Slot::One(one(&t, 19)?),
-        Slot::One(one(&t, 20)?),
+        Slot::One(ctor(18, i(1))?),
+        Slot::One(ctor(19, i(0))?),
+        Slot::One(ctor(20, i(0))?),
         Slot::One(i(if f100 == 4 || f100 == 5 { 0 } else { f100 })),
         Slot::One(t22),
         Slot::One(i(f84)),
@@ -271,15 +273,30 @@ fn head_tail(
 
 fn navigator(raw: &Node, cx: &mut Cx<'_>) -> Result<Node, Refusal> {
     let mut o: Vec<Node> = raw.as_list().ok_or(Refusal::Navigator)?.to_vec();
-    if o.first().and_then(Node::text) != Some("22") {
-        return Err(Refusal::Navigator);
-    }
+    let ver = match o.first().and_then(Node::text) {
+        Some("19") => 19,
+        Some("21") => 21,
+        Some("22") => 22,
+        _ => return Err(Refusal::Navigator),
+    };
     let uv = take_user_visible(&mut o, 4);
     group22_raw(&mut o, cx).map_err(|_| Refusal::Navigator)?;
+    if ver < 20 {
+        o.push(i(0));
+    }
+    if ver < 21 {
+        o.extend([i(3), i(3)]);
+    }
+    if ver < 22 {
+        o.push(i(0));
+        *o.first_mut().ok_or(Refusal::Navigator)? = i(22);
+    }
     for x in o.iter_mut() {
         let is_tooltip = x.as_list().is_some_and(|e| {
-            matches!(e.first().and_then(Node::text), Some("11" | "12"))
-                && e.len() > 30
+            matches!(
+                e.first().and_then(Node::text),
+                Some("8" | "9" | "10" | "11" | "12")
+            ) && e.len() > 24
                 && e.get(1)
                     .and_then(Node::as_list)
                     .is_some_and(|p| p.len() == 1 && p.first().and_then(Node::text) == Some("0"))
@@ -335,6 +352,15 @@ fn decoration12_raw(e: &mut Vec<Node>, cx: &mut Cx<'_>) -> Result<(), Refusal> {
         *e.get_mut(18).ok_or(Refusal::Navigator)? = s;
     }
     *e.get_mut(14).ok_or(Refusal::Navigator)? = c14;
+    if old_ver < 9 {
+        e.extend([1, 0, 0, 1, 0].map(i));
+    }
+    if old_ver < 10 {
+        e.extend([i(3), i(3)]);
+    }
+    if old_ver < 11 {
+        e.push(i(0));
+    }
     if old_ver < 12 {
         e.push(i(0));
     }
@@ -447,7 +473,7 @@ pub(crate) fn id_pass(
                 ch.id_text = next.to_string();
                 *ch.body.get_mut(1).ok_or(Refusal::Shape("item id"))? =
                     Node::list(vec![i(*next), Node::atom(FORMID)]);
-                *next += 1;
+                *next = next.checked_add(1).ok_or(Refusal::Shape("item id"))?;
                 cx.stats.hit("id pass: id assigned");
             }
             if parent_name.is_some() && ch.name().map(str::to_string) == parent_name {
@@ -462,7 +488,7 @@ pub(crate) fn id_pass(
     for c in children.iter() {
         max_id(c, &mut mx);
     }
-    let mut next = mx + 1;
+    let mut next = mx.checked_add(1).ok_or(Refusal::Shape("item id"))?;
     visit(acb, &mut next, cx)?;
     for c in children.iter_mut() {
         visit(c, &mut next, cx)?;

@@ -283,9 +283,37 @@ impl TableBuilder {
         self.rule(cx, names, template, unique, toks, item)
     }
 
+    pub(crate) fn rule_unless_prefix(
+        &mut self,
+        cx: &Ctx,
+        names: &mut Names,
+        template: &str,
+        unique: bool,
+        toks: &[Tok],
+        item: Option<&Child>,
+    ) -> Result<()> {
+        let fields = index::fields(toks, &self.table, item, cx, names)?;
+        if self
+            .table
+            .indexes
+            .iter()
+            .any(|i| i.fields.starts_with(&fields))
+        {
+            return Ok(());
+        }
+        self.rule(cx, names, template, unique, toks, item)
+    }
+
     pub(crate) fn finish(self) -> (Table, TableRole) {
         (self.table, self.role)
     }
+}
+
+fn unresolved_filter_ref(r: &ctx::FilterRef) -> Error {
+    Error::Unsupported(format!(
+        "filter criterion {} names no attribute of an object or of its tabular section: no rule for its index",
+        r.what
+    ))
 }
 
 pub(crate) type KindFn = fn(&Ctx, &mut Names) -> Result<Vec<(Table, TableRole)>>;
@@ -400,6 +428,13 @@ fn build_with(
     let mut objects = Vec::new();
     let mut tables = Vec::new();
     let mut skipped = Vec::new();
+    for r in md.filter_unresolved.iter().filter(|r| r.owner.is_none()) {
+        let e = unresolved_filter_ref(r);
+        if !skip_unsupported {
+            return Err(e);
+        }
+        skipped.push(r.what.clone());
+    }
     for obj in &cfg.objects {
         let f = match rules(obj.kind) {
             Rules::NoTables => continue,
@@ -413,16 +448,21 @@ fn build_with(
         let cx = Ctx::new(&md, obj)?;
         let checkpoint = nm.db.allocation_checkpoint();
         let allocated = nm.allocated.len();
-        let made = match f(&cx, &mut nm) {
-            Ok(made) => made,
-            Err(Error::Unsupported(_)) if skip_unsupported => {
-                nm.db.rollback_allocations(checkpoint);
-                nm.allocated.truncate(allocated);
-                skipped.push(cx.full_name);
-                continue;
-            }
-            Err(e) => return Err(in_object(&cx.full_name, e)),
-        };
+        let unresolved = md
+            .filter_unresolved
+            .iter()
+            .find(|r| r.owner == Some(obj.id));
+        let made =
+            match unresolved.map_or_else(|| f(&cx, &mut nm), |r| Err(unresolved_filter_ref(r))) {
+                Ok(made) => made,
+                Err(Error::Unsupported(_)) if skip_unsupported => {
+                    nm.db.rollback_allocations(checkpoint);
+                    nm.allocated.truncate(allocated);
+                    skipped.push(cx.full_name);
+                    continue;
+                }
+                Err(e) => return Err(in_object(&cx.full_name, e)),
+            };
         let mut roles = Vec::new();
         for (t, role) in made {
             if t.name == purpose::EXT_DATA_SRC_PRMS

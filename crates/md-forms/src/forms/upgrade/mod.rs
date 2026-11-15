@@ -159,6 +159,24 @@ pub(crate) fn translate(d: &DecodedForm, stats: &mut Stats) -> Result<Node, Refu
     put(&mut out, 3, attrs)?;
     put(&mut out, 4, params)?;
     put(&mut out, 5, commands)?;
+    let record = t
+        .first()
+        .and_then(Node::as_i64)
+        .ok_or(Refusal::Shape("entry"))?;
+    if record < 3 {
+        if out.len() != 8 {
+            return Err(Refusal::Shape("entry record v2"));
+        }
+        out.push(Node::int(0));
+        cx.stats
+            .hit_owned(format!("record v{record}: [8], [9] = 0"));
+    } else if record < 4 && out.get(8).and_then(Node::text) != Some("0") {
+        return Err(Refusal::Shape("entry record flag object"));
+    }
+    if record < 4 {
+        out.truncate(9);
+        out.push(Node::int(0));
+    }
     Ok(Node::list(out))
 }
 

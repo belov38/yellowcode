@@ -56,6 +56,8 @@ fn builtins() {
             .chain(super::valuetable::codecs())
             .chain(super::valuetree::codecs())
             .chain(super::boundary::codecs())
+            .chain(super::opaque::codecs())
+            .chain(crate::mail_message::codecs())
         {
             t.entry(idx.0).or_insert(c);
         }

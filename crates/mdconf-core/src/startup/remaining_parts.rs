@@ -7,6 +7,7 @@ use crate::startup::{
 };
 use crate::{ConfigSettings, EntryData, ManagedEntries, ManagedEntrySource, MdKind};
 use memory_budget::{BudgetError, Charged};
+use std::collections::HashSet;
 impl ManagedConfigurationGraph {
     pub fn load_remaining_parts<S: ManagedEntrySource + ?Sized>(
         mut self,
@@ -64,6 +65,7 @@ impl ManagedConfigurationGraph {
         keep: bool,
     ) -> Result<Self, ManagedObjectsError<S::Error>> {
         let budget = entries.memory_budget();
+        let mut checked = std::collections::HashMap::new();
         for at in 0..self.graph.objects.locations.len() {
             let object = self
                 .graph
@@ -89,7 +91,17 @@ impl ManagedConfigurationGraph {
                     continue;
                 }
             };
-            let actual = match remaining_rights::decode(index, settings, node, keep) {
+            let mut actual = remaining_rights::decode(index, settings, node, keep, &HashSet::new());
+            if matches!(
+                actual,
+                Err(remaining_rights::Error::Semantic("unresolved_object", None))
+            ) {
+                let removed = remaining_rights::dangling(entries, index, node, &mut checked)?;
+                if !removed.is_empty() {
+                    actual = remaining_rights::decode(index, settings, node, keep, &removed);
+                }
+            }
+            let actual = match actual {
                 Ok(value) => value,
                 Err(remaining_rights::Error::Memory(error)) => return Err(error.into()),
                 Err(remaining_rights::Error::Semantic(why, detail)) => {
