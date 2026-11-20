@@ -38,6 +38,7 @@ pub struct Request {
     pub cursor: Option<String>,
     pub format: Option<Format>,
     pub list_indexes: bool,
+    pub schema_notes: bool,
 }
 
 impl Request {
@@ -103,9 +104,7 @@ fn run_with_memory(
     }
     let mut console = memory.open(&args.base)?;
     super::control::trim_heap();
-    for note in &console.info().notes {
-        let _ = writeln!(err, "yellowcode: schema note: {note}");
-    }
+    super::schema_notes::write(err, &console.info().notes, args.schema_notes);
     if args.list_indexes {
         return list_indexes(&console, &args, out, err, tty, memory, diagnostic);
     }

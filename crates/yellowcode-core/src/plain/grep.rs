@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::PathBuf;
 
-use mdconf::{Configuration, LoadOptions};
+use mdconf::Configuration;
 use serde::Serialize;
 use serde_json::json;
 
@@ -346,7 +346,14 @@ pub fn run_with_memory_limit(
     err: &mut dyn Write,
 ) -> crate::Result<i32> {
     let memory = source::OpenMemory::resolve(limit)?;
-    let cfg = source::open_with_memory(&source, &LoadOptions::default(), &memory, &mut |_| Ok(()))?;
+    let reads = super::Reads::Grep {
+        code: args.places.contains(&Where::Code),
+        queries: args.places.contains(&Where::Queries),
+        names: args.places.contains(&Where::Names),
+    };
+    let cfg = source::open_with_memory(&source, &super::load_options(reads), &memory, &mut |_| {
+        Ok(())
+    })?;
     let scope = Scope::resolve(&cfg, &scope)?;
     let found = grep(&cfg, &scope, &args)?;
     render(&found, &args, out)?;

@@ -60,9 +60,82 @@ pub(crate) fn mentioned(bytes: &[u8], ids: &[Guid]) -> Vec<Guid> {
             let upper = lower.to_ascii_uppercase();
             [lower, upper]
                 .iter()
-                .any(|t| bytes.windows(t.len()).any(|w| w == t.as_bytes()))
+                .any(|t| memchr::memmem::find(bytes, t.as_bytes()).is_some())
         })
         .collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum VendorEntries {
+    Named(Vec<String>),
+    Shaped(String),
+}
+
+impl VendorEntries {
+    pub(crate) fn of(cfg_id: Guid, parents: Option<&[u8]>) -> Self {
+        match parents.and_then(parent_guids) {
+            Some(guids) => {
+                VendorEntries::Named(guids.iter().map(|g| format!("{cfg_id}.{g}")).collect())
+            }
+            None => VendorEntries::Shaped(format!("{cfg_id}.")),
+        }
+    }
+
+    pub(crate) fn contains(&self, name: &str) -> bool {
+        match self {
+            VendorEntries::Named(names) => names.iter().any(|n| n == name),
+            VendorEntries::Shaped(prefix) => name
+                .strip_prefix(prefix.as_str())
+                .is_some_and(|rest| Guid::parse(rest).is_some()),
+        }
+    }
+}
+
+fn parent_guids(bytes: &[u8]) -> Option<Vec<Guid>> {
+    let bytes = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes);
+    let head = String::from_utf8_lossy(bytes.get(..bytes.len().min(256))?);
+    let mut fields = head
+        .trim_start()
+        .strip_prefix('{')?
+        .split(',')
+        .map(str::trim);
+    if fields.next()? != "6" {
+        return None;
+    }
+    fields.next()?;
+    match fields.next()?.parse::<u32>().ok()? {
+        0 => Some(Vec::new()),
+        1 => Some(vec![Guid::parse(fields.next()?)?]),
+        _ => None,
+    }
+}
+
+pub(crate) fn mentioned_in<'n, B, E>(
+    names: impl IntoIterator<Item = &'n str>,
+    skip: impl Fn(&str) -> bool,
+    vendor: &VendorEntries,
+    ids: &[Guid],
+    mut raw: impl FnMut(&str) -> std::result::Result<Option<B>, E>,
+) -> std::result::Result<HashSet<Guid>, E>
+where
+    B: std::ops::Deref<Target = Vec<u8>>,
+{
+    let mut seen = HashSet::new();
+    if ids.is_empty() {
+        return Ok(seen);
+    }
+    for name in names {
+        if skip(name) || vendor.contains(name) {
+            continue;
+        }
+        if let Some(bytes) = raw(name)? {
+            seen.extend(mentioned(&bytes, ids));
+        }
+        if seen.len() == ids.len() {
+            break;
+        }
+    }
+    Ok(seen)
 }
 
 fn list(n: Option<&Node>) -> Decoded<&[Node]> {
@@ -386,59 +459,22 @@ pub(crate) fn decode_rights(cfg: &Configuration, entry: &Node) -> Option<Rights>
 }
 
 pub(crate) fn load(cx: &LoadCtx, cfg: &mut Configuration) -> Result<()> {
-    let rights_entries: HashSet<String> = cfg
-        .objects
-        .iter()
-        .filter(|o| o.kind == MdKind::Role)
-        .map(|o| format!("{}.0", o.id))
-        .collect();
-    let mut checked: HashMap<Guid, bool> = HashMap::new();
+    let mut pending: Vec<(usize, Vec<Guid>)> = Vec::new();
     for i in 0..cfg.objects.len() {
         let Some(role) = cfg.objects.get(i).filter(|o| o.kind == MdKind::Role) else {
             continue;
         };
         let name = format!("{}.0", role.id);
-        let data = fetch(cx, &name)?;
-        let res = match data.as_deref() {
+        let res = match fetch(cx, &name)?.as_deref() {
             Some(EntryData::Brace(doc)) => {
                 let first = decode(cfg, &doc.root, cx.opts.keep_source, &HashSet::new());
                 if first == Err(Miss::Unresolved) {
                     let ids =
                         unresolved_ids(&doc.root, |id| id == cfg.id || cfg.full_name(id).is_some());
-                    let fresh: Vec<Guid> = ids
-                        .iter()
-                        .copied()
-                        .filter(|id| !checked.contains_key(id))
-                        .collect();
-                    if !fresh.is_empty() {
-                        let mut seen = HashSet::new();
-                        for meta in cx.entries.list() {
-                            if rights_entries.contains(&meta.name) {
-                                continue;
-                            }
-                            if let Some(bytes) = cx.entries.raw(&meta.name)? {
-                                seen.extend(mentioned(&bytes, &fresh));
-                            }
-                            if seen.len() == fresh.len() {
-                                break;
-                            }
-                        }
-                        for id in fresh {
-                            checked.insert(id, !seen.contains(&id));
-                        }
-                    }
-                    let dangling: HashSet<Guid> = ids
-                        .into_iter()
-                        .filter(|id| checked.get(id) == Some(&true))
-                        .collect();
-                    if dangling.is_empty() {
-                        first
-                    } else {
-                        decode(cfg, &doc.root, cx.opts.keep_source, &dangling)
-                    }
-                } else {
-                    first
+                    pending.push((i, ids));
+                    continue;
                 }
+                first
             }
             _ if !cx.entries.contains(&name) => continue,
             _ => {
@@ -446,14 +482,82 @@ pub(crate) fn load(cx: &LoadCtx, cfg: &mut Configuration) -> Result<()> {
                 continue;
             }
         };
-        match res {
-            Ok(r) => {
-                if let Some(o) = cfg.objects.get_mut(i) {
-                    o.parts.rights = Some(r);
+        store(cfg, i, res);
+    }
+    if pending.is_empty() {
+        return Ok(());
+    }
+    let removed = removed_objects(cx, cfg, &pending)?;
+    for (i, ids) in pending {
+        let Some(role) = cfg.objects.get(i) else {
+            continue;
+        };
+        let name = format!("{}.0", role.id);
+        let dangling: HashSet<Guid> = ids.into_iter().filter(|id| removed.contains(id)).collect();
+        let res = if dangling.is_empty() {
+            Err(Miss::Unresolved)
+        } else {
+            match fetch(cx, &name)?.as_deref() {
+                Some(EntryData::Brace(doc)) => {
+                    decode(cfg, &doc.root, cx.opts.keep_source, &dangling)
+                }
+                _ => {
+                    miss(cfg, &[NOT_BRACE]);
+                    continue;
                 }
             }
-            Err(m) => miss(cfg, &[&m.key()]),
-        }
+        };
+        store(cfg, i, res);
     }
     Ok(())
+}
+
+fn store(cfg: &mut Configuration, i: usize, res: Decoded<Rights>) {
+    match res {
+        Ok(r) => {
+            if let Some(o) = cfg.objects.get_mut(i) {
+                o.parts.rights = Some(r);
+            }
+        }
+        Err(m) => miss(cfg, &[&m.key()]),
+    }
+}
+
+fn removed_objects(
+    cx: &LoadCtx,
+    cfg: &Configuration,
+    pending: &[(usize, Vec<Guid>)],
+) -> Result<HashSet<Guid>> {
+    let mut ids: Vec<Guid> = Vec::new();
+    for id in pending.iter().flat_map(|(_, ids)| ids) {
+        if !ids.contains(id) {
+            ids.push(*id);
+        }
+    }
+    let rights_entries: HashSet<String> = cfg
+        .objects
+        .iter()
+        .filter(|o| o.kind == MdKind::Role)
+        .map(|o| format!("{}.0", o.id))
+        .collect();
+    let parents = cx.entries.raw(&format!("{}.4", cfg.header_id))?;
+    let vendor = VendorEntries::of(cfg.id, parents.as_deref().map(Vec::as_slice));
+    drop(parents);
+    let seen = mentioned_in(
+        cx.entries.list().iter().map(|m| m.name.as_str()),
+        |name| rights_entries.contains(name),
+        &vendor,
+        &ids,
+        |name| cx.entries.raw(name).map_err(scan_error),
+    )?;
+    Ok(ids.into_iter().filter(|id| !seen.contains(id)).collect())
+}
+
+fn scan_error(error: crate::Error) -> crate::Error {
+    match error {
+        crate::Error::Io(e) => {
+            crate::Error::Io(std::io::Error::new(e.kind(), format!("rights scan: {e}")))
+        }
+        other => other,
+    }
 }

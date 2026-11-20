@@ -71,10 +71,14 @@ pub(super) struct Src<R> {
     limits: Option<ReadLimits>,
     remaining_bytes: u64,
     remaining_nodes: u64,
+    discard_payload: bool,
 }
 
 impl<R: Read> Src<R> {
     pub(super) fn charge_payload(&mut self, n: u64) -> Result<(), ErrorKind> {
+        if self.discard_payload {
+            return Ok(());
+        }
         if let Some(limits) = self.limits {
             if n > limits.atom_bytes {
                 return Err(ErrorKind::Limit("atom bytes"));
@@ -177,9 +181,20 @@ pub struct Reader<R: Read> {
     comma: bool,
     prev_elem: bool,
     depth: usize,
+    depth_limit: usize,
     missing_commas: u64,
     peeked: Option<Option<Event>>,
     failed: Option<Error>,
+}
+
+struct DiscardGuard<'a, R: Read> {
+    reader: &'a mut Reader<R>,
+    previous: bool,
+}
+impl<R: Read> Drop for DiscardGuard<'_, R> {
+    fn drop(&mut self) {
+        self.reader.src.discard_payload = self.previous;
+    }
 }
 
 impl<R: Read> Reader<R> {
@@ -194,12 +209,14 @@ impl<R: Read> Reader<R> {
                 limits: None,
                 remaining_bytes: 0,
                 remaining_nodes: 0,
+                discard_payload: false,
             },
             pend: 0,
             tag_off: 0,
             comma: false,
             prev_elem: false,
             depth: 0,
+            depth_limit: MAX_DEPTH,
             missing_commas: 0,
             peeked: None,
             failed: None,
@@ -210,6 +227,17 @@ impl<R: Read> Reader<R> {
         self.src.limits = Some(limits);
         self.src.remaining_bytes = limits.retained_bytes;
         self.src.remaining_nodes = limits.nodes;
+    }
+
+    pub fn set_depth_limit(&mut self, limit: usize) -> Result<(), Error> {
+        if let Some(error) = &self.failed {
+            return Err(error.clone());
+        }
+        if limit > MAX_DEPTH || limit < self.depth {
+            return Err(self.fail(ErrorKind::Limit("depth policy")));
+        }
+        self.depth_limit = limit;
+        Ok(())
     }
 
     pub fn next_event(&mut self) -> Result<Option<Event>, Error> {
@@ -320,6 +348,15 @@ impl<R: Read> Reader<R> {
 
     pub fn skip_value(&mut self) -> Result<bool, Error> {
         self.guard(Self::skip_value_inner)
+    }
+
+    pub fn discard_value(&mut self) -> Result<bool, Error> {
+        let previous = std::mem::replace(&mut self.src.discard_payload, true);
+        let reset = DiscardGuard {
+            reader: self,
+            previous,
+        };
+        reset.reader.guard(Self::skip_value_inner)
     }
 
     fn skip_value_inner(&mut self) -> Result<bool, Error> {
@@ -458,7 +495,7 @@ impl<R: Read> Reader<R> {
                 continue;
             }
             if t & F_OPEN != 0 {
-                if self.depth >= MAX_DEPTH {
+                if self.depth >= self.depth_limit {
                     return Err(self.fail(ErrorKind::TooDeep));
                 }
                 self.src.charge_node().map_err(|kind| self.fail(kind))?;

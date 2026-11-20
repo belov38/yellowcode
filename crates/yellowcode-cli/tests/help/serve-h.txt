@@ -14,6 +14,8 @@ Options:
           Точная версия эмулируемой платформы (не режим совместимости конфигурации) [default: 8.5.1.1529]
       --cache-limit <CACHE_LIMIT>
           Предел кэша страниц; 0 отключает кэш
+      --progress <MODE>
+          Ход работы в stderr: auto — строка на терминале, always — строки для журнала, never — без него (по умолчанию переменная YELLOWCODE_PROGRESS, иначе auto) [possible values: auto, always, never]
       --query-memory-limit <QUERY_MEMORY_LIMIT>
           Предел памяти на компиляцию, выполнение, пакет и временные таблицы запроса
       --result-memory-limit <RESULT_MEMORY_LIMIT>
@@ -22,6 +24,8 @@ Options:
           Предел размера всего ответа, включая экранирование и схему
       --listen <LISTEN>
           Адрес HTTP (контроль доступа и TLS — на стороне инфраструктуры) [default: 127.0.0.1:8080]
+      --schema-notes
+          Все замечания о расхождении схемы базы с правилами вместо одной итоговой строки (stderr)
   -h, --help
           Print help
 

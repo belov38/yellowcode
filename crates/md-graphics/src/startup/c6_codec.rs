@@ -71,7 +71,14 @@ pub fn one_template<S: ManagedEntrySource + ?Sized>(
     let raw = entries.raw(name.as_str())?;
     let files = match (data.as_deref(), raw.as_deref()) {
         (Some(data), Some(raw)) => {
-            match templates::convert_with(index, data, raw, kind, allocation) {
+            match templates::convert_with(
+                index,
+                data,
+                raw,
+                kind,
+                allocation,
+                templates::mxlxml::RowCoverage::Stored,
+            ) {
                 Ok(files) => files,
                 Err(ReadError::Memory(error)) => return Err(error.into()),
                 Err(ReadError::Semantic { code, .. }) => {

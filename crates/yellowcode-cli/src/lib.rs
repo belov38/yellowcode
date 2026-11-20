@@ -21,6 +21,7 @@ mod export;
 mod grep;
 mod metadata;
 mod module;
+mod progress;
 mod query;
 mod remote;
 mod scope;
@@ -126,6 +127,15 @@ struct Cli {
         help = "Точная версия эмулируемой платформы (не режим совместимости конфигурации)"
     )]
     platform_build: String,
+    #[arg(
+        long,
+        global = true,
+        value_enum,
+        value_name = "MODE",
+        help = "Ход работы в stderr: auto — строка на терминале, always — строки для журнала, never — без него \
+                (по умолчанию переменная YELLOWCODE_PROGRESS, иначе auto)"
+    )]
+    progress: Option<progress::Mode>,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -240,7 +250,15 @@ pub fn run(
     tty: bool,
 ) -> i32 {
     use std::io::IsTerminal;
-    run_with_stdin_terminal(args, input, out, err, tty, std::io::stdin().is_terminal())
+    run_with_terminals(
+        args,
+        input,
+        out,
+        err,
+        tty,
+        std::io::stdin().is_terminal(),
+        std::io::stderr().is_terminal(),
+    )
 }
 
 pub fn run_with_stdin_terminal(
@@ -250,6 +268,18 @@ pub fn run_with_stdin_terminal(
     err: &mut dyn Write,
     tty: bool,
     stdin_terminal: bool,
+) -> i32 {
+    run_with_terminals(args, input, out, err, tty, stdin_terminal, false)
+}
+
+pub fn run_with_terminals(
+    args: impl IntoIterator<Item = OsString>,
+    input: &mut dyn Read,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+    tty: bool,
+    stdin_terminal: bool,
+    stderr_terminal: bool,
 ) -> i32 {
     let args: Vec<OsString> = args.into_iter().collect();
     let cli = match Cli::try_parse_from(&args) {
@@ -293,8 +323,36 @@ pub fn run_with_stdin_terminal(
         let _ = writeln!(err, "yellowcode: {error}");
         return 2;
     }
+    let progress_style = match progress::style(
+        cli.progress,
+        std::env::var_os(progress::ENV).as_deref(),
+        stderr_terminal,
+    ) {
+        Ok(style) => style,
+        Err(message) => {
+            let _ = writeln!(err, "yellowcode: {message}");
+            return 2;
+        }
+    };
+    let shows_progress = match &cli.command {
+        Some(
+            Command::Metadata(_)
+            | Command::Module(_)
+            | Command::Template(_)
+            | Command::Grep(_)
+            | Command::Export(_),
+        ) => true,
+        Some(Command::Convert(args)) => !args.restores(),
+        _ => false,
+    };
+    let reporter = progress_style
+        .filter(|_| shows_progress)
+        .and_then(|style| progress::Reporter::start(style, Box::new(std::io::stderr())));
+    let mut out = progress::StopOnWrite::new(out, reporter.as_ref(), tty);
+    let mut err = progress::ClearOnWrite::new(err, reporter.as_ref());
+    let err: &mut dyn Write = &mut err;
     let mut output = yellowcode_core::output::Out {
-        w: out,
+        w: &mut out,
         closed: false,
     };
     let report = match bak_report::begin(cli.command.as_ref()) {
@@ -332,6 +390,9 @@ pub fn run_with_stdin_terminal(
         Err(error) => Err(error.into()),
         Ok(()) => Ok(code),
     });
+    if let Some(reporter) = &reporter {
+        reporter.stop();
+    }
     match result {
         Ok(code) => {
             bak_report::end(report, code, None, err);
@@ -343,7 +404,9 @@ pub fn run_with_stdin_terminal(
         }
         Err(error) => {
             let _ = writeln!(err, "yellowcode: {error}");
-            let code = if let Some(interrupt) = yellowcode_core::plain::bak::interrupted(&error) {
+            let code = if let Some(interrupt) = yellowcode_core::plain::bak::interrupted(&error)
+                .or_else(|| yellowcode_core::plain::convert::interrupted(&error))
+            {
                 if let Ok(mut slot) = ENDED_BY.lock() {
                     *slot = Some(interrupt);
                 }

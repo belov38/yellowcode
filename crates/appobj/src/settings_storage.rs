@@ -96,6 +96,11 @@ fn key_of(row: &[FieldValue], at: usize) -> Result<String, HostError> {
 impl Storage {
     fn load(&self, ex: &mut Execution, args: &[Arg]) -> CallResult<Value> {
         admit_data_read(ex)?;
+        if !crate::session::call_ctx(ex).is_some_and(|c| c.sess.user().no_users) {
+            return Err(
+                HostError::not_implemented("P6", "application read security provider").into(),
+            );
+        }
         let object = match arg_value(ex, args, 0)? {
             Value::String(s) => Some(fold_name(&s.to_string_lossy())),
             Value::Number(n) => Some(fold_name(&n.to_string())),

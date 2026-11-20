@@ -133,12 +133,17 @@ pub struct CallTxn {
     id: Cell<u64>,
     last_id: Cell<u64>,
     rolled_back: RefCell<Vec<(u64, u64)>>,
+    clean_rollbacks: RefCell<Vec<(u64, u64)>>,
     writer: RefCell<Option<Box<dyn WriteTxn>>>,
     undo: RefCell<Vec<Box<dyn FnOnce()>>>,
     held: RefCell<Option<Held>>,
     control: Cell<Option<LockControl>>,
     refused_commit: RefCell<Option<String>>,
+    options_changed: Cell<bool>,
+    serial: Cell<u64>,
 }
+
+static SERIALS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 impl Drop for CallTxn {
     fn drop(&mut self) {
@@ -172,11 +177,16 @@ impl CallTxn {
         (self.depth.get() > 0).then(|| self.id.get())
     }
 
+    pub(crate) fn serial(&self) -> Option<u64> {
+        (self.depth.get() > 0).then(|| self.serial.get())
+    }
+
     pub fn was_rolled_back(&self, id: u64) -> bool {
-        self.rolled_back.try_borrow().is_ok_and(|ranges| {
-            let at = ranges.partition_point(|&(_, last)| last < id);
-            ranges.get(at).is_some_and(|&(first, _)| first <= id)
-        })
+        holds(&self.rolled_back, id)
+    }
+
+    pub fn was_rolled_back_clean(&self, id: u64) -> bool {
+        holds(&self.clean_rollbacks, id)
     }
 
     pub fn has_writer(&self) -> bool {
@@ -193,6 +203,11 @@ impl CallTxn {
             self.last_id.set(id);
             self.id.set(id);
             self.poisoned.set(false);
+            self.serial.set(
+                SERIALS
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                    .saturating_add(1),
+            );
         }
         self.depth.set(depth.saturating_add(1));
     }
@@ -244,7 +259,10 @@ impl CallTxn {
         let writer = self.take_writer()?;
         let id = self.id.get();
         let poisoned = self.poisoned.get();
-        let refused = self.refused_commit.borrow_mut().take();
+        let mut refused = self.refused_commit.borrow_mut().take();
+        if self.options_changed.get() && refused.is_none() {
+            refused = Some("версия функциональных опций не записана".into());
+        }
         self.reset();
         if poisoned {
             let wrote = writer.is_some();
@@ -286,6 +304,18 @@ impl CallTxn {
     }
 
     pub fn rollback(&self, env: &(impl TxnEnv + ?Sized)) -> Result<Rollback, TxnError> {
+        self.end_in_rollback(env, false)
+    }
+
+    pub fn rollback_by_script(&self, env: &(impl TxnEnv + ?Sized)) -> Result<Rollback, TxnError> {
+        self.end_in_rollback(env, true)
+    }
+
+    fn end_in_rollback(
+        &self,
+        env: &(impl TxnEnv + ?Sized),
+        script: bool,
+    ) -> Result<Rollback, TxnError> {
         let depth = self.depth.get();
         if depth == 0 {
             return Err(TxnError::NotActive);
@@ -297,8 +327,12 @@ impl CallTxn {
         }
         let writer = self.take_writer()?;
         let id = self.id.get();
+        let poisoned = self.poisoned.get();
         self.reset();
         self.mark_rolled_back(id);
+        if script && !poisoned {
+            mark(&self.clean_rollbacks, id);
+        }
         let wrote = writer.is_some();
         drop(writer);
         self.ended(true);
@@ -336,6 +370,20 @@ impl CallTxn {
         {
             *slot = Some(what);
         }
+    }
+
+    pub(crate) fn options_changed(&self) {
+        if self.depth.get() > 0 {
+            self.options_changed.set(true);
+        }
+    }
+
+    pub(crate) fn options_pending(&self) -> bool {
+        self.depth.get() > 0 && self.options_changed.get()
+    }
+
+    pub(crate) fn options_written(&self) {
+        self.options_changed.set(false);
     }
 
     pub fn check(&self) -> Result<(), TxnError> {
@@ -435,6 +483,8 @@ impl CallTxn {
         self.poisoned.set(false);
         self.id.set(0);
         self.control.set(None);
+        self.options_changed.set(false);
+        self.serial.set(0);
     }
 
     fn ended(&self, rolled_back: bool) {
@@ -466,17 +516,28 @@ impl CallTxn {
     }
 
     fn mark_rolled_back(&self, id: u64) {
-        if id == 0 {
-            return;
-        }
-        let Ok(mut ranges) = self.rolled_back.try_borrow_mut() else {
-            return;
-        };
-        match ranges.last_mut() {
-            Some((_, last)) if last.checked_add(1) == Some(id) => *last = id,
-            _ => ranges.push((id, id)),
-        }
+        mark(&self.rolled_back, id);
     }
+}
+
+fn mark(ranges: &RefCell<Vec<(u64, u64)>>, id: u64) {
+    if id == 0 {
+        return;
+    }
+    let Ok(mut ranges) = ranges.try_borrow_mut() else {
+        return;
+    };
+    match ranges.last_mut() {
+        Some((_, last)) if last.checked_add(1) == Some(id) => *last = id,
+        _ => ranges.push((id, id)),
+    }
+}
+
+fn holds(ranges: &RefCell<Vec<(u64, u64)>>, id: u64) -> bool {
+    ranges.try_borrow().is_ok_and(|ranges| {
+        let at = ranges.partition_point(|&(_, last)| last < id);
+        ranges.get(at).is_some_and(|&(first, _)| first <= id)
+    })
 }
 
 pub(crate) enum View<'a> {

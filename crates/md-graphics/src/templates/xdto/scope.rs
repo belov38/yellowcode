@@ -130,6 +130,9 @@ impl<'a, 'parent> Ctx<'a, 'parent> {
         })
     }
     fn need(&mut self, uri: &'a str, read: Read<'_>) -> R<Option<Prefix<'a>>> {
+        if uri == "http://www.w3.org/XML/1998/namespace" {
+            return Ok(Some(Prefix::Borrowed("xml")));
+        }
         if uri.is_empty() || self.scope.uri(None) == Some(uri) {
             return Ok(None);
         }
@@ -154,6 +157,17 @@ impl<'a, 'parent> Ctx<'a, 'parent> {
             prefix: self.need(uri, read)?,
             local,
         })
+    }
+    pub(in crate::templates) fn element(
+        &mut self,
+        uri: &'a str,
+        local: &'a str,
+        read: Read<'_>,
+    ) -> R<QName<'a>> {
+        if uri.is_empty() && self.scope.uri(None).is_some_and(|uri| !uri.is_empty()) {
+            self.scope.declare(None, "")?;
+        }
+        self.qname(uri, local, read)
     }
     pub(in crate::templates) fn attribute(
         &mut self,

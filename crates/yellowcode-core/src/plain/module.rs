@@ -1,7 +1,7 @@
 use std::io::Write;
 use std::path::PathBuf;
 
-use mdconf::{Configuration, LoadOptions};
+use mdconf::Configuration;
 use serde_json::json;
 
 use super::metadata::Format;
@@ -282,7 +282,12 @@ pub fn run_with_memory_limit(
 ) -> crate::Result<()> {
     let memory = source::OpenMemory::resolve(limit)?;
     let open = |path: &PathBuf| {
-        source::open_with_memory(path, &LoadOptions::default(), &memory, &mut |_| Ok(()))
+        source::open_with_memory(
+            path,
+            &super::load_options(super::Reads::Modules),
+            &memory,
+            &mut |_| Ok(()),
+        )
     };
     match command {
         Command::List {
@@ -296,11 +301,37 @@ pub fn run_with_memory_limit(
             selection,
             numbers,
             format,
-        } => show_module(&open(&source)?, &module, &selection, numbers, format, out),
+        } => show_module(
+            &open_module(&source, &module, &memory)?,
+            &module,
+            &selection,
+            numbers,
+            format,
+            out,
+        ),
         Command::Outline {
             source,
             module,
             format,
-        } => outline_module(&open(&source)?, &module, format, out),
+        } => outline_module(
+            &open_module(&source, &module, &memory)?,
+            &module,
+            format,
+            out,
+        ),
     }
+}
+
+fn open_module(
+    source: &std::path::Path,
+    module: &str,
+    memory: &source::OpenMemory,
+) -> crate::Result<Configuration> {
+    super::load_objects(
+        &[module],
+        false,
+        &super::load_options(super::Reads::Modules),
+        &|cfg| resolve_module(cfg, module).is_ok(),
+        &mut |options| source::open_with_memory(source, options, memory, &mut |_| Ok(())),
+    )
 }

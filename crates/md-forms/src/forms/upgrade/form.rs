@@ -48,6 +48,23 @@ const TAIL: [(i64, bool); 36] = [
     (58, false),
 ];
 
+pub(crate) fn validate_tail(v: i64, mut tail: &[Node]) -> Result<(), Refusal> {
+    for (cond, flag_object) in TAIL {
+        if v <= cond {
+            continue;
+        }
+        let (node, rest) = tail.split_first().ok_or(Refusal::FormTail)?;
+        tail = rest;
+        if flag_object && node.as_bool().ok_or(Refusal::FormTail)? {
+            tail = tail.get(1..).ok_or(Refusal::FormTail)?;
+        }
+    }
+    if !tail.is_empty() {
+        return Err(Refusal::FormTail);
+    }
+    Ok(())
+}
+
 fn parse_tail(v: i64, tail: &[Node]) -> Result<Vec<Option<Slot>>, Refusal> {
     let mut i = 0;
     let mut out = Vec::with_capacity(36);
@@ -76,6 +93,17 @@ fn parse_tail(v: i64, tail: &[Node]) -> Result<Vec<Option<Slot>>, Refusal> {
         return Err(Refusal::FormTail);
     }
     Ok(out)
+}
+
+pub(crate) fn xml_tail(tail: &[Node]) -> Result<Vec<Node>, Refusal> {
+    parse_tail(59, tail)?
+        .into_iter()
+        .map(|slot| match slot {
+            Some(Slot::One(value)) => Ok(value),
+            Some(Slot::FlagObj(_)) => Ok(Node::int(0)),
+            None => Err(Refusal::FormTail),
+        })
+        .collect()
 }
 
 fn one(slots: &[Option<Slot>], t: usize) -> Result<Node, Refusal> {

@@ -155,8 +155,9 @@ impl<S: ManagedEntrySource> ManagedViewerOpen<S> {
             )?;
         }
         drop(entries);
+        let mut checked = std::collections::HashMap::new();
         for row in objects.iter().filter(|row| row.parent.is_none()) {
-            if let Some(selected) = context.read_rights(row.object.id)? {
+            if let Some(selected) = context.read_rights_checked(row.object.id, &mut checked)? {
                 record(
                     &mut receipts,
                     &mut diagnostics,

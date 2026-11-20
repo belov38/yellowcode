@@ -1,5 +1,6 @@
 mod codecs_a;
 mod codecs_b;
+mod command_policy;
 mod ctx;
 pub(crate) use ctx::SET_CATEGORIES;
 pub(crate) mod decode;
@@ -20,6 +21,7 @@ pub(crate) mod variant;
 mod visible;
 pub mod wire;
 mod write;
+pub mod xml_build;
 mod xmlconv;
 
 use std::sync::Arc;
@@ -178,7 +180,7 @@ pub fn form_xml_resolved(
     let d = decode::decode_form(root)?;
     let mut stats = upgrade::Stats::default();
     let entry = upgrade::writer_set::for_writer(&d, &mut stats).ok()?;
-    write::form_to_xml(cfg, shared, &entry, owner)
+    write::form_to_xml_from_source(cfg, shared, &entry, owner, d.layout.serialization)
 }
 
 pub fn form_refusal(cfg: &Configuration, id: Guid) -> Option<String> {
@@ -397,26 +399,58 @@ impl FormMisses {
 pub fn load(cx: &LoadCtx, cfg: &mut Configuration) -> Result<()> {
     let shared = Arc::new(shared::build(cx, cfg)?);
     let mut misses = FormMisses::default();
-    let mut stack: Vec<&mut MdObject> = cfg.objects.iter_mut().collect();
-    while let Some(o) = stack.pop() {
-        if o.kind == MdKind::CommonForm {
-            o.form = load_form(cx, o.id, &shared, &mut misses);
-        }
-        for f in &mut o.forms {
-            if f.kind == SubKind::Form {
-                f.form = load_form(cx, f.id, &shared, &mut misses);
+    memory_budget::profile::progress_total(cfg.objects.len());
+    for top in cfg.objects.iter_mut().rev() {
+        let mut stack: Vec<&mut MdObject> = vec![top];
+        while let Some(o) = stack.pop() {
+            if o.kind == MdKind::CommonForm {
+                o.form = load_form(cx, o.id, &shared, &mut misses);
             }
+            for f in &mut o.forms {
+                if f.kind == SubKind::Form {
+                    f.form = load_form(cx, f.id, &shared, &mut misses);
+                }
+            }
+            for e in &mut o.external {
+                load_external(cx, e, &shared, &mut misses);
+            }
+            stack.extend(o.subsystems.iter_mut());
         }
-        for e in &mut o.external {
-            load_external(cx, e, &shared, &mut misses);
-        }
-        stack.extend(o.subsystems.iter_mut());
+        memory_budget::profile::progress_step();
     }
     for (key, count) in misses.0 {
         let n = cfg.diagnostics.misses.entry(key).or_insert(0);
         *n = n.saturating_add(count);
     }
     Ok(())
+}
+
+impl FormResolution for md_model::external::ExternalDocument {
+    fn predefined_name(&self, _id: &brace::Guid) -> Option<&str> {
+        None
+    }
+}
+
+#[doc(hidden)]
+pub fn read_external(context: &LoadCtx<'_>, id: Guid, shared: &Arc<Shared>) -> Result<Form> {
+    let mut misses = FormMisses::default();
+    let form = load_form(context, id, shared, &mut misses);
+    context.entries.check_refused()?;
+    let form = form.ok_or_else(|| crate::Error::Format {
+        entry: format!("{id}.0"),
+        what: format!("unsupported or malformed managed form: {:?}", misses.0),
+    })?;
+    if misses
+        .0
+        .keys()
+        .any(|key| key.starts_with("form:untranslatable:"))
+    {
+        return Err(crate::Error::Format {
+            entry: format!("{id}.0"),
+            what: format!("form conversion refused: {:?}", misses.0),
+        });
+    }
+    Ok(form)
 }
 
 pub(crate) mod tables;

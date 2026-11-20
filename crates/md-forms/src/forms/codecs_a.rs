@@ -42,7 +42,12 @@ pub(crate) fn category(tname: Option<&str>) -> String {
         None | Some("") => "none".to_string(),
         Some(t) => {
             let t = t.split_once(':').map_or(t, |(_, r)| r);
-            t.split('.').next().unwrap_or(t).to_string()
+            match t.split('.').next().unwrap_or(t) {
+                "ExternalDataProcessorObject" => "DataProcessorObject",
+                "ExternalReportObject" => "ReportObject",
+                category => category,
+            }
+            .to_string()
         }
     }
 }
@@ -403,11 +408,18 @@ pub(crate) fn c_row_filter(
     src: &Src<'_>,
     _ent: Option<PropRef<'_>>,
 ) -> Option<Emit> {
-    if fc.shared.compat() != mdschema::forms::FormCompat::V8_5_1 || src.bag("13").is_some() {
+    if src.bag("13").is_some() {
         return None;
     }
     let item = src.item()?;
-    if table_cat(fc, item) != "ValueTable" {
+    let category = table_cat(fc, item);
+    let external = matches!(
+        fc.info.owner_kind,
+        Some("ExternalDataProcessor" | "ExternalReport")
+    );
+    if !(fc.shared.compat() == mdschema::forms::FormCompat::V8_5_1 && category == "ValueTable"
+        || external && category == "TabularSection")
+    {
         return None;
     }
     Some(Emit::El(E::new(
@@ -661,7 +673,18 @@ pub(crate) fn command_ref(fc: &mut FormCtx<'_>, v: &Node) -> Py<Option<String>> 
     }
     if k == "0" {
         let key = format!("{}|{g}", fc.form_cat);
-        return Ok(std_cmd(fc.tables(), &key)?.map(|nm| format!("Form.StandardCommand.{nm}")));
+        let external = super::write::fc_external_owner(fc.info.owner);
+        let known = std_cmd(fc.tables(), &key)?
+            .filter(|name| {
+                !external
+                    || !matches!(*name, "SaveValues" | "RestoreValues")
+                    || fc.info.form.head().get(5).and_then(Node::as_i64) == Some(1)
+            })
+            .map(|nm| format!("Form.StandardCommand.{nm}"));
+        let literal = fc.info.owner.is_some_and(|o| {
+            o.starts_with("ExternalDataProcessor.") || o.starts_with("ExternalReport.")
+        }) && brace::Guid::parse(&g).is_some();
+        return Ok(known.or_else(|| literal.then(|| format!("0:{g}"))));
     }
     let Some(it) = item_by_id(fc, &k) else {
         return Ok(None);
@@ -751,6 +774,71 @@ pub(crate) fn cmdset_el(tables: TableView<'_>, prop: &str, v: &Node, cat: &str) 
     ))
 }
 
+fn external_cmdset(
+    tables: TableView<'_>,
+    prop: &str,
+    value: &Node,
+    category: &str,
+    omit: impl Fn(&str) -> Py<bool>,
+    unavailable: impl Fn(&str, &str) -> Py<bool>,
+) -> Py<Emit> {
+    let values = value.as_list().ok_or(Raised)?;
+    let count = values
+        .first()
+        .and_then(Node::as_i64)
+        .and_then(|count| usize::try_from(count).ok())
+        .ok_or(Raised)?;
+    if count.checked_add(1) != Some(values.len()) {
+        return Err(Raised);
+    }
+    let mut names = Vec::new();
+    for value in values.iter().skip(1) {
+        let id = value.text().ok_or(Raised)?;
+        if omit(id)? {
+            continue;
+        }
+        let name = std_cmd(tables, &format!("{category}|{id}"))?.ok_or(Raised)?;
+        if unavailable(id, name)? {
+            continue;
+        }
+        names.push(name);
+    }
+    if names.is_empty() {
+        return Ok(Emit::Absent);
+    }
+    names.sort_unstable();
+    Ok(parent(
+        prop,
+        names
+            .into_iter()
+            .map(|name| E::leaf("ExcludedCommand", name))
+            .collect(),
+    ))
+}
+
+pub(crate) fn c_search_control_width(
+    fc: &mut FormCtx<'_>,
+    _ctx: &str,
+    prop: &str,
+    src: &Src<'_>,
+    ent: Option<PropRef<'_>>,
+) -> Option<Emit> {
+    if !super::write::fc_external_owner(fc.info.owner) {
+        return None;
+    }
+    let path = ent?.raw.get("external_width_path")?;
+    let result = (|| {
+        let path = json_segs(path.as_array().ok_or(Raised)?);
+        let value = value_at(src, &path)?.ok_or(Raised)?;
+        match value.as_i64() {
+            Some(1) => Ok(Emit::Absent),
+            Some(0) => Ok(leaf(prop, "false")),
+            _ => Err(Raised),
+        }
+    })();
+    checked(fc, result)
+}
+
 pub(crate) fn c_cmdset(
     fc: &mut FormCtx<'_>,
     ctx: &str,
@@ -766,6 +854,22 @@ fn cmdset(fc: &mut FormCtx<'_>, ctx: &str, prop: &str, src: &Src<'_>) -> Py<Emit
     let tables = fc.tables();
     if ctx == "Form" {
         let v = src.form().ok_or(Raised)?.command_set().ok_or(Raised)?;
+        if super::write::fc_external_owner(fc.info.owner) {
+            let policy = super::command_policy::for_form(
+                fc.info.form,
+                fc.source_serialization,
+                &fc.form_cat,
+            )
+            .map_err(|_| Raised)?;
+            return external_cmdset(
+                tables,
+                prop,
+                v,
+                &fc.form_cat,
+                |id| policy.omits(id).map_err(|_| Raised),
+                |id, name| policy.unavailable(id, name).map_err(|_| Raised),
+            );
+        }
         return cmdset_el(tables, prop, v, &fc.form_cat);
     }
     match src.cls()? {
@@ -776,7 +880,35 @@ fn cmdset(fc: &mut FormCtx<'_>, ctx: &str, prop: &str, src: &Src<'_>) -> Py<Emit
             if fc.raised() {
                 return Err(Raised);
             }
-            cmdset_el(tables, prop, v, &format!("T:{cat}"))
+            let category = format!("T:{cat}");
+            if super::write::fc_external_owner(fc.info.owner) {
+                let policy =
+                    super::command_policy::for_table(item, &category, None).map_err(|_| Raised)?;
+                external_cmdset(
+                    tables,
+                    prop,
+                    v,
+                    &category,
+                    |id| {
+                        policy
+                            .as_ref()
+                            .map(|p| p.omits(id))
+                            .transpose()
+                            .map_err(|_| Raised)
+                            .map(|value| value.unwrap_or(false))
+                    },
+                    |id, name| {
+                        policy
+                            .as_ref()
+                            .map(|p| p.unavailable(id, name))
+                            .transpose()
+                            .map_err(|_| Raised)
+                            .map(|value| value.unwrap_or(false))
+                    },
+                )
+            } else {
+                cmdset_el(tables, prop, v, &category)
+            }
         }
         "Field" => {
             let v = src.body()?.get(48).ok_or(Raised)?;
@@ -789,6 +921,26 @@ fn cmdset(fc: &mut FormCtx<'_>, ctx: &str, prop: &str, src: &Src<'_>) -> Py<Emit
         }
         _ => Ok(Emit::Cannot),
     }
+}
+
+pub(crate) fn c_warning_on_edit(
+    fc: &mut FormCtx<'_>,
+    _ctx: &str,
+    prop: &str,
+    src: &Src<'_>,
+    _entry: Option<PropRef<'_>>,
+) -> Option<Emit> {
+    if !super::write::fc_external_owner(fc.info.owner) {
+        return None;
+    }
+    let Src::Item { item, .. } = src else {
+        return None;
+    };
+    if item.class != Some("Field") {
+        return None;
+    }
+    let value = item.body.get(17)?.as_i64()?;
+    (value == 1).then(|| leaf(prop, "DontShow"))
 }
 
 pub(crate) fn c_mobile_cmdbar(

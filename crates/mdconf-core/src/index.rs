@@ -18,6 +18,10 @@ pub const MAX_EXTERNAL_DEPTH: usize = 2;
 pub(crate) use md_model::index::{Index, TypeOwner};
 
 pub fn build(e: &Entries, s: &'static Schema) -> Result<Index> {
+    build_kinds(e, s, None)
+}
+
+pub fn build_kinds(e: &Entries, s: &'static Schema, kinds: Option<&[MdKind]>) -> Result<Index> {
     let mut ix = Index {
         cfg_id: root_uuid(e)?,
         ..Default::default()
@@ -33,7 +37,9 @@ pub fn build(e: &Entries, s: &'static Schema) -> Result<Index> {
             what: "no configuration header uuid".into(),
         })?;
     for (kind, uuids) in class_lists(cfg_tree, s) {
-        index_kind(&mut ix, e, s, kind, &uuids);
+        if kinds.is_none_or(|kinds| kinds.contains(&kind)) {
+            index_kind(&mut ix, e, s, kind, &uuids);
+        }
     }
     Ok(ix)
 }
@@ -253,7 +259,7 @@ fn index_recalcs(ix: &mut Index, e: &Entries, reg: &Node, owner: Guid, full: &st
     }
 }
 
-fn index_children(
+pub(crate) fn index_children(
     ix: &mut Index,
     node: &Node,
     children: &[(String, ChildSpec)],
@@ -419,7 +425,7 @@ fn index_subobjects(
     }
 }
 
-fn brace_entry(e: &Entries, name: &str) -> Result<Arc<EntryData>> {
+pub(crate) fn brace_entry(e: &Entries, name: &str) -> Result<Arc<EntryData>> {
     e.doc(name)?.ok_or_else(|| {
         if e.contains(name) {
             Error::Format {
@@ -432,21 +438,21 @@ fn brace_entry(e: &Entries, name: &str) -> Result<Arc<EntryData>> {
     })
 }
 
-fn doc_tree(d: &EntryData) -> Option<&Node> {
+pub(crate) fn doc_tree(d: &EntryData) -> Option<&Node> {
     match d {
         EntryData::Brace(doc) => Some(&doc.root),
         _ => None,
     }
 }
 
-fn tree<'a>(d: &'a EntryData, entry: &str) -> Result<&'a Node> {
+pub(crate) fn tree<'a>(d: &'a EntryData, entry: &str) -> Result<&'a Node> {
     doc_tree(d).ok_or_else(|| Error::Format {
         entry: entry.into(),
         what: "not a brace document".into(),
     })
 }
 
-fn name_at(t: &Node, header: &[usize]) -> String {
+pub(crate) fn name_at(t: &Node, header: &[usize]) -> String {
     let mut p = header.to_vec();
     p.push(2);
     t.get(&p)
@@ -455,7 +461,7 @@ fn name_at(t: &Node, header: &[usize]) -> String {
         .to_string()
 }
 
-fn class_lists(cfg: &Node, s: &Schema) -> Vec<(MdKind, Vec<Guid>)> {
+pub(crate) fn class_lists(cfg: &Node, s: &Schema) -> Vec<(MdKind, Vec<Guid>)> {
     let mut found = Vec::new();
     let mut stack = vec![cfg];
     while let Some(n) = stack.pop() {

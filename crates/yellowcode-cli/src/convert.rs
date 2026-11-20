@@ -3,16 +3,24 @@ use yellowcode_core::plain::convert::{self, Format, Layout, Request};
 
 #[derive(clap::Args)]
 #[command(after_help = "\
-Поддерживаемые преобразования: DT -> CF, 1CD -> CF, 1CD -> DT, DT -> 1CD.
+Поддерживаемые преобразования: EPF/ERF -> XML, XML -> EPF/ERF, DT -> CF, 1CD -> CF, 1CD -> DT, DT -> 1CD.
 
-Результат — всегда новый файл: существующий файл и существующая база не заменяются. Для DT -> 1CD каталог новой базы \
-создайте заранее.
+Результат — новый файл либо новый каталог XML: существующие файлы и каталоги не заменяются. Для DT -> 1CD каталог новой базы \
+создайте заранее. Для EPF/ERF -> XML укажите путь к ещё не существующему каталогу. Сборка XML не требует исходного бинарника или 1С; \
+вид EPF/ERF должен соответствовать корню XML.
 
-Память (--memory-limit, только для преобразований из DT): загрузка DT в 1CD открывает получившуюся базу для проверки \
+Память (--memory-limit, для DT и EPF/ERF <-> XML): загрузка DT в 1CD открывает получившуюся базу для проверки \
 под тем же бюджетом, и проверочному открытию базам уровня УНФ нужно около 1792 МиБ, уровня ERP около 3 ГиБ. Это нижняя \
 граница, а не память всей загрузки. Если памяти не хватает, команда отказывает с MEMORY_LIMIT: поднимите --memory-limit.
 
 Примеры:
+  # Выгрузить внешнюю обработку или отчёт вместе с формами и макетами
+  yellowcode convert processing.epf --to xml --output new-xml
+
+  # Собрать внешнюю обработку или отчёт из XML
+  yellowcode convert new-xml/Processing.xml --to epf --output new-processing.epf
+  yellowcode convert Report.xml --to erf --output new-report.erf
+
   # Сохранить конфигурацию из DT в CF
   yellowcode convert backup.dt --to cf --output configuration.cf
 
@@ -29,14 +37,14 @@ use yellowcode_core::plain::convert::{self, Format, Layout, Request};
   yellowcode convert backup.dt --to 1cd --output new-base/1Cv8.1CD --without-users")]
 pub(crate) struct Args {
     #[arg(
-        help = "Исходный файл: CF, DT, файл 1Cv8.1CD или каталог базы; формат определяется по содержимому"
+        help = "Исходный файл: EPF, ERF, корневой XML, CF, DT, файл 1Cv8.1CD или каталог базы; формат определяется по содержимому"
     )]
     source: PathBuf,
     #[arg(long, value_enum, help = "Формат результата")]
     to: Format,
     #[arg(
         long,
-        help = "Путь к новому файлу; его каталог должен существовать, существующий файл не перезаписывается"
+        help = "Путь к новому файлу или новому каталогу XML; родительский каталог должен существовать, результат не перезаписывается"
     )]
     output: PathBuf,
     #[arg(
@@ -50,7 +58,7 @@ pub(crate) struct Args {
     #[arg(
         long,
         allow_hyphen_values = true,
-        help = "Бюджет памяти для преобразования с DT: auto или целое число байт с суффиксом B/KiB/MiB/GiB \
+        help = "Бюджет памяти для DT и EPF/ERF <-> XML: auto или целое число байт с суффиксом B/KiB/MiB/GiB \
                 (как у query и serve; переменная YELLOWCODE_MEMORY_LIMIT)"
     )]
     memory_limit: Option<String>,
@@ -60,6 +68,12 @@ pub(crate) struct Args {
                 Такая база открывается без входа, с полными правами"
     )]
     without_users: bool,
+}
+
+impl Args {
+    pub(crate) fn restores(&self) -> bool {
+        matches!(self.to, Format::Infobase)
+    }
 }
 
 impl From<Args> for Request {

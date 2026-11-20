@@ -206,6 +206,15 @@ pub fn dbschema_text_in_budgeted(
     budget: &MemoryBudget,
     limit: u64,
 ) -> Result<Charged<Vec<u8>>> {
+    dbschema_text_in_budgeted_checked(txn, budget, limit, &|| Ok(()))
+}
+
+pub(crate) fn dbschema_text_in_budgeted_checked(
+    txn: &ReadTxn,
+    budget: &MemoryBudget,
+    limit: u64,
+    before_slot: &dyn Fn() -> Result<()>,
+) -> Result<Charged<Vec<u8>>> {
     check_ledger(txn, budget)?;
     let table = txn
         .find_table("DBSCHEMA")?
@@ -213,6 +222,7 @@ pub fn dbschema_text_in_budgeted(
     let data_column = column(&table, "SERIALIZEDDATA")?;
     let mut only = None;
     for slot in 1..table.num_slots() {
+        before_slot()?;
         if let Some(row) = table.get_managed(slot, budget, Category::Metadata, limit)? {
             if only.is_some() {
                 return Err(bad("DBSCHEMA has more than one row"));
@@ -228,39 +238,73 @@ pub fn dbschema_text_in_budgeted(
     Ok(output.into_charged_vec())
 }
 
-pub fn schema_storage_current_in_budgeted(
+pub(crate) fn schema_storage_main_in_budgeted(
+    txn: &ReadTxn,
+    budget: &MemoryBudget,
+    limit: u64,
+) -> Result<Option<(Charged<Vec<u8>>, bool)>> {
+    schema_storage_main_in_budgeted_checked(txn, budget, limit, &|| Ok(()))
+}
+
+pub(crate) fn schema_storage_main_in_budgeted_checked(
+    txn: &ReadTxn,
+    budget: &MemoryBudget,
+    limit: u64,
+    before_slot: &dyn Fn() -> Result<()>,
+) -> Result<Option<(Charged<Vec<u8>>, bool)>> {
+    let Some((main, extension)) = storage_value_in_budgeted(txn, budget, limit, before_slot, 0)?
+    else {
+        return Ok(None);
+    };
+    let main = main.ok_or_else(|| bad("SCHEMASTORAGE: missing main SCHEMAID0"))?;
+    Ok(Some((main, extension)))
+}
+
+pub(crate) fn schema_storage_extension_in_budgeted(
     txn: &ReadTxn,
     budget: &MemoryBudget,
     limit: u64,
 ) -> Result<Option<Charged<Vec<u8>>>> {
+    Ok(storage_value_in_budgeted(txn, budget, limit, &|| Ok(()), 1)?.and_then(|(value, _)| value))
+}
+
+type StorageValue = (Option<Charged<Vec<u8>>>, bool);
+
+fn storage_value_in_budgeted(
+    txn: &ReadTxn,
+    budget: &MemoryBudget,
+    limit: u64,
+    before_slot: &dyn Fn() -> Result<()>,
+    want: u32,
+) -> Result<Option<StorageValue>> {
     check_ledger(txn, budget)?;
     let Some(table) = txn.find_table("SCHEMASTORAGE")? else {
         return Ok(None);
     };
-    let id_column = column(&table, "SCHEMAID")?;
-    let status_column = column(&table, "STATUS")?;
-    let data_column = column(&table, "CURRENTSCHEMA")?;
-    let mut only = None;
+    let columns = super::StorageColumns::new(table.descr())?;
+    let mut shape = super::StorageRows::default();
+    let mut wanted = None;
     for slot in 1..table.num_slots() {
+        before_slot()?;
         if let Some(row) = table.get_managed(slot, budget, Category::Metadata, limit)? {
-            if only.is_some() {
-                return Err(bad("SCHEMASTORAGE: more than one row"));
+            if !shape.admit() {
+                break;
             }
-            only = Some(row);
+            let id = shape.observe(&columns, &row, limit)?;
+            if id == want && wanted.is_none() {
+                wanted = Some(row);
+            }
         }
     }
-    let row = only.ok_or_else(|| bad("SCHEMASTORAGE: no rows, expected one"))?;
-    for column in [id_column, status_column] {
-        let number =
-            partno(row.get(column)).map_err(|_| bad("SCHEMASTORAGE: bad SCHEMAID or STATUS"))?;
-        u32::try_from(number).map_err(|_| bad("SCHEMASTORAGE: SCHEMAID or STATUS is too large"))?;
-    }
-    let total = schema_data_len(row.get(data_column))
-        .map_err(|_| bad("SCHEMASTORAGE: CURRENTSCHEMA is not an image or text value"))?;
+    let extension = shape.finish(&columns)?;
+    let Some(row) = wanted else {
+        return Ok(Some((None, extension)));
+    };
+    let total = super::storage_len(row.get(columns.current), "CURRENTSCHEMA", limit)?;
     value_limit(total, limit)?;
     let mut output = BudgetedVec::try_with_capacity(budget, Category::Metadata, total)?;
-    append(&table, row.get(data_column), &mut output, budget, limit)?;
-    Ok(Some(output.into_charged_vec()))
+    append(&table, row.get(columns.current), &mut output, budget, limit)?;
+    Ok(Some((Some(output.into_charged_vec()), extension)))
 }
 
 pub fn has_rows_in_budgeted(txn: &ReadTxn, table: &str, budget: &MemoryBudget) -> Result<bool> {

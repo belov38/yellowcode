@@ -1,7 +1,7 @@
 pub(crate) mod canon;
 mod created;
 mod fields;
-mod form;
+pub(crate) mod form;
 mod groups;
 mod items;
 mod records;

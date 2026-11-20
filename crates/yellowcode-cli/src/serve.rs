@@ -34,6 +34,11 @@ pub(crate) struct Args {
         help = "Адрес HTTP (контроль доступа и TLS — на стороне инфраструктуры)"
     )]
     listen: SocketAddr,
+    #[arg(
+        long,
+        help = "Все замечания о расхождении схемы базы с правилами вместо одной итоговой строки (stderr)"
+    )]
+    schema_notes: bool,
 }
 
 pub(crate) fn run(
@@ -47,6 +52,7 @@ pub(crate) fn run(
             memory: args.memory,
             base: args.base,
             listen: args.listen,
+            schema_notes: args.schema_notes,
         },
         err,
     )

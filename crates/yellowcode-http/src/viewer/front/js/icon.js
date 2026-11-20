@@ -26,6 +26,11 @@ const KINDS_RU = {
 };
 const QUERY_TABLES = { Константы: "Constant", Constants: "Constant" };
 const KINDS_EN = new Set(Object.values(KINDS_RU));
+const RUSSIAN_KIND = new Map(Object.entries(KINDS_RU).map(([ru, en]) => [en, ru]));
+
+export function localizedKind(kind, lang) {
+  return lang === "ru" ? RUSSIAN_KIND.get(kind) ?? kind : kind;
+}
 
 export function kindIconKey(kind) {
   const en = KINDS_RU[kind] || QUERY_TABLES[kind] || kind;

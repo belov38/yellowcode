@@ -2,14 +2,18 @@ use std::cell::RefCell;
 use std::io::{self, Write};
 use std::marker::PhantomData;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
 pub enum Phase {
     Startup,
+    InfobaseOpen,
+    ConfigRead,
+    CfOpen,
     DtExtract,
     SpoolIndex,
     Inventory,
@@ -34,11 +38,53 @@ pub enum Phase {
     Validation,
     Ranges,
     Drop,
+    DtTables,
 }
 impl Phase {
-    fn name(self) -> &'static str {
+    const ALL: [Phase; 29] = [
+        Self::Startup,
+        Self::InfobaseOpen,
+        Self::ConfigRead,
+        Self::CfOpen,
+        Self::DtExtract,
+        Self::SpoolIndex,
+        Self::Inventory,
+        Self::Index,
+        Self::Predefined,
+        Self::Settings,
+        Self::Shells,
+        Self::Objects,
+        Self::Modules,
+        Self::Forms,
+        Self::Parts,
+        Self::Rights,
+        Self::PredefinedData,
+        Self::ConfigurationParts,
+        Self::MiscParts,
+        Self::Templates,
+        Self::Flowcharts,
+        Self::EntriesDrop,
+        Self::Metadata,
+        Self::Tree,
+        Self::Statistics,
+        Self::Validation,
+        Self::Ranges,
+        Self::Drop,
+        Self::DtTables,
+    ];
+    fn from_index(index: u8) -> Phase {
+        Self::ALL
+            .get(usize::from(index))
+            .copied()
+            .unwrap_or(Self::Startup)
+    }
+    pub fn name(self) -> &'static str {
         match self {
             Self::Startup => "startup",
+            Self::InfobaseOpen => "infobase-open",
+            Self::ConfigRead => "config-read",
+            Self::CfOpen => "cf-open",
+            Self::DtTables => "dt-tables",
             Self::DtExtract => "dt-extract",
             Self::SpoolIndex => "spool-index",
             Self::Inventory => "inventory",
@@ -209,14 +255,45 @@ static ACTIVE: AtomicBool = AtomicBool::new(false);
 static FOREIGN: AtomicU64 = AtomicU64::new(0);
 thread_local! { static OWNER: RefCell<Option<Arc<Shared>>> = const { RefCell::new(None) }; }
 
+static WATCH: AtomicU8 = AtomicU8::new(0);
+const SESSION: u8 = 1;
+const PROGRESS: u8 = 2;
+static CURRENT: AtomicU8 = AtomicU8::new(Phase::Startup as u8);
+static TRANSITIONS: AtomicU64 = AtomicU64::new(0);
+static ITEMS_DONE: AtomicU64 = AtomicU64::new(0);
+static ITEMS_TOTAL: AtomicU64 = AtomicU64::new(0);
+
+fn progress_enter(next: Phase) -> Phase {
+    ITEMS_TOTAL.store(0, Ordering::Relaxed);
+    ITEMS_DONE.store(0, Ordering::Relaxed);
+    let previous = CURRENT.swap(next as u8, Ordering::Relaxed);
+    TRANSITIONS.fetch_add(1, Ordering::Release);
+    Phase::from_index(previous)
+}
+
 #[must_use]
 pub struct PhaseGuard {
     owner: Option<Arc<Shared>>,
     previous: Phase,
+    progress: Option<Phase>,
     _thread: PhantomData<Rc<()>>,
 }
 pub fn phase(next: Phase) -> PhaseGuard {
-    let owner = OWNER.with(|owner| owner.borrow().clone());
+    let watch = WATCH.load(Ordering::Acquire);
+    if watch == 0 {
+        return PhaseGuard {
+            owner: None,
+            previous: Phase::Startup,
+            progress: None,
+            _thread: PhantomData,
+        };
+    }
+    let progress = (watch & PROGRESS != 0).then(|| progress_enter(next));
+    let owner = if watch & SESSION != 0 {
+        OWNER.with(|owner| owner.borrow().clone())
+    } else {
+        None
+    };
     let previous = if let Some(owner) = &owner {
         owner
             .state
@@ -232,11 +309,17 @@ pub fn phase(next: Phase) -> PhaseGuard {
     PhaseGuard {
         owner,
         previous,
+        progress,
         _thread: PhantomData,
     }
 }
 impl Drop for PhaseGuard {
     fn drop(&mut self) {
+        if let Some(previous) = self.progress
+            && WATCH.load(Ordering::Acquire) & PROGRESS != 0
+        {
+            progress_enter(previous);
+        }
         if let Some(owner) = &self.owner {
             owner
                 .state
@@ -244,6 +327,60 @@ impl Drop for PhaseGuard {
                 .unwrap_or_else(|e| e.into_inner())
                 .transition(self.previous);
         }
+    }
+}
+
+pub fn progress_total(total: usize) {
+    if WATCH.load(Ordering::Relaxed) & PROGRESS != 0 {
+        ITEMS_DONE.store(0, Ordering::Relaxed);
+        ITEMS_TOTAL.store(u64::try_from(total).unwrap_or(u64::MAX), Ordering::Relaxed);
+    }
+}
+
+pub fn progress_step() {
+    if WATCH.load(Ordering::Relaxed) & PROGRESS != 0 {
+        ITEMS_DONE.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProgressSnapshot {
+    pub phase: Phase,
+    pub transitions: u64,
+    pub done: u64,
+    pub total: u64,
+}
+
+pub struct ProgressObserver {
+    _private: (),
+}
+impl ProgressObserver {
+    pub fn install() -> Option<Self> {
+        if WATCH.load(Ordering::Acquire) & PROGRESS != 0 {
+            return None;
+        }
+        CURRENT.store(Phase::Startup as u8, Ordering::Relaxed);
+        TRANSITIONS.store(0, Ordering::Relaxed);
+        ITEMS_DONE.store(0, Ordering::Relaxed);
+        ITEMS_TOTAL.store(0, Ordering::Relaxed);
+        if WATCH.fetch_or(PROGRESS, Ordering::AcqRel) & PROGRESS != 0 {
+            return None;
+        }
+        Some(Self { _private: () })
+    }
+    pub fn snapshot(&self) -> ProgressSnapshot {
+        let transitions = TRANSITIONS.load(Ordering::Acquire);
+        ProgressSnapshot {
+            phase: Phase::from_index(CURRENT.load(Ordering::Relaxed)),
+            transitions,
+            done: ITEMS_DONE.load(Ordering::Relaxed),
+            total: ITEMS_TOTAL.load(Ordering::Relaxed),
+        }
+    }
+}
+impl Drop for ProgressObserver {
+    fn drop(&mut self) {
+        WATCH.fetch_and(!PROGRESS, Ordering::AcqRel);
     }
 }
 
@@ -315,6 +452,7 @@ impl Session {
             }
         };
         OWNER.with(|owner| *owner.borrow_mut() = Some(shared.clone()));
+        WATCH.fetch_or(SESSION, Ordering::AcqRel);
         Ok(Some(Self {
             shared,
             worker: Some(worker),
@@ -324,6 +462,7 @@ impl Session {
 }
 impl Drop for Session {
     fn drop(&mut self) {
+        WATCH.fetch_and(!SESSION, Ordering::AcqRel);
         OWNER.with(|owner| *owner.borrow_mut() = None);
         {
             let mut state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());

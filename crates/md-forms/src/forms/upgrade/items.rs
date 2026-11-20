@@ -15,6 +15,8 @@ fn context_name(it: &Item) -> Result<String, Refusal> {
     Ok(match it.class {
         Some(c) => format!("{c}/{}", it.version),
         None => match it.version.as_str() {
+            "22" if it.body.len() == 30 => "Group/22".to_owned(),
+            "12" if it.body.len() == 36 => "Decoration/12".to_owned(),
             "19" | "21" | "22" => format!("Nested22/{}", it.version),
             "8" | "10" | "11" | "12" => format!("Tooltip/{}", it.version),
             "3" | "4" | "5" | "6" => format!("Addition/{}", it.version),
@@ -107,6 +109,8 @@ pub(crate) fn xf(name: &str, v: &Node) -> Result<Node, Refusal> {
         }),
         "table_bool" => Node::atom(if t == "0" { "0" } else { "1" }),
         "table_enum" => Node::atom(if t == "0" { "0" } else { "2" }),
+        "enum_bool" => Node::int(i64::from(matches!(v.as_i64(), Some(1 | 2)))),
+        "enum_one" => Node::int(i64::from(v.as_i64() == Some(1))),
         "cmdbar_location" => Node::atom(match t {
             "1" => "2",
             "0" => "0",
@@ -147,6 +151,38 @@ fn derived(op: &Op, env: &Env<'_>) -> Result<Node, Refusal> {
             } else {
                 "1"
             })
+        }
+        "modern_cmdbar" => {
+            let old = at(env.body, 8, "Table[8]")?
+                .as_i64()
+                .ok_or(Refusal::Shape("modern command bar"))?;
+            let flag = at(env.body, 110, "Table[110]")?
+                .as_bool()
+                .ok_or(Refusal::Shape("modern command bar"))?;
+            let mode = at(env.body, 111, "Table[111]")?
+                .as_i64()
+                .ok_or(Refusal::Shape("modern command bar"))?;
+            Node::int(if !flag {
+                old
+            } else {
+                match mode {
+                    2 => 1,
+                    0 => 0,
+                    _ if matches!(old, 2 | 3) => old,
+                    _ => 2,
+                }
+            })
+        }
+        "modern_default_button" => Node::int(i64::from(
+            at(env.body, 11, "Button[11]")?.as_bool() == Some(true)
+                || at(env.body, 57, "Button[57]")?.as_i64() == Some(0),
+        )),
+        "modern_importance" => {
+            if at(env.body, 11, "Button[11]")?.as_bool() == Some(true) {
+                Node::int(0)
+            } else {
+                at(env.body, 57, "Button[57]")?.clone()
+            }
         }
         _ => return Err(Refusal::Shape("derived")),
     })
@@ -213,6 +249,13 @@ pub(crate) fn translate_item(
     cx: &mut Cx<'_>,
 ) -> Result<Item, Refusal> {
     let _ = owner;
+    let normalized;
+    let it = if it.class == Some("Table") && it.version == "64" {
+        normalized = without_transient_table_objects(it)?;
+        &normalized
+    } else {
+        it
+    };
     let ctx_name = context_name(it)?;
     let c = cx
         .tables
@@ -294,4 +337,30 @@ pub(crate) fn translate_item(
         bag,
         bag_at,
     })
+}
+
+fn without_transient_table_objects(it: &Item) -> Result<Item, Refusal> {
+    let mut out = it.clone();
+    for _ in 0..2 {
+        let flag = out
+            .body
+            .get(109)
+            .and_then(Node::as_bool)
+            .ok_or(Refusal::Shape("Table transient flag"))?;
+        let end = 110 + usize::from(flag);
+        if end > out.body.len() {
+            return Err(Refusal::Shape("Table transient object"));
+        }
+        if flag && !out.nested.iter().any(|(p, _)| *p == 110) {
+            return Err(Refusal::Shape("Table transient object"));
+        }
+        out.body.drain(109..end);
+        out.nested.retain(|(p, _)| *p < 109 || *p >= end);
+        for (p, _) in &mut out.nested {
+            if *p >= end {
+                *p -= end - 109;
+            }
+        }
+    }
+    Ok(out)
 }

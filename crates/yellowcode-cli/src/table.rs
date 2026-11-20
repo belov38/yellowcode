@@ -141,6 +141,11 @@ pub(crate) struct Args {
         help = "Вместо строк вывести индексы таблицы: поля по порядку, допускает ли поле условие, индекс окна «Данные» по умолчанию и доступные фильтры"
     )]
     list_indexes: bool,
+    #[arg(
+        long,
+        help = "Все замечания о расхождении схемы базы с правилами вместо одной итоговой строки (stderr)"
+    )]
+    schema_notes: bool,
 }
 
 fn bound(exclusive: Option<String>, inclusive: Option<String>) -> Option<Bound> {
@@ -180,6 +185,7 @@ impl From<Args> for Request {
             cursor: a.cursor,
             format: a.format,
             list_indexes: a.list_indexes,
+            schema_notes: a.schema_notes,
         }
     }
 }

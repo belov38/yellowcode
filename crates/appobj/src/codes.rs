@@ -2,8 +2,8 @@ use crate::Application;
 use crate::errors::{self, keys};
 use crate::events::{self, Event, Param};
 use crate::meta::{arg_value, type_mismatch};
-use crate::model::{CodeSeries, CodeType, FieldDef, ObjDef, ObjId, StdAttr};
-use crate::numerator::{self, IssueError, Issued, SeriesKey};
+use crate::model::{CodeSeries, CodeType, FieldDef, NumberPeriodicity, ObjDef, ObjId, StdAttr};
+use crate::numerator::{self, IssueCtx, IssueError, Issued, SeriesKey};
 use crate::objects::ObjectInstance;
 use crate::predefined::AreaKey;
 use crate::read::{admit_data_read, read_view, store_call_error};
@@ -215,7 +215,11 @@ impl Layout<'_> {
         Ok(series)
     }
 
-    fn probe(&self, series: &Series) -> Result<(IndexId, Vec<Vec<FieldValue>>), HostError> {
+    fn probe(
+        &self,
+        series: &Series,
+        code_field: StdField,
+    ) -> Result<(IndexId, Vec<Vec<FieldValue>>), HostError> {
         let mut want: Vec<StdField> = Vec::new();
         let mut tail: Vec<FieldValue> = Vec::new();
         if let Some(o) = &series.owner {
@@ -230,7 +234,7 @@ impl Layout<'_> {
         if folder {
             want.push(StdField::Folder);
         }
-        want.push(StdField::Code);
+        want.push(code_field);
         let (index, ix) = self
             .index(&want)
             .ok_or_else(|| HostError::not_implemented("Код", "индекс кодов серии"))?;
@@ -297,10 +301,11 @@ impl Layout<'_> {
         series: &Series,
         prefix: &str,
         numeric: bool,
+        code_field: StdField,
     ) -> CallResult<Largest> {
-        let (index, keys) = self.probe(series)?;
+        let (index, keys) = self.probe(series, code_field)?;
         let code = self
-            .column(StdField::Code)
+            .column(code_field)
             .ok_or_else(|| internal("the table has no code"))?;
         let txn = CallTxn::of_call(ex);
         let mut view = read_view(ex, txn.as_deref(), self.app)?;
@@ -388,8 +393,9 @@ impl Layout<'_> {
         series: &Series,
         code: &FieldValue,
         own: Option<RefId>,
+        code_field: StdField,
     ) -> CallResult<bool> {
-        let (index, keys) = self.probe(series)?;
+        let (index, keys) = self.probe(series, code_field)?;
         let id = self.column(StdField::Id);
         let fields: Vec<FieldId> = id.into_iter().collect();
         let txn = CallTxn::of_call(ex);
@@ -479,7 +485,41 @@ fn issue_error(ex: &Execution, e: IssueError<bsl_vm::CallError>) -> bsl_vm::Call
     match e {
         IssueError::Read(e) => e,
         IssueError::Full => ex.out_of_memory().into(),
+        IssueError::Unobserved => HostError::not_implemented(
+            "Справочник",
+            "код после отката при уничтоженном держателе не наблюдён",
+        )
+        .into(),
+        IssueError::Stale => HostError::not_implemented(
+            "Справочник",
+            "код из пула конца сеанса после выдачи кода другого семейства не наблюдён",
+        )
+        .into(),
     }
+}
+
+fn call_number(txn: &Rc<CallTxn>) -> u64 {
+    use std::cell::RefCell;
+    use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    thread_local! {
+        static LAST: RefCell<Option<(std::rc::Weak<CallTxn>, u64)>> = const { RefCell::new(None) };
+    }
+    LAST.with(|last| {
+        let mut last = last.borrow_mut();
+        if let Some((w, n)) = last.as_ref()
+            && w.upgrade().is_some_and(|t| Rc::ptr_eq(&t, txn))
+        {
+            return *n;
+        }
+        let n = NEXT.fetch_add(1, AtomicOrdering::Relaxed);
+        *last = Some((Rc::downgrade(txn), n));
+        n
+    })
+}
+
+fn this_call(ex: &mut Execution) -> Option<u64> {
+    CallTxn::of_call(ex).map(|t| call_number(&t))
 }
 
 fn issue(
@@ -487,44 +527,92 @@ fn issue(
     layout: &Layout<'_>,
     series: &Series,
     prefix: &str,
+    holder: numerator::Holder,
 ) -> CallResult<Issued> {
     let app = layout.app;
     let len = layout.def.behavior.code_length as usize;
     let numerator = app.numerator().clone();
     let numeric = layout.def.behavior.code_type == CodeType::Number;
+    let ctx = IssueCtx {
+        call: this_call(ex),
+        pool: true,
+    };
+    release_dead(ex, &numerator, series.key);
     let issued = if numeric {
-        numerator.issue_number::<bsl_vm::CallError>(series.key, len, || {
-            Ok(match layout.largest(ex, series, prefix, true)? {
-                Largest::Number(n) => n,
-                Largest::Text(_) => None,
-            })
+        numerator.issue_number_in::<bsl_vm::CallError>(ctx, series.key, len, || {
+            Ok(
+                match layout.largest(ex, series, prefix, true, StdField::Code)? {
+                    Largest::Number(n) => n,
+                    Largest::Text(_) => None,
+                },
+            )
         })
     } else {
         let collating = Collating::of(app);
-        numerator.issue_string::<bsl_vm::CallError>(
+        numerator.issue_string_in::<bsl_vm::CallError>(
+            ctx,
             series.key,
             len,
             prefix,
             || {
-                Ok(match layout.largest(ex, series, prefix, false)? {
-                    Largest::Text(t) => t,
-                    Largest::Number(_) => None,
-                })
+                Ok(
+                    match layout.largest(ex, series, prefix, false, StdField::Code)? {
+                        Largest::Text(t) => t,
+                        Largest::Number(_) => None,
+                    },
+                )
             },
             |a, b| collating.compare(a, b),
         )
     }
     .map_err(|e| issue_error(ex, e))?;
+    if issued.ended && !numeric && stored(ex, layout, series, &issued.code)? {
+        if let Some(token) = &issued.token {
+            numerator.release_token(token);
+        }
+        return Err(HostError::not_implemented(
+            "Справочник",
+            "код из пула конца сеанса, который уже есть в базе, не наблюдён",
+        )
+        .into());
+    }
     if let Some(token) = issued.token.clone() {
-        keep_in_transaction(ex, &numerator, token);
+        keep_in_transaction(ex, &numerator, token, holder);
     }
     Ok(issued)
+}
+
+fn stored(
+    ex: &mut Execution,
+    layout: &Layout<'_>,
+    series: &Series,
+    code: &str,
+) -> CallResult<bool> {
+    let code = numerator::trimmed(code);
+    Ok(
+        match layout.largest(ex, series, code, false, StdField::Code)? {
+            Largest::Text(Some(t)) => {
+                numerator::fold(numerator::trimmed(&t)) == numerator::fold(code)
+            }
+            _ => false,
+        },
+    )
+}
+
+fn release_dead(ex: &mut Execution, numerator: &numerator::Numerator, key: SeriesKey) {
+    let Some((txn, id)) = open_txn(ex) else {
+        return;
+    };
+    if let Some(ledger) = numerator.ledger(Rc::as_ptr(&txn) as usize, id, |_| false) {
+        numerator.release_dead(&ledger, key, Some(call_number(&txn)), id);
+    }
 }
 
 fn keep_in_transaction(
     ex: &mut Execution,
     numerator: &Arc<numerator::Numerator>,
     token: numerator::Token,
+    holder: numerator::Holder,
 ) {
     let Some(txn) = CallTxn::of_call(ex) else {
         return;
@@ -533,12 +621,13 @@ fn keep_in_transaction(
         return;
     };
     let call = Rc::as_ptr(&txn) as usize;
+    let number = call_number(&txn);
     let ledger = numerator.ledger(call, id, |ledger| {
         let n = numerator.clone();
-        txn.on_rollback(move || n.release(&ledger))
+        txn.on_rollback(move || n.release(&ledger, Some(number)))
     });
     if let Some(ledger) = ledger {
-        ledger.push(token);
+        ledger.push(token, holder);
     }
 }
 
@@ -559,6 +648,9 @@ pub(crate) struct IssuedInTxn {
     series: SeriesKey,
     prefix: String,
     code: Value,
+    depth: u32,
+    loading: bool,
+    token: Option<numerator::Token>,
 }
 
 fn same_code(a: &Value, b: &Value) -> bool {
@@ -602,32 +694,92 @@ pub(crate) fn set_new_code(
     });
     if let Some(earlier) = earlier {
         let current = inst.attr(ex, code)?;
-        if earlier.series == series.key
-            && earlier.prefix == event.prefix
-            && same_code(&current, &earlier.code)
-        {
-            return inst.assign(ex, code, earlier.code);
+        if earlier.series != series.key || !same_code(&current, &earlier.code) {
+            return Err(HostError::not_implemented(
+                &inst.type_name(),
+                "УстановитьНовыйКод: повторно в транзакции после смены серии или кода",
+            )
+            .into());
         }
-        return Err(HostError::not_implemented(
-            &inst.type_name(),
-            "УстановитьНовыйКод: повторно в транзакции после смены серии, префикса или кода",
-        )
-        .into());
+        let_go(inst, &earlier);
     }
-    let issued = issue(ex, layout, &series, &event.prefix)?;
+    let issued = issue(
+        ex,
+        layout,
+        &series,
+        &event.prefix,
+        inst.code_holder.holder(),
+    )?;
     let value = code_value(layout, &issued)?;
+    let loading = inst.loading();
     inst.state.borrow_mut().issued = open.map(|(txn, id)| IssuedInTxn {
         txn: Rc::downgrade(&txn),
         id,
         series: series.key,
         prefix: event.prefix.clone(),
         code: value.clone(),
+        depth: txn.depth(),
+        loading,
+        token: issued.token.clone(),
     });
     inst.assign(ex, code, value)
 }
 
+fn let_go(inst: &ObjectInstance, issued: &IssuedInTxn) {
+    let Some(token) = issued.token.clone() else {
+        return;
+    };
+    let Some(txn) = issued.txn.upgrade() else {
+        return;
+    };
+    let numerator = inst.app.numerator().clone();
+    let call = Rc::as_ptr(&txn) as usize;
+    if let Some(ledger) = numerator.ledger(call, issued.id, |_| false) {
+        let call = Some(call_number(&txn));
+        let _ = numerator.let_go(
+            &ledger,
+            &token,
+            token.number(),
+            &inst.code_holder.holder(),
+            call,
+        );
+    }
+    inst.state.borrow_mut().issued = None;
+}
+
+pub(crate) fn manual_code(
+    ex: &mut Execution,
+    inst: &ObjectInstance,
+    index: usize,
+    value: &Value,
+) -> CallResult<()> {
+    let Some(issued) = inst.state.borrow().issued.clone() else {
+        return Ok(());
+    };
+    let layout = Layout::of(&inst.app, inst.obj)?;
+    if layout.code != Some(index) || same_code(value, &issued.code) {
+        return Ok(());
+    }
+    let open = open_txn(ex).is_some_and(|(txn, id)| {
+        id == issued.id && issued.txn.upgrade().is_some_and(|t| Rc::ptr_eq(&t, &txn))
+    });
+    if !open {
+        return Ok(());
+    }
+    if !issued.prefix.is_empty() || issued.loading || inst.loading() {
+        return Err(HostError::not_implemented(
+            &inst.type_name(),
+            "Код: ручной код после выдачи с префиксом или при ОбменДанными.Загрузка не наблюдён",
+        )
+        .into());
+    }
+    let_go(inst, &issued);
+    Ok(())
+}
+
 pub(crate) fn assign(ex: &mut Execution, ctx: &WriteCtx<'_>) -> CallResult<()> {
     let inst = ctx.inst;
+    inst.code_holder.note_write();
     let layout = Layout::of(&inst.app, inst.obj)?;
     let Some(code) = layout.code else {
         return Ok(());
@@ -641,6 +793,63 @@ pub(crate) fn assign(ex: &mut Execution, ctx: &WriteCtx<'_>) -> CallResult<()> {
     set_new_code(ex, inst, &layout, "")
 }
 
+fn refuse_after_rollback(
+    ex: &mut Execution,
+    inst: &ObjectInstance,
+    layout: &Layout<'_>,
+    prefix: &str,
+) -> CallResult<Option<HostError>> {
+    let (issued, clean, created_in, stored) = {
+        let st = inst.state.borrow();
+        let Some(p) = st.issued.clone() else {
+            return Ok(None);
+        };
+        let Some(txn) = p.txn.upgrade().filter(|txn| txn.was_rolled_back(p.id)) else {
+            return Ok(None);
+        };
+        let clean = txn.was_rolled_back_clean(p.id);
+        (
+            p,
+            clean,
+            st.created_in.clone(),
+            !st.is_new && st.written.is_none(),
+        )
+    };
+    let made_there = created_in.is_some_and(|(txn, id)| id == issued.id && txn.ptr_eq(&issued.txn));
+    let current = match layout.code {
+        Some(i) => Some(inst.attr(ex, i)?),
+        None => None,
+    };
+    let case = if !made_there && stored {
+        Some("объект прочитан из базы")
+    } else if !made_there {
+        Some("объект создан не СоздатьЭлемент() в этой транзакции")
+    } else if issued.depth != 1 {
+        Some("код выдан во вложенной транзакции")
+    } else if !clean {
+        Some("откат отравленной транзакции")
+    } else if !issued.prefix.is_empty() || !prefix.is_empty() {
+        Some("с префиксом")
+    } else if issued.loading || inst.loading() {
+        Some("ОбменДанными.Загрузка")
+    } else if !current.is_some_and(|c| same_code(&c, &issued.code)) {
+        Some("код изменён после выдачи")
+    } else if open_txn(ex).is_none() {
+        Some("вне транзакции")
+    } else {
+        None
+    };
+    Ok(Some(match case {
+        None => crate::objects::not_selected(),
+        Some(case) => HostError::not_implemented(
+            &inst.type_name(),
+            &format!(
+                "УстановитьНовыйКод: повторный вызов после отката транзакции не наблюдён для этого случая ({case})"
+            ),
+        ),
+    }))
+}
+
 pub(crate) fn set_new_code_method(
     ex: &mut Execution,
     inst: &Rc<ObjectInstance>,
@@ -652,10 +861,13 @@ pub(crate) fn set_new_code_method(
         _ => return Err(type_mismatch(1).into()),
     };
     let app = inst.app.clone();
+    let layout = Layout::of(&app, inst.obj)?;
+    if let Some(refused) = refuse_after_rollback(ex, inst, &layout, &prefix)? {
+        return Err(refused.into());
+    }
     admit_data_read(ex)?;
     app.predefined()
         .ensure(&app, inst.obj, &AreaKey::default())?;
-    let layout = Layout::of(&app, inst.obj)?;
     set_new_code(ex, inst, &layout, &prefix)?;
     Ok(Value::Undefined)
 }
@@ -677,13 +889,271 @@ pub(crate) fn check_unique(ex: &mut Execution, ctx: &WriteCtx<'_>) -> CallResult
     } else {
         inst.state.borrow().r.map(|r| r.id)
     };
-    if layout.taken(ex, &series, &stored, own)? {
+    if layout.taken(ex, &series, &stored, own, StdField::Code)? {
         let shown = match &value {
             Value::String(s) => numerator::trimmed(&s.to_string_lossy()).to_string(),
             Value::Number(n) => n.to_xml_string(),
             _ => String::new(),
         };
         return Err(not_unique(&shown).into());
+    }
+    Ok(())
+}
+
+fn number_refusal(inst: &ObjectInstance, what: &str) -> HostError {
+    HostError::not_implemented(&inst.type_name(), &format!("Номер: {what}"))
+}
+
+fn number_of_document(inst: &ObjectInstance, layout: &Layout<'_>) -> CallResult<Option<usize>> {
+    let def = layout.def;
+    let Some(i) = def
+        .fields
+        .iter()
+        .position(|f| f.std == Some(StdAttr::Number))
+    else {
+        return Ok(None);
+    };
+    let b = &def.behavior;
+    if b.number_type != CodeType::String {
+        return Err(number_refusal(inst, "номер типа Число").into());
+    }
+    if b.number_periodicity != NumberPeriodicity::Nonperiodical {
+        return Err(number_refusal(inst, "периодичность номера").into());
+    }
+    let md = layout.app.model().config.object(def.md);
+    if md.is_some_and(
+        |o| matches!(o.prop("NumberAllowedLength"), Some(md_model::Value::Text(t)) if t == "Fixed"),
+    ) {
+        return Err(number_refusal(inst, "номер фиксированной длины").into());
+    }
+    if b.numerator.is_some() {
+        return Err(number_refusal(inst, "общий нумератор").into());
+    }
+    if events::handled(inst, Event::NewNumber) {
+        return Err(number_refusal(inst, "обработчик ПриУстановкеНовогоНомера").into());
+    }
+    Ok(Some(i))
+}
+
+fn number_series(layout: &Layout<'_>) -> Series {
+    Series {
+        key: SeriesKey {
+            obj: layout.obj,
+            owner: RefId::NIL,
+            parent: RefId::NIL,
+        },
+        owner: None,
+        parent: None,
+    }
+}
+
+fn set_new_number(
+    ex: &mut Execution,
+    inst: &Rc<ObjectInstance>,
+    layout: &Layout<'_>,
+    i: usize,
+) -> CallResult<()> {
+    let app = layout.app;
+    let series = number_series(layout);
+    let numerator = app.numerator().clone();
+    if let Some(refused) = number_after_rollback(ex, inst) {
+        return Err(refused.into());
+    }
+    if let Some((txn, id)) = open_txn(ex)
+        && let Some(ledger) = numerator.ledger(Rc::as_ptr(&txn) as usize, id, |_| false)
+    {
+        let writers =
+            dead_writers_in_base(ex, &numerator, &ledger, layout, &series, i, txn.poisoned())?;
+        if writers.is_some() {
+            numerator.release_dead(&ledger, series.key, Some(call_number(&txn)), id);
+        }
+        if writers.is_none_or(|n| n > 0 && numerator.pooled(series.key)) {
+            return Err(number_refusal(
+                inst,
+                "номер после уничтожения в транзакции держателя, начавшего запись, не наблюдён",
+            )
+            .into());
+        }
+    }
+    if numerator.number_unobserved(series.key, this_call(ex), open_txn(ex).map(|(_, id)| id)) {
+        return Err(number_refusal(
+            inst,
+            "номер документа после отката при уничтоженном держателе не наблюдён",
+        )
+        .into());
+    }
+    let open = open_txn(ex);
+    let again =
+        open.as_ref().is_some_and(|(txn, id)| {
+            inst.state.borrow().issued.as_ref().is_some_and(|p| {
+                p.id == *id && p.txn.upgrade().is_some_and(|t| Rc::ptr_eq(&t, txn))
+            })
+        });
+    if again {
+        return Err(
+            number_refusal(inst, "второй номер объекта в одной транзакции не наблюдён").into(),
+        );
+    }
+    let len = layout.def.behavior.number_length as usize;
+    let collating = Collating::of(app);
+    let ctx = IssueCtx {
+        call: this_call(ex),
+        pool: true,
+    };
+    let issued = numerator
+        .issue_string_in::<bsl_vm::CallError>(
+            ctx,
+            series.key,
+            len,
+            "",
+            || {
+                Ok(
+                    match layout.largest(ex, &series, "", false, StdField::Number)? {
+                        Largest::Text(t) => t,
+                        Largest::Number(_) => None,
+                    },
+                )
+            },
+            |a, b| collating.compare(a, b),
+        )
+        .map_err(|e| issue_error(ex, e))?;
+    if let Some(token) = issued.token.clone() {
+        keep_in_transaction(ex, &numerator, token, inst.code_holder.holder());
+    }
+    let value = Value::from(issued.code.as_str());
+    let loading = inst.loading();
+    inst.state.borrow_mut().issued = open.map(|(txn, id)| IssuedInTxn {
+        txn: Rc::downgrade(&txn),
+        id,
+        series: series.key,
+        prefix: String::new(),
+        code: value.clone(),
+        depth: txn.depth(),
+        loading,
+        token: issued.token.clone(),
+    });
+    inst.assign(ex, i, value)
+}
+
+fn dead_writers_in_base(
+    ex: &mut Execution,
+    numerator: &numerator::Numerator,
+    ledger: &numerator::Ledger,
+    layout: &Layout<'_>,
+    series: &Series,
+    i: usize,
+    poisoned: bool,
+) -> CallResult<Option<usize>> {
+    let Some(dead) = numerator.dead_writers(ledger, series.key) else {
+        return Ok(None);
+    };
+    if dead.is_empty() {
+        return Ok(Some(0));
+    }
+    if poisoned || dead.iter().filter(|(_, h)| !h.seen()).count() >= 2 {
+        return Ok(None);
+    }
+    let field = layout.field(i)?;
+    let deletions = numerator.deletions();
+    for (code, holder) in &dead {
+        holder.note_seen();
+        if holder.found(deletions) {
+            continue;
+        }
+        let stored = to_field(layout.app, field, &Value::from(code.as_str()))?;
+        if !layout.taken(ex, series, &stored, None, StdField::Number)? {
+            return Ok(None);
+        }
+        holder.note_found(deletions);
+    }
+    Ok(Some(dead.len()))
+}
+
+pub(crate) fn assign_number(ex: &mut Execution, ctx: &WriteCtx<'_>) -> CallResult<()> {
+    let inst = ctx.inst;
+    inst.code_holder.note_write();
+    let layout = Layout::of(&inst.app, inst.obj)?;
+    if ctx.loading || !layout.def.behavior.autonumbering {
+        return Ok(());
+    }
+    let Some(i) = number_of_document(inst, &layout)? else {
+        return Ok(());
+    };
+    if !blank_value(&inst.attr(ex, i)?) {
+        return Ok(());
+    }
+    set_new_number(ex, inst, &layout, i)
+}
+
+fn number_after_rollback(ex: &mut Execution, inst: &ObjectInstance) -> Option<HostError> {
+    let observed = {
+        let st = inst.state.borrow();
+        let p = st.issued.clone()?;
+        let txn = p.txn.upgrade().filter(|t| t.was_rolled_back(p.id))?;
+        let made_there = st
+            .created_in
+            .as_ref()
+            .is_some_and(|(t, id)| *id == p.id && t.ptr_eq(&p.txn));
+        txn.was_rolled_back_clean(p.id) && made_there && p.depth == 1 && !p.loading
+    };
+    if observed && !inst.loading() && open_txn(ex).is_some() {
+        let mut e = match errors::msg(keys::DOCUMENT_NOT_SELECTED) {
+            Some(m) => HostError::text(m.ru, m.en),
+            None => HostError::text(
+                &format!("internal: {}", keys::DOCUMENT_NOT_SELECTED),
+                &format!("internal: {}", keys::DOCUMENT_NOT_SELECTED),
+            ),
+        };
+        e.categories = crate::objects::not_selected().categories;
+        return Some(e);
+    }
+    Some(number_refusal(
+        inst,
+        "УстановитьНовыйНомер после отката транзакции в этой форме не наблюдён",
+    ))
+}
+
+pub(crate) fn set_new_number_method(
+    ex: &mut Execution,
+    inst: &Rc<ObjectInstance>,
+    args: &[Arg],
+) -> CallResult<Value> {
+    match arg_value(ex, args, 0)? {
+        Value::Undefined => {}
+        Value::String(s) if s.to_string_lossy().is_empty() => {}
+        Value::String(_) => return Err(number_refusal(inst, "префикс номера").into()),
+        _ => return Err(type_mismatch(1).into()),
+    }
+    admit_data_read(ex)?;
+    if !inst.state.borrow().is_new {
+        return Err(number_refusal(inst, "новый номер записанного документа").into());
+    }
+    let layout = Layout::of(&inst.app, inst.obj)?;
+    let Some(i) = number_of_document(inst, &layout)? else {
+        return Err(number_refusal(inst, "у документа нет номера").into());
+    };
+    set_new_number(ex, inst, &layout, i)?;
+    Ok(Value::Undefined)
+}
+
+pub(crate) fn check_unique_number(ex: &mut Execution, ctx: &WriteCtx<'_>) -> CallResult<()> {
+    let inst = ctx.inst;
+    let layout = Layout::of(&inst.app, inst.obj)?;
+    if ctx.loading || !layout.def.behavior.check_unique {
+        return Ok(());
+    }
+    let Some(i) = number_of_document(inst, &layout)? else {
+        return Ok(());
+    };
+    let value = inst.attr(ex, i)?;
+    let stored = to_field(&inst.app, layout.field(i)?, &value)?;
+    let own = if ctx.is_new {
+        None
+    } else {
+        inst.state.borrow().r.map(|r| r.id)
+    };
+    if layout.taken(ex, &number_series(&layout), &stored, own, StdField::Number)? {
+        return Err(number_refusal(inst, "номер уже занят другим документом").into());
     }
     Ok(())
 }

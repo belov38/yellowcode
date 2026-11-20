@@ -5,24 +5,32 @@ exit 0
 Usage: yellowcode convert [OPTIONS] --to <TO> --output <OUTPUT> <SOURCE>
 
 Arguments:
-  <SOURCE>  Исходный файл: CF, DT, файл 1Cv8.1CD или каталог базы; формат определяется по содержимому
+  <SOURCE>  Исходный файл: EPF, ERF, корневой XML, CF, DT, файл 1Cv8.1CD или каталог базы; формат определяется по содержимому
 
 Options:
       --platform-build <BUILD>       Точная версия эмулируемой платформы (не режим совместимости конфигурации) [default: 8.5.1.1529]
-      --to <TO>                      Формат результата [possible values: cf, dt, 1cd]
-      --output <OUTPUT>              Путь к новому файлу; его каталог должен существовать, существующий файл не перезаписывается
+      --to <TO>                      Формат результата [possible values: cf, dt, 1cd, xml, epf, erf]
+      --output <OUTPUT>              Путь к новому файлу или новому каталогу XML; родительский каталог должен существовать, результат не перезаписывается
+      --progress <MODE>              Ход работы в stderr: auto — строка на терминале, always — строки для журнала, never — без него (по умолчанию переменная YELLOWCODE_PROGRESS, иначе auto) [possible values: auto, always, never]
       --users-layout <USERS_LAYOUT>  Формат таблицы пользователей в DT при выгрузке 1CD -> DT (обязателен, сам не выбирается): users8 — таблица Users из 8 колонок, users-spr11 — таблица UsersSpr из 11 колонок (пользователи разделены по областям данных) [possible values: users8, users-spr11]
-      --memory-limit <MEMORY_LIMIT>  Бюджет памяти для преобразования с DT: auto или целое число байт с суффиксом B/KiB/MiB/GiB (как у query и serve; переменная YELLOWCODE_MEMORY_LIMIT)
+      --memory-limit <MEMORY_LIMIT>  Бюджет памяти для DT и EPF/ERF <-> XML: auto или целое число байт с суффиксом B/KiB/MiB/GiB (как у query и serve; переменная YELLOWCODE_MEMORY_LIMIT)
       --without-users                Только DT -> 1CD: загрузить базу без пользователей (если их нельзя перенести как есть). Такая база открывается без входа, с полными правами
   -h, --help                         Print help
 
-Поддерживаемые преобразования: DT -> CF, 1CD -> CF, 1CD -> DT, DT -> 1CD.
+Поддерживаемые преобразования: EPF/ERF -> XML, XML -> EPF/ERF, DT -> CF, 1CD -> CF, 1CD -> DT, DT -> 1CD.
 
-Результат — всегда новый файл: существующий файл и существующая база не заменяются. Для DT -> 1CD каталог новой базы создайте заранее.
+Результат — новый файл либо новый каталог XML: существующие файлы и каталоги не заменяются. Для DT -> 1CD каталог новой базы создайте заранее. Для EPF/ERF -> XML укажите путь к ещё не существующему каталогу. Сборка XML не требует исходного бинарника или 1С; вид EPF/ERF должен соответствовать корню XML.
 
-Память (--memory-limit, только для преобразований из DT): загрузка DT в 1CD открывает получившуюся базу для проверки под тем же бюджетом, и проверочному открытию базам уровня УНФ нужно около 1792 МиБ, уровня ERP около 3 ГиБ. Это нижняя граница, а не память всей загрузки. Если памяти не хватает, команда отказывает с MEMORY_LIMIT: поднимите --memory-limit.
+Память (--memory-limit, для DT и EPF/ERF <-> XML): загрузка DT в 1CD открывает получившуюся базу для проверки под тем же бюджетом, и проверочному открытию базам уровня УНФ нужно около 1792 МиБ, уровня ERP около 3 ГиБ. Это нижняя граница, а не память всей загрузки. Если памяти не хватает, команда отказывает с MEMORY_LIMIT: поднимите --memory-limit.
 
 Примеры:
+  # Выгрузить внешнюю обработку или отчёт вместе с формами и макетами
+  yellowcode convert processing.epf --to xml --output new-xml
+
+  # Собрать внешнюю обработку или отчёт из XML
+  yellowcode convert new-xml/Processing.xml --to epf --output new-processing.epf
+  yellowcode convert Report.xml --to erf --output new-report.erf
+
   # Сохранить конфигурацию из DT в CF
   yellowcode convert backup.dt --to cf --output configuration.cf
 

@@ -37,7 +37,10 @@ fn write_record(
     let shared = fc.shared;
     let src = Src::Rec { rec, tag: ctx };
     let mut body = Vec::new();
-    for el in shared.order(ctx).iter() {
+    for el in shared
+        .order_for(ctx, super::write::fc_external_owner(fc.info.owner))
+        .iter()
+    {
         if fc.raised() {
             return;
         }
@@ -130,7 +133,10 @@ fn ca_lines(fc: &FormCtx<'_>) -> Py<Option<Vec<String>>> {
     if ca.children.is_empty() {
         return Ok(None);
     }
-    let e = conv(Some(fc.cfg), ca, &[&x], Some("ConditionalAppearance"), None);
+    let mut e = conv(Some(fc.cfg), ca, &[&x], Some("ConditionalAppearance"), None);
+    if super::write::fc_external_owner(fc.info.owner) {
+        super::write::external_parameter_names(&mut e)?;
+    }
     let mut out = Vec::new();
     ser(&e, 2, &mut out);
     Ok(Some(out))

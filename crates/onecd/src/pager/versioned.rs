@@ -330,12 +330,24 @@ impl memory_budget::Evictor for CleanCell {
         self.1.clear();
     }
 }
+const PAGER_MUTEX_HEAP_BYTES: u64 = if cfg!(target_vendor = "apple") {
+    3 * 64
+} else {
+    0
+};
+
 fn arc_bytes<T>() -> u64 {
     std::alloc::Layout::new::<[usize; 2]>()
         .extend(std::alloc::Layout::new::<T>())
         .ok()
         .and_then(|(layout, _)| u64::try_from(layout.pad_to_align().size()).ok())
         .unwrap_or(u64::MAX)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OpenMemory {
+    PagerEvictor,
+    PreserveCaller,
 }
 
 pub(crate) struct Pager {
@@ -351,6 +363,7 @@ pub(crate) struct Pager {
     budget: Option<memory_budget::MemoryBudget>,
     clean_cache: Arc<CleanCell>,
     _clean_charge: Option<memory_budget::Reservation>,
+    _mutex_charge: Option<memory_budget::Reservation>,
 }
 
 impl fmt::Debug for Pager {
@@ -395,6 +408,18 @@ impl Pager {
         storage: impl Into<super::storage::StorageOwner>,
         opts: &OpenOptions,
     ) -> Result<(Metadata<Pager>, DbHeader)> {
+        Self::open_with_memory(storage, opts, OpenMemory::PagerEvictor)
+    }
+    pub(crate) fn open_with_memory(
+        storage: impl Into<super::storage::StorageOwner>,
+        opts: &OpenOptions,
+        policy: OpenMemory,
+    ) -> Result<(Metadata<Pager>, DbHeader)> {
+        if policy == OpenMemory::PreserveCaller
+            && (opts.mode != crate::db::Mode::ReadOnly || opts.memory_budget.is_none())
+        {
+            return Err(Error::Io(io::ErrorKind::InvalidInput.into()));
+        }
         let storage = storage.into();
         if opts.memory_budget.is_some() && opts.mode != crate::db::Mode::ReadOnly {
             return Err(Error::Io(io::Error::new(
@@ -459,6 +484,15 @@ impl Pager {
             })
             .transpose()
             .map_err(memory_budget::BudgetError::from)?;
+        let mutex_charge = opts
+            .memory_budget
+            .as_ref()
+            .filter(|_| PAGER_MUTEX_HEAP_BYTES != 0)
+            .map(|budget| {
+                budget.try_reserve(memory_budget::Category::Metadata, PAGER_MUTEX_HEAP_BYTES)
+            })
+            .transpose()
+            .map_err(memory_budget::BudgetError::from)?;
         let clean_cache = Arc::new(CleanCell(
             Mutex::new(CleanState::default()),
             super::files::FileCache::new(
@@ -467,13 +501,17 @@ impl Pager {
                     .filter(|_| opts.cache_bytes / header.page_size as usize != 0),
             ),
         ));
-        let evictor: std::sync::Weak<dyn memory_budget::Evictor + Send> =
-            Arc::<CleanCell>::downgrade(&clean_cache);
-        let budget = opts
-            .memory_budget
-            .as_ref()
-            .map(|budget| budget.try_with_evictor(evictor))
-            .transpose()?;
+        let budget = match policy {
+            OpenMemory::PagerEvictor => {
+                let evictor: std::sync::Weak<dyn memory_budget::Evictor + Send> =
+                    Arc::<CleanCell>::downgrade(&clean_cache);
+                opts.memory_budget
+                    .as_ref()
+                    .map(|budget| budget.try_with_evictor(evictor))
+                    .transpose()?
+            }
+            OpenMemory::PreserveCaller => opts.memory_budget.clone(),
+        };
         let pager = Pager {
             storage,
             page_size: header.page_size,
@@ -487,6 +525,7 @@ impl Pager {
             budget,
             clean_cache,
             _clean_charge: clean_charge,
+            _mutex_charge: mutex_charge,
         };
         let pager = match budget_structure {
             Some(lease) => {

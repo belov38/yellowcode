@@ -15,10 +15,10 @@ use onecd::format::layout::value_size;
 use onecd::{BlobVal, Database, FormatInfo, RecordLayout, Row, TableDescr, Value};
 
 use super::{
-    Batches, EXTENSIONS_REFUSED, FILES_MAX, FOLDERS, Notes, PAGE, Phase, Plan, Progress,
-    RestoreEvent, RestoreLimits, RestoreOptions, TABLES_MAX, bad, check_row, counted_file,
-    database_options, discard_file, expect, folder_file_name, folder_header, folder_header_limits,
-    folder_length, io as io_err, open_f3, probe_locale, read_preamble, read_schema, row_limit,
+    Batches, FILES_MAX, FOLDERS, Notes, PAGE, Phase, Plan, Progress, RestoreEvent, RestoreLimits,
+    RestoreOptions, TABLES_MAX, bad, check_row, counted_file, database_options, discard_file,
+    expect, extensions, folder_file_name, folder_header, folder_header_limits, folder_length,
+    io as io_err, open_f3, probe_locale, read_preamble, read_schema, row_limit,
 };
 use crate::Result;
 use crate::physical::{NameCase, descrs};
@@ -74,6 +74,8 @@ pub struct ReducedIndexes {
     pub kept_estimate_bytes: u64,
     pub cap_bytes: u64,
     pub clustered_kept: bool,
+    pub object: Option<String>,
+    pub service: Option<String>,
 }
 
 impl ReducedIndexes {
@@ -93,6 +95,8 @@ impl ReducedIndexes {
                         kept_estimate_bytes: p.kept_estimate,
                         cap_bytes: p.cap_bytes,
                         clustered_kept: p.kept.iter().any(|k| named_index(&upper, k).is_some()),
+                        object: None,
+                        service: None,
                     })
                 }
             })
@@ -369,21 +373,39 @@ impl Drop for Sampler {
 }
 
 fn named_index(upper: &str, name: &str) -> Option<usize> {
-    let rest = name.strip_prefix(upper)?.strip_prefix('_')?;
-    let digits = rest.trim_end_matches('@');
-    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
+    fn ordinal(table: &str, index: &str) -> Option<usize> {
+        let rest = index.strip_prefix(table)?.strip_prefix('_')?;
+        let digits = rest.trim_end_matches('@');
+        if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        digits.parse().ok()
     }
-    digits.parse().ok()
+    ordinal(upper, name).or_else(|| ordinal(upper.strip_suffix("X1")?, name.strip_suffix("X1")?))
 }
 
-pub(crate) fn kept_indexes(t: &Table, _owner: Option<&Table>, d: &TableDescr) -> Vec<String> {
-    let upper = d.name.to_ascii_uppercase();
+pub(crate) fn kept_indexes(t: &Table, owner: Option<&Table>, d: &TableDescr) -> Vec<String> {
+    let base = ibschema::columns::phys_table_name(t, owner).to_ascii_uppercase();
+    let extension = d.name == format!("{base}X1");
+    let upper = if extension {
+        base
+    } else {
+        d.name.to_ascii_uppercase()
+    };
     d.indexes
         .iter()
-        .filter(|i| match named_index(&upper, &i.name) {
-            Some(n) => n >= 1 && t.indexes.get(n - 1).is_some_and(|x| x.clustered),
-            None => true,
+        .filter(|i| {
+            match named_index(
+                &upper,
+                if extension {
+                    i.name.strip_suffix("X1").unwrap_or(&i.name)
+                } else {
+                    &i.name
+                },
+            ) {
+                Some(n) => n >= 1 && t.indexes.get(n - 1).is_some_and(|x| x.clustered),
+                None => true,
+            }
         })
         .map(|i| i.name.clone())
         .collect()
@@ -442,8 +464,10 @@ pub(crate) fn prepass(
     locale: &str,
     opts: &RestoreOptions<'_>,
     notes: &mut Notes<'_, '_>,
+    extension_memory: &mut extensions::Memory,
 ) -> Result<Vec<TablePlan>> {
-    prepass_inner(source, staging, locale, opts, notes).map_err(|e| row_limit(e, &opts.limits))
+    prepass_inner(source, staging, locale, opts, notes, extension_memory)
+        .map_err(|e| row_limit(e, &opts.limits))
 }
 
 fn prepass_inner(
@@ -452,6 +476,7 @@ fn prepass_inner(
     locale: &str,
     opts: &RestoreOptions<'_>,
     notes: &mut Notes<'_, '_>,
+    extension_memory: &mut extensions::Memory,
 ) -> Result<Vec<TablePlan>> {
     let limits = opts.limits;
     let file = io_err(File::open(source))?;
@@ -472,8 +497,8 @@ fn prepass_inner(
     };
     ticks.send(notes);
 
-    read_preamble(&mut reader)?;
-    let next = skip_folders(
+    let compat = read_preamble(&mut reader)?;
+    let (next, cas) = skip_folders(
         &mut reader,
         &limits,
         row_limits,
@@ -527,11 +552,56 @@ fn prepass_inner(
         )?;
         plans.push(plan);
     }
+    drop(walk);
+    drop(all);
+    drop(by_name);
     match reader.next_event()? {
-        Some(Event::DataBaseEnd) => Ok(plans),
-        Some(Event::ExtensionsStart) => Err(bad(EXTENSIONS_REFUSED)),
-        _ => Err(bad("element order, layout or value")),
+        Some(Event::DataBaseEnd) => {
+            if reader.next_event()?.is_some() {
+                return Err(bad("element after DataBase"));
+            }
+        }
+        Some(Event::ExtensionsStart) => {
+            extensions::profile(compat, cas, &plans)?;
+            let block = extensions::Block::read(
+                &mut reader,
+                &schema,
+                &limits,
+                row_limits,
+                extension_memory,
+                opts.memory_budget.as_ref(),
+            )?;
+            let walk = block.schema.walk();
+            for ((head, descriptor), (t, owner)) in
+                block.heads.iter().zip(&block.descriptors).zip(walk)
+            {
+                expect(reader.next_event()?, Event::TableStart(head.clone()))?;
+                ticks.table.clone_from(&descriptor.name);
+                ticks.send(notes);
+                plans.push(table_plan(
+                    &mut reader,
+                    head,
+                    descriptor,
+                    t,
+                    owner,
+                    (cap, index_cap),
+                    staging,
+                    locale,
+                    opts,
+                    &mut ticks,
+                    notes,
+                )?);
+            }
+            let verified = block.finish(&mut reader, extension_memory)?;
+            drop(reader);
+            drop(verified);
+            drop(schema);
+            extension_memory.retain_plans(&plans)?;
+            return Ok(plans);
+        }
+        _ => return Err(bad("element order, layout or value")),
     }
+    Ok(plans)
 }
 
 pub(super) fn skip_folders<R: Read>(
@@ -540,9 +610,10 @@ pub(super) fn skip_folders<R: Read>(
     row_limits: ReadLimits,
     without_users: bool,
     file_limit: u64,
-) -> Result<Option<Event>> {
+) -> Result<(Option<Event>, [u64; 2])> {
     let (_, header_limits) = folder_header_limits(limits, row_limits);
     let mut files = 0u64;
+    let mut cas = [0u64; 2];
     let mut next = reader.next_event()?;
     for folder_name in FOLDERS {
         let head = TableHead::system(&Source::Folder(folder_name.into()))
@@ -554,6 +625,11 @@ pub(super) fn skip_folders<R: Read>(
         expect(next.take(), expected)?;
         reader.set_read_limits(header_limits);
         while let Some(metadata) = folder_header(reader, &head)? {
+            match folder_name {
+                "ConfigCAS" => cas[0] += 1,
+                "ConfigCASSave" => cas[1] += 1,
+                _ => {}
+            }
             let name = folder_file_name(&metadata)?;
             if counted_file(without_users, &head.phys_name, name) {
                 files += 1;
@@ -566,7 +642,7 @@ pub(super) fn skip_folders<R: Read>(
         reader.set_read_limits(row_limits);
         next = reader.next_event()?;
     }
-    Ok(next)
+    Ok((next, cas))
 }
 
 fn skip_users<R: Read>(reader: &mut DtReader<R>, next: Option<Event>) -> Result<()> {
@@ -645,6 +721,7 @@ fn table_plan<R: Read>(
             Some(Event::Row(row)) => row,
             _ => return Err(bad("missing logical table end")),
         };
+        extensions::check_data_head(head)?;
         check_row(head, &row)?;
         for &(i, ty) in &blob_columns {
             if let Some(v) = row.get(i) {
@@ -700,13 +777,23 @@ fn table_plan<R: Read>(
 
 pub fn plan_dt(source: &Path, opts: &mut RestoreOptions<'_>) -> Result<Vec<TablePlan>> {
     let scratch = io_err(tempfile::Builder::new().prefix(PLAN_PREFIX).tempdir())?;
+    let mut extension_memory = extensions::Memory::new(&opts.limits, opts.memory_budget.as_ref())?;
     let mut events = opts.events.take();
     let mut notes = Notes {
         events: &mut events,
     };
     let result = probe_locale(source, &opts.limits, opts.without_users, FILES_MAX)
         .map_err(|e| row_limit(e, &opts.limits))
-        .and_then(|locale| prepass(source, scratch.path(), locale, opts, &mut notes));
+        .and_then(|locale| {
+            prepass(
+                source,
+                scratch.path(),
+                locale,
+                opts,
+                &mut notes,
+                &mut extension_memory,
+            )
+        });
     opts.events = events;
     let closed = scratch.close();
     let plans = result?;

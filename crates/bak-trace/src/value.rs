@@ -45,6 +45,7 @@ pub enum Value {
     Tag(&'static str),
     Hash(Hashed),
     Text(Redacted),
+    Table(crate::table::ClearTable),
     Null,
 }
 
@@ -110,6 +111,15 @@ impl Event {
         self
     }
 
+    pub fn table(mut self, key: &'static str, value: crate::table::ClearTable) -> Self {
+        debug_assert!(
+            crate::render::TEXT_KEYS.contains(&key),
+            "table key {key:?} is not in render::TEXT_KEYS, so the final scan would not search it"
+        );
+        self.fields.push((key, Value::Table(value)));
+        self
+    }
+
     pub fn null(mut self, key: &'static str) -> Self {
         self.fields.push((key, Value::Null));
         self
@@ -172,6 +182,7 @@ impl Event {
                 Value::Tag(tag) => line.push_str(&json_string(tag)),
                 Value::Hash(hash) => line.push_str(&json_string(hash.as_str())),
                 Value::Text(text) => line.push_str(&json_string(text.as_str())),
+                Value::Table(name) => line.push_str(&json_string(name.as_str())),
                 Value::Null => line.push_str("null"),
             }
         }

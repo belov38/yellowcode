@@ -4,6 +4,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[path = "fragment.rs"]
+mod fragment;
+pub(crate) use fragment::FragmentAdmission;
+
 #[path = "namespace_capture.rs"]
 mod namespace_capture;
 
@@ -68,7 +72,7 @@ pub fn load_objects(dir: &Path, options: &ObjectOptions) -> Result<ObjectDump> {
     })
 }
 
-pub(super) struct Assembly {
+pub(crate) struct Assembly {
     pub reader: ValueReader,
     pub report: ObjectReport,
     pub max_value_bytes: u64,
@@ -83,13 +87,24 @@ impl Assembly {
         scope: &str,
         path: &Path,
     ) -> Result<Vec<crate::Prop>> {
+        self.properties_admitted(node, spec, tag, scope, path, &FragmentAdmission::LEGACY)
+    }
+    pub(crate) fn properties_admitted(
+        &mut self,
+        node: shell_xml::N<'_, '_>,
+        spec: &[(String, mdschema::PropSpec)],
+        tag: &str,
+        scope: &str,
+        path: &Path,
+        admission: &FragmentAdmission<'_>,
+    ) -> Result<Vec<crate::Prop>> {
         use crate::{Prop, Value};
         let props = shell_xml::required(node, shell_xml::MD, "Properties", path)?;
         let mut out = Vec::new();
         for p in props.children() {
             let descriptor = schema::descriptor(self.reader.schema, spec, tag, scope, p.local())
                 .unwrap_or_default();
-            let fragment = self.fragment(p, path)?;
+            let fragment = self.fragment_admitted(p, path, admission)?;
             let mut depth = 0usize;
             let mut parent = p.parent();
             while let Some(n) = parent {
@@ -106,7 +121,9 @@ impl Assembly {
                 depth,
                 &inherited,
             );
+            (admission.check)()?;
             self.capture_scope(p, &value, path)?;
+            (admission.check)()?;
             let raw = matches!(value, Value::Xml(_));
             let counts = self
                 .report
@@ -129,66 +146,28 @@ impl Assembly {
         Ok(out)
     }
     pub(super) fn fragment(&mut self, n: shell_xml::N<'_, '_>, path: &Path) -> Result<XmlNode> {
-        use crate::xml::XmlAttr;
-        let mut bytes = 0u64;
-        let mut stack = vec![n];
-        while let Some(n) = stack.pop() {
-            bytes = bytes.saturating_add(std::mem::size_of::<XmlNode>() as u64);
-            let mut add = |len: usize| {
-                bytes = bytes.saturating_add(len as u64);
-            };
-            add(n.local().len());
-            for s in n.ns().into_iter().chain(n.prefix()).chain(n.text()) {
-                add(s.len());
-            }
-            for a in n.attrs() {
-                add(std::mem::size_of::<XmlAttr>());
-                add(a.local().len());
-                add(a.value().len());
-                for s in a.ns().into_iter().chain(a.prefix()) {
-                    add(s.len());
-                }
-            }
-            for (p, u) in n.ns_decls() {
-                add(std::mem::size_of::<(Option<String>, String)>());
-                add(u.len());
-                if let Some(p) = p {
-                    add(p.len());
-                }
-            }
-            stack.extend(n.children());
-        }
-        self.report.value_bytes = self.report.value_bytes.saturating_add(bytes);
-        if self.report.value_bytes > self.max_value_bytes {
-            return Err(walk::err(path, "property value byte limit"));
-        }
-        fn copy(n: shell_xml::N<'_, '_>) -> XmlNode {
-            XmlNode {
-                ns: n.ns().map(String::from),
-                local: n.local().into(),
-                prefix: n.prefix().map(String::from),
-                attrs: n
-                    .attrs()
-                    .map(|a| XmlAttr {
-                        ns: a.ns().map(String::from),
-                        local: a.local().into(),
-                        prefix: a.prefix().map(String::from),
-                        value: a.value().into(),
-                    })
-                    .collect(),
-                ns_decls: n
-                    .ns_decls()
-                    .map(|(p, u)| (p.map(String::from), u.into()))
-                    .collect(),
-                children: n.children().map(copy).collect(),
-                text: n.text().map(String::from),
-            }
-        }
-        Ok(copy(n))
+        self.fragment_admitted(n, path, &FragmentAdmission::LEGACY)
+    }
+    fn fragment_admitted(
+        &mut self,
+        n: shell_xml::N<'_, '_>,
+        path: &Path,
+        admission: &FragmentAdmission<'_>,
+    ) -> Result<XmlNode> {
+        let bytes = fragment::measure(n, admission.check)?;
+        self.report.value_bytes = self
+            .report
+            .value_bytes
+            .checked_add(bytes)
+            .filter(|total| *total <= self.max_value_bytes)
+            .ok_or_else(|| walk::err(path, "property value byte limit"))?;
+        (admission.check)()?;
+        (admission.pay)(bytes)?;
+        fragment::copy(n, admission.check)
     }
 }
 
-pub(super) fn headers(
+pub(crate) fn headers(
     props: &[crate::Prop],
     synonym: &mut crate::LocalString,
     comment: &mut String,

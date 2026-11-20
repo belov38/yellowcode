@@ -175,12 +175,14 @@ impl SchemaResource {
             upgrade: crate::managed::Cell::new(),
         };
         let required = crate::static_schema().tables();
-        if usize::from(count) != required.len() + 2
+        if usize::from(count) != required.len() + 4
             || required
                 .iter()
                 .any(|(name, _)| resource.table(name).is_none())
             || resource.table("forms/compat8312.json").is_none()
             || resource.table("forms/upgrade.json").is_none()
+            || resource.table("forms/build.json").is_none()
+            || resource.table("forms/templates.json").is_none()
         {
             return Err(ResourceError::Broken("missing or unsupported table set"));
         }

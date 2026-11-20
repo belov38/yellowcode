@@ -152,35 +152,88 @@ pub(crate) fn type_name(ex: &Execution, t: TypeIdx) -> bsl_prim::Str {
 }
 
 pub(crate) fn release(values: Vec<Value>) {
+    release_in(values, false);
+}
+
+pub(crate) fn release_dropped(values: Vec<Value>) {
+    let observed = bsl_vm::drop_form() == bsl_vm::DropForm::AssignedContainer;
+    release_in(values, observed);
+}
+
+pub(crate) fn release_cleared(values: Vec<Value>) {
+    let observed = bsl_vm::drop_form() == bsl_vm::DropForm::None && bsl_vm::in_body();
+    release_in(values, observed);
+}
+
+const MAX_LEVELS: usize = 32;
+
+fn release_in(values: Vec<Value>, observed: bool) {
     let mut stack = values;
+    stack.reverse();
+    let mut levels = [(0usize, false); MAX_LEVELS];
+    let mut depth = 0usize;
+    let mut overflow = usize::MAX;
     while let Some(v) = stack.pop() {
+        let at = stack.len();
+        while depth > 0 && levels[depth - 1].0 > at {
+            depth -= 1;
+        }
+        if overflow > at {
+            overflow = usize::MAX;
+        }
+        let here = if overflow != usize::MAX {
+            false
+        } else if depth > 0 {
+            levels[depth - 1].1
+        } else {
+            observed
+        };
         let Value::Object(o) = v else {
             continue;
         };
         if Rc::strong_count(&o) == 1 {
+            let start = stack.len();
             let any = o.as_any();
+            let mut down = false;
             if value_tree::drain(&*o, &mut stack, false) {
             } else if let Some(a) = any.downcast_ref::<array::Array>() {
-                stack.extend(a.take_items());
+                down = here && !a.is_fixed();
+                stack.extend(a.take_items().into_iter().rev());
             } else if let Some(s) = any.downcast_ref::<structure::Structure>() {
-                stack.extend(s.take_values());
+                down = here && !s.is_fixed();
+                stack.extend(s.take_values().into_iter().rev());
             } else if let Some(m) = any.downcast_ref::<map::Map>() {
-                stack.extend(m.take_all());
+                stack.extend(m.take_all().into_iter().rev());
             } else if let Some(list) = any.downcast_ref::<value_list::ValueList>() {
-                stack.extend(list.take_values());
+                stack.extend(list.take_values().into_iter().rev());
             } else if let Some(item) = any.downcast_ref::<value_list::ValueListItem>() {
-                stack.extend(item.take_values());
+                stack.extend(item.take_values().into_iter().rev());
             } else if let Some(table) = any.downcast_ref::<value_table::ValueTable>() {
-                stack.extend(table.take_values());
+                stack.extend(table.take_values().into_iter().rev());
             } else if let Some(row) = any.downcast_ref::<value_table::row::TableRow>() {
-                stack.extend(row.take_values());
+                stack.extend(row.take_values().into_iter().rev());
             } else if let Some(kv) = any.downcast_ref::<KeyValue>() {
-                stack.extend(kv.take());
+                let [key, value] = kv.take();
+                stack.push(value);
+                stack.push(key);
             } else if let Some(boundary) = any.downcast_ref::<crate::values::boundary::Boundary>() {
                 stack.push(boundary.take());
             }
+            if stack.len() > start {
+                if depth < MAX_LEVELS {
+                    levels[depth] = (start, down);
+                    depth += 1;
+                } else if overflow == usize::MAX {
+                    overflow = start;
+                }
+            }
         }
-        drop(o);
+        let form = if here {
+            bsl_vm::DropForm::Observed
+        } else {
+            bsl_vm::DropForm::Unobserved
+        };
+        bsl_vm::with_drop_form(form, || drop(o));
     }
 }
 

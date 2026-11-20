@@ -308,6 +308,59 @@ pub(crate) fn insert_new_part(
     result
 }
 
+pub fn rewrite_single_part(
+    txn: &mut WriteTxn<'_>,
+    table: &str,
+    name: &str,
+    data: &[u8],
+    modified: onecd::DateTime,
+) -> Result<bool> {
+    let result = rewrite_inner(txn, table, name, data, modified);
+    if result.is_err() {
+        txn.abort();
+    }
+    result
+}
+
+fn rewrite_inner(
+    txn: &mut WriteTxn<'_>,
+    table: &str,
+    name: &str,
+    data: &[u8],
+    modified: onecd::DateTime,
+) -> Result<bool> {
+    let t = txn.read_table(table)?;
+    let c = Columns::read(t.descr())?;
+    let Some(old) = collect(&t, &c, name)? else {
+        return Ok(false);
+    };
+    let [(_, id, _)] = old.rows.as_slice() else {
+        return Err(Error::Unsupported(format!(
+            "{table}: a file of several parts is not rewritten in place"
+        )));
+    };
+    if data.len() > PART_SIZE {
+        return Err(bad(table, "the bytes do not fit one part"));
+    }
+    let mut row = t
+        .get(*id)?
+        .ok_or_else(|| bad(table, "folder part vanished"))?;
+    drop(t);
+    let size = Numeric::from_i64(
+        i64::try_from(data.len()).map_err(|_| bad(table, "folder length overflow"))?,
+    );
+    for (index, value) in [
+        (c.modified, Value::DateTime(modified)),
+        (c.size, Value::Numeric(size)),
+        (c.data, Value::Image(BlobVal::Data(data.to_vec()))),
+    ] {
+        *row.get_mut(index)
+            .ok_or_else(|| bad(table, "folder column outside row"))? = value;
+    }
+    txn.table(table)?.update(*id, &row)?;
+    Ok(true)
+}
+
 pub fn part_count(len: usize) -> usize {
     len.div_ceil(PART_SIZE).max(1)
 }

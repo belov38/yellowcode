@@ -388,6 +388,20 @@ GO
         ))
     }
 
+    pub fn schema_storage_ids_script(&self) -> String {
+        checked(format!(
+            r#"{}IF DB_ID(@db) IS NULL THROW 51000,'temporary database missing',1;
+{}
+IF DATABASEPROPERTYEX(@db,'Updateability')<>'READ_ONLY' THROW 51000,'temporary database is not read-only',1;
+DECLARE @query nvarchar(max)=CONVERT(nvarchar(max),N'USE ')+QUOTENAME(@db)+N'; SELECT CONVERT(bigint,SchemaID) AS [schema_id] FROM dbo.SchemaStorage ORDER BY SchemaID FOR JSON PATH';
+EXEC(@query);
+GO
+"#,
+            self.declarations(),
+            CHECK_OWNERSHIP
+        ))
+    }
+
     pub fn support_script(&self) -> String {
         checked(format!(
             r#"{}IF DB_ID(@db) IS NULL THROW 51000,'temporary database missing',1;

@@ -83,7 +83,15 @@ pub(crate) fn type_el(fi: &FormInfo<'_>, prop: &str, pat: Option<&Node>) -> Py<O
     for want in ["Type", "TypeSet"] {
         for t in names.iter().filter(|t| t.kind == want) {
             let mut attrs = Vec::new();
-            if let Some(ns) = t.ns.as_deref().filter(|ns| !ns.is_empty()) {
+            let enterprise = super::write::fc_external_owner(fi.owner)
+                && t.ns.as_deref() == Some("http://v8.1c.ru/8.1/data/enterprise")
+                && t.name.starts_with("@:");
+            let name = if enterprise {
+                format!("ent:{}", t.name.strip_prefix("@:").ok_or(Raised)?)
+            } else {
+                t.name.clone()
+            };
+            if let Some(ns) = t.ns.as_deref().filter(|ns| !ns.is_empty() && !enterprise) {
                 let k = if t.name.starts_with("@:") {
                     "xmlns:@".to_string()
                 } else {
@@ -93,7 +101,7 @@ pub(crate) fn type_el(fi: &FormInfo<'_>, prop: &str, pat: Option<&Node>) -> Py<O
             }
             kids.push(E::new(
                 format!("v8:{}", t.kind),
-                Some(t.name.clone()),
+                Some(name),
                 attrs,
                 Vec::new(),
             ));

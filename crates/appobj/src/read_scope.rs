@@ -337,4 +337,15 @@ impl WriteTxn for ScopedTxn<dyn WriteTxn> {
     fn commit(self: Box<Self>) -> StoreResult<()> {
         self.inner.commit()
     }
+    fn rewrite_system_file(
+        &mut self,
+        table: &str,
+        name: &str,
+        _data: &[u8],
+        _modified: ibschema::DateTime,
+    ) -> StoreResult<()> {
+        Err(StoreError::Unsupported(format!(
+            "system file {table}/{name}: a base with data separation"
+        )))
+    }
 }

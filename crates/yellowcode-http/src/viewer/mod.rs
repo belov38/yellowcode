@@ -1,5 +1,6 @@
 pub mod api;
 pub mod api_ext;
+mod extensions;
 pub mod form;
 pub mod front;
 pub mod managed;
@@ -21,26 +22,35 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use crate::{DRAIN, guard, text};
-use http::{HttpError, MAX_BODY, Request, Response, read_request_with_body_limit, write_response};
+use http::{HttpError, MAX_BODY, Request, Response, read_request_with_body_policy, write_response};
 use state::{State, Viewer};
 use yellowcode_core::Result;
 use yellowcode_core::viewer::body::ViewerBody;
 
 pub fn accepts_post(path: &str) -> bool {
-    path.starts_with("/api/x/") || path == "/api/skins/select" || path == "/api/users/apply"
+    path.starts_with("/api/x/")
+        || path == "/api/skins/select"
+        || path == "/api/users/apply"
+        || extensions::is_post_route(path)
 }
 
 pub fn is_api(path: &str) -> bool {
     path.starts_with("/api/")
 }
 
+pub fn post_body_limit(path: &str) -> usize {
+    if extensions::is_post_route(path) {
+        128
+    } else if path == "/api/users/apply" {
+        64 * 1024
+    } else {
+        MAX_BODY
+    }
+}
+
 pub fn read_request(r: &mut dyn std::io::BufRead) -> std::result::Result<Request, HttpError> {
-    read_request_with_body_limit(r, &accepts_post, &|path| {
-        if path == "/api/users/apply" {
-            64 * 1024
-        } else {
-            MAX_BODY
-        }
+    read_request_with_body_policy(r, &accepts_post, &post_body_limit, &|path| {
+        path == "/api/extensions"
     })
 }
 
@@ -410,6 +420,9 @@ const WAIT: Duration = Duration::from_secs(1);
 
 pub fn dispatch(viewer: &Viewer, req: &Request) -> Response {
     guarded(|| {
+        if extensions::is_route(req) {
+            return extensions::handle(viewer, req);
+        }
         if users_control::is_write_route(req) {
             return users_control::handle(viewer, req);
         }

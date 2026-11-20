@@ -182,6 +182,21 @@ fn child(
     }
     writer.close(tag)
 }
+pub fn managed_object_child(
+    writer: &mut ManagedXmlWriter,
+    budget: &MemoryBudget,
+    owner_kind: &str,
+    owner_name: &str,
+    value: &Child,
+) -> Result<()> {
+    let owner = static_schema()
+        .kind(owner_kind)
+        .ok_or(BudgetError::Overflow)?;
+    let specs = object(owner.field("children"));
+    let spec = child_spec(specs, child_tag_name(value.tag)).ok_or(BudgetError::Overflow)?;
+    child(writer, budget, owner_kind, owner_name, spec, value)
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "borrowed document context and selected groups share one lifetime"

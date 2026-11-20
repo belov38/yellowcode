@@ -64,7 +64,9 @@ impl Directory {
         let mut output = OutputBudget::new();
         for (i, row) in table.scan().enumerate() {
             if i >= MAX_USERS {
-                return Err(UserWriteError::UnsupportedLayout("users limit"));
+                return Err(UserWriteError::UnsupportedLayout(
+                    LimitKind::Rows.write_text(),
+                ));
             }
             let (slot, row) = row.map_err(storage)?;
             let value = row
@@ -78,9 +80,13 @@ impl Directory {
             total = total
                 .checked_add(len)
                 .filter(|n| *n <= MAX_TOTAL_DATA)
-                .ok_or(UserWriteError::UnsupportedLayout("DATA budget"))?;
+                .ok_or(UserWriteError::UnsupportedLayout(
+                    LimitKind::TotalData.write_text(),
+                ))?;
             if len > v8users::MAX_DATA_BYTES {
-                return Err(UserWriteError::UnsupportedLayout("DATA limit"));
+                return Err(UserWriteError::UnsupportedLayout(
+                    LimitKind::RowData.write_text(),
+                ));
             }
             let bytes = match value {
                 Value::Image(BlobVal::Ref(r)) => table.blob_bytes(*r).map_err(storage)?,
@@ -107,7 +113,7 @@ impl Directory {
 
             output
                 .admit(&card)
-                .map_err(|_| UserWriteError::UnsupportedLayout("public output limit"))?;
+                .map_err(|kind| UserWriteError::UnsupportedLayout(kind.write_text()))?;
             let Some(Value::DateTime(date)) = row.get(changed) else {
                 return Err(UserWriteError::UnsupportedLayout("CHANGED type"));
             };
@@ -580,8 +586,9 @@ fn apply_transaction(
     let directory = Directory::read(&tx)?;
     let mut mirror = legacy(&tx, &directory)?;
     let mut cards: Vec<_> = directory.rows.iter().map(|r| r.card.clone()).collect();
-    resolve_roles(&mut cards, &facts.cfg)
-        .map_err(|_| UserWriteError::UnsupportedLayout("public output limit"))?;
+    resolve_roles(&mut cards, &facts.cfg).map_err(|e| {
+        UserWriteError::UnsupportedLayout(e.limit_text().unwrap_or("public output limit"))
+    })?;
     let target = match &request.action {
         UserAction::Create { .. } => None,
         UserAction::Update { identity, .. }
@@ -650,7 +657,7 @@ fn apply_transaction(
     let data = match &request.action {
         UserAction::Create { draft } => {
             if cards.len() >= MAX_USERS - 1 {
-                return Err(UserWriteError::InvalidInput("users limit"));
+                return Err(UserWriteError::InvalidInput(LimitKind::Rows.write_text()));
             }
             policy(&tx, None)?;
             let roles = facts.roles(&draft.roles)?;
@@ -748,8 +755,9 @@ fn apply_transaction(
         .transpose()
         .map_err(layout)?;
     if let Some(card) = user.as_mut() {
-        resolve_roles(std::slice::from_mut(card), &facts.cfg)
-            .map_err(|_| UserWriteError::UnsupportedLayout("public output limit"))?;
+        resolve_roles(std::slice::from_mut(card), &facts.cfg).map_err(|e| {
+            UserWriteError::UnsupportedLayout(e.limit_text().unwrap_or("public output limit"))
+        })?;
         let request = onecd::KeyRequest::when_bound(None);
         let key = name_key(&card.name, request.as_ref())
             .map_err(|_| UserWriteError::InvalidInput("name"))?;
@@ -787,7 +795,7 @@ fn apply_transaction(
     for card in &remaining {
         output
             .admit(card)
-            .map_err(|_| UserWriteError::InvalidInput("result collection or output limit"))?;
+            .map_err(|kind| UserWriteError::InvalidInput(kind.write_text()))?;
     }
     let users_remaining = remaining.len();
     drop(remaining);
@@ -800,7 +808,7 @@ fn apply_transaction(
         users_remaining,
     };
     serde_json::to_writer(OutputBudget::new(), &outcome)
-        .map_err(|_| UserWriteError::InvalidInput("output limit"))?;
+        .map_err(|_| UserWriteError::InvalidInput(LimitKind::Json.write_text()))?;
     let related = Related::new(sets.max(), outcome.deleted_id.as_deref())?;
     let mut write = db.write().map_err(storage)?;
     if update_mirror {
@@ -874,7 +882,9 @@ fn apply_transaction(
         .try_fold(service_size, |n, r| n.checked_add(r.size))
         .and_then(|n| n.checked_add(prepared.as_ref().map_or(0, |r| r.data.len())));
     if data_total.is_none_or(|n| n > MAX_TOTAL_DATA) {
-        return Err(UserWriteError::InvalidInput("result DATA budget"));
+        return Err(UserWriteError::InvalidInput(
+            LimitKind::TotalData.write_text(),
+        ));
     }
     #[cfg(unix)]
     let current = {

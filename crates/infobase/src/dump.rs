@@ -15,7 +15,7 @@ use crate::colval::{col_type_of, from_onecd, value_kind};
 use crate::config::ConfigTxnSource;
 use crate::raw::{dbnames_text_in, dbschema_text_in};
 use crate::{Error, Infobase, Result};
-use mdconf::{EntryMeta, EntrySource, LoadOptions};
+use mdconf::{EntryMeta, EntrySource, LoadOptions, LoadProfile};
 
 pub const MAX_VALUE_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_ROW_BYTES: usize = 128 * 1024 * 1024;
@@ -497,7 +497,7 @@ impl EntrySource for BoundedConfig<'_> {
     }
 }
 
-fn configuration_in(txn: &ReadTxn) -> Result<Option<mdconf::Configuration>> {
+fn configuration_in(txn: &ReadTxn, profile: LoadProfile) -> Result<Option<mdconf::Configuration>> {
     let source = match ConfigTxnSource::read(txn, "CONFIG") {
         Ok(source) => source,
         Err(Error::Engine(e)) if absent(&e) => return Ok(None),
@@ -510,6 +510,7 @@ fn configuration_in(txn: &ReadTxn) -> Result<Option<mdconf::Configuration>> {
         &BoundedConfig(source),
         &LoadOptions {
             keep_source: false,
+            profile,
             ..Default::default()
         },
     )
@@ -528,7 +529,11 @@ struct SnapshotMetadata {
 impl SnapshotMetadata {
     fn read(txn: &ReadTxn, selection: UsersSelection) -> Result<Self> {
         let schema = LogicalSchema::from_text(&dbschema_text_in(txn)?)?;
-        let configuration = configuration_in(txn)?;
+        let profile = match selection {
+            UsersSelection::Explicit(_) => LoadProfile::Query,
+            UsersSelection::Auto(_) => LoadProfile::Full,
+        };
+        let configuration = configuration_in(txn, profile)?;
         let users = match selection {
             UsersSelection::Explicit(users) => users,
             UsersSelection::Auto(profile) => auto_users_layout(configuration.as_ref(), profile)?,
@@ -610,12 +615,13 @@ struct FolderFile {
     modified: DateTime,
     attributes: Numeric,
     size: Numeric,
-    length: usize,
+    length: u64,
     parts: Vec<(u64, RowId)>,
 }
 struct StoredPart {
     number: u64,
     row: RowId,
+    stored: u64,
     created: DateTime,
     modified: DateTime,
     attributes: Numeric,
@@ -645,7 +651,7 @@ fn folder_files(table: &TableRead<'_>) -> Result<Vec<FolderFile>> {
     let modified = field("MODIFIED")?;
     let attributes = field("ATTRIBUTES")?;
     let size = field("DATASIZE")?;
-    field("BINARYDATA")?;
+    let data = field("BINARYDATA")?;
     let part = descr.field("PARTNO").map(|(i, _)| i);
     let index = descr
         .indexes
@@ -687,11 +693,11 @@ fn folder_files(table: &TableRead<'_>) -> Result<Vec<FolderFile>> {
         };
         let attributes = numeric(attributes)?;
         let size = numeric(size)?;
-        let length = usize::try_from(number(&size, context)?)
-            .map_err(|_| limit(context, "DATASIZE overflow"))?;
-        if length > MAX_VALUE_BYTES {
-            return Err(limit(context, "BINARYDATA exceeds 64 MiB product limit"));
-        }
+        let stored = match cell(data)? {
+            Value::Image(BlobVal::Data(b)) => b.len() as u64,
+            Value::Image(BlobVal::Ref(r)) => u64::from(r.len),
+            v => return Err(bad(context, &format!("BINARYDATA is {}", value_kind(v)))),
+        };
         let created = date(created)?;
         let modified = date(modified)?;
         let partno = match part {
@@ -708,6 +714,7 @@ fn folder_files(table: &TableRead<'_>) -> Result<Vec<FolderFile>> {
         parts.push(StoredPart {
             number: partno,
             row: entry.row,
+            stored,
             created,
             modified,
             attributes,
@@ -761,8 +768,22 @@ fn folder_files(table: &TableRead<'_>) -> Result<Vec<FolderFile>> {
                 )));
             }
         }
-        let length = usize::try_from(number(&size, context)?)
-            .map_err(|_| limit(context, "DATASIZE overflow"))?;
+        let length = number(&size, context)?;
+        let mut total = 0u64;
+        for stored in &parts {
+            if length > 0 && stored.stored == 0 {
+                return Err(bad(
+                    context,
+                    &format!("part {} of a file: empty part", stored.number),
+                ));
+            }
+            total = total
+                .checked_add(stored.stored)
+                .ok_or_else(|| bad(context, "part length overflow"))?;
+        }
+        if total != length {
+            return Err(bad(context, "parts length differs from DATASIZE"));
+        }
         files.push(FolderFile {
             name,
             created,
@@ -785,62 +806,152 @@ fn folder_files(table: &TableRead<'_>) -> Result<Vec<FolderFile>> {
     Ok(files)
 }
 
-fn write_folder(txn: &ReadTxn, writer: &mut DtWriter<&mut dyn Write>, name: &str) -> Result<u64> {
+const FOLDERS: [&str; 7] = [
+    "Config",
+    "ConfigSave",
+    "Params",
+    "Files",
+    "DepotFiles",
+    "ConfigCAS",
+    "ConfigCASSave",
+];
+
+fn folder_plans(txn: &ReadTxn) -> Result<Vec<Option<Vec<FolderFile>>>> {
+    FOLDERS
+        .iter()
+        .map(|&name| {
+            let head = TableHead::system(&Source::Folder(name.into()))
+                .ok_or_else(|| bad(name, "no folder layout"))?;
+            match txn.table(&head.phys_name) {
+                Ok(table) => folder_files(&table).map(Some),
+                Err(e) if absent(&e) => Ok(None),
+                Err(e) => Err(e.into()),
+            }
+        })
+        .collect()
+}
+
+struct PartsReader<'t> {
+    table: &'t TableRead<'t>,
+    column: usize,
+    context: String,
+    parts: std::vec::IntoIter<(u64, RowId)>,
+    current: Option<(PartData<'t>, u64)>,
+}
+enum PartData<'t> {
+    Inline(std::io::Cursor<Vec<u8>>),
+    Blob(Box<onecd::BlobReader<'t>>),
+}
+impl<'t> PartsReader<'t> {
+    fn next_part(&mut self) -> Result<bool> {
+        let Some((_, slot)) = self.parts.next() else {
+            return Ok(false);
+        };
+        let row = self
+            .table
+            .get(slot)?
+            .ok_or_else(|| bad(&self.context, "part vanished"))?;
+        let data = match row.get(self.column) {
+            Some(Value::Image(BlobVal::Data(b))) => {
+                PartData::Inline(std::io::Cursor::new(b.clone()))
+            }
+            Some(Value::Image(BlobVal::Ref(r))) => {
+                let reader = self.table.blob(slot, "BINARYDATA")?;
+                if reader.len() != u64::from(r.len) {
+                    return Err(bad(
+                        &self.context,
+                        "blob length differs from declared length",
+                    ));
+                }
+                PartData::Blob(Box::new(reader))
+            }
+            Some(_) => return Err(bad(&self.context, "folder data is not an image")),
+            None => return Err(bad(&self.context, "short row")),
+        };
+        let declared = match &data {
+            PartData::Inline(c) => c.get_ref().len() as u64,
+            PartData::Blob(b) => b.len(),
+        };
+        self.current = Some((data, declared));
+        Ok(true)
+    }
+}
+impl Read for PartsReader<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        loop {
+            if self.current.is_none()
+                && !self
+                    .next_part()
+                    .map_err(|e| std::io::Error::other(e.to_string()))?
+            {
+                return Ok(0);
+            }
+            let Some((data, left)) = self.current.as_mut() else {
+                return Ok(0);
+            };
+            let n = match data {
+                PartData::Inline(c) => c.read(buf)?,
+                PartData::Blob(b) => b.read(buf)?,
+            };
+            if n == 0 {
+                if *left != 0 {
+                    return Err(std::io::Error::other(format!(
+                        "{}: part shorter than declared",
+                        self.context
+                    )));
+                }
+                self.current = None;
+                continue;
+            }
+            *left = left.checked_sub(n as u64).ok_or_else(|| {
+                std::io::Error::other(format!("{}: part longer than declared", self.context))
+            })?;
+            return Ok(n);
+        }
+    }
+}
+
+fn write_folder(
+    txn: &ReadTxn,
+    writer: &mut DtWriter<&mut dyn Write>,
+    name: &str,
+    files: Option<Vec<FolderFile>>,
+) -> Result<u64> {
     let head = TableHead::system(&Source::Folder(name.into()))
         .ok_or_else(|| bad(name, "no folder layout"))?;
     writer.begin_table(&head)?;
-    let table = match txn.table(&head.phys_name) {
-        Ok(table) => table,
-        Err(e) if absent(&e) => {
-            writer.end_table()?;
-            return Ok(0);
-        }
-        Err(e) => return Err(e.into()),
+    let Some(files) = files else {
+        writer.end_table()?;
+        return Ok(0);
     };
-    let files = folder_files(&table)?;
+    let table = txn.table(&head.phys_name)?;
     let (column, _) = table
         .descr()
         .field("BINARYDATA")
         .ok_or_else(|| bad(name, "no BINARYDATA"))?;
+    let context = format!("{}/BINARYDATA", head.phys_name);
     let mut count = 0;
     for file in files {
-        let context = format!("{}/BINARYDATA", head.phys_name);
-        let mut budget = Budget::new(LIMITS);
+        let budget = Budget::new(LIMITS);
         budget.value(file.name.len(), &context)?;
-        budget.add(file.name.len(), &context)?;
-        let mut joined = Vec::new();
-        for (_, slot) in file.parts {
-            let row = table.get(slot)?.ok_or_else(|| bad(name, "part vanished"))?;
-            let value = row.get(column).ok_or_else(|| bad(name, "short row"))?;
-            let blob = match value {
-                Value::Image(b) => b,
-                _ => return Err(bad(&context, "folder data is not an image")),
-            };
-            let inline = bytes_len(value);
-            budget.value(inline, &context)?;
-            budget.add(inline, &context)?;
-            append_blob(
-                &table,
-                slot,
-                "BINARYDATA",
-                blob,
-                &mut joined,
-                &mut budget,
-                &context,
-            )?;
-            budget.release(inline);
-        }
-        if joined.len() != file.length {
-            return Err(bad(&context, "actual length differs from DATASIZE"));
-        }
-        writer.row(&[
+        let metadata = [
             ColumnValue::Str(file.name),
             ColumnValue::DateTime(file.created),
             ColumnValue::DateTime(file.modified),
             ColumnValue::Number(file.attributes),
             ColumnValue::Number(file.size),
-            ColumnValue::Bytes(joined),
-        ])?;
+        ];
+        let mut input = PartsReader {
+            table: &table,
+            column,
+            context: context.clone(),
+            parts: file.parts.into_iter(),
+            current: None,
+        };
+        writer.row_folder_stream(&metadata, file.length, &mut input)?;
         count += 1;
     }
     writer.end_table()?;
@@ -864,7 +975,9 @@ fn write_dt_selected(
     selection: UsersSelection,
     out: &mut dyn Write,
 ) -> Result<DumpReport> {
+    let extension = crate::raw::extension_schema_in(txn)?;
     let metadata = SnapshotMetadata::read(txn, selection)?;
+    let folders = folder_plans(txn)?;
     let mut writer = DtWriter::new(
         out,
         DtHeader {
@@ -877,16 +990,8 @@ fn write_dt_selected(
         writer.custom_flag(name, &BinNode::Atom(Atom::int(1)))?;
     }
     let mut report = DumpReport::default();
-    for name in [
-        "Config",
-        "ConfigSave",
-        "Params",
-        "Files",
-        "DepotFiles",
-        "ConfigCAS",
-        "ConfigCASSave",
-    ] {
-        report.files += write_folder(txn, &mut writer, name)?;
+    for (name, files) in FOLDERS.into_iter().zip(folders) {
+        report.files += write_folder(txn, &mut writer, name, files)?;
     }
     report.users = write_table(txn, &mut writer, &metadata.users, true)?;
     for source in [Source::PasswordPolicies, Source::CompromisedPasswords] {
@@ -894,13 +999,41 @@ fn write_dt_selected(
         write_table(txn, &mut writer, &head, true)?;
     }
     writer.begin_database(&metadata.schema)?;
-    for head in TableHead::database(&metadata.schema)? {
+    let tables = TableHead::database(&metadata.schema)?;
+    let _phase = memory_budget::profile::phase(memory_budget::profile::Phase::DtTables);
+    memory_budget::profile::progress_total(tables.len());
+    for head in tables {
         report.rows += write_table(txn, &mut writer, &head, false)?;
         report.tables += 1;
+        memory_budget::profile::progress_step();
+    }
+    if let Some(text) = &extension {
+        write_extensions(txn, &mut writer, text, &mut report)?;
     }
     writer.end_database()?;
     writer.finish()?;
     Ok(report)
+}
+
+fn write_extensions(
+    txn: &ReadTxn,
+    writer: &mut DtWriter<&mut dyn Write>,
+    text: &[u8],
+    report: &mut DumpReport,
+) -> Result<()> {
+    let schema = dtfile::reader::extension_schema(text)?;
+    writer.begin_extensions()?;
+    let storage = TableHead::system(&Source::SchemaStorage)
+        .ok_or_else(|| bad("SCHEMASTORAGE", "no layout"))?;
+    write_table(txn, writer, &storage, false)?;
+    writer.begin_extension(1, &schema)?;
+    for head in TableHead::extension(1, &schema)? {
+        report.rows += write_table(txn, writer, &head, false)?;
+        report.tables += 1;
+    }
+    writer.end_extension()?;
+    writer.end_extensions()?;
+    Ok(())
 }
 
 impl Infobase {

@@ -12,6 +12,7 @@ autobenches = false
 [dependencies]
 base64 = "0.22"
 regex = "1"
+unicode-normalization = "0.1"
 thiserror = "2"
 mdconf-core = { path = "../mdconf-core" }
 md-model = { path = "../md-model" }

@@ -5,6 +5,7 @@ use super::{analysis_worker, body::ViewerBody};
 use memory_budget::{BudgetError, BudgetedVec, Category, MemoryBudget};
 use serde::{Deserialize, Serialize};
 use std::{
+    borrow::Cow,
     fs::File,
     io::{Read, Seek, Write},
     path::Path,
@@ -18,6 +19,23 @@ const MAX_OUTPUT: u64 = memory_budget::sealed_heap::ANALYSIS_HEAP_BYTES as u64;
 const CONTROL_BYTES: u64 = 1 << 20;
 const MAX_PATH_BYTES: usize = 32 << 10;
 const DEADLINE: Duration = Duration::from_secs(120);
+
+fn platform_resource_root(root: Option<&Path>) -> Result<Option<Cow<'_, Path>>, AnalysisError> {
+    #[cfg(windows)]
+    let root = root
+        .map(|root| std::path::absolute(root).map(Cow::<Path>::Owned))
+        .transpose()
+        .map_err(|_| AnalysisError::Io)?;
+    #[cfg(not(windows))]
+    let root = root.map(Cow::Borrowed);
+    if root
+        .as_deref()
+        .is_some_and(|root| root.as_os_str().len() > MAX_PATH_BYTES)
+    {
+        return Err(AnalysisError::Resource);
+    }
+    Ok(root)
+}
 #[derive(Clone, Copy)]
 enum OutputKind {
     Json,
@@ -104,7 +122,13 @@ pub struct FormXmlLease {
 }
 impl FormXmlLease {
     pub fn view(&self) -> Result<mdconf::forms::wire::Projection<'_>, AnalysisError> {
-        mdconf::forms::wire::decode_result(self.body.as_ref()).map_err(|_| AnalysisError::Protocol)
+        self.view_checked(|| Ok(()))
+    }
+    pub fn view_checked(
+        &self,
+        check: impl FnMut() -> Result<(), AnalysisError>,
+    ) -> Result<mdconf::forms::wire::Projection<'_>, AnalysisError> {
+        mdconf::forms::wire::decode_result_checked(self.body.as_ref(), check)
     }
 }
 
@@ -208,6 +232,7 @@ pub struct Supervisor<'a> {
     json_limit: u64,
     picture_answer: bool,
     interrupted: Option<&'a dyn Fn() -> bool>,
+    platform_resources: Option<&'a Path>,
 }
 impl<'a> Supervisor<'a> {
     pub fn new(
@@ -226,10 +251,15 @@ impl<'a> Supervisor<'a> {
             json_limit: MAX_OUTPUT,
             picture_answer: false,
             interrupted: None,
+            platform_resources: None,
         }
     }
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout.min(DEADLINE);
+        self
+    }
+    pub(crate) fn with_platform_resources(mut self, root: Option<&'a Path>) -> Self {
+        self.platform_resources = root;
         self
     }
     pub(crate) fn with_json_limit(mut self, limit: u64) -> Self {
@@ -247,6 +277,7 @@ impl<'a> Supervisor<'a> {
             json_limit: self.json_limit,
             picture_answer: true,
             interrupted: self.interrupted,
+            platform_resources: self.platform_resources,
         }
     }
     fn check_json_size(&self, kind: OutputKind, length: u64) -> Result<(), AnalysisError> {
@@ -456,12 +487,16 @@ impl<'a> Supervisor<'a> {
             .is_none_or(|length| length as u64 > MAX_OUTPUT)
             || self.executable.as_os_str().len() > MAX_PATH_BYTES
             || self.spill_dir.as_os_str().len() > MAX_PATH_BYTES
+            || self
+                .platform_resources
+                .is_some_and(|root| root.as_os_str().len() > MAX_PATH_BYTES)
         {
             return Err(AnalysisError::Resource);
         }
         if !self.executable.is_absolute() || !self.spill_dir.is_absolute() {
             return Err(AnalysisError::Io);
         }
+        let platform_resources = platform_resource_root(self.platform_resources)?;
         let metadata = super::body::json(self.budget, MAX_METADATA, metadata)?;
         let mut input = tempfile::tempfile_in(self.spill_dir).map_err(|_| AnalysisError::Io)?;
         let mut output = tempfile::tempfile_in(self.spill_dir).map_err(|_| AnalysisError::Io)?;
@@ -492,6 +527,9 @@ impl<'a> Supervisor<'a> {
         self.check(deadline)?;
         let mut command = Command::new(self.executable);
         command.env_clear();
+        if let Some(root) = platform_resources.as_deref() {
+            command.env("YELLOWCODE_PLATFORM_RESOURCES", root);
+        }
         #[cfg(windows)]
         if let Some(root) = std::env::var_os("SystemRoot") {
             if root.len() > MAX_PATH_BYTES {

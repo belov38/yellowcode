@@ -166,11 +166,9 @@ fn respond_internal(
             raw.push_str(&format!("Content-Type: {c}\r\n"));
         }
         raw.push_str(&format!("Content-Length: {}\r\n", body.len()));
-        let limit = if path_and_query.split('?').next() == Some("/api/users/apply") {
-            64 * 1024
-        } else {
-            yellowcode_http::transport::MAX_BODY
-        };
+        let limit = yellowcode_http::viewer::post_body_limit(
+            path_and_query.split('?').next().unwrap_or_default(),
+        );
         if body.len() <= limit {
             tail = body;
         }
@@ -182,6 +180,9 @@ fn respond_internal(
         Ok(r) => r,
         Err(e) => return Reply::text(e.status().unwrap_or(400), "error\n"),
     };
+    if req.method == "GET" && req.path == "/api/extensions" && !body.is_empty() {
+        return Reply::text(400, "error\n");
+    }
     if method == "GET" {
         let picture: Option<(&str, &[u8])> = match req.path.as_str() {
             "/startup/splash.svg" => Some((

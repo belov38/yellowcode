@@ -14,6 +14,7 @@ pub mod create;
 pub mod data;
 pub mod dump;
 pub mod error;
+pub mod extensions;
 pub mod folder;
 pub mod maybe_charged;
 pub mod open;

@@ -1,4 +1,5 @@
 use crate::model::Uuid16;
+use bsl_vm::HostError;
 use md_model::MdKind;
 use md_model::parts::{Right as MdRight, RightTarget as MdTarget, Rights};
 use std::collections::HashMap;
@@ -110,6 +111,99 @@ impl RightsMatrix {
     pub(crate) fn has_role(&self, id: &Uuid16) -> bool {
         self.role_ix.contains_key(id)
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DataRead {
+    Allowed,
+    Denied,
+}
+
+fn read_refusal(what: &str) -> HostError {
+    HostError::not_implemented("P6", &format!("чтение данных под пользователем: {what}"))
+}
+
+pub(crate) fn data_read(
+    ex: &mut bsl_vm::Execution,
+    app: &crate::Application,
+    md: Uuid16,
+) -> Result<DataRead, HostError> {
+    let privileged = ex.effective_flags().privileged;
+    let Some(ctx) = crate::session::call_ctx(ex) else {
+        return Err(HostError::not_implemented(
+            "P6",
+            "application read security provider",
+        ));
+    };
+    if ctx.sess.user().no_users || privileged {
+        return Ok(DataRead::Allowed);
+    }
+    let user = ctx.sess.user().clone();
+    let Some(read) = MdRight::from_name("Read") else {
+        return Err(read_refusal("право Чтение не найдено"));
+    };
+    let config = &app.model().config;
+    let Some(obj) = config.object(md) else {
+        return Err(read_refusal("объект вне конфигурации"));
+    };
+    if !read.is_applicable(obj.kind) {
+        return Err(read_refusal("вид объекта без права Чтение"));
+    }
+    let mut fields = Vec::new();
+    let mut stack: Vec<&md_model::Child> = obj.children.iter().collect();
+    while let Some(c) = stack.pop() {
+        fields.push(c.id);
+        stack.extend(c.children.iter());
+    }
+    let object = MdTarget::Object(md);
+    for role in user.roles.iter().filter_map(|id| config.object(*id)) {
+        let Some(rights) = role.rights() else {
+            continue;
+        };
+        if rights
+            .restrictions(&object, read)
+            .iter()
+            .any(|r| !r.condition.trim().is_empty() || !r.fields.is_empty())
+        {
+            return Err(read_refusal("ограничение на уровне записей"));
+        }
+        let field_right = rights.objects.iter().any(|o| {
+            let named = match &o.target {
+                MdTarget::Child { id, field: true } => fields.contains(id),
+                MdTarget::StandardAttribute { owner, .. } => *owner == md,
+                _ => false,
+            };
+            named && o.rights.iter().any(|rv| rv.right == read)
+        });
+        let fields_by_default = rights.set_for_attributes_by_default
+            || !rights.value(&object, read)
+            || fields.is_empty();
+        if field_right || !fields_by_default {
+            return Err(read_refusal("права на поля"));
+        }
+    }
+    Ok(
+        if app.has_right(&user, RightTarget::Object(md), Right(read)) {
+            DataRead::Allowed
+        } else {
+            DataRead::Denied
+        },
+    )
+}
+
+pub(crate) fn access_violation() -> HostError {
+    use crate::errors::{keys, render};
+    use platform_catalog::messages::Lang;
+    let mut e = HostError::text(
+        &render(keys::DB_ACCESS, &[], Lang::Ru),
+        &render(keys::DB_ACCESS, &[], Lang::En),
+    );
+    e.categories = Some(bsl_vm::CategorySet::of(&[
+        bsl_vm::Category::AllErrors,
+        bsl_vm::Category::ScriptRuntimeError,
+        bsl_vm::Category::OtherError,
+    ]));
+    e
 }
 
 fn default_roles(config: &md_model::Configuration) -> Vec<Uuid16> {

@@ -402,6 +402,16 @@ pub fn failure_kind(message: &str) -> (&'static str, &'static str) {
             "inventory",
         ),
         (
+            "invalid SQL table inventory",
+            "inventory_mismatch",
+            "inventory",
+        ),
+        (
+            "unsupported: the base has extension storage",
+            "extension_storage",
+            "inventory",
+        ),
+        (
             "SQL system data check failed",
             "support_check_failed",
             "support",

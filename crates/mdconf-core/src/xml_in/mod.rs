@@ -13,9 +13,14 @@ pub struct ValueReader {
 
 impl ValueReader {
     pub fn new(configuration: &Configuration) -> Result<Self> {
+        Self::with_index(&configuration.index)
+    }
+
+    #[doc(hidden)]
+    pub fn with_index(index: &md_model::index::Index) -> Result<Self> {
         Ok(Self {
             schema: mdschema::schema()?,
-            names: values::Names::new(&configuration.index),
+            names: values::Names::new(index),
             diagnostics: Diagnostics::default(),
         })
     }
@@ -101,6 +106,31 @@ impl ValueReader {
 
     pub fn diagnostics(&self) -> &Diagnostics {
         &self.diagnostics
+    }
+    pub(crate) fn resolved_uuid_reference(&mut self, scope: &str, tag: &str) {
+        self.qualified_miss("unresolved", scope, tag);
+    }
+    pub(crate) fn qualified_external_empty_collection(&mut self, scope: &str, prop: &crate::Prop) {
+        if matches!(
+            prop.codec,
+            Codec::CpLinks | Codec::CParams | Codec::LinkByType
+        ) && let Value::Xml(value) = &prop.value
+            && value.children.is_empty()
+            && value.attrs.is_empty()
+            && shell_xml::xml_whitespace(value.text.as_deref().unwrap_or_default())
+        {
+            self.qualified_miss("raw", scope, &prop.name);
+        }
+    }
+    fn qualified_miss(&mut self, what: &str, scope: &str, tag: &str) {
+        let key = format!("{what}:{scope}.{tag}");
+        if let Some(count) = self.diagnostics.misses.get_mut(&key) {
+            if *count > 1 {
+                *count -= 1;
+            } else {
+                self.diagnostics.misses.remove(&key);
+            }
+        }
     }
 
     pub fn into_diagnostics(self) -> Diagnostics {
@@ -191,13 +221,13 @@ pub fn load_shells(dir: &std::path::Path, options: &ShellOptions) -> Result<Shel
     shells::load(dir, options)
 }
 
-mod schema;
+pub(crate) mod schema;
 mod shell_index;
-mod shell_xml;
+pub(crate) mod shell_xml;
 mod shells;
-mod walk;
+pub(crate) mod walk;
 
-mod objects;
+pub(crate) mod objects;
 pub use objects::{ObjectDump, ObjectOptions, ObjectReport, load_objects};
 mod modules;
 
@@ -216,6 +246,25 @@ pub fn parse_part<'a>(
     text_work: &mut u64,
 ) -> Result<crate::xml::view::XmlArena<'a>> {
     shell_xml::parse(bytes, path, options, budget, text_work)
+}
+
+#[doc(hidden)]
+#[derive(Debug)]
+pub enum CheckedPartError {
+    Part(crate::Error),
+    Memory(memory_budget::BudgetError),
+    Cancelled,
+}
+#[doc(hidden)]
+pub fn parse_part_checked<'a>(
+    bytes: &'a [u8],
+    path: &std::path::Path,
+    options: &ShellOptions,
+    budget: &memory_budget::MemoryBudget,
+    text_work: &mut u64,
+    cancelled: &dyn Fn() -> bool,
+) -> std::result::Result<crate::xml::view::XmlArena<'a>, CheckedPartError> {
+    shell_xml::parse_checked(bytes, path, options, budget, text_work, cancelled)
 }
 
 mod part_paths;

@@ -160,6 +160,17 @@ pub(crate) struct ModuleInstance {
     ctx: ModuleContext,
 }
 
+impl Drop for ModuleInstance {
+    fn drop(&mut self) {
+        let vars = self.vars.get_mut();
+        if !vars.iter().any(|v| matches!(v, Value::Object(_))) {
+            return;
+        }
+        let vars = std::mem::take(vars);
+        crate::with_drop_form(crate::DropForm::Unobserved, || drop(vars));
+    }
+}
+
 impl ModuleInstanceRef {
     pub(crate) fn new(module: Arc<CompiledModule>, ctx: ModuleContext) -> ModuleInstanceRef {
         let vars = vec![Value::Undefined; module.vars.len()];

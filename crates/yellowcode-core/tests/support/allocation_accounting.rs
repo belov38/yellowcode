@@ -111,7 +111,11 @@ pub fn isolated(module: &str, name: &str, body: impl FnOnce()) {
         .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(output.status.success(), "{test}: {stdout}{stderr}");
+    assert!(
+        output.status.success(),
+        "{test}: child exited with {}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        output.status
+    );
     assert!(
         stdout.contains(&format!("test {test} ... ok")),
         "{test} did not run alone: {stdout}"

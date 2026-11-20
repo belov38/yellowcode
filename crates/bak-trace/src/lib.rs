@@ -23,6 +23,7 @@ mod render;
 mod ring;
 mod scan;
 mod sink;
+mod table;
 mod tempdb;
 mod trace;
 mod utc;
@@ -45,6 +46,7 @@ pub use scan::{
     HEAD_MESSAGES, MAX_MESSAGES, MAX_TEXT_CHARS, MessageSource, RawMessage, ScanSummary, StderrScan,
 };
 pub use sink::{Destination, WriteFailure, io_kind_tag};
+pub use table::{ClearTable, TableVocabulary, extension_suffix, strip_extension_suffix};
 pub use tempdb::TempDbName;
 pub use trace::{Finished, Limits, Rendered, Scope, Trace};
 pub use value::{Event, Hashed, Redacted, Value};

@@ -427,7 +427,7 @@ pub(super) fn write(ex: &mut Execution, set: &Rc<RecordSet>, args: &[Arg]) -> Ca
     let modified = core.modified.get();
     txn.begin();
     let ended = match steps(ex, &plan, &txn, set, replace) {
-        Ok(()) => txn.commit(&*app).map_err(|e| e.call_error(ex)),
+        Ok(()) => crate::fo_version::commit(ex, &app, &txn),
         Err(e) => {
             let _ = txn.rollback(&*app);
             Err(e)
@@ -486,12 +486,16 @@ fn steps(
     }
     let registration =
         crate::changes::Registration::for_write(app, core.obj, &exchange, auto_before)?;
+    let queue = crate::history::Queue::for_write(ex, app, txn, core.obj)?;
     let mut removed: Vec<Row> = Vec::new();
     let stored = txn.with_write(app, |w| -> StoreResult<Stored> {
         if replace {
             let found = plan
                 .rows(&*w, &key)?
                 .collect::<StoreResult<Vec<(RowHandle, Row)>>>()?;
+            if let Some(q) = queue.as_ref().filter(|_| !found.is_empty()) {
+                q.replaced();
+            }
             for (h, row) in found {
                 w.delete(plan.table, h)?;
                 if registration.is_some() {
@@ -517,10 +521,19 @@ fn steps(
                 Err(e) => return Err(e),
             }
         }
+        if let Some(q) = &queue {
+            for row in &rows {
+                q.record(w, row)?;
+            }
+        }
         Ok(Stored::Done)
     });
     match stored {
-        Ok(Stored::Done) => {}
+        Ok(Stored::Done) => {
+            if let Some(q) = queue {
+                q.finish(txn);
+            }
+        }
         Ok(Stored::Duplicate { record, line }) => {
             let rec = records
                 .get(record)
@@ -643,6 +656,7 @@ fn rows_of(
             }
         }
         let mut row = crate::predefined::blank_row(plan.app, plan.ti, &hints);
+        crate::values::field::empty_storages(&mut row, &hints);
         for (col, fid) in plan.fields.iter().enumerate() {
             let value = match rec.stored(col) {
                 Some(Some(stored)) => stored,

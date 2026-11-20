@@ -112,6 +112,29 @@ impl<'a, 'src> Policy<'a, 'src> {
         };
         TypeKey { group, text }
     }
+    fn omit_default(&self, parent: View<'a, 'src>, child: View<'a, 'src>) -> bool {
+        if self.lookup.is_none()
+            || child.attrs().next().is_some()
+            || child.children().next().is_some()
+            || child.text().is_some_and(|text| !text.empty())
+        {
+            return false;
+        }
+        const SCHEMA: &str = "http://v8.1c.ru/8.1/data-composition-system/schema";
+        const SETTINGS: &str = "http://v8.1c.ru/8.1/data-composition-system/settings";
+        let ty = parent.attr(XSI, "type").and_then(|ty| parent.resolve(ty));
+        match (child.ns(), child.local(), parent.ns(), parent.local()) {
+            (SCHEMA, "appearance", SCHEMA, "field") => ty == Some((SCHEMA, "DataSetFieldField")),
+            (SETTINGS, "outputParameters", SETTINGS, "Settings" | "settings") => {
+                parent.attr(XSI, "type").is_none()
+            }
+            (SETTINGS, "outputParameters", SETTINGS, "item") => {
+                ty == Some((SETTINGS, "StructureItemGroup"))
+            }
+            _ => false,
+        }
+    }
+
     fn substitute(&self, view: View<'a, 'src>) -> View<'a, 'src> {
         if self.lookup.is_none() {
             return view;
@@ -330,7 +353,7 @@ impl<'a, 'policy, 'src> Writer<'a, 'policy, 'src> {
                 .ok_or_else(|| self.read.invalid("QName"))?;
             text = Some(Value::Fragments([uri, name]));
         }
-        let name = ctx.qname(ns, local, self.read)?;
+        let name = ctx.element(ns, local, self.read)?;
         let mut attrs = self.read.allocation.vector(0)?;
         let mut xsi_type = None;
         for attr in view.attrs() {
@@ -345,12 +368,15 @@ impl<'a, 'policy, 'src> Writer<'a, 'policy, 'src> {
             let name = ctx.attribute(attr.ns, attr.local, self.read)?;
             attrs.push((name, value))?;
         }
-        if xsi_type == Some((XS, "QName"))
+        if matches!(xsi_type, Some((XS, "QName") | (V8, "Type")))
             && let Some(value) = text
                 .and_then(Value::plain)
                 .filter(|value| !value.is_empty())
-            && let Some((uri, local)) = view.resolve(value.trim())
         {
+            let (uri, local) = view
+                .resolve(value.trim())
+                .filter(|(uri, local)| mdschema::ExpandedTypeName::new(uri, local).is_some())
+                .ok_or_else(|| self.read.invalid("QName"))?;
             text = Some(Value::Fragments([uri, local]));
         } else if xsi_type == Some((V8UI, "Color"))
             && let Some(value) = text
@@ -396,6 +422,9 @@ impl<'a, 'policy, 'src> Writer<'a, 'policy, 'src> {
         }
         let mut children = self.read.allocation.vector(0)?;
         for (ordinal, child) in view.children().enumerate() {
+            if self.policy.omit_default(view, child) {
+                continue;
+            }
             children.push((child, ordinal, None::<TypeKey<'a>>))?
         }
         if self.policy.lookup.is_some()

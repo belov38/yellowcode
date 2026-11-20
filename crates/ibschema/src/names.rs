@@ -342,7 +342,7 @@ pub mod purpose {
     }
 
     pub fn accum_rg_agg_dict(k: u32) -> String {
-        format!("{ACCUM_RG_AGG_DICT}{k}h")
+        format!("{ACCUM_RG_AGG_DICT}{k:x}h")
     }
 }
 

@@ -11,6 +11,7 @@ import { initTemplate } from "./template.js";
 import { initRights } from "./rights.js";
 import { initHelper } from "./helper.js";
 import { initSearch } from "./search.js";
+import { initExtensions, openExtensions, extensionTitle } from "./extensions.js";
 import { retitleMenus } from "./menu.js";
 import { initCommands, refreshCommands } from "./commands.js";
 import { initSkin } from "./skin.js";
@@ -22,6 +23,7 @@ function showError(e) {
 }
 
 function applyLang() {
+  $("extensions-open").textContent = extensionTitle(document.documentElement.lang);
   $("search").placeholder = T.search;
   $("search").setAttribute("aria-label", T.search);
   $("lbl-names").textContent = T.names;
@@ -73,10 +75,12 @@ function splitter(id, prop, fromRight) {
   sp.addEventListener("pointercancel", stop);
 }
 
-function start() {
+async function start() {
   buildMenus();
   initSkin(showError);
   initTabs();
+  await initExtensions();
+  $("extensions-open").addEventListener("click", () => { void openExtensions(); });
   initProps();
   initModule();
   initForm();
@@ -88,7 +92,7 @@ function start() {
   splitter("splitter", "--side", false);
   splitter("splitter-pal", "--pal", true);
   onActive((win) => {
-    const path = win && win.kind !== "helper" && !win.kind.startsWith("x-") ? win.path : null;
+    const path = win && win.kind !== "helper" && win.kind !== "extensions" && !win.kind.startsWith("x-") ? win.path : null;
     selectInTree(path);
     setPaletteTarget(path);
     $("empty").hidden = !!win;

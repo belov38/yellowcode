@@ -20,13 +20,25 @@ fn bad(f: &FieldDef, what: &str) -> HostError {
     )
 }
 
-const EMPTY_STORAGE: [u8; 18] = [
+pub(crate) const EMPTY_STORAGE: [u8; 18] = [
     0x01, 0x01, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xEF, 0xBB, 0xBF, 0x7B, 0x22, 0x55,
     0x22, 0x7D,
 ];
 
 pub fn empty_storage() -> Value {
     bsl_stdlib::value_storage_from_bytes(std::sync::Arc::from(&EMPTY_STORAGE[..]))
+}
+
+pub(crate) fn empty_storages(row: &mut [FieldValue], hints: &[Option<&FieldDef>]) {
+    for (cell, hint) in row.iter_mut().zip(hints) {
+        if matches!(
+            hint.and_then(|h| h.types.single()),
+            Some(TypeAtom::ValueStorage)
+        ) && matches!(cell, FieldValue::Storage(b) if b.is_empty())
+        {
+            *cell = FieldValue::Storage(EMPTY_STORAGE.to_vec());
+        }
+    }
 }
 
 pub(crate) fn storage_of(app: &Application, bytes: &[u8]) -> Result<Value, HostError> {

@@ -210,6 +210,9 @@ impl HostObject for ObjMgr {
             "СоздатьЭлемент" if self.kind() == ObjKind::Catalog => {
                 crate::objects::create_item(ex, &self.app, self.obj)
             }
+            "СоздатьДокумент" if self.kind() == ObjKind::Document => {
+                crate::objects::create_document(ex, &self.app, self.obj)
+            }
             "СоздатьГруппу" if self.kind() == ObjKind::Catalog => {
                 crate::objects::create_group(ex, &self.app, self.obj)
             }
@@ -259,6 +262,13 @@ impl HostObject for ObjMgr {
             {
                 let v = arg_value(ex, args, 0)?;
                 let mode = predefined::update_mode_of(&v).ok_or_else(|| type_mismatch(1))?;
+                if CallTxn::of_call(ex).is_some_and(|t| t.depth() > 0) {
+                    return Err(HostError::not_implemented(
+                        "Предопределенные",
+                        "УстановитьОбновлениеПредопределенныхДанных в транзакции",
+                    )
+                    .into());
+                }
                 self.app
                     .predefined()
                     .set_update_mode(&self.app, self.obj, mode)?;

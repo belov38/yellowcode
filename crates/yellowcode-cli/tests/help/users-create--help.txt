@@ -11,6 +11,7 @@ Options:
       --format <FORMAT>              Формат вывода; по умолчанию текст в терминале и JSON при перенаправлении [possible values: text, json]
       --platform-build <BUILD>       Точная версия эмулируемой платформы (не режим совместимости конфигурации) [default: 8.5.1.1529]
       --name <NAME>                  Имя нового пользователя
+      --progress <MODE>              Ход работы в stderr: auto — строка на терминале, always — строки для журнала, never — без него (по умолчанию переменная YELLOWCODE_PROGRESS, иначе auto) [possible values: auto, always, never]
       --full-name <FULL_NAME>        Полное имя; по умолчанию пустое [default: ""]
       --roles <ROLES>                UUID ролей текущей конфигурации через запятую; параметр можно повторять
       --clear-roles                  Явно назначить пустой набор ролей

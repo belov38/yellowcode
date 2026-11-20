@@ -38,6 +38,22 @@ const CASES: &[(&str, &[&str], &str)] = cases![
     ("metadata-h", ["metadata", "-h"]),
     ("metadata-tree--help", ["metadata", "tree", "--help"]),
     ("metadata-show--help", ["metadata", "show", "--help"]),
+    (
+        "metadata-extension-info--help",
+        ["metadata", "extension-info", "--help"]
+    ),
+    (
+        "metadata-extension-objects--help",
+        ["metadata", "extension-objects", "--help"]
+    ),
+    (
+        "metadata-extension-modules--help",
+        ["metadata", "extension-modules", "--help"]
+    ),
+    (
+        "metadata-extension-intercepts--help",
+        ["metadata", "extension-intercepts", "--help"]
+    ),
     ("module--help", ["module", "--help"]),
     ("module-list--help", ["module", "list", "--help"]),
     ("module-show--help", ["module", "show", "--help"]),

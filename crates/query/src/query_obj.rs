@@ -64,8 +64,28 @@ impl Query {
                         .map_err(|e| {
                         errors::batch_error(ex, &text, query_exec::BatchError::Compile(e))
                     })?;
-                if batch.stmts.iter().any(|s|matches!(s,query_syntax::ast::Stmt::Query(q) if q.query.parts.iter().any(|p|p.into.is_some()))) {
-                    return Err(HostError::text("Не установлен менеджер временных таблиц","Temporary tables manager is not set").into());
+                let puts = |s: &query_syntax::ast::Stmt| matches!(s, query_syntax::ast::Stmt::Query(q) if q.query.parts.iter().any(|p| p.into.is_some()));
+                let selects = |s: &query_syntax::ast::Stmt| {
+                    matches!(s, query_syntax::ast::Stmt::Query(_)) && !puts(s)
+                };
+                if batch.stmts.iter().any(puts) {
+                    match batch.stmts.as_slice() {
+                        [_] => {
+                            return Err(HostError::text(
+                                "Не установлен менеджер временных таблиц",
+                                "Temporary tables manager is not set",
+                            )
+                            .into());
+                        }
+                        [.., last] if selects(last) => {}
+                        _ => {
+                            return Err(HostError::not_implemented(
+                                "Запрос",
+                                "Выполнить: пакет без менеджера временных таблиц, последний запрос не выборка",
+                            )
+                            .into());
+                        }
+                    }
                 }
             }
             let outcome = {

@@ -927,6 +927,19 @@ fn prepare(
                         "balance view without register metadata".into(),
                     )))
                 })?;
+            if view.kind == query_ir::TableKind::Virtual(query_ir::VtKind::Turnovers)
+                && view.owner.is_some_and(|owner| {
+                    schema.tables().iter().any(|t| {
+                        t.owner == Some(owner)
+                            && t.kind == query_ir::TableKind::Virtual(query_ir::VtKind::Balance)
+                    })
+                })
+            {
+                return Err(compile_stage(exec(ExecError::Later {
+                    what: "DL3-CNT-BalanceRegisterTurnoversWithoutFields",
+                    stage: "DL3",
+                })));
+            }
             let src = host.read_source();
             let error = crate::register::resolve_pending_view_failure_with_observation(
                 &*src,
@@ -935,6 +948,21 @@ fn prepare(
                 observation,
             )
             .map_err(|error| compile_stage(exec(error)))?;
+            if matches!(
+                view.kind,
+                query_ir::TableKind::Virtual(
+                    query_ir::VtKind::Turnovers | query_ir::VtKind::BalanceAndTurnovers
+                )
+            ) && error
+                .cause
+                .as_ref()
+                .is_some_and(|c| c.msg == query_syntax::MsgId::USE_TOTALS_SWITCH_OFF)
+            {
+                return Err(compile_stage(exec(ExecError::Later {
+                    what: "DL3-CNT-TurnoversWithoutFieldsTotalsOff",
+                    stage: "DL3",
+                })));
+            }
             return Err(BatchError::Compile(error).into());
         }
     };

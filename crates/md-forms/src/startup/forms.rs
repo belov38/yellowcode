@@ -373,6 +373,15 @@ fn summary(
     if !layout.accepts_tail(raw.len().saturating_sub(tail)) || tail > raw.len() {
         return Ok(None);
     }
+    if layout.strict
+        && crate::forms::upgrade::form::validate_tail(
+            i64::from(layout.serialization.form),
+            present!(raw.get(tail..)),
+        )
+        .is_err()
+    {
+        return Ok(None);
+    }
     present!(decode::strict_sections(layout, top));
     let attrs = present!(top.get(3).and_then(section));
     let mut attributes = vector(budget, attrs.len())?;

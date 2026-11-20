@@ -77,11 +77,76 @@ pub(crate) enum Command {
         #[arg(long, value_enum, default_value = "json", help = "Формат вывода")]
         format: Format,
     },
+    #[command(about = "Свойства расширения из файла CFE (только чтение)")]
+    ExtensionInfo {
+        #[arg(help = "Файл расширения CFE")]
+        source: PathBuf,
+        #[arg(long, value_enum, default_value = "json", help = "Формат вывода")]
+        format: Format,
+    },
+    #[command(
+        about = "Объекты верхнего уровня расширения CFE (только чтение)",
+        after_help = "Ссылки выводятся в исходном порядке, включая дубликаты. Без дочерних объектов, форм и модулей. Это не полная проверка CFE."
+    )]
+    ExtensionObjects {
+        #[arg(help = "Файл расширения CFE")]
+        source: PathBuf,
+        #[arg(long, value_enum, default_value = "json", help = "Формат вывода")]
+        format: Format,
+    },
+    #[command(about = "Модули объектов расширения CFE (только чтение)")]
+    ExtensionModules {
+        #[arg(help = "Файл расширения CFE")]
+        source: PathBuf,
+        #[arg(long, value_enum, default_value = "json", help = "Формат списка")]
+        format: Format,
+        #[arg(
+            long,
+            requires = "module",
+            conflicts_with = "format",
+            value_parser = metadata::parse_entry_id,
+            help = "UUID записи объекта из поля entryId списка"
+        )]
+        entry_id: Option<String>,
+        #[arg(
+            long,
+            requires = "entry_id",
+            value_name = "KIND",
+            help = "Вид модуля из поля moduleKind списка. Выводит исходные байты BSL"
+        )]
+        module: Option<String>,
+    },
+    #[command(about = "Перехваты методов в модулях расширения CFE (только чтение)")]
+    ExtensionIntercepts {
+        #[arg(help = "Файл расширения CFE")]
+        source: PathBuf,
+        #[arg(long, value_enum, default_value = "json", help = "Формат списка")]
+        format: Format,
+    },
 }
 
 impl From<Command> for metadata::Command {
     fn from(c: Command) -> metadata::Command {
         match c {
+            Command::ExtensionModules {
+                source,
+                format,
+                entry_id,
+                module,
+            } => metadata::Command::ExtensionModules {
+                source,
+                format,
+                selection: entry_id.zip(module),
+            },
+            Command::ExtensionIntercepts { source, format } => {
+                metadata::Command::ExtensionIntercepts { source, format }
+            }
+            Command::ExtensionObjects { source, format } => {
+                metadata::Command::ExtensionObjects { source, format }
+            }
+            Command::ExtensionInfo { source, format } => {
+                metadata::Command::ExtensionInfo { source, format }
+            }
             Command::Tree {
                 memory_limit: _,
                 source,
@@ -116,6 +181,10 @@ impl From<Command> for metadata::Command {
 
 pub(crate) fn run(command: Command, out: &mut dyn Write) -> yellowcode_core::Result<()> {
     let limit = match &command {
+        Command::ExtensionInfo { .. }
+        | Command::ExtensionObjects { .. }
+        | Command::ExtensionModules { .. }
+        | Command::ExtensionIntercepts { .. } => None,
         Command::Tree { memory_limit, .. } | Command::Show { memory_limit, .. } => {
             memory_limit.clone()
         }

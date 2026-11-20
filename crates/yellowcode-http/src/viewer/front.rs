@@ -25,6 +25,11 @@ const FILES: &[(&str, &str, &str)] = &[
     ),
     ("js/dialogs.js", JS, include_str!("front/js/dialogs.js")),
     ("js/users.js", JS, include_str!("front/js/users.js")),
+    (
+        "js/extensions.js",
+        JS,
+        include_str!("front/js/extensions.js"),
+    ),
     ("js/dcs.js", JS, include_str!("front/js/dcs.js")),
     (
         "js/dcs_settings.js",

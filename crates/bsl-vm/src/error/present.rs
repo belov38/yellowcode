@@ -129,11 +129,12 @@ fn display_categories(info: &ErrorInfo) -> Vec<&'static str> {
     runtime
         .then_some(Category::ScriptRuntimeError)
         .into_iter()
-        .chain(
-            info.categories
-                .iter()
-                .filter(|c| !matches!(c, Category::AllErrors | Category::ScriptRuntimeError)),
-        )
+        .chain(info.categories.iter().filter(|c| {
+            !matches!(
+                c,
+                Category::AllErrors | Category::ScriptRuntimeError | Category::OtherError
+            )
+        }))
         .map(Category::name_ru)
         .collect()
 }

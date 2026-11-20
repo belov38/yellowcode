@@ -29,6 +29,7 @@ impl std::ops::Deref for FlatTree {
 }
 
 pub struct State {
+    pub(crate) extensions: super::extensions::Availability,
     pub users_control: Arc<super::users_control::UsersControl>,
     pub skins: super::skin::Store,
     pub cfg: Configuration,
@@ -111,6 +112,7 @@ impl State {
         progress: &mut impl FnMut(&'static str) -> Result<()>,
     ) -> Result<State> {
         let source = &source::resolve(source);
+        let extension_stamp = super::extensions::prepare(source, None);
         let opts = mdconf::LoadOptions {
             keep_source: false,
             ..Default::default()
@@ -137,6 +139,12 @@ impl State {
         )?;
         state.memory = memory.cloned();
         state.config_entries = entries;
+        state.extensions = super::extensions::Availability::bind(
+            source,
+            extension_stamp,
+            state.fingerprint.as_ref(),
+            state.users_control.admission.clone(),
+        );
         Ok(state)
     }
 
@@ -148,7 +156,7 @@ impl State {
         progress: &mut impl FnMut(&'static str) -> Result<()>,
     ) -> Result<State> {
         let memory = default_memory(source)?;
-        Self::load_stages_inner(source, names, lang, extra, memory.as_ref(), progress)
+        Self::load_stages_inner(source, names, lang, extra, memory.as_ref(), None, progress)
     }
 
     pub fn load_stages_with_memory(
@@ -159,7 +167,7 @@ impl State {
         memory: &source::OpenMemory,
         progress: &mut impl FnMut(&'static str) -> Result<()>,
     ) -> Result<State> {
-        Self::load_stages_inner(source, names, lang, extra, Some(memory), progress)
+        Self::load_stages_inner(source, names, lang, extra, Some(memory), None, progress)
     }
     fn load_stages_inner(
         source: &Path,
@@ -167,9 +175,13 @@ impl State {
         lang: Lang,
         extra: Stages,
         memory: Option<&source::OpenMemory>,
+        existing_extensions: Option<super::extensions::Availability>,
         progress: &mut impl FnMut(&'static str) -> Result<()>,
     ) -> Result<State> {
         let source = &source::resolve(source);
+        let extension_stamp = existing_extensions
+            .is_none()
+            .then(|| super::extensions::prepare(source, None));
         let (cfg, fp, entries) = if source::detect(source)? == source::SourceKind::Dt {
             let memory = memory.ok_or("DT opening memory context missing")?;
             let (cfg, fp, entries) =
@@ -192,6 +204,14 @@ impl State {
         let mut state = Self::build(source, names, lang, cfg, extra, (Some(fp), None), progress)?;
         state.memory = memory.cloned();
         state.config_entries = entries;
+        state.extensions = existing_extensions.unwrap_or_else(|| {
+            super::extensions::Availability::bind(
+                source,
+                extension_stamp.unwrap_or(Err(super::extensions::Code::Unavailable)),
+                state.fingerprint.as_ref(),
+                state.users_control.admission.clone(),
+            )
+        });
         Ok(state)
     }
 
@@ -207,6 +227,7 @@ impl State {
         let lease = super::memory::GuiLease::new(&memory)?;
         let result = (|| {
             let source = source::resolve(source);
+            let extension_stamp = super::extensions::prepare(&source, Some(&memory));
             let mut checked_progress = |phase| {
                 memory.check()?;
                 progress(phase)
@@ -232,6 +253,12 @@ impl State {
             state
                 .check
                 .bind_memory(memory.budget().clone(), loaded.lease.bytes());
+            state.extensions = super::extensions::Availability::bind(
+                &source,
+                extension_stamp,
+                state.fingerprint.as_ref(),
+                state.users_control.admission.clone(),
+            );
             state.session = Some(memory);
             state.model_memory = Some(loaded.lease);
             if let Some(tree) = Arc::get_mut(&mut state.nodes) {
@@ -274,6 +301,9 @@ impl State {
             memory.check()?;
         }
         Ok(State {
+            extensions: super::extensions::Availability::unavailable(
+                super::extensions::Code::Unavailable,
+            ),
             users_control: Arc::new(super::users_control::UsersControl::new(source)),
             skins: super::skin::Skins::store(),
             cfg,
@@ -561,6 +591,7 @@ impl Viewer {
     }
 
     pub fn shutdown(&self) {
+        self.snapshot().extensions.signal();
         let control = self.snapshot().users_control.clone();
         match control.admission.write() {
             Ok(_exclusive) => control.revoke(),
@@ -580,6 +611,7 @@ impl Viewer {
             old.lang,
             old.stages,
             old.memory.as_ref(),
+            Some(old.extensions.clone()),
             &mut |_| Ok(()),
         ) {
             Ok(next) => next,
@@ -871,6 +903,7 @@ impl Inner {
             match result {
                 Ok((cfg, fp, lease)) => {
                     let next = Arc::new(State {
+                        extensions: cur.extensions.clone(),
                         users_control: Arc::clone(&cur.users_control),
                         skins: cur.skins.clone(),
                         cfg,

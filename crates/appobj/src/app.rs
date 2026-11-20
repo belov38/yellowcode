@@ -70,6 +70,41 @@ impl AppOptions {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InfoBaseUserCard {
+    pub user: SessionUser,
+    pub standard_auth: bool,
+    pub password_set: bool,
+    pub show_in_list: bool,
+}
+
+pub type UserNameKey = Arc<dyn Fn(&str) -> Option<Vec<u8>> + Send + Sync>;
+
+pub(crate) struct InfoBaseUsers {
+    cards: Vec<(Vec<u8>, InfoBaseUserCard)>,
+    key: UserNameKey,
+}
+
+impl InfoBaseUsers {
+    pub(crate) fn cards(&self) -> impl Iterator<Item = &InfoBaseUserCard> {
+        self.cards.iter().map(|(_, c)| c)
+    }
+
+    pub(crate) fn by_name(&self, name: &str) -> std::result::Result<Option<&InfoBaseUserCard>, ()> {
+        let key = (self.key)(name).ok_or(())?;
+        Ok(self
+            .cards
+            .binary_search_by(|(k, _)| k.as_slice().cmp(key.as_slice()))
+            .ok()
+            .and_then(|i| self.cards.get(i))
+            .map(|(_, c)| c))
+    }
+
+    pub(crate) fn by_uuid(&self, uuid: &Uuid16) -> Option<&InfoBaseUserCard> {
+        self.cards().find(|c| c.user.uuid == *uuid)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ModuleTarget {
     Common(String),
     HttpService(Uuid16),
@@ -98,6 +133,8 @@ pub struct Application {
     predefined: crate::predefined::Predefined,
     numerator: Arc<crate::numerator::Numerator>,
     locks: Arc<crate::locks::LockTable>,
+    last_real_time_day: Mutex<Option<(u32, u32, u32)>>,
+    users: OnceLock<InfoBaseUsers>,
 }
 
 pub(crate) struct QueryCtx {
@@ -150,6 +187,8 @@ impl Application {
             predefined: crate::predefined::Predefined::default(),
             numerator: Arc::default(),
             locks: Arc::default(),
+            last_real_time_day: Mutex::new(None),
+            users: OnceLock::new(),
         }))
     }
 
@@ -216,6 +255,20 @@ impl Application {
         &self.numerator
     }
 
+    pub(crate) fn last_real_time_day(&self) -> Option<(u32, u32, u32)> {
+        *self
+            .last_real_time_day
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub(crate) fn note_real_time_day(&self, day: (u32, u32, u32)) {
+        *self
+            .last_real_time_day
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(day);
+    }
+
     #[doc(hidden)]
     pub fn reserved_codes(&self) -> (usize, usize) {
         (self.numerator.runs(), self.numerator.series())
@@ -256,6 +309,42 @@ impl Application {
 
     pub fn modules(&self) -> &Modules {
         &self.modules
+    }
+
+    pub fn install_users(&self, cards: Vec<InfoBaseUserCard>, key: UserNameKey) -> Result<()> {
+        let mut keyed = Vec::with_capacity(cards.len());
+        for card in cards {
+            if card.user.no_users || card.user.name.is_empty() {
+                return Err(AppError::Unsupported(
+                    "a user of the table without a name".into(),
+                ));
+            }
+            let k = key(&card.user.name).ok_or_else(|| {
+                AppError::Unsupported("a user name without a comparison key".into())
+            })?;
+            keyed.push((k, card));
+        }
+        keyed.sort_by(|a, b| a.0.cmp(&b.0));
+        let twice = keyed.windows(2).any(|w| match w {
+            [a, b] => a.0 == b.0,
+            _ => false,
+        });
+        let mut ids: Vec<Uuid16> = keyed.iter().map(|(_, c)| c.user.uuid).collect();
+        ids.sort_unstable_by_key(|u| *u.as_bytes());
+        if twice || ids.windows(2).any(|w| w.first() == w.get(1)) {
+            return Err(AppError::Unsupported(
+                "two users with the same name or identifier".into(),
+            ));
+        }
+        self.users
+            .set(InfoBaseUsers { cards: keyed, key })
+            .map_err(|_| {
+                AppError::Unsupported("the users of the base are installed already".into())
+            })
+    }
+
+    pub(crate) fn users(&self) -> Option<&InfoBaseUsers> {
+        self.users.get()
     }
 
     pub fn types(&self) -> Option<&AppTypes> {
@@ -312,6 +401,9 @@ impl Application {
         crate::extensions::register(self, reg);
         crate::predefined::register(self, reg);
         crate::style::register(self, reg);
+        crate::sched::register(self, reg);
+        crate::bgjobs::register(self, reg);
+        crate::history::register(self, reg);
         crate::picture_lib::register(self, reg);
         query::register(reg, query);
         Ok(())

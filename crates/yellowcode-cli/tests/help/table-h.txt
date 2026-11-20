@@ -16,6 +16,8 @@ Options:
           Точная версия эмулируемой платформы (не режим совместимости конфигурации) [default: 8.5.1.1529]
       --cache-limit <CACHE_LIMIT>
           Предел кэша страниц; 0 отключает кэш
+      --progress <MODE>
+          Ход работы в stderr: auto — строка на терминале, always — строки для журнала, never — без него (по умолчанию переменная YELLOWCODE_PROGRESS, иначе auto) [possible values: auto, always, never]
       --query-memory-limit <QUERY_MEMORY_LIMIT>
           Предел памяти на компиляцию, выполнение, пакет и временные таблицы запроса
       --result-memory-limit <RESULT_MEMORY_LIMIT>
@@ -48,6 +50,8 @@ Options:
           Формат вывода; по умолчанию таблица в терминале и JSON при перенаправлении [possible values: table, json, csv]
       --list-indexes
           Вместо строк вывести индексы таблицы: поля по порядку, допускает ли поле условие, индекс окна «Данные» по умолчанию и доступные фильтры
+      --schema-notes
+          Все замечания о расхождении схемы базы с правилами вместо одной итоговой строки (stderr)
   -h, --help
           Print help
 

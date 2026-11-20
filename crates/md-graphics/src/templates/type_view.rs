@@ -203,10 +203,12 @@ impl<'a> TypePattern<'a> {
                             &[(key.as_str(), uri)],
                         )?;
                     } else {
-                        let attrs: &[(&str, &str)] = if item.name.first() == Some(&"dcsset:") {
-                            &[("xmlns:dcsset", mdschema::FixedNamespace::Dcsset.uri())]
-                        } else {
-                            &[]
+                        let attrs: &[(&str, &str)] = match item.name.first().copied() {
+                            Some("cfg:") => &[("xmlns:cfg", mdschema::FixedNamespace::Cfg.uri())],
+                            Some("dcsset:") => {
+                                &[("xmlns:dcsset", mdschema::FixedNamespace::Dcsset.uri())]
+                            }
+                            _ => &[],
                         };
                         writer.text_fragments(tag, &item.name, attrs)?;
                     }

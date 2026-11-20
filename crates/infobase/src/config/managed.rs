@@ -39,6 +39,13 @@ struct StoredEntry {
     parts: Vec<Part>,
     declared: Option<u64>,
 }
+impl StoredEntry {
+    fn total(&self) -> Result<usize> {
+        Ok(self.parts.iter().try_fold(0usize, |total, part| {
+            total.checked_add(part.bytes).ok_or(BudgetError::Overflow)
+        })?)
+    }
+}
 struct Staged {
     metadata: EntryMeta,
     stored: StoredEntry,
@@ -114,16 +121,7 @@ impl<'a> ManagedConfigTxnSource<'a> {
     ) -> Result<Option<Charged<Vec<u8>>>> {
         self.read_data_checked(name, Some(limit), check)
     }
-    fn read_data(&self, name: &str, cap: Option<usize>) -> Result<Option<Charged<Vec<u8>>>> {
-        self.read_data_checked(name, cap, &|| Ok(()))
-    }
-    fn read_data_checked(
-        &self,
-        name: &str,
-        cap: Option<usize>,
-        check: &dyn Fn() -> Result<()>,
-    ) -> Result<Option<Charged<Vec<u8>>>> {
-        check()?;
+    fn entry(&self, name: &str) -> Result<Option<&StoredEntry>> {
         let Ok(at) = self.index.by_name.binary_search_by(|&index| {
             self.index
                 .metadata
@@ -134,18 +132,42 @@ impl<'a> ManagedConfigTxnSource<'a> {
         }) else {
             return Ok(None);
         };
-        let entry = self
-            .index
+        self.index
             .by_name
             .get(at)
             .and_then(|&index| self.index.stored.get(index))
-            .ok_or_else(|| bad("invalid CONFIG entry index"))?;
+            .map(Some)
+            .ok_or_else(|| bad("invalid CONFIG entry index"))
+    }
+
+    pub fn indexed_len(&self, name: &str) -> Result<Option<usize>> {
+        let Some(entry) = self.entry(name)? else {
+            return Ok(None);
+        };
+        let len = entry.total()?;
+        if entry.declared != Some(len as u64) {
+            return Err(bad("folder size differs from indexed parts"));
+        }
+        Ok(Some(len))
+    }
+
+    fn read_data(&self, name: &str, cap: Option<usize>) -> Result<Option<Charged<Vec<u8>>>> {
+        self.read_data_checked(name, cap, &|| Ok(()))
+    }
+    fn read_data_checked(
+        &self,
+        name: &str,
+        cap: Option<usize>,
+        check: &dyn Fn() -> Result<()>,
+    ) -> Result<Option<Charged<Vec<u8>>>> {
+        check()?;
+        let Some(entry) = self.entry(name)? else {
+            return Ok(None);
+        };
         if cap.is_some_and(|limit| entry.declared.is_none_or(|size| size > limit as u64)) {
             return Err(bad("CONFIG entry size exceeds product limit"));
         }
-        let total = entry.parts.iter().try_fold(0usize, |total, part| {
-            total.checked_add(part.bytes).ok_or(BudgetError::Overflow)
-        })?;
+        let total = entry.total()?;
         if cap.is_some_and(|limit| total > limit) {
             return Err(bad("CONFIG entry size exceeds product limit"));
         }

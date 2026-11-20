@@ -15,10 +15,13 @@ testing = ["md-model/testing"]
 [dependencies]
 base64 = "0.22"
 regex = "1"
+serde_json = "1"
+unicode-normalization = "0.1"
 thiserror = "2"
 mdconf-core = { path = "../mdconf-core" }
 md-graphics = { path = "../md-graphics" }
 md-model = { path = "../md-model" }
+md-xmlout = { path = "../md-xmlout" }
 mdschema = { path = "../mdschema" }
 brace = { path = "../brace" }
 memory-budget = { path = "../memory-budget" }

@@ -80,6 +80,11 @@ pub(crate) struct Args {
         help = "Сколько строк каждого результата выводить; пределы памяти и строк движка действуют независимо"
     )]
     max_rows: usize,
+    #[arg(
+        long,
+        help = "Все замечания о расхождении схемы базы с правилами вместо одной итоговой строки (stderr)"
+    )]
+    schema_notes: bool,
 }
 
 impl From<Args> for Request {
@@ -97,6 +102,7 @@ impl From<Args> for Request {
             format: a.format,
             timeout: a.timeout,
             max_rows: a.max_rows,
+            schema_notes: a.schema_notes,
         }
     }
 }

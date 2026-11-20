@@ -2,7 +2,7 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use mdconf::templates::{Template, TemplateType};
-use mdconf::{Configuration, LoadOptions, MdKind, SubKind};
+use mdconf::{Configuration, MdKind, SubKind};
 use serde_json::json;
 
 use super::metadata::Format;
@@ -526,7 +526,12 @@ pub fn run_with_memory_limit(
 ) -> crate::Result<()> {
     let memory = source::OpenMemory::resolve(limit)?;
     let open = |path: &PathBuf| {
-        source::open_with_memory(path, &LoadOptions::default(), &memory, &mut |_| Ok(()))
+        source::open_with_memory(
+            path,
+            &super::load_options(super::Reads::Templates),
+            &memory,
+            &mut |_| Ok(()),
+        )
     };
     match command {
         Command::List {

@@ -311,6 +311,13 @@ fn opening_bound(b: Bnd) -> Bnd {
     }
 }
 
+fn lacks_needed_dims(st: &AccumulationRowsL, t: &StoredTotals) -> bool {
+    st.needed_dims
+        .iter()
+        .zip(&t.dims)
+        .any(|(need, d)| *need && d.is_none())
+}
+
 fn balance_parts(
     st: &AccumulationRowsL,
     s: &RegisterSettings,
@@ -322,7 +329,7 @@ fn balance_parts(
         balance: true,
         neg: false,
     };
-    if st.totals.is_none() {
+    if st.totals.as_ref().is_none_or(|t| lacks_needed_dims(st, t)) {
         parts.push(movements(Keep::InBalance(b)));
         return Ok(());
     }
@@ -377,15 +384,7 @@ fn turnover_months(
     b1: Bnd,
 ) -> Option<(Option<BslDate>, Option<BslDate>)> {
     let tn = st.turnovers.as_ref()?;
-    if s.agg_mode || !st.coarse {
-        return None;
-    }
-    if st
-        .needed_dims
-        .iter()
-        .zip(&tn.dims)
-        .any(|(need, d)| *need && d.is_none())
-    {
+    if s.agg_mode || !st.coarse || lacks_needed_dims(st, tn) {
         return None;
     }
     let (lo, lo_aligned) = match b0 {

@@ -76,3 +76,21 @@ pub(crate) fn ui(table: &str, key: &str) -> Option<&'static str> {
 pub(crate) fn merged(table: &str, key: &str) -> Option<&'static str> {
     mxl(table, key).or_else(|| ui(table, key))
 }
+
+impl Lookup for md_model::external::ExternalDocument {
+    fn name(&self, id: &Guid) -> Option<&str> {
+        self.name(*id)
+    }
+    fn type_name(&self, id: &Guid) -> Option<&str> {
+        self.type_name(*id)
+    }
+    fn sub_header(&self, id: &Guid) -> Option<&[usize]> {
+        self.index.sub_hdr.get(id).map(Vec::as_slice)
+    }
+    fn common_picture(&self, name: &str) -> bool {
+        self.index
+            .names
+            .values()
+            .any(|v| v.strip_prefix("CommonPicture.") == Some(name))
+    }
+}

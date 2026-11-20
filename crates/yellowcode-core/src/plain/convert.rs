@@ -12,6 +12,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub mod external;
+pub mod form_renderer;
+
 #[derive(Clone, Copy)]
 #[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 pub enum Format {
@@ -19,6 +22,9 @@ pub enum Format {
     Dt,
     #[cfg_attr(feature = "clap", value(name = "1cd"))]
     Infobase,
+    Xml,
+    Epf,
+    Erf,
 }
 #[derive(Clone, Copy)]
 #[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
@@ -118,7 +124,92 @@ fn raw_cf(source: &Path, memory: Option<&source::OpenMemory>, out: &mut dyn Writ
     }
 }
 
+pub fn interrupted(error: &crate::Error) -> Option<process_containment::interrupt::Kind> {
+    error
+        .downcast_ref::<external::Interrupted>()
+        .map(|error| error.kind)
+}
+
+fn display_path(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    if let Some(unc) = text.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{unc}")
+    } else {
+        text.strip_prefix(r"\\?\").unwrap_or(&text).to_owned()
+    }
+}
+
+fn external_limits(budget: &memory_budget::MemoryBudget) {
+    budget.set_limits(memory_budget::Limits::new(budget.snapshot().admission));
+}
+
+fn run_external(args: &Request, out: &mut dyn Write) -> Result<i32> {
+    external::validate(args)?;
+    let (context, _reserve) =
+        crate::service::memory::Settings::memory_only(args.memory_limit.clone()).resolve()?;
+    let budget = context.ledger();
+    external_limits(budget);
+    let _control = budget.try_reserve(memory_budget::Category::Execution, 1 << 20)?;
+    let _watch = process_containment::interrupt::watch()?;
+    let executable = std::env::current_exe()?;
+    let spill = tempfile::Builder::new()
+        .prefix("yellowcode-external-")
+        .tempdir()?;
+    let spill_path = std::fs::canonicalize(spill.path())?;
+    let discovery = crate::platform::DiscoverySnapshot::capture(budget)?;
+    let (catalog, _catalog_owner) = crate::platform::catalog_with_memory(budget)?;
+    let renderer = form_renderer::SupervisedFormRenderer {
+        executable: &executable,
+        spill_dir: &spill_path,
+        platform: catalog.platform(),
+        platform_resources: discovery.roots().override_root,
+    };
+    let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let bridge = external::InterruptBridge::new(cancelled.clone(), budget)?;
+    let result = external::run(
+        args,
+        &external::Options {
+            budget,
+            cancelled,
+            form_renderer: &renderer,
+        },
+    );
+    drop(bridge);
+    if let Err(source) = result {
+        if let Some(kind) = process_containment::interrupt::requested() {
+            return Err(Box::new(external::Interrupted { kind, source }));
+        }
+        return Err(source);
+    }
+    #[derive(serde::Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Published {
+        schema_version: u32,
+        output: String,
+        complete: bool,
+    }
+    let status = Published {
+        schema_version: 1,
+        output: display_path(&args.output),
+        complete: true,
+    };
+    if let Err(error) = serde_json::to_writer(&mut *out, &status) {
+        return if error.io_error_kind() == Some(std::io::ErrorKind::BrokenPipe) {
+            Ok(0)
+        } else {
+            Err(error.into())
+        };
+    }
+    match writeln!(out) {
+        Err(error) if error.kind() != std::io::ErrorKind::BrokenPipe => Err(error.into()),
+        _ => Ok(0),
+    }
+}
+
 pub fn run(args: Request, out: &mut dyn Write, err: &mut dyn Write) -> Result<i32> {
+    if matches!(args.to, Format::Xml | Format::Epf | Format::Erf) {
+        return run_external(&args, out);
+    }
     let source = source::resolve(&args.source);
     let kind = source::detect(&source)?;
     match (kind, args.to) {
@@ -184,6 +275,9 @@ pub fn run(args: Request, out: &mut dyn Write, err: &mut dyn Write) -> Result<i3
                 Ok(())
             })?;
         }
+        Format::Xml | Format::Epf | Format::Erf => {
+            return Err("unsupported conversion direction".into());
+        }
         Format::Infobase => {
             let (context, _reserve) = memory.ok_or("memory settings")?;
             report = Some(restore_dt(
@@ -200,7 +294,7 @@ pub fn run(args: Request, out: &mut dyn Write, err: &mut dyn Write) -> Result<i3
         serde_json::json!({"schemaVersion": 1, "output": args.output, "complete": true});
     if let Some((r, _)) = &report {
         for reduced in &r.reduced_indexes {
-            let _ = writeln!(err, "{}", reduced_warning(reduced));
+            let _ = writeln!(err, "{}", reduced_warning(reduced, true));
         }
     }
     if let (Some((r, seconds)), Some(map)) = (&report, status.as_object_mut()) {
@@ -243,24 +337,77 @@ pub fn run(args: Request, out: &mut dyn Write, err: &mut dyn Write) -> Result<i3
     }
 }
 
-fn reduced_warning(r: &infobase::restore::ReducedIndexes) -> String {
+fn reduced_warning(r: &infobase::restore::ReducedIndexes, done: bool) -> String {
     const GIB: f64 = (1u64 << 30) as f64;
     let kept = if r.clustered_kept {
         "с кластерным и служебными индексами"
     } else {
         "со служебными индексами"
     };
-    format!(
-        "предупреждение: таблица {} ({} строк): индексы не помещаются в файловую базу \
-         (оценка {:.1} ГиБ при пределе {:.1} ГиБ); загружена только {kept} \
-         (оценка {:.1} ГиБ), сняты: {}",
-        r.table,
+    let table = match reduced_object(r) {
+        Some(o) => format!("{} ({o})", r.table),
+        None => r.table.clone(),
+    };
+    let (loaded, dropped) = if done {
+        ("загружена", "сняты")
+    } else {
+        ("будет загружена", "будут сняты")
+    };
+    let mut line = format!(
+        "предупреждение: таблица {table}, {} строк: индексы не помещаются в файловую базу \
+         (оценка {:.1} ГиБ при пределе {:.1} ГиБ); {loaded} только {kept} \
+         (оценка {:.1} ГиБ), {dropped}: {}",
         r.rows,
         r.estimate_bytes as f64 / GIB,
         r.cap_bytes as f64 / GIB,
         r.kept_estimate_bytes as f64 / GIB,
         r.dropped.join(", ")
-    )
+    );
+    if done {
+        line.push_str(
+            ". Чтение и запись в 1С работают, но отборы и соединения по снятым индексам идут \
+             просмотром всей таблицы и медленнее; -ReIndex в 1С снятые индексы не восстанавливает, \
+             полный набор индексов даёт только клиент-серверная база",
+        );
+    }
+    line
+}
+
+fn md_name_ru(md_name: &str) -> String {
+    md_name
+        .split('.')
+        .enumerate()
+        .map(|(i, part)| match (i, part) {
+            (0, "Catalog") => "Справочник",
+            (0, "Document") => "Документ",
+            (0, "DocumentJournal") => "ЖурналДокументов",
+            (0, "Enum") => "Перечисление",
+            (0, "Constant") => "Константа",
+            (0, "ChartOfCharacteristicTypes") => "ПланВидовХарактеристик",
+            (0, "ChartOfAccounts") => "ПланСчетов",
+            (0, "ChartOfCalculationTypes") => "ПланВидовРасчета",
+            (0, "InformationRegister") => "РегистрСведений",
+            (0, "AccumulationRegister") => "РегистрНакопления",
+            (0, "AccountingRegister") => "РегистрБухгалтерии",
+            (0, "CalculationRegister") => "РегистрРасчета",
+            (0, "BusinessProcess") => "БизнесПроцесс",
+            (0, "Task") => "Задача",
+            (0, "ExchangePlan") => "ПланОбмена",
+            (0, "Sequence") => "Последовательность",
+            (i, "TabularSection") if i % 2 == 0 => "ТабличнаяЧасть",
+            (i, "Recalculation") if i % 2 == 0 => "Перерасчет",
+            (_, other) => other,
+        })
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+fn reduced_object(r: &infobase::restore::ReducedIndexes) -> Option<String> {
+    let name = md_name_ru(r.object.as_deref()?);
+    Some(match &r.service {
+        Some(purpose) => format!("{name}, служебная таблица {purpose}"),
+        None => name,
+    })
 }
 
 fn reduced_json(rs: &[infobase::restore::ReducedIndexes]) -> serde_json::Value {
@@ -268,6 +415,7 @@ fn reduced_json(rs: &[infobase::restore::ReducedIndexes]) -> serde_json::Value {
         .map(|r| {
             serde_json::json!({
                 "table": r.table,
+                "object": reduced_object(r),
                 "rows": r.rows,
                 "kept": r.kept,
                 "dropped": r.dropped,
@@ -303,6 +451,9 @@ fn restore_dt(
     let mut sink = |event: &RestoreEvent| {
         let line = match event {
             RestoreEvent::Note(note) => format!("yellowcode: restore: {note}"),
+            RestoreEvent::Reduced(r) => {
+                format!("yellowcode: restore: {}", reduced_warning(r, false))
+            }
             RestoreEvent::Progress(p) => {
                 let now = std::time::Instant::now();
                 if let Some((phase, at)) = last

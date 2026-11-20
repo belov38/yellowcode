@@ -4,7 +4,9 @@ use crate::data_lock;
 use crate::events;
 use crate::exchange_params::ExchangeParams;
 use crate::meta::arg_value;
-use crate::model::{FieldDef, FieldRole, ObjDef, ObjId, ObjKind, StdAttr, TypeAtom};
+use crate::model::{
+    FieldDef, FieldRole, ObjDef, ObjId, ObjKind, Posting, RecordsDeletion, StdAttr, TypeAtom,
+};
 use crate::objects::{ObjectInstance, not_selected, stored_instance};
 use crate::predefined::AreaKey;
 use crate::read::{read_fresh, read_view, store_call_error};
@@ -83,15 +85,112 @@ enum Removed {
     Missing,
     Stale,
     Guarded(ObjId),
+    Recorded(ObjId),
+}
+
+fn recorders(app: &Application, def: &ObjDef) -> Result<Vec<(ObjId, TableId, IndexId)>, HostError> {
+    let model = app.model();
+    let map = app.store().storage();
+    let mut out = Vec::new();
+    for md in &def.behavior.register_records {
+        let reg = model
+            .by_uuid(*md)
+            .ok_or_else(|| internal("an unknown register of the records of a document"))?;
+        let st = model
+            .storage_of(reg)
+            .ok_or_else(|| internal("a register without storage"))?;
+        let ti = map
+            .try_table(st.main)
+            .ok_or_else(|| internal("no table of the register"))?;
+        let index = ti
+            .indexes
+            .iter()
+            .position(|ix| {
+                ix.prefix == 0
+                    && ix
+                        .fields
+                        .first()
+                        .and_then(|f| ti.field(*f))
+                        .is_some_and(|f| f.std == Some(StdField::Recorder))
+            })
+            .and_then(|k| u16::try_from(k).ok())
+            .map(IndexId::Named)
+            .ok_or_else(|| refuse(def, Op::Delete, "регистр без индекса по регистратору"))?;
+        out.push((reg, st.main, index));
+    }
+    Ok(out)
+}
+
+pub(crate) fn delete_document(ex: &mut Execution, inst: &ObjectInstance) -> CallResult<Value> {
+    inst.live()?;
+    let def = inst.app.model().obj(inst.obj);
+    let posted = match def
+        .fields
+        .iter()
+        .position(|f| f.std == Some(StdAttr::Posted))
+    {
+        Some(i) => matches!(inst.attr(ex, i)?, Value::Bool(true)),
+        None => false,
+    };
+    if posted {
+        crate::posting::undo_check(inst, "Удалить", events::Event::BeforeDelete)?;
+    }
+    let unrecord = if !posted && def.behavior.posting == Posting::Deny {
+        let txn = CallTxn::of_call(ex).ok_or_else(|| internal("a deletion outside a call"))?;
+        Unrecord::Deny(deny_check(inst, inst.written_in(&txn)).err())
+    } else {
+        Unrecord::No
+    };
+    delete_with(ex, inst, posted, unrecord)
+}
+
+enum Unrecord {
+    No,
+    Deny(Option<bsl_vm::CallError>),
+}
+
+fn deny_check(inst: &ObjectInstance, written: bool) -> CallResult<()> {
+    let app = inst.app.clone();
+    let model = app.model();
+    let def = model.obj(inst.obj);
+    let refuse = |what: &str| -> bsl_vm::CallError {
+        refuse(def, Op::Delete, &format!("документ с движениями: {what}")).into()
+    };
+    if def.behavior.register_records_deletion != RecordsDeletion::AutoDelete {
+        return Err(refuse("удаление движений не AutoDelete"));
+    }
+    for md in &def.behavior.register_records {
+        if model.by_uuid(*md).map(|o| model.obj(o).kind) != Some(ObjKind::AccumulationRegister) {
+            return Err(refuse("движения не в регистре накопления"));
+        }
+    }
+    if events::handled(inst, events::Event::BeforeDelete) {
+        return Err(refuse("обработчик ПередУдалением"));
+    }
+    if inst.loading() {
+        return Err(refuse("ОбменДанными.Загрузка документа"));
+    }
+    if inst.state.borrow().modified.get() {
+        return Err(refuse("объект изменён"));
+    }
+    if crate::regread::sets_touched(inst)? {
+        return Err(refuse("движения документа прочитаны или изменены"));
+    }
+    if written {
+        return Err(refuse("документ, записанный в этой транзакции"));
+    }
+    Ok(())
 }
 
 struct Walk<'a> {
-    app: &'a Application,
+    app: &'a Arc<Application>,
     txn: Rc<CallTxn>,
     op: Op,
     def: &'a ObjDef,
     masters: HashMap<ObjId, Rc<Vec<Master>>>,
     top: Option<(Rc<ExchangeParams>, bool)>,
+    posted: bool,
+    unrecord: Unrecord,
 }
 
 fn admit(ex: &mut Execution, app: &Application, def: &ObjDef, op: Op) -> CallResult<()> {
@@ -462,6 +561,35 @@ impl Walk<'_> {
         Ok(())
     }
 
+    fn has_records(
+        &self,
+        ex: &mut Execution,
+        recorded: &[(ObjId, TableId, IndexId)],
+        value: &FieldValue,
+    ) -> CallResult<bool> {
+        let txn = self.txn.clone();
+        let mut view = read_view(ex, Some(&*txn), self.app)?;
+        let _memory = open_read(ex, &mut view)?;
+        let key = [value.clone()];
+        for (_, table, index) in recorded {
+            let found = view
+                .txn()
+                .range(
+                    *table,
+                    *index,
+                    Bound::Included(key.as_slice()),
+                    Bound::Included(key.as_slice()),
+                    Direction::Forward,
+                )
+                .and_then(|mut rows| rows.next().transpose())
+                .map_err(|e| store_call_error(ex, e))?;
+            if found.is_some() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     fn remove(
         &mut self,
         ex: &mut Execution,
@@ -521,9 +649,40 @@ impl Walk<'_> {
             layout.column(StdField::Marked),
         );
         let mut taken = 0u64;
+        let document = layout.def.kind == ObjKind::Document;
+        if document {
+            app.numerator().note_deletion();
+        }
+        let journals = if document {
+            Some(crate::journal::Journals::of(app, r.obj)?)
+        } else {
+            None
+        };
+        let recorded = if document {
+            recorders(app, layout.def)?
+        } else {
+            Vec::new()
+        };
+        let queue = crate::history::Queue::for_write(ex, app, &self.txn, r.obj)?;
+        let mut posted = std::mem::take(&mut self.posted);
+        if let Unrecord::Deny(refusal) = std::mem::replace(&mut self.unrecord, Unrecord::No)
+            && self.has_records(ex, &recorded, &value)?
+        {
+            if let Some(e) = refusal {
+                return Err(e);
+            }
+            posted = true;
+        }
+        if posted {
+            let regs: Vec<ObjId> = recorded.iter().map(|(reg, _, _)| *reg).collect();
+            for reg in regs {
+                crate::regread::remove_records(ex, self.app, &self.txn, reg, r)?;
+            }
+        }
+        let mut history_master = None;
         let outcome = self
             .txn
-            .with_write(app, |w: &mut dyn WriteTxn| -> StoreResult<Removed> {
+            .with_write(&**app, |w: &mut dyn WriteTxn| -> StoreResult<Removed> {
                 let found = {
                     let mut rows = w.range(
                         layout.table,
@@ -548,7 +707,26 @@ impl Walk<'_> {
                     marked: matches!(cell(marked), Some(FieldValue::Bool(true))),
                     owner: cell(owner),
                 };
+                let recorder = [value.clone()];
+                for (reg, table, index) in &recorded {
+                    let mut rows = w.range(
+                        *table,
+                        *index,
+                        Bound::Included(recorder.as_slice()),
+                        Bound::Included(recorder.as_slice()),
+                        Direction::Forward,
+                    )?;
+                    if rows.next().transpose()?.is_some() {
+                        return Ok(Removed::Recorded(*reg));
+                    }
+                }
                 w.delete(layout.table, handle)?;
+                if let Some(j) = &journals {
+                    j.delete(w, r.id)?;
+                }
+                if let Some(q) = &queue {
+                    q.object(w, r.id, None, false)?;
+                }
                 for (table, key) in &sections {
                     let handles = handles_of(&*w, *table, key)?;
                     taken = taken.saturating_add(handles.len() as u64);
@@ -563,6 +741,9 @@ impl Walk<'_> {
                     }
                     if m.guarded {
                         return Ok(Removed::Guarded(m.reg));
+                    }
+                    if crate::history::kept(app, m.reg) {
+                        history_master = Some(m.reg);
                     }
                     taken = taken.saturating_add(handles.len() as u64);
                     for h in handles {
@@ -581,6 +762,13 @@ impl Walk<'_> {
                 if let Some(reg) = &registration {
                     reg.done(&registered);
                 }
+                if let Some(q) = queue {
+                    q.finish(&self.txn);
+                }
+                if let Some(reg) = history_master {
+                    self.txn
+                        .refuse_commit(crate::history::refused_deletion(app, reg));
+                }
                 crate::commit_guard::guard(app, &self.txn, r.obj);
                 Ok(Some(node))
             }
@@ -588,6 +776,15 @@ impl Walk<'_> {
             Removed::Stale => {
                 Err(refuse(self.def, self.op, "версия объекта не та, что в базе").into())
             }
+            Removed::Recorded(reg) => Err(refuse(
+                self.def,
+                self.op,
+                &format!(
+                    "документ с движениями регистра {}",
+                    app.model().obj(reg).name
+                ),
+            )
+            .into()),
             Removed::Guarded(reg) => {
                 let reg = app.model().obj(reg);
                 Err(refuse(
@@ -663,6 +860,15 @@ impl Walk<'_> {
 }
 
 pub(crate) fn delete(ex: &mut Execution, inst: &ObjectInstance) -> CallResult<Value> {
+    delete_with(ex, inst, false, Unrecord::No)
+}
+
+fn delete_with(
+    ex: &mut Execution,
+    inst: &ObjectInstance,
+    posted: bool,
+    unrecord: Unrecord,
+) -> CallResult<Value> {
     let inst = inst.rc()?;
     let app = inst.app.clone();
     let def = app.model().obj(inst.obj);
@@ -702,10 +908,12 @@ pub(crate) fn delete(ex: &mut Execution, inst: &ObjectInstance) -> CallResult<Va
         def,
         masters: HashMap::new(),
         top: Some((params, auto_before)),
+        posted,
+        unrecord,
     };
     txn.begin();
     let ended = match walk.delete(ex, &inst, r, &version, loading) {
-        Ok(()) => txn.commit(&*app).map_err(|e| e.call_error(ex)),
+        Ok(()) => crate::fo_version::commit(ex, &app, &txn),
         Err(e) => {
             let _ = txn.rollback(&*app);
             Err(e)
@@ -781,6 +989,8 @@ pub(crate) fn set_mark(
         def,
         masters: HashMap::new(),
         top: None,
+        posted: false,
+        unrecord: Unrecord::No,
     };
     txn.begin();
     let mut assigned = None;
@@ -801,7 +1011,7 @@ pub(crate) fn set_mark(
         result = walk.mark_below(ex, &top, mark);
     }
     let ended = match result {
-        Ok(()) => txn.commit(&*app).map_err(|e| e.call_error(ex)),
+        Ok(()) => crate::fo_version::commit(ex, &app, &txn),
         Err(e) => {
             let _ = txn.rollback(&*app);
             Err(e)
@@ -813,6 +1023,92 @@ pub(crate) fn set_mark(
         inst.restore(s);
     }
     ended.map(|_| Value::Undefined)
+}
+
+pub(crate) fn set_mark_document(
+    ex: &mut Execution,
+    inst: &ObjectInstance,
+    args: &[Arg],
+) -> CallResult<Value> {
+    use crate::write_hooks::{DocWrite, DocumentModes};
+    inst.live()?;
+    let inst = inst.rc()?;
+    let app = inst.app.clone();
+    let def = app.model().obj(inst.obj);
+    let mark = match arg_value(ex, args, 0)? {
+        Value::Bool(b) => b,
+        _ => return Err(refuse(def, Op::Mark(true), "пометка не Булево").into()),
+    };
+    let op = Op::Mark(mark);
+    if inst.state.borrow().is_new {
+        return Err(refuse(def, op, "новый документ").into());
+    }
+    if inst.loading() {
+        return Err(refuse(def, op, "ОбменДанными.Загрузка документа").into());
+    }
+    if inst.state.borrow().modified.get() {
+        return Err(refuse(def, op, "объект модифицирован").into());
+    }
+    let flag = |ex: &mut Execution, std: StdAttr| -> CallResult<bool> {
+        match def.fields.iter().position(|f| f.std == Some(std)) {
+            Some(i) => Ok(matches!(inst.attr(ex, i)?, Value::Bool(true))),
+            None => Ok(false),
+        }
+    };
+    let posted = flag(ex, StdAttr::Posted)?;
+    let marked = flag(ex, StdAttr::DeletionMark)?;
+    let txn = CallTxn::of_call(ex).ok_or_else(|| internal("a mark outside a call"))?;
+    let written = inst.written_in(&txn);
+    let write = match (mark, posted, marked) {
+        (true, true, false) => DocWrite::Mark(true),
+        (false, false, true) => DocWrite::Mark(false),
+        (true, false, false) if def.behavior.posting == Posting::Deny => DocWrite::Mark(false),
+        (true, false, false) => {
+            return Err(refuse(def, op, "пометка непроведённого документа").into());
+        }
+        (true, false, true) if !written => return Ok(Value::Undefined),
+        (true, false, true) => return Err(refuse(def, op, "повторная пометка документа").into()),
+        (true, true, true) => {
+            return Err(refuse(def, op, "повторная пометка проведённого документа").into());
+        }
+        (false, true, _) => {
+            return Err(refuse(def, op, "снятие пометки проведённого документа").into());
+        }
+        (false, false, false) => {
+            return Err(refuse(def, op, "снятие пометки непомеченного документа").into());
+        }
+    };
+    let method = op.method();
+    if write == DocWrite::Mark(true) {
+        crate::posting::undo_check(&inst, method, events::Event::OnWrite)?;
+        crate::posting::before_write_check(&inst, method, "пометке удаления")?;
+    } else {
+        if events::handled(&inst, events::Event::OnWrite) {
+            return Err(refuse(def, op, "обработчик ПриЗаписи").into());
+        }
+        crate::posting::before_write_check(&inst, method, "пометке удаления")?;
+        crate::posting::untouched_sets(
+            &inst,
+            if mark {
+                "до пометки"
+            } else {
+                "до снятия пометки"
+            },
+        )?;
+    }
+    if written && !(posted && write == DocWrite::Mark(true)) {
+        return Err(refuse(def, op, "документ, записанный в этой транзакции").into());
+    }
+    let i = mark_field(def)?;
+    let before = inst.snapshot();
+    let result = inst.assign(ex, i, Value::Bool(mark)).and_then(|()| {
+        let modes = DocumentModes::undoing(write)?;
+        crate::write::write_with(ex, &inst, Some(modes))
+    });
+    if result.is_err() {
+        inst.restore(before);
+    }
+    result.map(|()| Value::Undefined)
 }
 
 fn refuse_list(what: &str) -> HostError {
@@ -884,7 +1180,7 @@ fn delete_objects(
     }
     match result {
         Ok(()) => {
-            txn.commit(&**app).map_err(|e| e.call_error(ex))?;
+            crate::fo_version::commit(ex, app, &txn)?;
             Ok(Value::Undefined)
         }
         Err(e) => {

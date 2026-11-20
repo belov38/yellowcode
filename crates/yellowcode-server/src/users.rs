@@ -1,8 +1,8 @@
-use appobj::SessionUser;
+use appobj::{InfoBaseUserCard, SessionUser, UserNameKey};
 use icu46_sys::{Collator, Strength};
 use onecd::{BlobVal, Database, FieldType, Value};
 use std::collections::{HashMap, HashSet};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use v8users::user::UserData;
 
 const MAX_USERS: usize = 10_000;
@@ -52,12 +52,14 @@ impl std::fmt::Debug for Credentials<'_> {
 struct Entry {
     user: SessionUser,
     standard: bool,
+    password_set: bool,
+    show_in_list: bool,
     upper_hash: String,
 }
 
 pub struct UserDirectory {
     users: HashMap<Vec<u8>, Entry>,
-    collator: Mutex<Collator>,
+    collator: Arc<Mutex<Collator>>,
 }
 
 impl std::fmt::Debug for UserDirectory {
@@ -172,6 +174,8 @@ impl UserDirectory {
                     no_users: false,
                 },
                 standard: data.std_auth(),
+                password_set: data.password_set(),
+                show_in_list: data.show_in_list(),
                 upper_hash: hashes.upper,
             };
             if users.insert(key, entry).is_some() {
@@ -180,7 +184,26 @@ impl UserDirectory {
         }
         Ok(Self {
             users,
-            collator: Mutex::new(collator),
+            collator: Arc::new(Mutex::new(collator)),
+        })
+    }
+
+    pub fn cards(&self) -> Vec<InfoBaseUserCard> {
+        self.users
+            .values()
+            .map(|e| InfoBaseUserCard {
+                user: e.user.clone(),
+                standard_auth: e.standard,
+                password_set: e.password_set,
+                show_in_list: e.show_in_list,
+            })
+            .collect()
+    }
+
+    pub fn name_key(&self) -> UserNameKey {
+        let collator = self.collator.clone();
+        Arc::new(move |name: &str| {
+            name_key(&collator.lock().unwrap_or_else(|p| p.into_inner()), name).ok()
         })
     }
 

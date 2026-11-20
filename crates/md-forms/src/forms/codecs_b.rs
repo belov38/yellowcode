@@ -577,6 +577,54 @@ pub(crate) fn value_el(fc: &FormCtx<'_>, tag: &str, tv: &Node) -> Py<Option<E>> 
     }))
 }
 
+pub(crate) fn c_numeric_bound(
+    fc: &mut FormCtx<'_>,
+    _ctx: &str,
+    prop: &str,
+    src: &Src<'_>,
+    ent: Option<PropRef<'_>>,
+) -> Option<Emit> {
+    if !super::write::fc_external_owner(fc.info.owner) {
+        return None;
+    }
+    let path = learned_path(ent)?;
+    let r = (|| {
+        let value = value_at(src, &path?)?.ok_or(Raised)?;
+        match value.at(0).and_then(Node::text) {
+            Some("U") => {
+                if value.as_list().is_none_or(|v| v.len() != 1) {
+                    return Err(Raised);
+                }
+                Ok(Some(Emit::Absent))
+            }
+            Some("N") => {
+                if value.as_list().is_none_or(|v| v.len() != 2) {
+                    return Err(Raised);
+                }
+                let scalar = value.at(1).and_then(Node::text).ok_or(Raised)?;
+                let digits = scalar.strip_prefix(['+', '-']).unwrap_or(scalar);
+                let mut digit = false;
+                let mut dot = false;
+                for byte in digits.bytes() {
+                    if byte.is_ascii_digit() {
+                        digit = true;
+                    } else if byte == b'.' && !dot {
+                        dot = true;
+                    } else {
+                        return Err(Raised);
+                    }
+                }
+                if !digit {
+                    return Err(Raised);
+                }
+                Ok(value_el(fc, prop, value)?.map(Emit::El))
+            }
+            _ => Ok(None),
+        }
+    })();
+    run(fc, r)
+}
+
 fn fixed_values(fc: &FormCtx<'_>, arr: &Node) -> Py<Option<Vec<E>>> {
     let n = int_of(py_item(arr, 0)?.as_ref())?;
     let seq = py_seq(arr);

@@ -1,14 +1,20 @@
 pub(crate) use crate::{allocation, codec_base64};
 pub(crate) mod context;
 mod dcs;
+pub mod dcs_build;
+mod external_owned;
 mod files;
+#[doc(hidden)]
+pub use external_owned::read_external_owned;
 mod kind;
 mod links;
 pub(crate) mod moxel;
 pub(crate) mod moxel_view;
+pub mod mxl_build;
 pub(crate) mod mxltables;
 pub(crate) mod mxlxml;
 mod simple;
+pub mod simple_build;
 pub(crate) mod tree;
 mod type_view;
 mod xdto;
@@ -32,13 +38,15 @@ fn convert(
         TemplateType::ActiveDocument | TemplateType::GeographicalSchema => Ok(Vec::new()),
         TemplateType::SpreadsheetDocument => {
             let bytes = entry_bytes(data, raw).ok_or(FAILED)?;
-            let converted = mxlxml::entry_xml(cfg, bytes);
-            let xml = match converted {
-                Ok(xml) => xml,
-                Err(_) => crate::graph::sheet::sheet_xml(cfg, bytes)
-                    .ok()
-                    .ok_or(FAILED)?,
-            };
+            let xml = crate::graph::sheet::template_xml_with(
+                cfg,
+                bytes,
+                allocation::Allocation::Native,
+                mxlxml::RowCoverage::Stored,
+            )
+            .map_err(|_| FAILED)?
+            .native()
+            .map_err(|_| FAILED)?;
             Ok(vec![("Template.xml".to_string(), xml)])
         }
         TemplateType::GraphicalSchema => {
@@ -60,6 +68,7 @@ pub(crate) fn convert_with(
     raw: &[u8],
     kind: TemplateType,
     allocation: allocation::Allocation<'_>,
+    row_coverage: mxlxml::RowCoverage,
 ) -> crate::graph::read::R<allocation::Owned<Vec<files::File>>> {
     use crate::graph::read::{Read, ReadError};
     let read = Read::new(allocation);
@@ -71,6 +80,7 @@ pub(crate) fn convert_with(
             lookup,
             entry_bytes(data, raw).ok_or_else(|| read.invalid("failed"))?,
             allocation,
+            row_coverage,
         )?,
         TemplateType::GraphicalSchema => {
             let tree =
@@ -306,4 +316,43 @@ pub(crate) fn entry_bytes<'a>(data: &crate::entries::EntryData, raw: &'a [u8]) -
         crate::entries::EntryData::Nested(_) => None,
         _ => Some(raw),
     }
+}
+
+#[doc(hidden)]
+pub fn read_external(
+    lookup: &dyn context::Lookup,
+    data: &crate::EntryData,
+    raw: &[u8],
+    kind: TemplateType,
+) -> Result<Template> {
+    if matches!(
+        kind,
+        TemplateType::ActiveDocument | TemplateType::GeographicalSchema
+    ) {
+        return Err(crate::Error::Format {
+            entry: "external template".into(),
+            what: "unsupported template kind".into(),
+        });
+    }
+    let files = convert_with(
+        lookup,
+        data,
+        raw,
+        kind,
+        allocation::Allocation::Native,
+        mxlxml::RowCoverage::FullHeight,
+    )
+    .map_err(|e| crate::Error::Format {
+        entry: "external template".into(),
+        what: e.legacy().0,
+    })?
+    .native()
+    .map_err(|e| crate::Error::Format {
+        entry: "external template".into(),
+        what: e.to_string(),
+    })?;
+    Ok(Template {
+        kind: Some(kind),
+        files,
+    })
 }

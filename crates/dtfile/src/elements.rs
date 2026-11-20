@@ -189,6 +189,61 @@ impl<R: Read> RawReader<R> {
         self.limits = Some(limits);
     }
 
+    pub fn set_depth_limit(&mut self, limit: usize) -> Result<()> {
+        self.rd
+            .set_depth_limit(limit)
+            .map_err(|e| bin_err(e, &self.trace))
+    }
+
+    pub fn skip_table_rows(
+        &mut self,
+        row_nodes: u64,
+        check: &mut impl FnMut() -> Result<()>,
+    ) -> Result<RawEvent> {
+        if let Some(error) = &self.failed {
+            return Err(error.again());
+        }
+        let result = self.skip_table_rows_inner(row_nodes, check);
+        if let Err(error) = &result {
+            self.failed = Some(error.again());
+        }
+        result
+    }
+
+    fn skip_table_rows_inner(
+        &mut self,
+        row_nodes: u64,
+        check: &mut impl FnMut() -> Result<()>,
+    ) -> Result<RawEvent> {
+        let State::Rows { place } = self.state else {
+            return self.fail("table discard requires an open row list");
+        };
+        loop {
+            check()?;
+            self.rd.begin_budget(brace::binary::ReadLimits {
+                atom_bytes: 0,
+                retained_bytes: 0,
+                nodes: row_nodes,
+            });
+            if self.at_close()? {
+                return self.rows(place);
+            }
+            if !matches!(
+                self.rd.peek_event().map_err(|e| bin_err(e, &self.trace))?,
+                Some(Event::Open)
+            ) {
+                return self.fail("row must be a list");
+            }
+            if !self
+                .rd
+                .discard_value()
+                .map_err(|e| bin_err(e, &self.trace))?
+            {
+                return self.fail("missing discarded row");
+            }
+        }
+    }
+
     pub fn header(&self) -> DtHeader {
         self.header
     }

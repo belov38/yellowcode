@@ -393,3 +393,138 @@ fn a_part_loads_behind_a_loading_answer_over_the_scheme() {
     assert_eq!((got.status, got.body), (want.status, want.body));
     assert_eq!(lazy.loads(), 1);
 }
+
+#[cfg(unix)]
+mod extensions_body_tests {
+    use super::*;
+    use onec_desktop::bridge::{LocalRequestHeaders, Reply, respond_local};
+
+    fn headers() -> LocalRequestHeaders<'static> {
+        LocalRequestHeaders {
+            authority: "localhost",
+            origin: Some("onec://localhost"),
+            fetch_site: Some("same-origin"),
+            permission: None,
+        }
+    }
+
+    fn local(
+        skins: &yellowcode_core::viewer::skin::Store,
+        viewer: Option<&Viewer>,
+        method: &str,
+        target: &str,
+        body: &[u8],
+    ) -> Reply {
+        respond_local(
+            skins,
+            viewer,
+            method,
+            target,
+            (method == "POST").then_some("application/json"),
+            body,
+            headers(),
+        )
+    }
+
+    #[test]
+    fn original_get_body_is_rejected_for_decoded_extension_path_before_dispatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = yellowcode_testkit::base::create(dir.path());
+        let viewer = Viewer::open(&base, None, yellowcode_core::viewer::Lang::En).unwrap();
+        let skins = yellowcode_core::viewer::skin::Skins::store();
+        let opening = local(
+            &skins,
+            Some(&viewer),
+            "POST",
+            "/api/extensions/start",
+            b"{}",
+        );
+        assert_eq!(opening.status, 200);
+        let opening: serde_json::Value = serde_json::from_slice(&opening.body).unwrap();
+        let scan = opening["scan"].as_str().unwrap();
+        let mut discarded_bodies = Vec::new();
+        for path in ["/api/extensions", "/api/%65xtensions", "/%61pi/extensions"] {
+            let target = format!("{path}?scan={scan}");
+            assert_eq!(
+                local(&skins, Some(&viewer), "GET", &target, &[]).status,
+                200
+            );
+            let status = local(
+                &skins,
+                Some(&viewer),
+                "GET",
+                &target,
+                b"actual original body",
+            )
+            .status;
+            if status != 400 {
+                discarded_bodies.push(format!("live viewer {path}: {status}"));
+            }
+            let status = local(&skins, None, "GET", &target, b"actual original body").status;
+            if status != 400 {
+                discarded_bodies.push(format!("no viewer {path}: {status}"));
+            }
+        }
+        assert_eq!(
+            local(
+                &skins,
+                Some(&viewer),
+                "GET",
+                "/api/info",
+                b"legacy ignored body"
+            )
+            .status,
+            200
+        );
+        assert_eq!(
+            local(
+                &skins,
+                None,
+                "GET",
+                "/skin/vars.css",
+                b"legacy ignored body"
+            )
+            .status,
+            200
+        );
+        assert_eq!(
+            local(
+                &skins,
+                Some(&viewer),
+                "HEAD",
+                "/api/extensions",
+                b"legacy ignored body"
+            )
+            .status,
+            405
+        );
+        assert_eq!(
+            local(
+                &skins,
+                None,
+                "POST",
+                "/api/skins/select",
+                br#"{"id":"builtin"}"#
+            )
+            .status,
+            200
+        );
+        let cancel = format!("{{\"scan\":\"{scan}\"}}");
+        assert_eq!(
+            local(
+                &skins,
+                Some(&viewer),
+                "POST",
+                "/api/extensions/cancel",
+                cancel.as_bytes()
+            )
+            .status,
+            200
+        );
+        viewer.shutdown();
+        assert!(
+            discarded_bodies.is_empty(),
+            "original GET bodies lost before admission: {discarded_bodies:#?}"
+        );
+    }
+}

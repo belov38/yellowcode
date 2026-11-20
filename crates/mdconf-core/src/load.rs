@@ -41,12 +41,30 @@ pub trait LoadMeter: Send + Sync {
 }
 
 #[derive(Clone)]
+pub struct ObjectFilter {
+    pub index_kinds: Option<Vec<MdKind>>,
+    pub keep: KeepObject,
+}
+
+pub type KeepObject = std::sync::Arc<dyn Fn(MdKind, &str) -> bool + Send + Sync>;
+
+impl std::fmt::Debug for ObjectFilter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ObjectFilter")
+            .field("index_kinds", &self.index_kinds)
+            .field("keep", &"Fn")
+            .finish()
+    }
+}
+
+#[derive(Clone)]
 pub struct LoadOptions {
     pub keep_source: bool,
     pub private_forms: Option<PathBuf>,
     pub profile: LoadProfile,
     pub extra_stages: Stages,
     pub meter: Option<std::sync::Arc<dyn LoadMeter>>,
+    pub objects: Option<ObjectFilter>,
 }
 
 impl std::fmt::Debug for LoadOptions {
@@ -57,6 +75,7 @@ impl std::fmt::Debug for LoadOptions {
             .field("profile", &self.profile)
             .field("extra_stages", &self.extra_stages)
             .field("meter", &self.meter.as_ref().map(|_| "LoadMeter"))
+            .field("objects", &self.objects)
             .finish()
     }
 }
@@ -69,6 +88,7 @@ impl Default for LoadOptions {
             profile: LoadProfile::Full,
             extra_stages: Stages::NONE,
             meter: None,
+            objects: None,
         }
     }
 }
@@ -135,7 +155,7 @@ fn shell(kind: MdKind, id: Guid, name: &str) -> MdObject {
     }
 }
 
-fn shell_with_subs(ix: &Index, kind: MdKind, id: Guid, name: &str) -> MdObject {
+pub(crate) fn shell_with_subs(ix: &Index, kind: MdKind, id: Guid, name: &str) -> MdObject {
     let mut o = shell(kind, id, name);
     for &(sk, su) in ix.subs.get(&id).map(Vec::as_slice).unwrap_or_default() {
         let full = ix.names.get(&su).map(String::as_str).unwrap_or_default();
@@ -286,7 +306,8 @@ fn load_selected(
     let id = root_info.id();
     let index = {
         let _phase = phase(Phase::Index);
-        crate::index::build(&entries, schema)?
+        let kinds = opts.objects.as_ref().and_then(|f| f.index_kinds.as_deref());
+        crate::index::build_kinds(&entries, schema, kinds)?
     };
     let predef = {
         let _phase = phase(Phase::Predefined);
@@ -331,7 +352,13 @@ fn load_selected(
         header_id: index.header_id,
         compat,
         settings,
-        objects: build_shells(&index),
+        objects: {
+            let mut objects = build_shells(&index);
+            if let Some(filter) = &opts.objects {
+                objects.retain(|o| (filter.keep)(o.kind, &o.name));
+            }
+            objects
+        },
         diagnostics,
         index,
         predef,

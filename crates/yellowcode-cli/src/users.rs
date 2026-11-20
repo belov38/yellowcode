@@ -73,13 +73,27 @@ pub(crate) struct Base {
     format: Option<Format>,
 }
 
+#[derive(clap::Args)]
+pub(crate) struct RoleNames {
+    #[arg(
+        long,
+        help = "Не читать конфигурацию ради имён ролей: роли выводятся только UUID (быстрее на больших конфигурациях)"
+    )]
+    no_role_names: bool,
+}
+
 #[derive(clap::Subcommand)]
 pub(crate) enum Command {
     #[command(
         about = "Список пользователей базы без служебной строки и секретов",
         after_help = EXAMPLES
     )]
-    List(Base),
+    List {
+        #[command(flatten)]
+        base: Base,
+        #[command(flatten)]
+        names: RoleNames,
+    },
     #[command(
         about = "Карточка пользователя по имени или UUID; UUID нужен, если имена повторяются в разных областях данных",
         after_help = EXAMPLES
@@ -89,6 +103,8 @@ pub(crate) enum Command {
         base: Base,
         #[arg(help = "Имя или UUID пользователя")]
         name: String,
+        #[command(flatten)]
+        names: RoleNames,
     },
     /// Create a user with an empty password and an explicit role set.
     #[command(
@@ -202,7 +218,7 @@ pub(crate) enum Command {
 
 impl Command {
     pub(crate) fn is_mutation(&self) -> bool {
-        !matches!(self, Self::List(_) | Self::Show { .. })
+        !matches!(self, Self::List { .. } | Self::Show { .. })
     }
 }
 
@@ -212,8 +228,8 @@ pub(crate) fn committed_output_error() -> yellowcode_core::Error {
 
 pub(crate) fn run(command: Command, out: &mut dyn Write, tty: bool) -> yellowcode_core::Result<()> {
     match command {
-        Command::List(base) => read(base, None, out, tty),
-        Command::Show { base, name } => read(base, Some(name), out, tty),
+        Command::List { base, names } => read(base, None, names, out, tty),
+        Command::Show { base, name, names } => read(base, Some(name), names, out, tty),
         Command::Create {
             base,
             name,
@@ -345,24 +361,19 @@ fn publish_outcome(
 fn read(
     base: Base,
     name: Option<String>,
+    names: RoleNames,
     out: &mut dyn Write,
     tty: bool,
 ) -> yellowcode_core::Result<()> {
-    let cards = users::list(&base.base)?;
-    let card = name
-        .as_deref()
-        .map(|name| users::find(&cards, name))
-        .transpose()?;
+    let named = !names.no_role_names;
+    let Some(name) = name else {
+        return users::write_all(&base.base, base.json(tty), named, out);
+    };
+    let card = users::find_in(&base.base, &name, named)?;
     if base.json(tty) {
-        if let Some(card) = card {
-            users::write_json(out, card)?;
-        } else {
-            users::write_json(out, &cards)?;
-        }
-    } else if let Some(card) = card {
-        users::write_card(out, card)?;
+        users::write_json(out, &card)?;
     } else {
-        users::write_list(out, &cards)?;
+        users::write_card(out, &card)?;
     }
     Ok(())
 }

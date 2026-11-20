@@ -9,18 +9,63 @@ use super::py::{Dict, Py, Raised, py_int, py_len, py_slice, py_str, str_at};
 use super::query::result_fields;
 use super::shared::Shared;
 
-fn platform_type_name(t: &mdschema::PlatformType) -> TypeName {
-    let (name, ns) = match t.legacy_qname() {
+fn resolved_type_name(t: mdschema::BorrowedPlatformType<'_>) -> TypeName {
+    let (name, ns) = match t.name.legacy_qname() {
         Some(name) => (name, None),
         None => (
-            format!("@:{}", t.name().local),
-            Some(t.name().namespace_uri.to_owned()),
+            format!("@:{}", t.name.local),
+            Some(t.name.namespace_uri.to_owned()),
         ),
     };
     TypeName {
         kind: if t.set { "TypeSet" } else { "Type" }.into(),
         name,
         ns,
+    }
+}
+#[derive(Clone, Copy)]
+enum PathSchema<'a> {
+    Legacy(&'a Schema),
+    Resolved,
+}
+
+pub(crate) trait PathAdmission {
+    fn type_names(&self, pattern: &Node) -> Py<()>;
+    fn reserve(&self, bytes: Option<u64>) -> Py<()>;
+}
+
+fn node_bytes(node: &PathNode, copies: u64) -> Option<u64> {
+    [
+        node.md.as_deref().unwrap_or_default(),
+        node.tname.as_deref().unwrap_or_default(),
+        &node.chain,
+        &node.apath,
+    ]
+    .iter()
+    .try_fold(128u64, |n, s| n.checked_add(s.len() as u64))?
+    .checked_mul(copies)
+}
+impl<'a> PathSchema<'a> {
+    fn platform_type(self, guid: &str) -> Option<mdschema::BorrowedPlatformType<'a>> {
+        match self {
+            Self::Legacy(s) => s
+                .platform_type(guid)
+                .map(|t| mdschema::BorrowedPlatformType {
+                    name: t.name(),
+                    set: t.set,
+                }),
+            Self::Resolved => mdschema::static_schema().platform_type(guid),
+        }
+    }
+    fn std_attr(self, kind: &str, id: &str) -> Option<&'a str> {
+        match self {
+            Self::Legacy(s) => s.std_attr(kind, id),
+            Self::Resolved => mdschema::static_schema()
+                .table("stdattrs.json")?
+                .get(kind)?
+                .get(id)?
+                .as_str(),
+        }
     }
 }
 
@@ -208,7 +253,8 @@ pub(crate) struct AddCols<'a> {
 pub(crate) struct FormInfo<'a> {
     cfg: &'a dyn FormResolution,
     shared: &'a Shared,
-    schema: &'static Schema,
+    schema: PathSchema<'a>,
+    admission: Option<&'a dyn PathAdmission>,
     pub form: &'a DecodedForm,
     #[allow(dead_code)]
     pub owner: Option<&'a str>,
@@ -248,7 +294,40 @@ impl<'a> FormInfo<'a> {
         df: &'a DecodedForm,
         owner: Option<&'a str>,
     ) -> Option<FormInfo<'a>> {
-        let schema = mdschema::schema().ok()?;
+        Self::new_with_view(
+            cfg,
+            shared,
+            df,
+            owner,
+            PathSchema::Legacy(mdschema::schema().ok()?),
+            None,
+        )
+    }
+
+    pub(crate) fn new_resolved(
+        cfg: &'a dyn FormResolution,
+        shared: &'a Shared,
+        df: &'a DecodedForm,
+        owner: Option<&'a str>,
+        admission: &'a dyn PathAdmission,
+    ) -> Option<FormInfo<'a>> {
+        Self::new_with_view(
+            cfg,
+            shared,
+            df,
+            owner,
+            PathSchema::Resolved,
+            Some(admission),
+        )
+    }
+    fn new_with_view(
+        cfg: &'a dyn FormResolution,
+        shared: &'a Shared,
+        df: &'a DecodedForm,
+        owner: Option<&'a str>,
+        schema: PathSchema<'a>,
+        admission: Option<&'a dyn PathAdmission>,
+    ) -> Option<FormInfo<'a>> {
         let attrs: Vec<Attr<'a>> = df.attrs.iter().map(Attr::new).collect::<Py<_>>().ok()?;
         let mut attr_by_id = HashMap::new();
         for (i, a) in attrs.iter().enumerate() {
@@ -262,6 +341,7 @@ impl<'a> FormInfo<'a> {
             cfg,
             shared,
             schema,
+            admission,
             form: df,
             owner,
             owner_kind: owner
@@ -361,6 +441,9 @@ impl<'a> FormInfo<'a> {
     }
 
     pub(crate) fn type_names_py(&self, pat: &Node) -> Py<Option<Vec<TypeName>>> {
+        if let Some(admission) = self.admission {
+            admission.type_names(pat)?;
+        }
         let Some(items) = pat.as_list() else {
             return Ok(None);
         };
@@ -415,7 +498,7 @@ impl<'a> FormInfo<'a> {
             let Some(t) = self.schema.platform_type(&g) else {
                 return Ok(None);
             };
-            out.push(platform_type_name(t));
+            out.push(resolved_type_name(t));
         }
         Ok(Some(out))
     }
@@ -466,10 +549,14 @@ impl<'a> FormInfo<'a> {
     }
 
     fn item_node_py(&mut self, item_id: &str) -> Py<Option<PathNode>> {
+        let admission = self.admission;
         let Some(cache) = self.item_nodes.as_mut() else {
             return Err(Raised);
         };
         if let Some(r) = cache.get(item_id) {
+            if let (Some(admission), Some(node)) = (admission, r) {
+                admission.reserve(node_bytes(node, 2))?;
+            }
             return Ok(r.clone());
         }
         cache.insert(item_id.to_string(), None);
@@ -490,6 +577,9 @@ impl<'a> FormInfo<'a> {
             if let Some((_, node)) = res {
                 r = node;
             }
+        }
+        if let (Some(admission), Some(node)) = (admission, &r) {
+            admission.reserve(node_bytes(node, 2))?;
         }
         if let Some(cache) = self.item_nodes.as_mut() {
             cache.insert(item_id.to_string(), r.clone());
@@ -644,6 +734,12 @@ impl<'a> FormInfo<'a> {
     }
 
     fn step_py(&mut self, node: &PathNode, s: &Node, text: &str) -> Py<Option<(String, PathNode)>> {
+        if let Some(admission) = self.admission {
+            admission.reserve(
+                node_bytes(node, 8)
+                    .and_then(|n| n.checked_add((text.len() as u64).checked_mul(8)?)),
+            )?;
+        }
         let chain = |nm: &str| format!("{}.{nm}", node.chain);
         let apath = |nm: &str| format!("{}.{nm}", node.apath);
         let len = py_len(s);
@@ -668,6 +764,13 @@ impl<'a> FormInfo<'a> {
             let Some(full) = md_name(self.cfg, &str_at(s, 1)?) else {
                 return Ok(None);
             };
+            if let Some(admission) = self.admission {
+                admission.reserve(
+                    (full.len() as u64)
+                        .checked_add(128)
+                        .and_then(|n| n.checked_mul(8)),
+                )?;
+            }
             let nm = format!("Total{}", last_part(full));
             let n = PathNode::new(NodeKind::Std, chain(&nm), apath(&nm));
             return Ok(Some((format!("{text}.{nm}"), n)));
@@ -690,6 +793,13 @@ impl<'a> FormInfo<'a> {
                 return Ok(Some((format!("{text}.{nm}"), n)));
             };
             let nm = last_part(full);
+            if let Some(admission) = self.admission {
+                admission.reserve(
+                    (full.len() as u64)
+                        .checked_add(128)
+                        .and_then(|n| n.checked_mul(64)),
+                )?;
+            }
             let parts: Vec<&str> = full.split('.').collect();
             if parts.len() >= 2 && parts.get(parts.len() - 2) == Some(&"TabularSection") {
                 let mut n = PathNode::new(NodeKind::Ts, chain(nm), apath(nm))
@@ -775,7 +885,10 @@ impl<'a> FormInfo<'a> {
         Ok(None)
     }
 
-    fn candidates(&self, node: &PathNode) -> Vec<Node> {
+    fn candidates(&self, node: &PathNode) -> Py<Vec<Node>> {
+        if let Some(admission) = self.admission {
+            admission.reserve(node_bytes(node, 4))?;
+        }
         let one = |k: &str| Node::list(vec![Node::atom(k)]);
         let two = |a: &str, b: &str| Node::list(vec![Node::atom(a), Node::atom(b)]);
         let mut out = Vec::new();
@@ -850,7 +963,7 @@ impl<'a> FormInfo<'a> {
                 out.extend(g.cols.keys().map(|k| two(k, ADDCOL)));
             }
         }
-        out
+        Ok(out)
     }
 
     #[allow(dead_code)]
@@ -923,7 +1036,7 @@ impl<'a> FormInfo<'a> {
             return Ok(None);
         }
         let part = rest.get(i).map(String::as_str).unwrap_or_default();
-        let mut cands = self.candidates(node);
+        let mut cands = self.candidates(node)?;
         cands.extend(
             self.shared
                 .by_name(part.split('[').next().unwrap_or_default())
@@ -935,6 +1048,18 @@ impl<'a> FormInfo<'a> {
                 continue;
             };
             for j in (i + 1..=rest.len()).rev() {
+                if let Some(admission) = self.admission {
+                    let bytes = rest
+                        .get(i..j)
+                        .unwrap_or_default()
+                        .iter()
+                        .try_fold(cur.len() as u64, |n, s| {
+                            n.checked_add(s.len() as u64)?.checked_add(1)
+                        })
+                        .and_then(|n| n.checked_add(128))
+                        .and_then(|n| n.checked_mul(8));
+                    admission.reserve(bytes)?;
+                }
                 let want = format!("{cur}.{}", rest.get(i..j).unwrap_or_default().join("."));
                 let base = strip_last_idx(&want);
                 if rr != base && rr != want {

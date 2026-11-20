@@ -130,8 +130,10 @@ dependencies = [
  "query-syntax",
  "quick-xml 0.37.5",
  "rand 0.9.5",
+ "sha1",
  "sha2",
  "thiserror 2.0.21",
+ "v8cont",
  "zraw",
 ]
 
@@ -2258,9 +2260,9 @@ dependencies = [
 
 [[package]]
 name = "libz-sys"
-version = "1.1.31"
+version = "1.1.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff20308ecabd635a2dc1dd5834a86c462cca20efba1d5d3ddab1f8aea3455cb2"
+checksum = "fee3f59f4321dab0c78d828942e7aa09d0bd8ad6e78a501977e6bf3d02938045"
 dependencies = [
  "cc",
  "pkg-config",
@@ -2329,11 +2331,14 @@ dependencies = [
  "brace",
  "md-graphics",
  "md-model",
+ "md-xmlout",
  "mdconf-core",
  "mdschema",
  "memory-budget",
  "regex",
+ "serde_json",
  "thiserror 2.0.21",
+ "unicode-normalization",
 ]
 
 [[package]]
@@ -2348,6 +2353,7 @@ dependencies = [
  "memory-budget",
  "regex",
  "thiserror 2.0.21",
+ "unicode-normalization",
 ]
 
 [[package]]
@@ -2386,6 +2392,7 @@ dependencies = [
  "mdconf-core",
  "mdschema",
  "memory-budget",
+ "zraw",
 ]
 
 [[package]]
@@ -2398,6 +2405,7 @@ dependencies = [
  "md-model",
  "md-xmlout",
  "mdschema",
+ "memchr",
  "memory-budget",
  "quick-xml 0.37.5",
  "serde",
@@ -2840,7 +2848,7 @@ dependencies = [
 
 [[package]]
 name = "onec-desktop"
-version = "0.1.0-alpha.24"
+version = "0.1.0-alpha.25"
 dependencies = [
  "cf-fixtures",
  "dunce",
@@ -5889,11 +5897,13 @@ dependencies = [
  "onec-client",
  "onecd",
  "platform-catalog",
+ "process-containment",
  "query-console",
  "regex-automata",
  "rustix",
  "serde",
  "serde_json",
+ "sha1",
  "sha2",
  "tempfile",
  "thiserror 2.0.21",

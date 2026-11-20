@@ -1,6 +1,6 @@
 use super::{
-    creation_number, method_name, no_field, not_implemented, position, release, reserve_values,
-    same_value, type_name, types, vec_with_capacity,
+    creation_number, method_name, no_field, not_implemented, position, release_cleared,
+    release_dropped, reserve_values, same_value, type_name, types, vec_with_capacity,
 };
 use crate::bind::{arg_number, arg_value, msg, to_number, type_mismatch, value_mismatch};
 use bsl_prim::Str;
@@ -190,7 +190,7 @@ impl Array {
 
 impl Drop for Array {
     fn drop(&mut self) {
-        release(std::mem::take(self.items.get_mut()));
+        release_dropped(std::mem::take(self.items.get_mut()));
     }
 }
 
@@ -291,7 +291,7 @@ impl HostObject for Array {
                 }
                 Some("Clear") if !self.fixed => {
                     let old = self.take_items();
-                    release(old);
+                    release_cleared(old);
                     Ok(Value::Undefined)
                 }
                 _ => Err(not_implemented(t, m).into()),

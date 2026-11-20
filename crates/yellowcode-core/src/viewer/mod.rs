@@ -9,6 +9,7 @@ pub mod configurator;
 pub mod consoles;
 pub mod definition;
 pub mod exchange_view;
+pub mod extensions;
 pub mod find;
 pub mod form;
 pub mod helper;

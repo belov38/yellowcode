@@ -21,10 +21,13 @@ pub(crate) enum Event {
     BeforeWrite,
     OnWrite,
     NewCode,
+    NewNumber,
     BeforeDelete,
     OnCopy,
     Filling,
     FillCheck,
+    Posting,
+    UndoPosting,
 }
 
 impl Event {
@@ -33,10 +36,13 @@ impl Event {
             Event::BeforeWrite => ("ПередЗаписью", "BeforeWrite"),
             Event::OnWrite => ("ПриЗаписи", "OnWrite"),
             Event::NewCode => ("ПриУстановкеНовогоКода", "OnSetNewCode"),
+            Event::NewNumber => ("ПриУстановкеНовогоНомера", "OnSetNewNumber"),
             Event::BeforeDelete => ("ПередУдалением", "BeforeDelete"),
             Event::OnCopy => ("ПриКопировании", "OnCopy"),
             Event::Filling => ("ОбработкаЗаполнения", "Filling"),
             Event::FillCheck => ("ОбработкаПроверкиЗаполнения", "FillCheckProcessing"),
+            Event::Posting => ("ОбработкаПроведения", "Posting"),
+            Event::UndoPosting => ("ОбработкаУдаленияПроведения", "UndoPosting"),
         }
     }
 }
@@ -74,6 +80,119 @@ pub(crate) struct Owner<'a> {
     pub(crate) module: Option<ModuleInstanceRef>,
     pub(crate) source: Value,
     pub(crate) category: &'static str,
+}
+
+pub(crate) fn handled(inst: &ObjectInstance, event: Event) -> bool {
+    let app = &inst.app;
+    inst.module()
+        .is_some_and(|m| handler_in(&m, event).is_some())
+        || !subscribed(app, app.model().obj(inst.obj), "Object", event).is_empty()
+}
+
+pub(crate) fn modes_seen(inst: &ObjectInstance) -> bool {
+    let app = &inst.app;
+    if let Some(module) = inst.module()
+        && let Some(name) = handler_in(&module, Event::BeforeWrite)
+        && module
+            .module()
+            .method(name)
+            .is_none_or(|(_, code)| sees_modes(code, 1))
+    {
+        return true;
+    }
+    subscribed(app, app.model().obj(inst.obj), "Object", Event::BeforeWrite)
+        .iter()
+        .any(|(module_name, method)| {
+            let Some(m) = app
+                .modules()
+                .module_ref(&format!("ОбщийМодуль.{module_name}.Модуль"))
+            else {
+                return true;
+            };
+            let Ok(compiled) = app.modules().compiled(m) else {
+                return true;
+            };
+            compiled
+                .method(method)
+                .is_none_or(|(_, code)| sees_modes(code, 2))
+        })
+}
+
+fn sees_modes(code: &bsl_compiler::bytecode::MethodCode, first: u32) -> bool {
+    code.callable_only
+        || code
+            .code
+            .iter()
+            .any(|op| names_slots(*op, &[first, first + 1]))
+}
+
+fn names_slots(op: bsl_compiler::bytecode::Op, slots: &[u32]) -> bool {
+    use bsl_compiler::bytecode::Op;
+    match op {
+        Op::LoadLocal(i)
+        | Op::StoreLocal(i)
+        | Op::RefLocal(i)
+        | Op::IterStart(i)
+        | Op::IterNext { slot: i, .. } => slots.contains(&i),
+        Op::Execute | Op::Evaluate | Op::LoadOuter(_) | Op::StoreOuter(_) | Op::RefOuter(_) => true,
+        Op::Const(_)
+        | Op::Undef
+        | Op::Null
+        | Op::True
+        | Op::False
+        | Op::Pop
+        | Op::Dup
+        | Op::LoadModVar(_)
+        | Op::StoreModVar(_)
+        | Op::LoadGlobal(_)
+        | Op::StoreGlobal(_)
+        | Op::LoadContext(_)
+        | Op::StoreContext(_)
+        | Op::GetMember(_)
+        | Op::SetMember(_)
+        | Op::GetIndex
+        | Op::SetIndex
+        | Op::RefModVar(_)
+        | Op::RefMember(_)
+        | Op::RefIndex
+        | Op::Omitted
+        | Op::CallLocal { .. }
+        | Op::CallApp { .. }
+        | Op::CallPlatform { .. }
+        | Op::CallContext { .. }
+        | Op::CallMember { .. }
+        | Op::New { .. }
+        | Op::NewNoArgs { .. }
+        | Op::NewDynamic { .. }
+        | Op::Return
+        | Op::ReturnValue
+        | Op::Neg
+        | Op::Pos
+        | Op::Not
+        | Op::Add
+        | Op::Sub
+        | Op::Mul
+        | Op::Div
+        | Op::Mod
+        | Op::Eq
+        | Op::Ne
+        | Op::Lt
+        | Op::Le
+        | Op::Gt
+        | Op::Ge
+        | Op::ToBool
+        | Op::Jump(_)
+        | Op::JumpIfFalse(_)
+        | Op::JumpIfTrue(_)
+        | Op::Raise
+        | Op::RaiseExt(_)
+        | Op::Reraise
+        | Op::EnterHandler
+        | Op::LeaveHandler(_)
+        | Op::Await
+        | Op::AddHandler
+        | Op::RemoveHandler => false,
+    }
 }
 
 pub(crate) fn has_write_subscriptions(app: &Application, def: &ObjDef, category: &str) -> bool {
@@ -241,6 +360,12 @@ fn fewer_fill_parameters(
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+struct Level {
+    weight: u32,
+    privileged: bool,
+}
+
 fn call(
     ex: &mut Execution,
     app: &Application,
@@ -248,11 +373,15 @@ fn call(
     module: &ModuleInstanceRef,
     name: &str,
     mut args: Vec<Arg>,
-    weight: u32,
+    level: Level,
 ) -> CallResult<()> {
     pad_missing(module, name, &mut args);
     let frame = HandlerFrame::enter(ex);
-    let outcome = ex.call_weighted(module, name, &mut args, weight);
+    let outcome = if level.privileged {
+        ex.call_privileged_weighted(module, name, &mut args, level.weight)
+    } else {
+        ex.call_weighted(module, name, &mut args, level.weight)
+    };
     frame.leave(ex);
     match outcome {
         Ok(_) => Ok(()),
@@ -286,6 +415,17 @@ pub(crate) fn run_for(
     params: &[Param],
     cancel: Option<&Place>,
 ) -> CallResult<bool> {
+    run_with(ex, owner, event, params, cancel, false)
+}
+
+fn run_with(
+    ex: &mut Execution,
+    owner: &Owner<'_>,
+    event: Event,
+    params: &[Param],
+    cancel: Option<&Place>,
+    privileged: bool,
+) -> CallResult<bool> {
     let app = owner.app;
     let stopped = || {
         cancel
@@ -297,7 +437,18 @@ pub(crate) fn run_for(
     {
         let mut args = args_of(None, params);
         fewer_fill_parameters(owner, module, name, event, &mut args, false)?;
-        call(ex, app, event, module, name, args, MODULE_WEIGHT)?;
+        call(
+            ex,
+            app,
+            event,
+            module,
+            name,
+            args,
+            Level {
+                weight: MODULE_WEIGHT,
+                privileged,
+            },
+        )?;
         if stopped() {
             return Ok(true);
         }
@@ -317,7 +468,10 @@ pub(crate) fn run_for(
             &instance,
             &method,
             args,
-            SUBSCRIPTION_WEIGHT,
+            Level {
+                weight: SUBSCRIPTION_WEIGHT,
+                privileged,
+            },
         )?;
     }
     Ok(stopped())
@@ -390,6 +544,126 @@ pub(crate) fn writing(
         return Err(cant(ex, inst, keys::REFERENCE_CANT_SAVE)?.into());
     }
     Ok(())
+}
+
+pub(crate) fn writing_document(
+    ex: &mut Execution,
+    inst: &Rc<ObjectInstance>,
+    event: Event,
+    mode: &Value,
+    posting: &Value,
+) -> CallResult<()> {
+    let cancel = Place::temp(Value::Bool(false));
+    let mut params = vec![Param::Ref(cancel.clone())];
+    let modes = [Place::temp(mode.clone()), Place::temp(posting.clone())];
+    if event == Event::BeforeWrite {
+        params.extend(modes.iter().cloned().map(Param::Ref));
+    }
+    let cancelled = run(ex, inst, event, &params, Some(&cancel))?;
+    if event == Event::BeforeWrite {
+        for (place, was, name) in [
+            (&modes[0], mode, "РежимЗаписи"),
+            (&modes[1], posting, "РежимПроведения"),
+        ] {
+            if !same_enum_value(place.temp_value().as_ref(), was) {
+                return Err(HostError::not_implemented(
+                    &inst.type_name(),
+                    &format!("Записать: {name} изменён в ПередЗаписью"),
+                )
+                .into());
+            }
+        }
+    }
+    if cancelled {
+        return Err(HostError::not_implemented(
+            &inst.type_name(),
+            &format!("Записать: Отказ в {}", event.names().0),
+        )
+        .into());
+    }
+    Ok(())
+}
+
+pub(crate) fn posting(
+    ex: &mut Execution,
+    inst: &Rc<ObjectInstance>,
+    mode: &Value,
+    privileged: bool,
+) -> CallResult<()> {
+    let app = inst.app.clone();
+    let owner = Owner {
+        app: &app,
+        def: app.model().obj(inst.obj),
+        module: inst.module(),
+        source: Value::Object(inst.clone()),
+        category: "Object",
+    };
+    let cancel = Place::temp(Value::Bool(false));
+    let params = [Param::Ref(cancel.clone()), Param::Val(mode.clone())];
+    if run_with(
+        ex,
+        &owner,
+        Event::Posting,
+        &params,
+        Some(&cancel),
+        privileged,
+    )? {
+        let real_time =
+            bsl_stdlib::enums::as_enum_value(mode).is_some_and(|e| e.name_ru() == "Оперативный");
+        if real_time {
+            return Err(cant_post(inst)?.into());
+        }
+        return Err(HostError::not_implemented(
+            &inst.type_name(),
+            "Записать: Отказ в ОбработкаПроведения",
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn cant_post(inst: &ObjectInstance) -> CallResult<HostError> {
+    let app = &inst.app;
+    let def = app.model().obj(inst.obj);
+    let extended = match app
+        .model()
+        .config
+        .object(def.md)
+        .and_then(|o| o.prop("ExtendedObjectPresentation"))
+    {
+        Some(md_model::Value::LStr(l)) => crate::types::synonym(l, "", &app.model().lang_code),
+        _ => String::new(),
+    };
+    if extended.is_empty() {
+        return Err(HostError::not_implemented(
+            &inst.type_name(),
+            "Записать: Отказ в ОбработкаПроведения без расширенного представления объекта",
+        )
+        .into());
+    }
+    let text = |lang| {
+        format!(
+            "{}: \"{extended}\"!",
+            errors::render(keys::REFERENCE_CANT_POST, &[], lang)
+        )
+    };
+    let mut e = HostError::text(&text(Lang::Ru), &text(Lang::En));
+    e.categories = Some(CategorySet::of(&[
+        Category::AllErrors,
+        Category::ScriptRuntimeError,
+        Category::OtherError,
+    ]));
+    Ok(e)
+}
+
+fn same_enum_value(now: Option<&Value>, was: &Value) -> bool {
+    let (Some(a), Some(b)) = (
+        now.and_then(bsl_stdlib::enums::as_enum_value),
+        bsl_stdlib::enums::as_enum_value(was),
+    ) else {
+        return false;
+    };
+    a.type_idx() == b.type_idx() && a.index() == b.index()
 }
 
 pub(crate) fn before_delete(ex: &mut Execution, inst: &Rc<ObjectInstance>) -> CallResult<()> {
@@ -514,7 +788,11 @@ fn check_filling_inner(ex: &mut Execution, inst: &Rc<ObjectInstance>) -> CallRes
         .filter(|(i, f)| f.fill_check && !inst.hidden(*i))
         .map(|(_, f)| f.name.clone())
         .collect();
+    let md = app.model().config.object(def.md);
     for t in &def.tabular {
+        if section_checked(md, t.md) {
+            paths.push(t.name.clone());
+        }
         paths.extend(
             t.fields
                 .iter()
@@ -552,6 +830,12 @@ fn check_filling_inner(ex: &mut Execution, inst: &Rc<ObjectInstance>) -> CallRes
     Ok(ok)
 }
 
+fn section_checked(md: Option<&md_model::MdObject>, section: crate::model::Uuid16) -> bool {
+    md.and_then(|o| o.children.iter().find(|c| c.id == section))
+        .and_then(|c| c.props.iter().find(|p| p.name == "FillChecking"))
+        .is_some_and(|p| matches!(&p.value, md_model::Value::Text(t) if t == "ShowError"))
+}
+
 fn check_path(ex: &mut Execution, inst: &ObjectInstance, path: &str) -> CallResult<bool> {
     let app = &inst.app;
     let def = app.model().obj(inst.obj);
@@ -565,6 +849,24 @@ fn check_path(ex: &mut Execution, inst: &ObjectInstance, path: &str) -> CallResu
         ex.push_message(UserMessage { text, status: None });
     };
     let Some((section, column)) = path.split_once('.') else {
+        if crate::read::field_index(def, path).is_none()
+            && let Some(t) = crate::read::tabular_index(def, path)
+        {
+            let empty = inst
+                .state
+                .borrow()
+                .tabular
+                .get(t)
+                .is_none_or(|tab| tab.is_empty());
+            if !empty {
+                return Ok(true);
+            }
+            return Err(HostError::not_implemented(
+                &inst.type_name(),
+                &format!("ПроверитьЗаполнение: пустая табличная часть {path}"),
+            )
+            .into());
+        }
         let i = crate::read::field_index(def, path).ok_or_else(unknown)?;
         let field = def.fields.get(i).ok_or_else(unknown)?;
         let value = inst.attr(ex, i)?;

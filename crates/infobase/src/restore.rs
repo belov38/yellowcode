@@ -20,6 +20,7 @@ use crate::raw::FolderFile;
 use crate::seed::seed;
 use crate::{Error, Infobase, OpenMode, OpenOptions, Result, SchemaCheck, Warning, folder};
 
+mod extensions;
 mod fit;
 mod ibcmd;
 mod users;
@@ -122,6 +123,7 @@ pub struct Progress {
 pub enum RestoreEvent {
     Progress(Progress),
     Note(String),
+    Reduced(ReducedIndexes),
 }
 
 #[derive(Default)]
@@ -233,6 +235,14 @@ fn protected_names() -> Result<HashSet<String>> {
 }
 
 fn application_import_scope(heads: &[TableHead], catalog: &[String]) -> Result<HashSet<String>> {
+    import_scope(heads, catalog, &Source::DataBase)
+}
+
+fn import_scope(
+    heads: &[TableHead],
+    catalog: &[String],
+    source: &Source,
+) -> Result<HashSet<String>> {
     let protected = protected_names()?;
     let mut actual = HashMap::with_capacity(catalog.len());
     for name in catalog {
@@ -246,7 +256,7 @@ fn application_import_scope(heads: &[TableHead], catalog: &[String]) -> Result<H
     for head in heads {
         let name = &head.phys_name;
         let canonical = name.to_ascii_uppercase();
-        if head.source != Source::DataBase || protected.contains(&canonical) {
+        if &head.source != source || protected.contains(&canonical) {
             return Err(bad(format!("excluded application import table {name}")));
         }
         if actual.get(&canonical).copied() != Some(&canonical) {
@@ -260,9 +270,6 @@ fn application_import_scope(heads: &[TableHead], catalog: &[String]) -> Result<H
     }
     Ok(scope)
 }
-
-const EXTENSIONS_REFUSED: &str =
-    "the DT holds data of configuration extensions; restoring it is not supported";
 
 fn reduced(logical: Vec<TableDescr>, plans: &[TablePlan]) -> Vec<TableDescr> {
     let mut kept: HashMap<String, &[String]> = HashMap::new();
@@ -886,6 +893,7 @@ fn probe_publication(staging: &Path, parent: &Path) -> Result<()> {
 
 struct Expected {
     schema: LogicalSchema,
+    extension: Option<extensions::Verified>,
     compat: i64,
     counts: Vec<u64>,
     files: u64,
@@ -895,6 +903,7 @@ struct Expected {
     matching_keys: u64,
     users_descr: TableDescr,
     plans: Vec<TablePlan>,
+    extension_memory: Option<extensions::Memory>,
 }
 
 struct Run<'o, 'e> {
@@ -1156,7 +1165,21 @@ fn run(
     if stamp(&before) != stamp(&io(fs::metadata(source))?) {
         return Err(bad("the source changed while it was read"));
     }
-    let plans = fit::prepass(source, staging.path(), locale, opts, notes)?;
+    let mut extension_memory = extensions::Memory::new(&opts.limits, opts.memory_budget.as_ref())?;
+    let plans = fit::prepass(
+        source,
+        staging.path(),
+        locale,
+        opts,
+        notes,
+        &mut extension_memory,
+    )?;
+    if notes.events.is_some() {
+        let _reports_memory = extension_memory.reduced_reports(&plans)?;
+        for reduced in ReducedIndexes::of(&plans) {
+            notes.send(RestoreEvent::Reduced(reduced));
+        }
+    }
     if stamp(&before) != stamp(&io(fs::metadata(source))?) {
         return Err(bad("the source changed while it was read"));
     }
@@ -1180,10 +1203,18 @@ fn run(
         table: String::new(),
         last_progress: 0,
     };
-    let (expected, commits, peak) =
-        stream(&mut reader, &mut state, notes, row_limits, locale, plans)
-            .map_err(|e| row_limit(e, &opts.limits))?;
+    let (mut expected, commits, peak) = stream(
+        &mut reader,
+        &mut state,
+        notes,
+        row_limits,
+        locale,
+        plans,
+        &mut extension_memory,
+    )
+    .map_err(|e| row_limit(e, &opts.limits))?;
     drop(reader);
+    expected.extension_memory = Some(extension_memory);
 
     let after = io(fs::metadata(source))?;
     if stamp(&before) != stamp(&after) {
@@ -1203,24 +1234,23 @@ fn run(
     state.progress(notes, Phase::Verify);
     #[cfg(test)]
     inject("verify")?;
-    let checked = final_checks(&database, &expected, opts)?;
+    let mut checked = final_checks(&database, &expected, opts)?;
     before_publish()?;
-    state.progress(notes, Phase::Publish);
-    #[cfg(test)]
-    inject("publish")?;
-    persist(&database, target)?;
-    sync_dir(parent);
-    drop(lock);
-    let constraints = &checked.index_constraints;
-    if constraints.indexes_with_duplicates != 0 {
-        notes.send(RestoreEvent::Note(format!(
-            "snapshot import preserved {} duplicate entries in {} group(s) across {} declared-unique index(es); strict uniqueness audit reports them",
-            constraints.duplicate_entries,
-            constraints.duplicate_groups,
-            constraints.indexes_with_duplicates,
-        )));
-    }
-    Ok(RestoreReport {
+    let _reports_memory = expected
+        .extension_memory
+        .as_ref()
+        .ok_or_else(|| bad("missing restore metadata scope"))?
+        .reduced_reports(&expected.plans)?;
+    let reduced_indexes = ReducedIndexes::of(&expected.plans)
+        .into_iter()
+        .zip(std::mem::take(&mut checked.objects.values))
+        .map(|(r, (object, service))| ReducedIndexes {
+            object,
+            service,
+            ..r
+        })
+        .collect();
+    let report = RestoreReport {
         source_bytes: before.len(),
         files: expected.files,
         rows: expected.rows,
@@ -1231,8 +1261,35 @@ fn run(
         source_sha256,
         index_constraints: checked.index_constraints,
         warnings: checked.warnings,
-        reduced_indexes: ReducedIndexes::of(&expected.plans),
-    })
+        reduced_indexes,
+    };
+    let constraints = &report.index_constraints;
+    let notify_duplicates = notes.events.is_some() && constraints.indexes_with_duplicates != 0;
+    let _note_memory = if notify_duplicates {
+        Some(
+            expected
+                .extension_memory
+                .as_ref()
+                .ok_or_else(|| bad("missing restore metadata scope"))?
+                .scratch(1024)?,
+        )
+    } else {
+        None
+    };
+    let duplicate_note = notify_duplicates.then(|| format!(
+        "snapshot import preserved {} duplicate entries in {} group(s) across {} declared-unique index(es); strict uniqueness audit reports them",
+        constraints.duplicate_entries, constraints.duplicate_groups, constraints.indexes_with_duplicates,
+    ));
+    state.progress(notes, Phase::Publish);
+    #[cfg(test)]
+    inject("publish")?;
+    persist(&database, target)?;
+    sync_dir(parent);
+    drop(lock);
+    if let Some(note) = duplicate_note {
+        notes.send(RestoreEvent::Note(note));
+    }
+    Ok(report)
 }
 
 fn read_schema<R: Read>(
@@ -1272,6 +1329,7 @@ fn stream<R: Read>(
     row_limits: ReadLimits,
     locale: &str,
     plans: Vec<TablePlan>,
+    extension_memory: &mut extensions::Memory,
 ) -> Result<(Expected, u64, usize)> {
     let limits = run.opts.limits;
     let compat = read_preamble(reader)?;
@@ -1558,7 +1616,7 @@ fn stream<R: Read>(
         return Err(bad("schema table limit"));
     }
     let heads = TableHead::database(&schema)?;
-    if plans.len() != heads.len()
+    if plans.len() < heads.len()
         || plans
             .iter()
             .zip(&heads)
@@ -1639,6 +1697,8 @@ fn stream<R: Read>(
     let dbnames = dbnames.ok_or_else(|| bad("missing DBNames"))?;
     let partial = Expected {
         schema,
+        extension: None,
+        extension_memory: None,
         compat,
         counts,
         files: run.files,
@@ -1653,7 +1713,7 @@ fn stream<R: Read>(
     run.progress(notes, Phase::Metadata);
     #[cfg(test)]
     inject("metadata")?;
-    check_metadata(&run.database, &partial, run.opts)?;
+    check_metadata(&run.database, &partial, run.opts, false)?;
 
     let db = Database::open(&run.database, database_options(&limits))?;
     let scope = application_import_scope(&heads, &db.info().tables)?;
@@ -1699,16 +1759,36 @@ fn stream<R: Read>(
         }
         counts.push(count);
     }
-    match reader.next_event()? {
-        Some(Event::DataBaseEnd) => {}
+    let extension = match reader.next_event()? {
+        Some(Event::DataBaseEnd) if partial.plans.len() == partial.schema.walk().len() => {
+            if reader.next_event()?.is_some() {
+                return Err(bad("element after DataBase"));
+            }
+            None
+        }
         Some(Event::ExtensionsStart) => {
-            return Err(bad(EXTENSIONS_REFUSED));
+            let main_len = partial.schema.walk().len();
+            let [_, _, _, _, _, cas, cas_save, ..] = counts.as_slice() else {
+                return Err(bad("missing extension folder counts"));
+            };
+            let (main_plans, extension_plans) = partial
+                .plans
+                .split_at_checked(main_len)
+                .ok_or_else(|| bad("missing extension table plans"))?;
+            extensions::profile(compat, [*cas, *cas_save], main_plans)?;
+            let mut block = extensions::Block::read(
+                reader,
+                &partial.schema,
+                &limits,
+                row_limits,
+                extension_memory,
+                run.opts.memory_budget.as_ref(),
+            )?;
+            counts.extend(block.load(reader, run, notes, &mut batches, &db, extension_plans)?);
+            Some(block.finish(reader, extension_memory)?)
         }
         _ => return Err(bad("element order, layout or value")),
-    }
-    if reader.next_event()?.is_some() {
-        return Err(bad("element after DataBase"));
-    }
+    };
     batches.commit()?;
     commits += batches.commits;
     peak = peak.max(batches.peak);
@@ -1718,6 +1798,7 @@ fn stream<R: Read>(
         Expected {
             counts,
             rows: run.rows,
+            extension,
             ..partial
         },
         commits,
@@ -1766,11 +1847,69 @@ fn open_warnings(ib: &Infobase) -> Vec<OpenWarning> {
         .collect()
 }
 
+type TableObject = (Option<String>, Option<String>);
+
+fn table_object<'a>(
+    storage: &'a ibschema::storage::StorageMap,
+    phys: &str,
+) -> (Option<&'a str>, Option<&'a str>) {
+    let Some(t) = storage
+        .tables()
+        .iter()
+        .find(|t| t.phys.eq_ignore_ascii_case(phys))
+    else {
+        return (None, None);
+    };
+    if !t.md_name.is_empty() {
+        return (Some(t.md_name.as_str()), None);
+    }
+    let owner =
+        t.md.and_then(|md| storage.object(md))
+            .and_then(|o| storage.try_table(o.main))
+            .map(|main| main.md_name.as_str())
+            .filter(|name| !name.is_empty());
+    let purpose = Some(t.purpose.as_str()).filter(|p| !p.is_empty());
+    match owner {
+        Some(owner) => (Some(owner), purpose),
+        None => (None, None),
+    }
+}
+
+#[derive(Default)]
+struct ObjectNames {
+    values: Vec<TableObject>,
+    _memory: Option<memory_budget::Reservation>,
+}
+
+fn reduced_objects(ib: &Infobase, expected: &Expected) -> Result<ObjectNames> {
+    let reduced = || {
+        expected
+            .plans
+            .iter()
+            .filter(|p| matches!(p.decision, Decision::ClusteredOnly { .. }))
+    };
+    let memory = expected
+        .extension_memory
+        .as_ref()
+        .ok_or_else(|| bad("missing restore metadata scope"))?;
+    let hold = memory.object_names(reduced().map(|p| table_object(ib.storage(), &p.table)))?;
+    let mut values = Vec::with_capacity(reduced().count());
+    for plan in reduced() {
+        let (object, service) = table_object(ib.storage(), &plan.table);
+        values.push((object.map(str::to_owned), service.map(str::to_owned)));
+    }
+    Ok(ObjectNames {
+        values,
+        _memory: Some(hold),
+    })
+}
+
 fn check_metadata(
     path: &Path,
     expected: &Expected,
     opts: &RestoreOptions<'_>,
-) -> Result<(bool, Vec<OpenWarning>)> {
+    with_objects: bool,
+) -> Result<(bool, Vec<OpenWarning>, ObjectNames)> {
     let ib = open_check(path, opts)?;
     if ib.raw().dbschema_text()? != expected.schema.to_text()
         || ib.raw().dbnames_text()?.as_slice() != expected.dbnames.as_slice()
@@ -1799,16 +1938,25 @@ fn check_metadata(
             }
         }
     }
-    Ok((ib.configuration().is_some(), open_warnings(&ib)))
+    Ok((
+        ib.configuration().is_some(),
+        open_warnings(&ib),
+        if with_objects {
+            reduced_objects(&ib, expected)?
+        } else {
+            ObjectNames::default()
+        },
+    ))
 }
 
 struct FinalCheck {
     warnings: Vec<OpenWarning>,
     index_constraints: onecd::IndexConstraintSummary,
+    objects: ObjectNames,
 }
 
 fn final_checks(path: &Path, expected: &Expected, opts: &RestoreOptions<'_>) -> Result<FinalCheck> {
-    let (configured, mut warnings) = check_metadata(path, expected, opts)?;
+    let (configured, mut warnings, objects) = check_metadata(path, expected, opts, true)?;
     if !configured && expected.rows != 0 {
         return Err(bad("unqualified no-config schema/data"));
     }
@@ -1820,18 +1968,29 @@ fn final_checks(path: &Path, expected: &Expected, opts: &RestoreOptions<'_>) -> 
             ..onecd::OpenOptions::read_only()
         },
     )?;
-    let heads = TableHead::database(&expected.schema)?;
-    let scope = application_import_scope(&heads, &db.info().tables)?;
+    let mut heads = TableHead::database(&expected.schema)?;
+    let mut scope = application_import_scope(&heads, &db.info().tables)?;
+    if let Some(extension) = &expected.extension {
+        scope.extend(import_scope(
+            &extension.heads,
+            &db.info().tables,
+            &Source::Extension(1),
+        )?);
+        heads.extend(extension.heads.iter().cloned());
+    }
     let report = db.verify_with(onecd::VerifyOptions::for_imported_tables(&scope))?;
     if !report.violations.is_empty() {
         return Err(bad("engine verification"));
     }
-    let expected_descrs = descriptors(
+    let mut expected_descrs = descriptors(
         &expected.schema,
         &expected.users_descr,
         configured,
         &expected.plans,
     )?;
+    if let Some(extension) = &expected.extension {
+        expected_descrs.extend(extension.descriptors.iter().cloned());
+    }
     let mut names: Vec<_> = expected_descrs.iter().map(|d| d.name.clone()).collect();
     names.sort();
     let mut actual = db.info().tables;
@@ -1910,33 +2069,37 @@ fn final_checks(path: &Path, expected: &Expected, opts: &RestoreOptions<'_>) -> 
         }
     }
     let t = read.table("SCHEMASTORAGE")?;
-    let rows = t.scan().collect::<onecd::Result<Vec<_>>>()?;
-    let [(_, row)] = rows.as_slice() else {
-        return Err(bad("SCHEMASTORAGE cardinality"));
-    };
-    let field = |name: &str| -> Result<&Value> {
-        let index = t
-            .descr()
-            .field(name)
-            .ok_or_else(|| bad("SCHEMASTORAGE field"))?
-            .0;
-        row.get(index).ok_or_else(|| bad("SCHEMASTORAGE row"))
-    };
-    let bytes = |v: &Value| -> Result<Vec<u8>> {
-        match v {
-            Value::Image(BlobVal::Ref(r)) => Ok(t.blob_bytes(*r)?),
-            Value::Image(BlobVal::Data(b)) => Ok(b.clone()),
-            _ => Err(bad("SCHEMASTORAGE blob")),
+    if let Some(extension) = &expected.extension {
+        extension.verify_storage(&t)?;
+    } else {
+        let rows = t.scan().collect::<onecd::Result<Vec<_>>>()?;
+        let [(_, row)] = rows.as_slice() else {
+            return Err(bad("SCHEMASTORAGE cardinality"));
+        };
+        let field = |name: &str| -> Result<&Value> {
+            let index = t
+                .descr()
+                .field(name)
+                .ok_or_else(|| bad("SCHEMASTORAGE field"))?
+                .0;
+            row.get(index).ok_or_else(|| bad("SCHEMASTORAGE row"))
+        };
+        let bytes = |v: &Value| -> Result<Vec<u8>> {
+            match v {
+                Value::Image(BlobVal::Ref(r)) => Ok(t.blob_bytes(*r)?),
+                Value::Image(BlobVal::Data(b)) => Ok(b.clone()),
+                _ => Err(bad("SCHEMASTORAGE blob")),
+            }
+        };
+        let number = |v: &Value, n: u32| matches!(v, Value::Numeric(x) if x.eq_value(&Numeric::from_i64(i64::from(n))));
+        if !number(field("SCHEMAID")?, seed().schemastorage.0)
+            || !number(field("STATUS")?, seed().schemastorage.1)
+            || bytes(field("CURRENTSCHEMA")?)? != expected.schema.to_text()
+            || bytes(field("NEWGENCREATED")?)? != seed().newgen
+            || bytes(field("NEWGENDROPPED")?)? != seed().newgen
+        {
+            return Err(bad("SCHEMASTORAGE policy"));
         }
-    };
-    let number = |v: &Value, n: u32| matches!(v, Value::Numeric(x) if x.eq_value(&Numeric::from_i64(i64::from(n))));
-    if !number(field("SCHEMAID")?, seed().schemastorage.0)
-        || !number(field("STATUS")?, seed().schemastorage.1)
-        || bytes(field("CURRENTSCHEMA")?)? != expected.schema.to_text()
-        || bytes(field("NEWGENCREATED")?)? != seed().newgen
-        || bytes(field("NEWGENDROPPED")?)? != seed().newgen
-    {
-        return Err(bad("SCHEMASTORAGE policy"));
     }
     if rows_of("V8USERSMATKEYS")? != expected.matching_keys {
         return Err(bad("V8USERSMATKEYS row count"));
@@ -1951,5 +2114,6 @@ fn final_checks(path: &Path, expected: &Expected, opts: &RestoreOptions<'_>) -> 
     Ok(FinalCheck {
         warnings,
         index_constraints: report.index_constraints,
+        objects,
     })
 }

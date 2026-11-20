@@ -10,6 +10,7 @@ use crate::{
     ring::{Ring, RingLimits},
     scan::{HEAD_MESSAGES, MAX_MESSAGES, MessageSource},
     sink::{self, Destination, WriteFailure},
+    table::TableVocabulary,
     tempdb::TempDbName,
     value::{Event, Hashed, Redacted},
 };
@@ -476,6 +477,36 @@ impl Trace {
                 .opt_num("expected", refusal.expected)
                 .opt_num("observed", refusal.observed),
         );
+    }
+
+    pub fn inventory(&self, missing: u64, extra: u64, extra_ext: u64, ext_schemas: Option<u64>) {
+        self.emit(
+            Event::new("inventory")
+                .unum("missing", missing)
+                .unum("extra", extra)
+                .unum("extra_ext", extra_ext)
+                .opt_unum("ext_schemas", ext_schemas),
+        );
+    }
+
+    pub fn inventory_table(
+        &self,
+        side: &'static str,
+        kind: &'static str,
+        vocabulary: &TableVocabulary,
+        name: &str,
+    ) {
+        let event = Event::new("inventory_table")
+            .tag("side", side)
+            .tag("kind", kind);
+        let event = match vocabulary.classify(name) {
+            Some(clear) => event.table("name", clear),
+            None => event.hash("name_hash", self.hash(name)).unum(
+                "name_len",
+                u64::try_from(name.chars().count()).unwrap_or(u64::MAX),
+            ),
+        };
+        self.emit(event);
     }
 
     pub fn failure(&self, class: &'static str, stage: &'static str, display: &str) {

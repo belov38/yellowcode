@@ -93,15 +93,21 @@ pub(crate) fn read_fresh(
     app: &Application,
     r: RefValue,
 ) -> CallResult<ReadRow> {
-    admit_read(ex, r)?;
+    admit_read(ex, app, r)?;
     load_row(ex, app, r, 0)
 }
 
-fn admit_read(ex: &mut Execution, r: RefValue) -> Result<(), HostError> {
+fn admit_read(ex: &mut Execution, app: &Application, r: RefValue) -> Result<(), HostError> {
     if r.is_empty() {
         return Ok(());
     }
-    admit_data_read(ex)?;
+    let md = app.model().obj(r.obj).md;
+    if crate::rights::data_read(ex, app, md)? == crate::rights::DataRead::Denied {
+        return Err(HostError::not_implemented(
+            "P6",
+            "чтение ссылки без права Чтение в сеансе с пользователями",
+        ));
+    }
     if let Some(c) = call_ctx(ex) {
         c.txn.check().map_err(|e| e.host())?;
     }
@@ -124,7 +130,8 @@ pub(crate) fn read_view<'a>(
 }
 
 pub(crate) fn admit_data_read(ex: &mut Execution) -> Result<(), HostError> {
-    if call_ctx(ex).is_some_and(|c| c.sess.user().no_users) {
+    let privileged = ex.effective_flags().privileged;
+    if call_ctx(ex).is_some_and(|c| c.sess.user().no_users || privileged) {
         Ok(())
     } else {
         Err(HostError::not_implemented(
@@ -139,7 +146,7 @@ pub(crate) fn read_object_row(
     app: &Application,
     r: RefValue,
 ) -> CallResult<Rc<ReadRow>> {
-    admit_read(ex, r)?;
+    admit_read(ex, app, r)?;
     let epoch = app.write_epoch();
     if let Some((e, row)) = call_ctx(ex).and_then(|c| c.read_cache.get(&r))
         && *e == epoch
@@ -178,7 +185,7 @@ pub(crate) fn read_tabular(
     tab: usize,
     live: u64,
 ) -> CallResult<Vec<Vec<Value>>> {
-    admit_read(ex, r)?;
+    admit_read(ex, app, r)?;
     let def = app.model().obj(r.obj);
     let (Some(st), Some(td)) = (app.model().storage_of(r.obj), def.tabular.get(tab)) else {
         return Ok(Vec::new());

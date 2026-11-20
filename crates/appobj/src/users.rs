@@ -1,7 +1,7 @@
 use crate::meta::{MdCtx, MdKey, MdPath, arg_value, key_with_app, member_name, value_of};
 use crate::session::{SessionUser, call_ctx, internal};
 use crate::session_info::outside_call;
-use crate::{AppError, Application, Result};
+use crate::{AppError, Application, InfoBaseUserCard, Result};
 use brace::Node;
 use bsl_stdlib::{InternalReader, InternalWriter, ValueCodec, register_codec};
 use bsl_vm::{
@@ -96,6 +96,7 @@ impl HostObject for UsersManager {
                 self.find_by_uuid(ex, args)
             }
             (true, "НайтиПоИмени") => self.find_by_name(ex, args),
+            (true, "ПолучитьПользователей") => self.list(ex),
             (true, "СоздатьПользователя") => Ok(self.new_user()),
             (_, name) => Err(HostError::not_implemented(MANAGER, name).into()),
         }
@@ -104,13 +105,54 @@ impl HostObject for UsersManager {
 
 impl UsersManager {
     fn user_object(&self, user: SessionUser) -> Value {
+        let flags = if user.no_users {
+            None
+        } else {
+            self.app
+                .users()
+                .and_then(|users| users.by_uuid(&user.uuid))
+                .map(Flags::of)
+        };
         Value::Object(Rc::new(InfoBaseUser {
             types: self.types,
             app: Some(self.app.clone()),
             user,
+            flags,
             restored: None,
             created: None,
         }))
+    }
+
+    fn card_object(&self, card: &InfoBaseUserCard) -> Value {
+        Value::Object(Rc::new(InfoBaseUser {
+            types: self.types,
+            app: Some(self.app.clone()),
+            user: card.user.clone(),
+            flags: Some(Flags::of(card)),
+            restored: None,
+            created: None,
+        }))
+    }
+
+    fn list(&self, ex: &mut Execution) -> CallResult<Value> {
+        let user = call_ctx(ex).ok_or_else(outside_call)?.sess.user().clone();
+        let users = (!user.no_users).then(|| self.app.users()).flatten();
+        let Some(users) = users else {
+            return Err(HostError::not_implemented(MANAGER, "ПолучитьПользователей").into());
+        };
+        if !crate::access_right::is_admin(&self.app, &user) {
+            if ex.effective_flags().privileged {
+                return Err(HostError::not_implemented(
+                    MANAGER,
+                    "ПолучитьПользователей: привилегированный режим сеанса без административных прав",
+                )
+                .into());
+            }
+            return Err(access_denied().into());
+        }
+        Ok(bsl_stdlib::new_array(
+            users.cards().map(|c| self.card_object(c)).collect(),
+        ))
     }
 
     fn new_user(&self) -> Value {
@@ -124,6 +166,7 @@ impl UsersManager {
                 roles: Vec::new(),
                 no_users: false,
             },
+            flags: None,
             restored: None,
             created: Some(Rc::new(RefCell::new(Vec::new()))),
         }))
@@ -134,7 +177,7 @@ impl UsersManager {
         let refuse =
             |what: &str| HostError::not_implemented(MANAGER, &format!("НайтиПоИмени{what}"));
         if !user.no_users {
-            return Err(refuse("").into());
+            return self.find_in_table(ex, args, &user);
         }
         match arg_value(ex, args, 0)? {
             Value::String(name) if name.to_string_lossy().is_empty() => {
@@ -146,6 +189,43 @@ impl UsersManager {
             }
             Value::String(_) => Ok(Value::Undefined),
             _ => Err(refuse(": параметр не Строка").into()),
+        }
+    }
+
+    fn find_in_table(
+        &self,
+        ex: &mut Execution,
+        args: &[Arg],
+        user: &SessionUser,
+    ) -> CallResult<Value> {
+        let refuse =
+            |what: &str| HostError::not_implemented(MANAGER, &format!("НайтиПоИмени{what}"));
+        let Some(users) = self.app.users() else {
+            return Err(refuse("").into());
+        };
+        let Value::String(name) = arg_value(ex, args, 0)? else {
+            return Err(refuse(": параметр не Строка").into());
+        };
+        let name = name.to_string_lossy();
+        if name.trim_end_matches(' ').is_empty() {
+            return Err(refuse(": пустое имя в базе с пользователями").into());
+        }
+        let Ok(found) = users.by_name(&name) else {
+            return Err(refuse(": имя без ключа сравнения").into());
+        };
+        let admin = crate::access_right::is_admin(&self.app, user);
+        if !admin && ex.effective_flags().privileged {
+            return Err(
+                refuse(": привилегированный режим сеанса без административных прав").into(),
+            );
+        }
+        match found {
+            Some(card) if admin || card.user.uuid == user.uuid => Ok(self.card_object(card)),
+            Some(_) => Err(access_denied().into()),
+            None if admin => Ok(Value::Undefined),
+            None => {
+                Err(refuse(": нет такого пользователя, сеанс без административных прав").into())
+            }
         }
     }
 
@@ -170,6 +250,19 @@ impl UsersManager {
             Value::Undefined
         })
     }
+}
+
+fn access_denied() -> HostError {
+    let mut e = HostError::text(
+        "Пользователю недостаточно прав для выполнения операции.",
+        "The user doesn't have appropriate rights to perform this operation.",
+    );
+    e.categories = Some(bsl_vm::CategorySet::of(&[
+        bsl_vm::Category::AllErrors,
+        bsl_vm::Category::ScriptRuntimeError,
+        bsl_vm::Category::OtherError,
+    ]));
+    e
 }
 
 fn anonymous_uuid() -> crate::model::Uuid16 {
@@ -197,10 +290,36 @@ pub(crate) fn user_value(v: &Value) -> Option<UserValue> {
     })
 }
 
+pub(crate) fn user_roles(v: &Value) -> Option<(Vec<crate::model::Uuid16>, Arc<Application>)> {
+    let user = v.as_object()?.as_any().downcast_ref::<InfoBaseUser>()?;
+    if user_value(v) != Some(UserValue::OfSessionWithUsers) {
+        return None;
+    }
+    Some((user.user.roles.clone(), user.app.clone()?))
+}
+
+#[derive(Clone, Copy)]
+struct Flags {
+    standard_auth: bool,
+    password_set: bool,
+    show_in_list: bool,
+}
+
+impl Flags {
+    fn of(card: &InfoBaseUserCard) -> Flags {
+        Flags {
+            standard_auth: card.standard_auth,
+            password_set: card.password_set,
+            show_in_list: card.show_in_list,
+        }
+    }
+}
+
 struct InfoBaseUser {
     types: Types,
     app: Option<Arc<Application>>,
     user: SessionUser,
+    flags: Option<Flags>,
     restored: Option<[u8; 16]>,
     created: Option<Rc<RefCell<Vec<MdKey>>>>,
 }
@@ -302,7 +421,16 @@ impl HostObject for InfoBaseUser {
             "UUID" => Ok(bsl_stdlib::values::new_uuid(self.uuid_bytes())),
             "Roles" => self.roles(),
             "OSUser" if self.user.no_users => Ok(Value::from("")),
-            _ => Err(HostError::not_implemented(USER, ru).into()),
+            _ => match (ru, self.flags) {
+                ("АутентификацияСтандартная", Some(f)) => {
+                    Ok(Value::Bool(f.standard_auth))
+                }
+                ("ПарольУстановлен", Some(f)) => Ok(Value::Bool(f.password_set)),
+                ("ПоказыватьВСпискеВыбора", Some(f)) => {
+                    Ok(Value::Bool(f.show_in_list))
+                }
+                _ => Err(HostError::not_implemented(USER, ru).into()),
+            },
         }
     }
     fn set(&self, _: &mut Execution, m: MemberId, _: Value) -> CallResult<()> {
@@ -613,6 +741,7 @@ impl ValueCodec for UserCodec {
                 roles: Vec::new(),
                 no_users: true,
             },
+            flags: None,
             restored: Some(uid),
             created: None,
         })))

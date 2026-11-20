@@ -571,6 +571,15 @@ pub(crate) fn group_kind(kind: &str, v: &Node, cx: &mut Cx<'_>) -> Result<Node, 
         "6" => button_group(v),
         "8" => context_menu(v),
         "9" => auto_command_bar(v),
+        "10" | "11"
+            if v.as_list().is_some_and(|l| l.len() == 4)
+                && v.at(0).and_then(Node::as_i64) == Some(0)
+                && v.at(1).and_then(Node::as_i64) == Some(1)
+                && v.at(2).and_then(Node::as_i64) == Some(0)
+                && v.at(3).and_then(Node::as_i64) == Some(1) =>
+        {
+            Ok(v.clone())
+        }
         _ => Err(Refusal::NoRuleKind {
             what: "group-kind",
             kind: kind.into(),

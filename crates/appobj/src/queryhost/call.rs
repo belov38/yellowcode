@@ -71,7 +71,11 @@ impl QueryHostProvider for CallQueryProvider {
         let host = CallQueryHost {
             provider: self,
             call,
-            session: SessionView { user },
+            session: SessionView {
+                user,
+                privileged: ex.effective_flags().privileged,
+                app: self.app.clone(),
+            },
             cancel,
             mem_limit: ex
                 .options()
@@ -93,18 +97,98 @@ impl QueryHostProvider for CallQueryProvider {
 
 struct SessionView {
     user: Option<SessionUser>,
+    privileged: bool,
+    app: Arc<Application>,
 }
 impl SessionView {
     fn admitted(&self) -> bool {
-        self.user.as_ref().is_some_and(|u| u.no_users)
+        self.user.is_some()
     }
 }
+fn rights_later(what: &str) -> HostError {
+    HostError::new(format!("Не реализовано в реплике (Запрос.{what})"))
+}
 impl AccessPolicy for SessionView {
-    fn read_policy(&self, _: &SourceTable, _: &FieldSet) -> Result<Access, HostError> {
-        if self.admitted() {
+    fn read_policy(&self, table: &SourceTable, fields: &FieldSet) -> Result<Access, HostError> {
+        let Some(user) = self.user.as_ref() else {
+            return Err(HostError::new("Q7e-SessionSecurity / P6"));
+        };
+        if user.no_users || self.privileged {
+            return Ok(Access::Unrestricted);
+        }
+        let Some(read) = md_model::parts::Right::from_name("Read") else {
+            return Err(rights_later("P6-RightRead"));
+        };
+        let config = &self.app.model().config;
+        let Some(obj) = config.object(table.object) else {
+            return Err(rights_later("P6-UnknownObject"));
+        };
+        if !read.is_applicable(obj.kind) {
+            return Err(rights_later("P6-ReadNotApplicable"));
+        }
+        let mut own_fields: Vec<(brace::Guid, Option<brace::Guid>)> = Vec::new();
+        let mut stack: Vec<(&md_model::Child, Option<brace::Guid>)> =
+            obj.children.iter().map(|c| (c, None)).collect();
+        while let Some((c, section)) = stack.pop() {
+            let section =
+                section.or_else(|| (c.tag == md_model::ChildTag::TabularSection).then_some(c.id));
+            own_fields.push((c.id, section));
+            stack.extend(c.children.iter().map(|k| (k, section)));
+        }
+        let reads_field = |id: &brace::Guid| {
+            let section = own_fields
+                .iter()
+                .find(|(f, _)| f == id)
+                .and_then(|(_, s)| *s);
+            fields.all
+                || fields.fields.contains(id)
+                || matches!(table.part, query_ir::TablePart::Tabular(ts) if Some(ts) == section || ts == *id)
+                || section.is_some_and(|s| {
+                    s == *id
+                        && own_fields
+                            .iter()
+                            .any(|(f, fs)| *fs == Some(s) && fields.fields.contains(f))
+                })
+        };
+        for role in user.roles.iter().filter_map(|id| config.object(*id)) {
+            let Some(rights) = role.rights() else {
+                continue;
+            };
+            let object = md_model::parts::RightTarget::Object(table.object);
+            if rights
+                .restrictions(&object, read)
+                .iter()
+                .any(|r| !r.condition.trim().is_empty() || !r.fields.is_empty())
+            {
+                return Err(rights_later("P6-RecordLevelRestriction"));
+            }
+            let field_right = rights.objects.iter().any(|o| {
+                let named = match &o.target {
+                    md_model::parts::RightTarget::Child { id, field: true } => {
+                        own_fields.iter().any(|(f, _)| f == id) && reads_field(id)
+                    }
+                    md_model::parts::RightTarget::StandardAttribute { owner, .. } => {
+                        *owner == table.object
+                    }
+                    _ => false,
+                };
+                named && o.rights.iter().any(|rv| rv.right == read)
+            });
+            let fields_by_default = rights.set_for_attributes_by_default
+                || !rights.value(&object, read)
+                || !own_fields.iter().any(|(f, _)| reads_field(f));
+            if field_right || !fields_by_default {
+                return Err(rights_later("P6-FieldRights"));
+            }
+        }
+        if self.app.has_right(
+            user,
+            crate::RightTarget::Object(table.object),
+            crate::Right(read),
+        ) {
             Ok(Access::Unrestricted)
         } else {
-            Err(HostError::new("Q7e-SessionSecurity / P6"))
+            Ok(Access::Deny)
         }
     }
 }
@@ -303,9 +387,19 @@ impl QueryHost for CallQueryHost<'_> {
         if self.txn.is_some_and(CallTxn::poisoned) {
             let failure =
                 query_syntax::QueryError::new(query_syntax::MsgId::SELECT_ERROR_RUNTIMEERROR, None);
+            let lang = match self.lang {
+                query_syntax::Lang::Ru => platform_catalog::messages::Lang::Ru,
+                query_syntax::Lang::En => platform_catalog::messages::Lang::En,
+            };
+            let poisoned = HostError::new(crate::errors::render(
+                crate::errors::keys::TRANSACTION_POISONED,
+                &[],
+                lang,
+            ));
             return Err(HostError::new(
                 failure.message(self.lang, query_syntax::ScriptVariant::Russian),
-            ));
+            )
+            .with_cause(poisoned));
         }
         Ok(())
     }

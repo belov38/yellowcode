@@ -61,12 +61,15 @@ pub fn load(cx: &LoadCtx, cfg: &mut Configuration) -> Result<()> {
     };
     let mut dec = Decoder::new(&ctx);
     let forget = !cx.opts.keep_source;
+    memory_budget::profile::progress_total(objects.len());
     for o in objects.iter_mut().filter(|o| is_set_kind(o.kind)) {
         dec.object(cx.entries, o, diagnostics, forget)?;
         dec.sets.add(o);
+        memory_budget::profile::progress_step();
     }
     for o in objects.iter_mut().filter(|o| !is_set_kind(o.kind)) {
         dec.object(cx.entries, o, diagnostics, forget)?;
+        memory_budget::profile::progress_step();
     }
     Ok(())
 }
@@ -435,6 +438,30 @@ fn is_field_desc(fd: Option<&Node>) -> bool {
             == Some("Pattern")
 }
 
+fn selected_spec<'a>(
+    node: &Node,
+    hdr: &[usize],
+    source: Src<'a>,
+) -> Option<(&'a PropSpec, Option<Vec<usize>>)> {
+    match source {
+        Src::Head(_) => None,
+        Src::Spec(spec) => Some((spec, prop_path(spec, Some(hdr)))),
+        Src::Fallback { fd, hp } => {
+            let fd = fd.filter(|_| hdr.len() >= 3 && is_field_desc(node.get(cut(hdr, 2))));
+            if let Some(spec) = fd {
+                let path = spec.fd.as_ref().map(|relative| {
+                    let mut path = cut(hdr, 2).to_vec();
+                    path.extend_from_slice(relative);
+                    path
+                });
+                Some((spec, path))
+            } else {
+                hp.map(|spec| (spec, prop_path(spec, Some(hdr))))
+            }
+        }
+    }
+}
+
 fn order_props<'n>(
     xprops: &[&'n str],
     context_obs: Option<overlay::ObservedOrder<'n>>,
@@ -602,6 +629,113 @@ impl<'c, 'a, 'v> Decoder<'c, 'a, 'v> {
         plan
     }
 
+    fn preflight_types(
+        &mut self,
+        node: &Node,
+        of: &PropsOf<'_, 'a>,
+        admit: &dyn Fn(u64) -> Result<()>,
+    ) -> Result<()> {
+        use crate::external::TypeUse;
+        for &(name, source) in self.plan(of).iter() {
+            let Some((spec, path)) = selected_spec(node, of.hdr, source) else {
+                continue;
+            };
+            if let Some((path, value)) = &spec.false_if
+                && node.get(path).map_or_else(|| "None".into(), codecs::py_str) == *value
+            {
+                continue;
+            }
+            if name == "FillValue" {
+                if let Some(pattern) = node.get(&at(cut(of.hdr, 1), 2)) {
+                    preflight_pattern(self.ctx, pattern, TypeUse::AllowedTypes, admit)?;
+                }
+            }
+            let Some(raw) = path.as_deref().and_then(|p| node.get(p)) else {
+                continue;
+            };
+            if spec.codec == Codec::Type {
+                preflight_pattern(self.ctx, raw, TypeUse::Description, admit)?;
+            } else {
+                let standard_sections = name == overlay::STS && of.owner.is_some();
+                if spec.codec != Codec::Unknown || standard_sections {
+                    let standard_owner = spec
+                        .std
+                        .as_ref()
+                        .filter(|kind| spec.codec == Codec::StdAttrs && !kind.is_empty())
+                        .map(|kind| Owner {
+                            kind: kind.clone(),
+                            name: String::new(),
+                        });
+                    let owner = standard_owner.as_ref().or(of.owner);
+                    let bytes = crate::external::reference_use_bytes(
+                        self.ctx,
+                        raw,
+                        spec.codec,
+                        owner,
+                        &|| admit(0),
+                    )?;
+                    admit(bytes)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn preflight_children_types(
+        &mut self,
+        node: &Node,
+        children: &'a [(String, ChildSpec)],
+        owner: &Owner,
+        (co_type, parent): (&str, Option<&str>),
+        admit: &dyn Fn(u64) -> Result<()>,
+    ) -> Result<()> {
+        for property in self.ctx.schema.xdto_props(co_type) {
+            let Some((class, spec)) = children
+                .iter()
+                .rev()
+                .find(|(_, spec)| spec.tag == property.name)
+            else {
+                continue;
+            };
+            if child_tag(&spec.tag).is_none() {
+                continue;
+            }
+            let Some(header) = &spec.header else {
+                continue;
+            };
+            let context = match parent {
+                Some(parent) => format!("{}.{parent}.{}", owner.kind, spec.tag),
+                None => format!("{}.{}", owner.kind, spec.tag),
+            };
+            for item in find_collection(node, class).unwrap_or_default() {
+                self.preflight_types(
+                    item,
+                    &PropsOf {
+                        identity: self.identity,
+                        special: None,
+                        spec_props: &spec.props,
+                        hdr: header,
+                        props_type: &format!("{}Properties", spec.tag),
+                        tag: &spec.tag,
+                        context: Some(&context),
+                        owner: Some(owner),
+                    },
+                    admit,
+                )?;
+                if !spec.children.is_empty() || spec.tag == "TabularSection" {
+                    self.preflight_children_types(
+                        item,
+                        &spec.children,
+                        owner,
+                        (&format!("{}ChildObjects", spec.tag), Some(&spec.tag)),
+                        admit,
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn observe(
         &mut self,
         of: &PropsOf<'_, 'a>,
@@ -673,23 +807,13 @@ impl<'c, 'a, 'v> Decoder<'c, 'a, 'v> {
                     }
                     continue;
                 }
-                Src::Spec(e) => (e, prop_path(e, Some(hdr))),
-                Src::Fallback { fd, hp } => {
-                    let fd = fd.filter(|_| hdr.len() >= 3 && is_field_desc(node.get(cut(hdr, 2))));
-                    if let Some(t) = fd {
-                        let path = t.fd.as_ref().map(|f| {
-                            let mut p = cut(hdr, 2).to_vec();
-                            p.extend_from_slice(f);
-                            p
-                        });
-                        (t, path)
-                    } else if let Some(h) = hp {
-                        (h, prop_path(h, Some(hdr)))
-                    } else {
+                source => match selected_spec(node, hdr, source) {
+                    Some(selected) => selected,
+                    None => {
                         miss(diag, format!("unknown:{}.{name}", of.props_type));
                         continue;
                     }
-                }
+                },
             };
             let v2 = ent
                 .path2
@@ -1220,4 +1344,156 @@ impl<'c, 'a, 'v> Decoder<'c, 'a, 'v> {
         }
         Ok(())
     }
+}
+
+fn preflight_pattern(
+    ctx: &Ctx<'_>,
+    node: &Node,
+    consumer: crate::external::TypeUse,
+    admit: &dyn Fn(u64) -> Result<()>,
+) -> Result<()> {
+    let bytes = crate::external::type_use_bytes(
+        node,
+        &|id| ctx.index.types.get(&id).map(String::as_str),
+        consumer,
+        &|| admit(0),
+    )?;
+    admit(bytes)
+}
+
+pub(crate) fn external_object(
+    ctx: &Ctx<'_>,
+    entries: &Entries<'_>,
+    kind: md_model::external::ExternalKind,
+    tree: &Node,
+    object: &mut MdObject,
+    diagnostics: &mut Diagnostics,
+    admit: &dyn Fn(u64) -> Result<()>,
+) -> Result<()> {
+    let properties: Vec<_> = crate::external::schema::properties(kind)
+        .iter()
+        .map(|(name, position)| {
+            (
+                (*name).to_string(),
+                PropSpec {
+                    path: Some(vec![1, *position]),
+                    codec: Codec::Ref,
+                    ..Default::default()
+                },
+            )
+        })
+        .collect();
+    let context = Ctx {
+        schema: ctx.schema,
+        index: ctx.index,
+        predef: ctx.predef,
+    };
+    let mut decoder = Decoder::new(&context);
+    let owner = Owner {
+        kind: kind.base_kind().as_str().into(),
+        name: object.name.clone(),
+    };
+    if let Some(base) = overlay::kind(ctx.schema, kind.base_kind().as_str()) {
+        decoder.preflight_children_types(
+            tree,
+            &base.children,
+            &owner,
+            (&format!("{}ChildObjects", kind.base_kind().as_str()), None),
+            admit,
+        )?;
+    }
+    for sub in object.forms.iter().chain(&object.templates) {
+        let tag = match sub.kind {
+            SubKind::Form => "Form",
+            SubKind::Template => "Template",
+        };
+        let Some(spec) = overlay::kind(ctx.schema, tag) else {
+            continue;
+        };
+        let Some(header) = ctx
+            .index
+            .sub_hdr
+            .get(&sub.id)
+            .map(Vec::as_slice)
+            .filter(|h| !h.is_empty())
+            .or(spec.header.as_deref())
+        else {
+            continue;
+        };
+        let entry = sub.id.to_string();
+        if let Some(data) = entries.doc(&entry)?
+            && let EntryData::Brace(doc) = &*data
+        {
+            decoder.preflight_types(
+                &doc.root,
+                &PropsOf {
+                    identity: decoder.identity,
+                    special: None,
+                    spec_props: &spec.props,
+                    hdr: header,
+                    props_type: &format!("{tag}Properties"),
+                    tag,
+                    context: None,
+                    owner: None,
+                },
+                admit,
+            )?;
+        }
+    }
+    for (_, spec) in &properties {
+        if let Some(raw) = spec.path.as_deref().and_then(|path| tree.get(path)) {
+            let bytes = crate::external::reference_use_bytes(
+                &context,
+                raw,
+                spec.codec,
+                Some(&owner),
+                &|| admit(0),
+            )?;
+            admit(bytes)?;
+        }
+    }
+    let mut decoded = Decoded::default();
+    for header in [Head::Name, Head::Synonym, Head::Comment] {
+        header_prop(
+            &context,
+            tree,
+            crate::external::schema::HEADER,
+            header,
+            &format!("{}Properties", kind.xml_name()),
+            &mut decoded,
+            diagnostics,
+        );
+    }
+    for (name, spec) in &properties {
+        let raw = spec
+            .path
+            .as_deref()
+            .and_then(|p| tree.get(p))
+            .ok_or_else(|| crate::external::fail("external root", "missing property"))?;
+        let value = codecs::decode(&context, name, spec, raw, Some(&owner), None)
+            .ok_or_else(|| crate::external::fail("external root", "invalid property"))?;
+        decoded.props.push(Prop {
+            name: name.clone(),
+            codec: spec.codec,
+            value,
+        });
+    }
+    object.props = decoded.props;
+    object.synonym = decoded.synonym;
+    object.comment = decoded.comment;
+    if let Some(base) = overlay::kind(ctx.schema, kind.base_kind().as_str()) {
+        object.children = decoder.children(
+            tree,
+            &base.children,
+            &base.subobjects,
+            &owner,
+            &format!("{}ChildObjects", kind.base_kind().as_str()),
+            None,
+            diagnostics,
+        );
+    }
+    for sub in object.forms.iter_mut().chain(object.templates.iter_mut()) {
+        decoder.subobject(entries, sub, diagnostics, false)?;
+    }
+    Ok(())
 }

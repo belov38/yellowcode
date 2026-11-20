@@ -263,13 +263,10 @@ impl<'a> ChangeTable<'a> {
         };
         match found {
             Some((h, mut old)) => {
-                if let Some(slot) = old.get_mut(self.msg)
-                    && *slot != FieldValue::Null
-                {
+                if let Some(slot) = old.get_mut(self.msg) {
                     *slot = FieldValue::Null;
-                    w.update(self.table, h, &old)?;
                 }
-                Ok(())
+                w.update(self.table, h, &old)
             }
             None => w.insert(self.table, &row).map(drop),
         }

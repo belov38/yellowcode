@@ -11,15 +11,19 @@ use memory_budget::MemoryBudget;
 use quick_xml::{Reader, events::Event};
 use std::path::Path;
 
-pub(super) const MD: &str = "http://v8.1c.ru/8.3/MDClasses";
-pub(super) const XR: &str = "http://v8.1c.ru/8.3/xcf/readable";
-pub(super) type N<'a, 's> = NodeRef<'a, 's>;
-pub(super) fn attr<'a>(n: N<'a, '_>, ns: Option<&str>, tag: &str) -> Option<&'a str> {
+pub(crate) const MD: &str = "http://v8.1c.ru/8.3/MDClasses";
+pub(crate) const XR: &str = "http://v8.1c.ru/8.3/xcf/readable";
+pub(crate) type N<'a, 's> = NodeRef<'a, 's>;
+pub(crate) fn xml_whitespace(text: &str) -> bool {
+    text.bytes()
+        .all(|b| matches!(b, b' ' | b'\t' | b'\r' | b'\n'))
+}
+pub(crate) fn attr<'a>(n: N<'a, '_>, ns: Option<&str>, tag: &str) -> Option<&'a str> {
     n.attrs()
         .find(|a| a.ns() == ns && a.local() == tag)
         .map(|a| a.value())
 }
-pub(super) fn block<'a, 's>(
+pub(crate) fn block<'a, 's>(
     n: N<'a, 's>,
     ns: &str,
     tag: &str,
@@ -34,7 +38,7 @@ pub(super) fn block<'a, 's>(
     }
     Ok(first)
 }
-pub(super) fn required<'a, 's>(
+pub(crate) fn required<'a, 's>(
     n: N<'a, 's>,
     ns: &str,
     tag: &str,
@@ -42,13 +46,13 @@ pub(super) fn required<'a, 's>(
 ) -> Result<N<'a, 's>> {
     block(n, ns, tag, path)?.ok_or_else(|| err(path, format!("missing {tag}")))
 }
-pub(super) fn leaf<'a>(n: N<'a, '_>, path: &Path) -> Result<&'a str> {
+pub(crate) fn leaf<'a>(n: N<'a, '_>, path: &Path) -> Result<&'a str> {
     if n.children().next().is_some() || n.attrs().next().is_some() {
         return Err(err(path, "expected text-only element"));
     }
     Ok(n.text().unwrap_or_default())
 }
-pub(super) fn attributes(n: N<'_, '_>, allowed: &[&str], path: &Path) -> Result<()> {
+pub(crate) fn attributes(n: N<'_, '_>, allowed: &[&str], path: &Path) -> Result<()> {
     if n.attrs()
         .any(|a| a.ns().is_some() || !allowed.contains(&a.local()))
     {
@@ -56,18 +60,64 @@ pub(super) fn attributes(n: N<'_, '_>, allowed: &[&str], path: &Path) -> Result<
     }
     Ok(())
 }
-pub(super) fn parse<'a>(
+pub(crate) fn parse<'a>(
     bytes: &'a [u8],
     path: &Path,
     o: &ShellOptions,
     budget: &MemoryBudget,
     text_work: &mut u64,
 ) -> Result<XmlArena<'a>> {
+    validate(bytes, path, o, text_work, &|| false)?;
+    read::parse_arena(bytes, crate::allocation::Allocation::Managed(budget)).map_err(|e| match e {
+        read::ReadError::Memory(e) => err(path, format!("XML allocation limit: {e}")),
+        e => err(path, read::legacy_error(bytes, e).to_string()),
+    })
+}
+pub(crate) fn parse_checked<'a>(
+    bytes: &'a [u8],
+    path: &Path,
+    o: &ShellOptions,
+    budget: &MemoryBudget,
+    text_work: &mut u64,
+    cancelled: &dyn Fn() -> bool,
+) -> std::result::Result<XmlArena<'a>, super::CheckedPartError> {
+    use super::CheckedPartError;
+    validate(bytes, path, o, text_work, cancelled).map_err(|e| match e {
+        crate::Error::Io(e) if e.kind() == std::io::ErrorKind::Interrupted => {
+            CheckedPartError::Cancelled
+        }
+        e => CheckedPartError::Part(e),
+    })?;
+    read::parse_arena_checked(
+        bytes,
+        crate::allocation::Allocation::Managed(budget),
+        cancelled,
+    )
+    .map_err(|e| match e {
+        read::CheckedReadError::Cancelled => CheckedPartError::Cancelled,
+        read::CheckedReadError::Read(read::ReadError::Memory(e)) => CheckedPartError::Memory(e),
+        read::CheckedReadError::Read(e) => {
+            CheckedPartError::Part(err(path, read::legacy_error(bytes, e).to_string()))
+        }
+    })
+}
+fn validate(
+    bytes: &[u8],
+    path: &Path,
+    o: &ShellOptions,
+    text_work: &mut u64,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<()> {
     let mut r = Reader::from_reader(bytes);
     let mut nodes = 0usize;
     let mut depth = 0usize;
     let mut text_lengths = Vec::<u64>::new();
     loop {
+        if cancelled() {
+            return Err(crate::Error::Io(std::io::Error::from(
+                std::io::ErrorKind::Interrupted,
+            )));
+        }
         let event = r.read_event().map_err(|e| err(path, e.to_string()))?;
         match &event {
             Event::Start(_) => {
@@ -99,6 +149,11 @@ pub(super) fn parse<'a>(
                 let mut attrs = 0usize;
                 let mut ns = 0usize;
                 for a in e.attributes().with_checks(false) {
+                    if cancelled() {
+                        return Err(crate::Error::Io(std::io::Error::from(
+                            std::io::ErrorKind::Interrupted,
+                        )));
+                    }
                     let a = a.map_err(|e| err(path, e.to_string()))?;
                     attrs += 1;
                     if a.key.as_ref() == b"xmlns" || a.key.as_ref().starts_with(b"xmlns:") {
@@ -114,10 +169,7 @@ pub(super) fn parse<'a>(
             _ => {}
         }
     }
-    read::parse_arena(bytes, crate::allocation::Allocation::Managed(budget)).map_err(|e| match e {
-        read::ReadError::Memory(e) => err(path, format!("XML allocation limit: {e}")),
-        e => err(path, read::legacy_error(bytes, e).to_string()),
-    })
+    Ok(())
 }
 fn charge_text(
     len: usize,
@@ -135,7 +187,8 @@ fn charge_text(
     }
     Ok(())
 }
-pub(super) fn description<'a, 's>(
+
+pub(crate) fn description<'a, 's>(
     arena: &'a XmlArena<'s>,
     tag: &str,
     path: &Path,

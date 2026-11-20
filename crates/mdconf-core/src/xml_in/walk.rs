@@ -5,19 +5,19 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use unicode_normalization::UnicodeNormalization;
 
-pub(super) fn err(path: &Path, what: impl Into<String>) -> Error {
+pub(crate) fn err(path: &Path, what: impl Into<String>) -> Error {
     Error::Xml {
         path: path.into(),
         what: what.into(),
     }
 }
-pub(super) fn nfc(s: &str) -> String {
+pub(crate) fn nfc(s: &str) -> String {
     s.nfc().collect()
 }
-fn portable_fs_collision_key(name: &str) -> String {
+pub(crate) fn portable_fs_collision_key(name: &str) -> String {
     name.nfc().default_case_fold().nfc().collect()
 }
-pub(super) fn component(path: &Path, s: &str) -> Result<String> {
+pub(crate) fn component(path: &Path, s: &str) -> Result<String> {
     let n = nfc(s);
     if n.is_empty()
         || n == "."
@@ -31,7 +31,14 @@ pub(super) fn component(path: &Path, s: &str) -> Result<String> {
     }
     Ok(n)
 }
-pub(super) fn inventory(root: &Path, opts: &ShellOptions) -> Result<BTreeMap<PathBuf, PathBuf>> {
+pub(crate) fn inventory(root: &Path, opts: &ShellOptions) -> Result<BTreeMap<PathBuf, PathBuf>> {
+    inventory_with(root, opts, &mut |_| Ok(()))
+}
+pub(crate) fn inventory_with(
+    root: &Path,
+    opts: &ShellOptions,
+    admit: &mut dyn FnMut(u64) -> Result<()>,
+) -> Result<BTreeMap<PathBuf, PathBuf>> {
     if opts.max_directory_depth > 256 || opts.max_metadata_depth > 64 || opts.max_xml_depth > 256 {
         return Err(err(root, "depth option exceeds safe limit"));
     }
@@ -48,6 +55,11 @@ pub(super) fn inventory(root: &Path, opts: &ShellOptions) -> Result<BTreeMap<Pat
         for entry in std::fs::read_dir(&real).map_err(|e| err(&real, e.to_string()))? {
             let entry = entry.map_err(|e| err(&real, e.to_string()))?;
             let path = entry.path();
+            admit(
+                (path.as_os_str().len() as u64)
+                    .saturating_mul(8)
+                    .saturating_add(1024),
+            )?;
             entries += 1;
             if entries > opts.max_entries {
                 return Err(err(&path, "file/directory count limit"));

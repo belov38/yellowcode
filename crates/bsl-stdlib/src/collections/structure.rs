@@ -413,7 +413,7 @@ impl Structure {
 impl Drop for Structure {
     fn drop(&mut self) {
         let entries = std::mem::take(&mut self.fields.get_mut().entries);
-        release(entries.into_iter().map(|e| e.value).collect());
+        super::release_dropped(entries.into_iter().map(|e| e.value).collect());
     }
 }
 

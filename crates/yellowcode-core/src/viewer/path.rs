@@ -147,6 +147,41 @@ fn eq_name(a: &str, b: &str) -> bool {
 }
 
 pub fn resolve<'a>(cfg: &'a Configuration, path: &str) -> Result<Target<'a>, PathError> {
+    resolve_with(cfg, path, &|kind, name| {
+        cfg.objects
+            .iter()
+            .find(|o| o.kind == kind && eq_name(&o.name, name))
+    })
+}
+
+pub struct Resolver<'a> {
+    cfg: &'a Configuration,
+    objects: std::collections::HashMap<(MdKind, String), &'a MdObject>,
+}
+
+impl<'a> Resolver<'a> {
+    pub fn new(cfg: &'a Configuration) -> Self {
+        let mut objects = std::collections::HashMap::with_capacity(cfg.objects.len());
+        for o in &cfg.objects {
+            objects
+                .entry((o.kind, fold_path_name(&o.name)))
+                .or_insert(o);
+        }
+        Resolver { cfg, objects }
+    }
+
+    pub fn resolve(&self, path: &str) -> Result<Target<'a>, PathError> {
+        resolve_with(self.cfg, path, &|kind, name| {
+            self.objects.get(&(kind, fold_path_name(name))).copied()
+        })
+    }
+}
+
+fn resolve_with<'a>(
+    cfg: &'a Configuration,
+    path: &str,
+    object: &dyn Fn(MdKind, &str) -> Option<&'a MdObject>,
+) -> Result<Target<'a>, PathError> {
     let segs: Vec<&str> = path.split('.').map(str::trim).collect();
     let w = Walk { segs };
     let seg = |i: usize| w.segs.get(i).copied();
@@ -156,15 +191,18 @@ pub fn resolve<'a>(cfg: &'a Configuration, path: &str) -> Result<Target<'a>, Pat
     {
         return Ok(Target::Configuration(cfg));
     }
-    let mut kind_cands: Vec<String> = MdKind::all()
-        .iter()
-        .filter(|&&k| cfg.objects.iter().any(|o| o.kind == k))
-        .map(|&k| kind_name(k, w.lang_at(0)))
-        .collect();
-    kind_cands.push(kind_name(MdKind::Configuration, w.lang_at(0)));
+    let kind_cands = || {
+        let mut cands: Vec<String> = MdKind::all()
+            .iter()
+            .filter(|&&k| cfg.objects.iter().any(|o| o.kind == k))
+            .map(|&k| kind_name(k, w.lang_at(0)))
+            .collect();
+        cands.push(kind_name(MdKind::Configuration, w.lang_at(0)));
+        cands
+    };
     let kind = seg(0)
         .and_then(kind_from_name)
-        .ok_or_else(|| w.fail(0, kind_cands))?;
+        .ok_or_else(|| w.fail(0, kind_cands()))?;
     let object_names = |objs: &[MdObject], k: MdKind| -> Vec<String> {
         objs.iter()
             .filter(|o| o.kind == k)
@@ -172,11 +210,8 @@ pub fn resolve<'a>(cfg: &'a Configuration, path: &str) -> Result<Target<'a>, Pat
             .collect()
     };
     let name = seg(1).ok_or_else(|| w.fail(1, object_names(&cfg.objects, kind)))?;
-    let mut owner: &MdObject = cfg
-        .objects
-        .iter()
-        .find(|o| o.kind == kind && eq_name(&o.name, name))
-        .ok_or_else(|| w.fail(1, object_names(&cfg.objects, kind)))?;
+    let mut owner: &MdObject =
+        object(kind, name).ok_or_else(|| w.fail(1, object_names(&cfg.objects, kind)))?;
 
     let mut chain: Vec<&Child> = Vec::new();
     let mut i = 2;

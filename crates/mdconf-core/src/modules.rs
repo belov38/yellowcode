@@ -287,9 +287,12 @@ pub(crate) fn entry_slots<'c>(
 pub fn load(cx: &LoadCtx, cfg: &mut Configuration) -> Result<()> {
     let mut objects = std::mem::take(&mut cfg.objects);
     let diag = &mut cfg.diagnostics;
-    let r = objects
-        .iter_mut()
-        .try_for_each(|o| load_object(cx, o, diag));
+    memory_budget::profile::progress_total(objects.len());
+    let r = objects.iter_mut().try_for_each(|o| {
+        load_object(cx, o, diag)?;
+        memory_budget::profile::progress_step();
+        Ok::<(), Error>(())
+    });
     cfg.objects = objects;
     r?;
     let mut mods = Vec::new();

@@ -176,8 +176,36 @@ pub(crate) const V4_50: Layout = Layout {
         (N, "5", 24),
     ],
     table_bag: &["55"],
-    tails: &[25],
+    tails: &[24, 25],
     command: &["9"],
+};
+
+pub(crate) const V4_55: Layout = Layout {
+    serialization: s(4, 55),
+    strict: true,
+    items: &[
+        (G, "22", 30),
+        (D, "12", 36),
+        (F, "44", 68),
+        (F, "45", 69),
+        (F, "46", 71),
+        (F, "47", 72),
+        (B, "33", 58),
+        (B, "34", 59),
+        (T, "64", 112),
+        (T, "64", 114),
+        (T, "64", 116),
+        (T, "69", 117),
+        (T, "70", 120),
+        (N, "22", 29),
+        (N, "22", 30),
+        (N, "12", 34),
+        (N, "12", 36),
+        (N, "5", 24),
+    ],
+    table_bag: &["64", "69", "70"],
+    tails: &[32, 33, 34, 35, 36, 37],
+    command: &["9", "10", "11"],
 };
 
 pub(crate) const V2_35: Layout = Layout {
@@ -232,11 +260,13 @@ pub(crate) const V3_42: Layout = Layout {
     command: &["7", "8"],
 };
 
-const LAYOUTS: [&Layout; 8] = [
-    &V4_59, &V2_35, &V2_37, &V3_42, &V3_48, &V3_49, &V4_49, &V4_50,
+const LAYOUTS: [&Layout; 9] = [
+    &V4_59, &V2_35, &V2_37, &V3_42, &V3_48, &V3_49, &V4_49, &V4_50, &V4_55,
 ];
 
-const STRICT: [&Layout; 7] = [&V2_35, &V2_37, &V3_42, &V3_48, &V3_49, &V4_49, &V4_50];
+const STRICT: [&Layout; 8] = [
+    &V2_35, &V2_37, &V3_42, &V3_48, &V3_49, &V4_49, &V4_50, &V4_55,
+];
 
 const STRICT_EXTRA: [(Option<&str>, &str, usize); 2] = [(Some("Addition"), "5", 24), (B, "30", 51)];
 

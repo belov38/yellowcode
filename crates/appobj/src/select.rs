@@ -23,7 +23,7 @@ use query_exec::{ExecEnv, ExecEnvOwned, RowStream, execute_store};
 use query_ir::build::{BuildValue, Selection};
 use query_ir::{BindCtx, FieldRole, ParamValue, ParamValues, QFieldId, QStr, QValue, StdRole};
 use std::any::Any;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -158,6 +158,8 @@ struct Prepared {
     version_col: Option<usize>,
     subtree: Option<RefId>,
     empty: bool,
+    observed_empty: bool,
+    observed_rest: bool,
 }
 
 fn std_field(qt: &query_ir::QTable, role: StdRole) -> Option<QFieldId> {
@@ -283,15 +285,59 @@ fn prepare(app: &Application, obj: ObjId, spec: &SelectSpec) -> Result<Prepared,
         let f = by_name(&fd.name).ok_or_else(|| value_mismatch(number))?;
         let q = value_to_q(app, v).filter(|q| admits(app, &fd.types, q));
         if q.is_none() && strict {
-            return Err(value_mismatch(number));
+            let seen = seen_kind(app, v);
+            let refused = |field: &str| {
+                HostError::not_implemented(
+                    &format!("{}Менеджер", def.kind.name(Lang::Ru)),
+                    &format!("Выбрать: отбор по {field} {name} значением другого типа"),
+                )
+            };
+            match fd.std {
+                Some(StdAttr::Description)
+                    if matches!(
+                        seen,
+                        Some(
+                            Seen::Number
+                                | Seen::Undefined
+                                | Seen::Null
+                                | Seen::Date
+                                | Seen::DocumentRef
+                        )
+                    ) => {}
+                None | Some(StdAttr::Code) if seen.is_some() && observed_string_field(def, fd) => {}
+                None if seen == Some(Seen::Number) && observed_number_field(fd) => {}
+                Some(
+                    StdAttr::Parent
+                    | StdAttr::Owner
+                    | StdAttr::Ref
+                    | StdAttr::IsFolder
+                    | StdAttr::DeletionMark,
+                ) if seen.is_some() => return Err(value_mismatch(number)),
+                None => return Err(refused("реквизиту")),
+                Some(_) => return Err(refused("стандартному реквизиту")),
+            }
         }
         Ok(q.map(|q| (f, q)))
     };
+    let mut observed_empty = false;
+    let mut observed_rest = false;
     for (pair, number, strict) in [(&spec.filter, 3, true), (&spec.exact, 1, false)] {
         if let Some((name, v)) = pair {
             match resolve_eq(name, v, number, strict)? {
                 Some((f, q)) => sel = sel.eq(f, BuildValue::Value(q)),
-                None => empty = true,
+                None => {
+                    empty = true;
+                    observed_empty |= strict;
+                    observed_rest |= strict
+                        && !spec.hierarchical
+                        && matches!(v, Value::Number(_))
+                        && field_index(def, name)
+                            .and_then(|i| def.fields.get(i))
+                            .is_some_and(|fd| {
+                                matches!(fd.std, Some(StdAttr::Description))
+                                    || observed_string_field(def, fd)
+                            });
+                }
             }
         }
     }
@@ -370,13 +416,20 @@ fn prepare(app: &Application, obj: ObjId, spec: &SelectSpec) -> Result<Prepared,
         version_col,
         subtree: subtree.filter(|_| ref_col.is_some() && parent_col.is_some()),
         empty,
+        observed_empty,
+        observed_rest,
     })
 }
 
 struct InterimSelectionSecurity;
 
 impl InterimSelectionSecurity {
-    fn for_call(ex: &mut Execution, app: &Application) -> Result<Self, HostError> {
+    fn for_call(
+        ex: &mut Execution,
+        app: &Application,
+        obj: ObjId,
+        what: &str,
+    ) -> Result<Self, HostError> {
         if app.options().area().is_none()
             && app
                 .store()
@@ -390,13 +443,21 @@ impl InterimSelectionSecurity {
                 "explicit read area required",
             ));
         }
-        if call_ctx(ex).is_some_and(|c| c.sess.user().no_users) {
-            Ok(Self)
-        } else {
-            Err(HostError::not_implemented(
+        let def = app.model().obj(obj);
+        match crate::rights::data_read(ex, app, def.md)? {
+            crate::rights::DataRead::Allowed => Ok(Self),
+            crate::rights::DataRead::Denied
+                if def.kind == ObjKind::ExchangePlan && what == "Выбрать" =>
+            {
+                Err(crate::rights::access_violation())
+            }
+            crate::rights::DataRead::Denied => Err(HostError::not_implemented(
                 "P6",
-                "selection security provider",
-            ))
+                &format!(
+                    "{}Менеджер.{what}: без права Чтение в сеансе с пользователями",
+                    def.kind.name(Lang::Ru)
+                ),
+            )),
         }
     }
 }
@@ -476,6 +537,7 @@ enum Src {
     Pending(Box<(Arc<QueryCtx>, query_ir::ir::StmtS)>),
     Running(RowStream<'static>, #[allow(dead_code)] StreamGuard),
     Rows(std::collections::VecDeque<Vec<QValue>>),
+    Empty(bool),
     Done,
 }
 
@@ -554,6 +616,8 @@ pub struct SelectionObject {
     parent_col: Option<usize>,
     version_col: Option<usize>,
     state: RefCell<State>,
+    failed_in_poison: Cell<bool>,
+    rest_after_failure: bool,
 }
 
 impl SelectionObject {
@@ -609,7 +673,8 @@ impl SelectionObject {
             return Ok(());
         };
         let (ctx, stmt) = *p;
-        let security = InterimSelectionSecurity::for_call(ex, &self.app)?;
+        let security =
+            InterimSelectionSecurity::for_call(ex, &self.app, self.obj, "Выбрать: первое чтение")?;
         let lowered = bind(&self.app, &ctx, &stmt, &security)?;
         let call_txn = CallTxn::of_call(ex);
         let mut view = read_view(ex, call_txn.as_deref(), &self.app)?;
@@ -701,8 +766,34 @@ impl SelectionObject {
         let result = self.advance_inner(ex);
         if result.is_err() {
             self.release();
+            if CallTxn::of_call(ex).is_some_and(|t| t.poisoned()) {
+                self.failed_in_poison.set(true);
+            }
         }
         result
+    }
+
+    fn after_failed_next(&self, ex: &Execution, m: MemberId) -> CallResult<()> {
+        if !self.failed_in_poison.get() {
+            return Ok(());
+        }
+        if self.rest_after_failure && self.member(ex, m) == Some((true, "Следующий")) {
+            return Ok(());
+        }
+        let name = if (ATTR_BASE..TAB_BASE).contains(&m.0) {
+            self.app
+                .model()
+                .obj(self.obj)
+                .fields
+                .get((m.0 - ATTR_BASE) as usize)
+                .map_or_else(|| m.0.to_string(), |f| f.name.clone())
+        } else {
+            self.member(ex, m)
+                .map_or_else(|| m.0.to_string(), |n| n.1.to_string())
+        };
+        Err(self
+            .not_implemented(&format!("{name}: после ошибки в отравленной транзакции"))
+            .into())
     }
 
     fn reconcile_state(&self, ex: &Execution, st: &State) -> CallResult<()> {
@@ -720,6 +811,18 @@ impl SelectionObject {
             .map_err(|_| internal("selection re-entered"))?;
         if matches!(st.src, Src::Pending(_)) {
             self.start(ex, &mut st)?;
+        }
+        if let Src::Empty(observed) = st.src {
+            st.src = Src::Done;
+            if CallTxn::of_call(ex).is_some_and(|t| t.poisoned()) {
+                return Err(if observed {
+                    poisoned_error(ex, &self.app)
+                } else {
+                    self.not_implemented("Следующий: пустая выборка в отравленной транзакции")
+                        .into()
+                });
+            }
+            return Ok(false);
         }
         loop {
             if st.current.is_some()
@@ -930,6 +1033,7 @@ impl HostObject for SelectionObject {
     }
 
     fn get(&self, ex: &mut Execution, m: MemberId) -> CallResult<Value> {
+        self.after_failed_next(ex, m)?;
         self.read(|| {
             if (ATTR_BASE..TAB_BASE).contains(&m.0) {
                 return self.field(ex, (m.0 - ATTR_BASE) as usize);
@@ -971,6 +1075,7 @@ impl HostObject for SelectionObject {
     }
 
     fn call(&self, ex: &mut Execution, m: MemberId, _: &mut [Arg]) -> CallResult<Value> {
+        self.after_failed_next(ex, m)?;
         self.read(|| match self.member(ex, m) {
             Some((true, "Следующий")) => Ok(Value::Bool(self.advance(ex)?)),
             Some((true, "ПолучитьОбъект")) => match self.current_ref() {
@@ -1009,7 +1114,12 @@ pub(crate) fn select(
     obj: ObjId,
     spec: SelectSpec,
 ) -> CallResult<Value> {
-    InterimSelectionSecurity::for_call(ex, app)?;
+    let what = if spec.hierarchical {
+        "ВыбратьИерархически"
+    } else {
+        "Выбрать"
+    };
+    InterimSelectionSecurity::for_call(ex, app, obj, what)?;
     let arc = app
         .arc()
         .ok_or_else(|| internal("the application is gone"))?;
@@ -1033,7 +1143,7 @@ pub(crate) fn select(
         })
     });
     let src = if p.empty {
-        Src::Done
+        Src::Empty(p.observed_empty)
     } else {
         Src::Pending(Box::new((p.ctx.clone(), p.stmt)))
     };
@@ -1045,6 +1155,8 @@ pub(crate) fn select(
         ref_col: p.ref_col,
         parent_col: p.parent_col,
         version_col: p.version_col,
+        failed_in_poison: Cell::new(false),
+        rest_after_failure: p.empty && p.observed_rest,
         state: RefCell::new(State {
             src,
             current: None,
@@ -1073,9 +1185,16 @@ pub(crate) fn find_one(
     obj: ObjId,
     mut spec: SelectSpec,
 ) -> CallResult<Value> {
-    let security = InterimSelectionSecurity::for_call(ex, app)?;
+    let security = InterimSelectionSecurity::for_call(ex, app, obj, "НайтиПо")?;
     spec.top = Some(1);
     let p = prepare(app, obj, &spec)?;
+    if p.empty && CallTxn::of_call(ex).is_some_and(|t| t.poisoned()) {
+        return Err(HostError::not_implemented(
+            &format!("{}Менеджер", app.model().obj(obj).kind.name(Lang::Ru)),
+            "поиск без чтения базы: в отравленной транзакции",
+        )
+        .into());
+    }
     let mut _found_payment = None;
     let found = if p.empty {
         None
@@ -1291,6 +1410,14 @@ pub(crate) fn manager_call(
     p: &Params,
 ) -> CallResult<Value> {
     let def = app.model().obj(obj);
+    let refuse_poisoned = || -> bsl_vm::CallError {
+        HostError::not_implemented(
+            &format!("{}Менеджер", def.kind.name(Lang::Ru)),
+            &format!("{name}: в отравленной транзакции"),
+        )
+        .into()
+    };
+    let poisoned = CallTxn::of_call(ex).is_some_and(|t| t.poisoned());
     let mut spec = SelectSpec {
         parent: p.opt("Родитель").cloned(),
         owner: p.opt("Владелец").cloned(),
@@ -1330,6 +1457,9 @@ pub(crate) fn manager_call(
             let by_full = matches!(p.opt("ПоискПоПолномуКоду"), Some(Value::Bool(true)))
                 && def.behavior.hierarchical;
             let Some(code) = code_value(def, &code) else {
+                if poisoned {
+                    return Err(poisoned_error(ex, app));
+                }
                 return Ok(empty_ref(app, obj)?);
             };
             spec.ref_order = true;
@@ -1370,12 +1500,25 @@ pub(crate) fn manager_call(
             Ok(last)
         }
         "НайтиПоНаименованию" => {
-            let Some(Value::String(s)) = p.opt("Наименование") else {
-                return Ok(empty_ref(app, obj)?);
+            let s = match p.opt("Наименование") {
+                Some(Value::String(s)) => s.clone(),
+                Some(Value::Number(n)) if small_whole(n) => {
+                    bsl_prim::Str::from(n.to_xml_string().as_str())
+                }
+                _ => {
+                    return Err(HostError::not_implemented(
+                        &format!("{}Менеджер", def.kind.name(Lang::Ru)),
+                        "НайтиПоНаименованию: значение другого типа",
+                    )
+                    .into());
+                }
             };
             let exact = matches!(p.opt("ТочноеСоответствие"), Some(Value::Bool(true)));
             if exact {
                 if s.to_string_lossy().is_empty() {
+                    if poisoned {
+                        return Err(poisoned_error(ex, app));
+                    }
                     return Ok(empty_ref(app, obj)?);
                 }
                 spec.exact = Some(("Наименование".to_string(), Value::String(s.clone())));
@@ -1406,16 +1549,25 @@ pub(crate) fn manager_call(
                     .unwrap_or(Value::Undefined),
             ));
             spec.ref_order = true;
+            if poisoned && prepare(app, obj, &spec)?.empty {
+                return Err(refuse_poisoned());
+            }
             find_one(ex, app, obj, spec)
         }
         "НайтиПоНомеру" => {
             let number = number_value(def, p.raw("НомерДокумента"));
             let Some(number) = number else {
+                if poisoned {
+                    return Err(refuse_poisoned());
+                }
                 return Ok(empty_ref(app, obj)?);
             };
             if p.opt("ДатаИнтервала")
                 .is_some_and(|d| !matches!(d, Value::Date(_)))
             {
+                if poisoned {
+                    return Err(refuse_poisoned());
+                }
                 return Ok(empty_ref(app, obj)?);
             }
             spec.exact = Some(("Номер".to_string(), number));
@@ -1438,6 +1590,63 @@ fn number_value(def: &crate::model::ObjDef, v: Option<&Value>) -> Option<Value> 
         (CodeType::String, Value::Number(n)) => digits_of(n),
         (CodeType::Number, v) => rounded_number(v).map(Value::Number),
         _ => None,
+    }
+}
+
+fn small_whole(n: &bsl_prim::Number) -> bool {
+    n.is_integer() && n.to_i64().is_some_and(|i| (0..1000).contains(&i))
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Seen {
+    String,
+    Number,
+    Date,
+    Bool,
+    Null,
+    Undefined,
+    DocumentRef,
+}
+
+fn seen_kind(app: &Application, v: &Value) -> Option<Seen> {
+    Some(match v {
+        Value::String(_) => Seen::String,
+        Value::Number(_) => Seen::Number,
+        Value::Date(_) => Seen::Date,
+        Value::Bool(_) => Seen::Bool,
+        Value::Null => Seen::Null,
+        Value::Undefined => Seen::Undefined,
+        _ => {
+            let r = as_ref(v)?;
+            if app.model().obj(r.obj).kind != ObjKind::Document {
+                return None;
+            }
+            Seen::DocumentRef
+        }
+    })
+}
+
+fn observed_string_field(def: &crate::model::ObjDef, fd: &crate::model::FieldDef) -> bool {
+    match fd.std {
+        Some(StdAttr::Code) => def.behavior.code_type == CodeType::String,
+        None => fd.types.atoms == [TypeAtom::String],
+        _ => false,
+    }
+}
+
+fn observed_number_field(fd: &crate::model::FieldDef) -> bool {
+    fd.std.is_none()
+        && matches!(
+            fd.types.atoms.as_slice(),
+            [TypeAtom::Date] | [TypeAtom::Uuid]
+        )
+}
+
+fn poisoned_error(ex: &mut Execution, app: &Application) -> bsl_vm::CallError {
+    let txn = CallTxn::of_call(ex);
+    match read_view(ex, txn.as_deref(), app) {
+        Err(e) => e,
+        Ok(_) => internal("the transaction is not poisoned").into(),
     }
 }
 

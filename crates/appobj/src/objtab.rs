@@ -749,6 +749,25 @@ impl HostObject for ObjTabRow {
             .map(|i| MemberId(COLUMN_BASE + i))
     }
 
+    fn property_names(
+        &self,
+        ex: &mut Execution,
+        retained: u64,
+    ) -> CallResult<Option<Vec<bsl_prim::Str>>> {
+        let def = self.tab.def()?;
+        ex.charge(def.fields.len() as u64)?;
+        let bytes = def.fields.iter().fold(0u64, |n, f| {
+            n.saturating_add((f.name.len() as u64).saturating_mul(2).saturating_add(64))
+        });
+        budget::reserve(ex, retained.saturating_add(bytes))?;
+        Ok(Some(
+            def.fields
+                .iter()
+                .map(|f| bsl_prim::Str::from(f.name.as_str()))
+                .collect(),
+        ))
+    }
+
     fn member_kind(&self, m: MemberId) -> Option<MemberKind> {
         let col = m.0.checked_sub(COLUMN_BASE)? as usize;
         let f = self.tab.def().ok()?.fields.get(col)?;

@@ -34,13 +34,63 @@ pub(crate) fn serves(kind: ObjKind, ru: &str) -> bool {
                 | "ПолучитьПервое"
                 | "СоздатьМенеджерЗаписи"
         ),
-        ObjKind::AccumulationRegister => matches!(
-            ru,
-            "Остатки" | "Обороты" | "Выбрать" | "ВыбратьПоРегистратору" | "СоздатьНаборЗаписей"
-        ),
+        ObjKind::AccumulationRegister => {
+            matches!(
+                ru,
+                "Остатки" | "Обороты" | "Выбрать" | "ВыбратьПоРегистратору" | "СоздатьНаборЗаписей"
+            ) || crate::aggregates::serves(ru)
+        }
         ObjKind::DocumentJournal => ru == "Выбрать",
         _ => false,
     }
+}
+
+fn reads(kind: ObjKind, ru: &str) -> bool {
+    serves(kind, ru) && !matches!(ru, "СоздатьМенеджерЗаписи" | "СоздатьНаборЗаписей")
+}
+
+fn read_right(
+    ex: &mut Execution,
+    app: &Arc<Application>,
+    reg: &Reg<'_>,
+    ru: &str,
+) -> Result<(), HostError> {
+    if !reads(reg.def.kind, ru) || ex.effective_flags().privileged {
+        return Ok(());
+    }
+    let Some(user) = crate::session::call_ctx(ex).map(|c| c.sess.user().clone()) else {
+        return Ok(());
+    };
+    if user.no_users {
+        return Ok(());
+    }
+    let read = md_model::parts::Right::from_name("Read")
+        .ok_or_else(|| internal("the right Read is not in the list of rights"))?;
+    if app.has_right(
+        &user,
+        crate::RightTarget::Object(reg.def.md),
+        crate::Right(read),
+    ) {
+        return Ok(());
+    }
+    if ru != "Выбрать"
+        || !matches!(
+            reg.def.kind,
+            ObjKind::DocumentJournal | ObjKind::AccumulationRegister
+        )
+    {
+        return Err(reg.refuse("чтение без права Чтение в сеансе с пользователями"));
+    }
+    let mut e = HostError::text(
+        &crate::errors::render(crate::errors::keys::DB_ACCESS, &[], Lang::Ru),
+        &crate::errors::render(crate::errors::keys::DB_ACCESS, &[], Lang::En),
+    );
+    e.categories = Some(bsl_vm::CategorySet::of(&[
+        bsl_vm::Category::AllErrors,
+        bsl_vm::Category::ScriptRuntimeError,
+        bsl_vm::Category::OtherError,
+    ]));
+    Err(e)
 }
 
 pub(crate) fn manager_call(
@@ -50,7 +100,11 @@ pub(crate) fn manager_call(
     ru: &str,
     args: &[Arg],
 ) -> CallResult<Value> {
+    if app.model().obj(obj).kind == ObjKind::AccumulationRegister && crate::aggregates::serves(ru) {
+        return crate::aggregates::manager_call(ex, app, obj, ru);
+    }
     let reg = Reg::new(app, obj, ru);
+    read_right(ex, app, &reg, ru)?;
     reg.check_shape()?;
     let a = |ex: &mut Execution, i| arg_value(ex, args, i);
     match (reg.def.kind, ru) {
@@ -109,7 +163,7 @@ pub(crate) fn manager_call(
         }
         (ObjKind::AccumulationRegister, "СоздатьНаборЗаписей") => {
             reg.only_args(args, 0)?;
-            AccumSet::create(ex, app, obj, Recorder::Unset)
+            AccumSet::create(ex, app, obj, Recorder::Unset, Rc::default())
         }
         (ObjKind::DocumentJournal, "Выбрать") => {
             let (b, e, f, o) = (a(ex, 0)?, a(ex, 1)?, a(ex, 2)?, a(ex, 3)?);
@@ -357,12 +411,86 @@ impl<'a> Reg<'a> {
     }
 }
 
-#[derive(Default)]
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QueryingMethod {
+    InfoSliceLast,
+    InfoSliceFirst,
+    InfoGetLast,
+    InfoGetFirst,
+    InfoSelect,
+    InfoRecordRead,
+    AccumBalance,
+    AccumTurnovers,
+    AccumSelect,
+    AccumByRecorder,
+    AccumSetRead,
+    JournalSelect,
+    CriterionFind,
+}
+
+impl QueryingMethod {
+    pub const ALL: [QueryingMethod; 13] = [
+        QueryingMethod::InfoSliceLast,
+        QueryingMethod::InfoSliceFirst,
+        QueryingMethod::InfoGetLast,
+        QueryingMethod::InfoGetFirst,
+        QueryingMethod::InfoSelect,
+        QueryingMethod::InfoRecordRead,
+        QueryingMethod::AccumBalance,
+        QueryingMethod::AccumTurnovers,
+        QueryingMethod::AccumSelect,
+        QueryingMethod::AccumByRecorder,
+        QueryingMethod::AccumSetRead,
+        QueryingMethod::JournalSelect,
+        QueryingMethod::CriterionFind,
+    ];
+
+    pub fn names(self) -> (&'static str, &'static str) {
+        match self {
+            QueryingMethod::InfoSliceLast => ("РегистрСведенийМенеджер", "СрезПоследних"),
+            QueryingMethod::InfoSliceFirst => ("РегистрСведенийМенеджер", "СрезПервых"),
+            QueryingMethod::InfoGetLast => ("РегистрСведенийМенеджер", "ПолучитьПоследнее"),
+            QueryingMethod::InfoGetFirst => ("РегистрСведенийМенеджер", "ПолучитьПервое"),
+            QueryingMethod::InfoSelect => ("РегистрСведенийМенеджер", "Выбрать"),
+            QueryingMethod::InfoRecordRead => ("РегистрСведенийМенеджерЗаписи", "Прочитать"),
+            QueryingMethod::AccumBalance => ("РегистрНакопленияМенеджер", "Остатки"),
+            QueryingMethod::AccumTurnovers => ("РегистрНакопленияМенеджер", "Обороты"),
+            QueryingMethod::AccumSelect => ("РегистрНакопленияМенеджер", "Выбрать"),
+            QueryingMethod::AccumByRecorder => {
+                ("РегистрНакопленияМенеджер", "ВыбратьПоРегистратору")
+            }
+            QueryingMethod::AccumSetRead => ("РегистрНакопленияНаборЗаписей", "Прочитать"),
+            QueryingMethod::JournalSelect => ("ЖурналДокументовМенеджер", "Выбрать"),
+            QueryingMethod::CriterionFind => ("КритерийОтбораМенеджер", "Найти"),
+        }
+    }
+
+    fn admit(self, ex: &mut Execution) -> Result<(), HostError> {
+        if crate::txn::CallTxn::of_call(ex).is_some_and(|t| t.poisoned()) {
+            let (ty, member) = self.names();
+            return Err(HostError::not_implemented(
+                ty,
+                &format!("{member}: в отравленной транзакции"),
+            ));
+        }
+        Ok(())
+    }
+}
+
 struct Stmt {
+    method: QueryingMethod,
     params: Vec<(String, Value)>,
 }
 
 impl Stmt {
+    fn new(method: QueryingMethod) -> Stmt {
+        Stmt {
+            method,
+            params: Vec::new(),
+        }
+    }
+
     fn param(&mut self, v: Value) -> String {
         let name = format!("П{}", self.params.len());
         self.params.push((name.clone(), v));
@@ -389,6 +517,7 @@ impl Stmt {
     }
 
     fn run(self, ex: &mut Execution, text: &str) -> CallResult<Value> {
+        self.method.admit(ex)?;
         let mut a = [Arg::Val(Value::from(text))];
         let q = ex.construct_by_name("Запрос", &mut a)?;
         for (name, v) in self.params {
@@ -445,7 +574,11 @@ fn where_of(cond: &[String]) -> String {
 fn info_slice(ex: &mut Execution, reg: &Reg, period: &Value, filter: &Value) -> CallResult<Value> {
     let date = reg.date(period, "Период")?;
     let pairs = reg.filter(filter, |_| true, None)?;
-    let mut st = Stmt::default();
+    let mut st = Stmt::new(if reg.method == "СрезПоследних" {
+        QueryingMethod::InfoSliceLast
+    } else {
+        QueryingMethod::InfoSliceFirst
+    });
     let p = date.map(|d| st.param(Value::Date(d)));
     let cond = st.condition(reg, &pairs)?;
     let mut cols = Vec::new();
@@ -461,6 +594,7 @@ fn info_slice(ex: &mut Execution, reg: &Reg, period: &Value, filter: &Value) -> 
         reg.method,
         vt_params(&[p, cond])
     );
+    poisoned_fails(ex)?;
     let result = st.run(ex, &text)?;
     unload(ex, &result)
 }
@@ -476,7 +610,11 @@ fn info_get(ex: &mut Execution, reg: &Reg, period: &Value, filter: &Value) -> Ca
     } else {
         "СрезПервых"
     };
-    let mut st = Stmt::default();
+    let mut st = Stmt::new(if reg.method == "ПолучитьПоследнее" {
+        QueryingMethod::InfoGetLast
+    } else {
+        QueryingMethod::InfoGetFirst
+    });
     let p = at.map(|v| st.param(v));
     let cond = st.condition(reg, &pairs)?;
     let res: Vec<(usize, &FieldDef)> = reg.fields(FieldRole::Resource).collect();
@@ -487,6 +625,7 @@ fn info_get(ex: &mut Execution, reg: &Reg, period: &Value, filter: &Value) -> Ca
         reg.table(),
         vt_params(&[p, cond])
     );
+    poisoned_fails(ex)?;
     let result = st.run(ex, &text)?;
     let table = unload(ex, &result)?;
     let row = match count(ex, &table)? {
@@ -521,7 +660,7 @@ fn info_select(
     if pairs.len() > 1 {
         return Err(value_mismatch(filter.1).into());
     }
-    let mut st = Stmt::default();
+    let mut st = Stmt::new(QueryingMethod::InfoSelect);
     let mut cond = Vec::new();
     let period = reg.std(StdAttr::Period).map(|(_, f)| f.name.clone());
     if let Some(name) = &period {
@@ -546,6 +685,9 @@ fn info_select(
         where_of(&cond),
         order_list(&ord, desc)
     );
+    if let Some(txn) = poisoned_txn(ex) {
+        return Selection::poisoned(ex, reg, cols, txn);
+    }
     let result = st.run(ex, &text)?;
     Selection::create(ex, reg, &result, cols)
 }
@@ -577,7 +719,7 @@ fn accum_balance(
     let pairs = reg.filter(filter, |_| true, Some(2))?;
     let dims = reg.subset(dims, FieldRole::Dimension, "Измерения")?;
     let resources = reg.subset(resources, FieldRole::Resource, "Ресурсы")?;
-    let mut st = Stmt::default();
+    let mut st = Stmt::new(QueryingMethod::AccumBalance);
     let p = at.map(|v| st.param(v));
     let cond = st.condition(reg, &pairs)?;
     let mut cols: Vec<String> = dims.iter().map(|(_, f)| format!("Т.{}", f.name)).collect();
@@ -608,7 +750,7 @@ fn accum_turnovers(
     let pairs = reg.filter(filter, |_| true, None)?;
     let dims = reg.subset(dims, FieldRole::Dimension, "Измерения")?;
     let resources = reg.subset(resources, FieldRole::Resource, "Ресурсы")?;
-    let mut st = Stmt::default();
+    let mut st = Stmt::new(QueryingMethod::AccumTurnovers);
     let b = b.map(|v| st.param(v));
     let e = e.map(|v| st.param(v));
     let cond = st.condition(reg, &pairs)?;
@@ -667,7 +809,7 @@ fn accum_select(
     }
     let cols: Vec<String> = accum_columns(reg).into_iter().map(|(_, n)| n).collect();
     let period = reg.name(reg.std(StdAttr::Period).map_or(usize::MAX, |(i, _)| i))?;
-    let mut st = Stmt::default();
+    let mut st = Stmt::new(QueryingMethod::AccumSelect);
     let mut cond = Vec::new();
     if let Some(d) = b {
         cond.push(format!("Т.{period} >= {}", st.param(Value::Date(d))));
@@ -683,6 +825,9 @@ fn accum_select(
         reg.table(),
         where_of(&cond)
     );
+    if let Some(txn) = poisoned_txn(ex) {
+        return Selection::poisoned(ex, reg, cols, txn);
+    }
     let result = st.run(ex, &text)?;
     Selection::create(ex, reg, &result, cols)
 }
@@ -725,7 +870,7 @@ fn accum_by_recorder(ex: &mut Execution, reg: &Reg, recorder: &Value) -> CallRes
     else {
         return Err(internal("a standard field of a register").into());
     };
-    let mut st = Stmt::default();
+    let mut st = Stmt::new(QueryingMethod::AccumByRecorder);
     let p = st.param(recorder.clone());
     let text = format!(
         "ВЫБРАТЬ {} ИЗ {} КАК Т ГДЕ Т.{} = {p} УПОРЯДОЧИТЬ ПО Т.{}",
@@ -734,8 +879,28 @@ fn accum_by_recorder(ex: &mut Execution, reg: &Reg, recorder: &Value) -> CallRes
         reg.name(rec)?,
         reg.name(line)?
     );
+    if let Some(txn) = poisoned_txn(ex) {
+        return Selection::poisoned(ex, reg, cols, txn);
+    }
     let result = st.run(ex, &text)?;
     Selection::create(ex, reg, &result, cols)
+}
+
+fn poisoned(ex: &mut Execution) -> bool {
+    crate::txn::CallTxn::of_call(ex).is_some_and(|t| t.poisoned())
+}
+
+fn poisoned_fails(ex: &mut Execution) -> CallResult<()> {
+    if poisoned(ex) {
+        return Err(crate::txn::TxnError::Poisoned.call_error(ex));
+    }
+    Ok(())
+}
+
+fn poisoned_txn(ex: &mut Execution) -> Option<u64> {
+    crate::txn::CallTxn::of_call(ex)
+        .filter(|t| t.poisoned())
+        .and_then(|t| t.id())
 }
 
 fn journal_select(ex: &mut Execution, reg: &Reg, begin: &Value, end: &Value) -> CallResult<Value> {
@@ -751,7 +916,7 @@ fn journal_select(ex: &mut Execution, reg: &Reg, begin: &Value, end: &Value) -> 
             .filter(|f| f.std.is_none())
             .map(|f| f.name.clone()),
     );
-    let mut st = Stmt::default();
+    let mut st = Stmt::new(QueryingMethod::JournalSelect);
     let mut cond = Vec::new();
     if let Some(d) = b {
         cond.push(format!("Т.Дата >= {}", st.param(Value::Date(d))));
@@ -765,6 +930,9 @@ fn journal_select(ex: &mut Execution, reg: &Reg, begin: &Value, end: &Value) -> 
         reg.table(),
         where_of(&cond)
     );
+    if let Some(txn) = poisoned_txn(ex) {
+        return Selection::poisoned(ex, reg, cols, txn);
+    }
     let result = st.run(ex, &text)?;
     Selection::create(ex, reg, &result, cols)
 }
@@ -810,7 +978,8 @@ enum At {
 struct Selection {
     ty: TypeId,
     type_name: String,
-    inner: Value,
+    inner: Option<Value>,
+    poisoned_in: Option<u64>,
     cols: Vec<String>,
     at: Cell<At>,
 }
@@ -823,6 +992,20 @@ impl Selection {
         cols: Vec<String>,
     ) -> CallResult<Value> {
         let inner = ex.call_method(result, "Выбрать", &mut [], true)?;
+        Selection::make(ex, reg, Some(inner), cols, None)
+    }
+
+    fn poisoned(ex: &mut Execution, reg: &Reg, cols: Vec<String>, txn: u64) -> CallResult<Value> {
+        Selection::make(ex, reg, None, cols, Some(txn))
+    }
+
+    fn make(
+        ex: &mut Execution,
+        reg: &Reg,
+        inner: Option<Value>,
+        cols: Vec<String>,
+        poisoned_in: Option<u64>,
+    ) -> CallResult<Value> {
         crate::read_budget::reserve(
             ex,
             cols.iter()
@@ -832,6 +1015,7 @@ impl Selection {
             ty: type_of(reg.app, reg.obj, Category::Selection)?,
             type_name: format!("{}Выборка", reg.def.kind.name(Lang::Ru)),
             inner,
+            poisoned_in,
             cols,
             at: Cell::new(At::Before),
         })))
@@ -841,9 +1025,16 @@ impl Selection {
         HostError::not_implemented(&self.type_name, member)
     }
 
+    fn refuse_poisoned(&self, member: &str) -> HostError {
+        self.refuse(&format!("{member}: выборка отравленной транзакции"))
+    }
+
     fn field(&self, ex: &mut Execution, name: &str) -> CallResult<Value> {
         let Some(i) = position(&self.cols, name) else {
             return Err(self.refuse(name).into());
+        };
+        let Some(inner) = &self.inner else {
+            return Err(self.refuse_poisoned(name).into());
         };
         if self.at.get() != At::Row {
             return Ok(Value::Undefined);
@@ -853,7 +1044,7 @@ impl Selection {
             .get(i)
             .ok_or_else(|| internal("a column"))?
             .clone();
-        Ok(ex.get_member(&self.inner, &col)?)
+        Ok(ex.get_member(inner, &col)?)
     }
 }
 
@@ -901,10 +1092,23 @@ impl HostObject for Selection {
     fn call(&self, ex: &mut Execution, m: MemberId, args: &mut [Arg]) -> CallResult<Value> {
         match template_member(ex, self.ty, m) {
             Some((true, "Следующий")) if args.is_empty() => {
+                let now = poisoned_txn(ex);
+                let Some(inner) = &self.inner else {
+                    if self.at.get() == At::Before && now.is_some() && now == self.poisoned_in {
+                        self.at.set(At::After);
+                        return Err(crate::txn::TxnError::Poisoned.call_error(ex));
+                    }
+                    return Err(self.refuse_poisoned("Следующий").into());
+                };
+                if now.is_some() {
+                    return Err(self
+                        .refuse("Следующий: выборка, сделанная до отравления транзакции")
+                        .into());
+                }
                 if self.at.get() == At::After {
                     return Ok(Value::Bool(false));
                 }
-                let next = ex.call_method(&self.inner, "Следующий", &mut [], true)?;
+                let next = ex.call_method(inner, "Следующий", &mut [], true)?;
                 let Value::Bool(b) = next else {
                     return Err(internal("Следующий").into());
                 };
@@ -939,6 +1143,8 @@ struct RecordManager {
     selected: Cell<bool>,
     read_key: RefCell<Option<Vec<Value>>>,
     touched: RefCell<Vec<bool>>,
+    failed_in_poison: Cell<bool>,
+    read_once: Cell<bool>,
 }
 
 impl RecordManager {
@@ -966,6 +1172,8 @@ impl RecordManager {
             selected: Cell::new(false),
             read_key: RefCell::new(None),
             touched: RefCell::new(vec![false; n]),
+            failed_in_poison: Cell::new(false),
+            read_once: Cell::new(false),
         })))
     }
 
@@ -985,6 +1193,22 @@ impl RecordManager {
                 .get(i)
                 .is_some_and(|f| fold_name(&f.name) == wanted)
         })
+    }
+
+    fn after_failed_read(&self, ex: &Execution, m: MemberId) -> CallResult<()> {
+        if self.failed_in_poison.get() {
+            let name = self
+                .slot_of(ex, m)
+                .and_then(|s| self.fields.get(s))
+                .and_then(|&i| self.def().fields.get(i))
+                .map_or_else(|| self.member_ru(ex, m), |f| f.name.clone());
+            return Err(self
+                .refuse(&format!(
+                    "{name}: после ошибки Прочитать в отравленной транзакции"
+                ))
+                .into());
+        }
+        Ok(())
     }
 
     fn slot_of(&self, ex: &Execution, m: MemberId) -> Option<usize> {
@@ -1028,10 +1252,17 @@ impl RecordManager {
             undefined |= matches!(v, Value::Undefined);
             pairs.push((i, v));
         }
+        if poisoned(ex) {
+            if undefined || self.read_once.get() {
+                return Err(self.refuse("Прочитать: в отравленной транзакции").into());
+            }
+            self.failed_in_poison.set(true);
+            return Err(crate::txn::TxnError::Poisoned.call_error(ex));
+        }
         let row = if undefined {
             None
         } else {
-            let mut st = Stmt::default();
+            let mut st = Stmt::new(QueryingMethod::InfoRecordRead);
             let cond = st.equalities(&reg, "Т.", &pairs)?;
             let text = format!(
                 "ВЫБРАТЬ {} ИЗ {} КАК Т{}",
@@ -1073,6 +1304,7 @@ impl RecordManager {
         } else {
             None
         };
+        self.read_once.set(true);
         Ok(())
     }
 
@@ -1187,6 +1419,7 @@ impl HostObject for RecordManager {
     }
 
     fn get(&self, ex: &mut Execution, m: MemberId) -> CallResult<Value> {
+        self.after_failed_read(ex, m)?;
         match self.slot_of(ex, m) {
             Some(s) => self
                 .values
@@ -1199,6 +1432,7 @@ impl HostObject for RecordManager {
     }
 
     fn set(&self, ex: &mut Execution, m: MemberId, v: Value) -> CallResult<()> {
+        self.after_failed_read(ex, m)?;
         let Some(s) = self.slot_of(ex, m) else {
             return Err(self
                 .refuse(&format!("{} (запись)", self.member_ru(ex, m)))
@@ -1222,6 +1456,7 @@ impl HostObject for RecordManager {
     }
 
     fn call(&self, ex: &mut Execution, m: MemberId, args: &mut [Arg]) -> CallResult<Value> {
+        self.after_failed_read(ex, m)?;
         match template_member(ex, self.ty, m) {
             Some((true, "Прочитать")) if args.is_empty() => {
                 self.read(ex)?;
@@ -1266,7 +1501,15 @@ pub(crate) struct AccumSet {
     obj: ObjId,
     ty: TypeId,
     filter: Rc<AccumFilter>,
-    rows: RefCell<Option<Vec<Vec<Value>>>>,
+    cols: Rc<Vec<(usize, String)>>,
+    records: RefCell<Vec<Rc<accum::AccumRecord>>>,
+    read: Cell<bool>,
+    read_for: Cell<Option<RefValue>>,
+    doc: Option<ObjId>,
+    recorder: Cell<Option<RefValue>>,
+    state: Rc<accum::SetState>,
+    posting: Rc<Cell<bool>>,
+    lock_for_change: Cell<bool>,
 }
 
 impl AccumSet {
@@ -1275,6 +1518,7 @@ impl AccumSet {
         app: &Arc<Application>,
         obj: ObjId,
         recorder: Recorder,
+        posting: Rc<Cell<bool>>,
     ) -> CallResult<Value> {
         let reg = Reg::new(app, obj, "СоздатьНаборЗаписей");
         reg.check_shape()?;
@@ -1286,10 +1530,14 @@ impl AccumSet {
         ) else {
             return Err(internal("no type of the filter in the catalog").into());
         };
-        let value = match recorder {
-            Recorder::Unset => Value::Undefined,
-            Recorder::Of(r) => crate::values::refs::ref_value(app, r)?,
-            Recorder::Empty(doc) => crate::values::refs::empty_ref(app, doc)?,
+        let (value, doc, of) = match recorder {
+            Recorder::Unset => (Value::Undefined, None, None),
+            Recorder::Of(r) => (
+                crate::values::refs::ref_value(app, r)?,
+                Some(r.obj),
+                Some(r),
+            ),
+            Recorder::Empty(doc) => (crate::values::refs::empty_ref(app, doc)?, Some(doc), None),
         };
         let item = Rc::new(AccumFilterItem {
             app: app.clone(),
@@ -1307,7 +1555,15 @@ impl AccumSet {
             obj,
             ty: type_of(app, obj, Category::RecordSet)?,
             filter: Rc::new(AccumFilter { ty: fty, item }),
-            rows: RefCell::new(None),
+            cols: Rc::new(accum_columns(&reg)),
+            records: RefCell::new(Vec::new()),
+            read: Cell::new(false),
+            read_for: Cell::new(None),
+            doc,
+            recorder: Cell::new(of),
+            state: Rc::new(accum::SetState::default()),
+            posting,
+            lock_for_change: Cell::new(false),
         })))
     }
 
@@ -1320,14 +1576,31 @@ impl AccumSet {
         if !item.used.get() {
             return Err(self.refuse("Прочитать: отбор не используется").into());
         }
+        if self.state.modified.get() || self.records.borrow().iter().any(|r| r.is_new()) {
+            return Err(self.refuse("Прочитать: изменённый набор").into());
+        }
         let recorder = item.value.borrow().clone();
+        let poison = poisoned(ex);
+        let refuse_poisoned = || self.refuse("Прочитать: в отравленной транзакции");
         if matches!(recorder, Value::Undefined) {
-            *self.rows.borrow_mut() = Some(Vec::new());
+            if poison {
+                return Err(refuse_poisoned().into());
+            }
+            *self.records.borrow_mut() = Vec::new();
+            self.read.set(true);
+            self.read_for.set(None);
             return Ok(());
         }
         if as_ref(&recorder).is_none_or(|r| r.is_empty()) {
             return Err(self.refuse("Прочитать: пустая ссылка в отборе").into());
         }
+        if poison {
+            if self.doc.is_some() || self.read.get() {
+                return Err(refuse_poisoned().into());
+            }
+            return Err(crate::txn::TxnError::Poisoned.call_error(ex));
+        }
+        let read_for = as_ref(&recorder);
         let app = self.app.clone();
         let reg = Reg::new(&app, self.obj, "Прочитать");
         let cols = accum_columns(&reg);
@@ -1337,7 +1610,7 @@ impl AccumSet {
         else {
             return Err(internal("a standard field of a register").into());
         };
-        let mut st = Stmt::default();
+        let mut st = Stmt::new(QueryingMethod::AccumSetRead);
         let p = st.param(recorder);
         let text = format!(
             "ВЫБРАТЬ {} ИЗ {} КАК Т ГДЕ Т.{} = {p} УПОРЯДОЧИТЬ ПО Т.{}",
@@ -1349,21 +1622,81 @@ impl AccumSet {
         let result = st.run(ex, &text)?;
         let table = unload(ex, &result)?;
         let n = count(ex, &table)?;
-        let mut rows = Vec::with_capacity(n);
+        let mut records = Vec::with_capacity(n);
         for i in 0..n {
             let row = row_at(ex, &table, i)?;
             let mut values = Vec::with_capacity(names.len());
             for name in &names {
                 values.push(ex.get_member(&row, name)?);
             }
-            rows.push(values);
+            records.push(accum::AccumRecord::new(ex, self, values, false)?);
         }
-        *self.rows.borrow_mut() = Some(rows);
+        *self.records.borrow_mut() = records;
+        self.read.set(true);
+        self.read_for.set(read_for);
+        self.state.read();
         Ok(())
     }
 
-    fn count(&self) -> usize {
-        self.rows.borrow().as_ref().map_or(0, Vec::len)
+    fn count(&self) -> CallResult<usize> {
+        if self.state.unposted.get() == accum::Unposted::Refused {
+            return Err(self
+                .refuse("Количество: состояние набора после отмены проведения не наблюдено")
+                .into());
+        }
+        Ok(self.records.borrow().len())
+    }
+
+    fn after_rollback(&self, member: &str, args: usize) -> Option<CallResult<Value>> {
+        let after = self.state.after_rollback.get();
+        if after == accum::AfterRollback::No {
+            return None;
+        }
+        if after == accum::AfterRollback::NewWritten && !self.state.modified.get() && args == 0 {
+            match member {
+                "Количество" => return Some(Ok(Value::from(0i64))),
+                "Записывать" | "Модифицированность" => {
+                    return Some(Ok(Value::Bool(false)));
+                }
+                _ => {}
+            }
+        }
+        Some(Err(self
+            .refuse(&format!(
+                "{member}: набор после отката транзакции не наблюден"
+            ))
+            .into()))
+    }
+
+    fn add(&self, ex: &mut Execution) -> CallResult<Value> {
+        let values = accum::AccumRecord::blank(ex, self)?;
+        let record = accum::AccumRecord::new(ex, self, values, true)?;
+        self.records.borrow_mut().push(record.clone());
+        self.state.changed();
+        let r: Rc<dyn HostObject> = record;
+        Ok(Value::Object(r))
+    }
+
+    fn written_flag(&self, member: &str) -> CallResult<Value> {
+        match self.state.unposted.get() {
+            accum::Unposted::Refused => {
+                return Err(self
+                    .refuse(&format!(
+                        "{member}: состояние набора после отмены проведения не наблюдено"
+                    ))
+                    .into());
+            }
+            accum::Unposted::Clean if !self.state.modified.get() => {
+                return Ok(Value::Bool(false));
+            }
+            _ => {}
+        }
+        if self.state.by_document.get() && !self.state.modified.get() {
+            return Ok(Value::Bool(false));
+        }
+        Err(self
+            .refuse(&format!("{member}: состояние набора не наблюдено"))
+            .into())
     }
 
     fn unload(&self, ex: &mut Execution) -> CallResult<Value> {
@@ -1381,8 +1714,12 @@ impl AccumSet {
         let moment = ex.construct_by_name("ОписаниеТипов", &mut a)?;
         let mut a = [Arg::Val(Value::from("МоментВремени")), Arg::Val(moment)];
         ex.call_method(&list, "Добавить", &mut a, true)?;
-        let rows = self.rows.borrow().clone().unwrap_or_default();
-        for values in rows {
+        if self.state.modified.get() || self.records.borrow().iter().any(|r| r.is_new()) {
+            return Err(self.refuse("Выгрузить: изменённый набор").into());
+        }
+        let records: Vec<Rc<accum::AccumRecord>> = self.records.borrow().clone();
+        for record in records {
+            let values = record.values();
             let row = ex.call_method(&table, "Добавить", &mut [], true)?;
             for ((_, name), value) in cols.iter().zip(values) {
                 ex.set_member(&row, name, value)?;
@@ -1404,35 +1741,132 @@ impl HostObject for AccumSet {
     }
 
     fn get(&self, ex: &mut Execution, m: MemberId) -> CallResult<Value> {
-        match template_member(ex, self.ty, m) {
+        let member = template_member(ex, self.ty, m);
+        if let Some(answer) = self.after_rollback(member.map_or("", |n| n.1), 0) {
+            return answer;
+        }
+        match member {
             Some((false, "Отбор")) => {
                 let f: Rc<dyn HostObject> = self.filter.clone();
                 Ok(Value::Object(f))
+            }
+            Some((false, "Записывать")) if self.doc.is_some() => {
+                self.written_flag("Записывать")
+            }
+            Some((false, "БлокироватьДляИзменения"))
+                if self.doc.is_some() && self.posting.get() =>
+            {
+                Ok(Value::Bool(self.lock_for_change.get()))
             }
             Some((_, ru)) => Err(self.refuse(ru).into()),
             None => Err(self.refuse(&m.0.to_string()).into()),
         }
     }
 
-    fn set(&self, ex: &mut Execution, m: MemberId, _: Value) -> CallResult<()> {
+    fn set(&self, ex: &mut Execution, m: MemberId, v: Value) -> CallResult<()> {
         let name =
             template_member(ex, self.ty, m).map_or_else(|| m.0.to_string(), |n| n.1.to_string());
+        if let Some(Err(e)) = self.after_rollback(&format!("{name} (запись)"), 1) {
+            return Err(e);
+        }
+        if name == "БлокироватьДляИзменения" && self.doc.is_some() && self.posting.get()
+        {
+            return match v {
+                Value::Bool(b) => {
+                    self.lock_for_change.set(b);
+                    Ok(())
+                }
+                _ => Err(self
+                    .refuse("БлокироватьДляИзменения: значение не Булево в ОбработкаПроведения")
+                    .into()),
+            };
+        }
+        if name == "Записывать" && self.doc.is_some() && self.posting.get() {
+            return match v {
+                Value::Bool(true) => {
+                    self.state.selected.set(true);
+                    Ok(())
+                }
+                _ => Err(self
+                    .refuse("Записывать: значение не Истина в ОбработкаПроведения")
+                    .into()),
+            };
+        }
         Err(self.refuse(&format!("{name} (запись)")).into())
     }
 
     fn call(&self, ex: &mut Execution, m: MemberId, args: &mut [Arg]) -> CallResult<Value> {
-        match template_member(ex, self.ty, m) {
+        let member = template_member(ex, self.ty, m);
+        if let Some(answer) = self.after_rollback(member.map_or("", |n| n.1), args.len()) {
+            return answer;
+        }
+        match member {
             Some((true, "Прочитать")) if args.is_empty() => {
                 self.read(ex)?;
                 Ok(Value::Undefined)
             }
             Some((true, "Выгрузить")) if args.is_empty() => self.unload(ex),
-            Some((true, "Количество")) if args.is_empty() => {
-                Ok(Value::from(i64::try_from(self.count()).unwrap_or(i64::MAX)))
+            Some((true, "Количество")) if args.is_empty() => Ok(Value::from(
+                i64::try_from(self.count()?).unwrap_or(i64::MAX),
+            )),
+            Some((true, "Добавить")) if args.is_empty() && self.doc.is_some() => {
+                self.add(ex)
+            }
+            Some((true, "Очистить")) if args.is_empty() && self.doc.is_some() => {
+                self.records.borrow_mut().clear();
+                self.state.changed();
+                Ok(Value::Undefined)
+            }
+            Some((true, "Записать")) if self.doc.is_some() => {
+                accum::write_set(ex, self, args)?;
+                Ok(Value::Undefined)
+            }
+            Some((true, "Модифицированность")) if args.is_empty() && self.doc.is_some() => {
+                self.written_flag("Модифицированность")
             }
             Some((_, ru)) => Err(self.refuse(ru).into()),
             None => Err(self.refuse(&m.0.to_string()).into()),
         }
+    }
+
+    fn iter_len(&self, _: &mut Execution) -> Option<usize> {
+        Some(self.records.borrow().len())
+    }
+
+    fn iter_get(&self, _: &mut Execution, i: usize) -> CallResult<Value> {
+        let record = self
+            .records
+            .borrow()
+            .get(i)
+            .cloned()
+            .ok_or_else(|| internal("a record of the set out of its range"))?;
+        let record: Rc<dyn HostObject> = record;
+        Ok(Value::Object(record))
+    }
+
+    fn iter_keys(&self, _: &mut Execution) -> CallResult<Option<Vec<Value>>> {
+        if let Some(Err(e)) = self.after_rollback("Для Каждого", 0) {
+            return Err(e);
+        }
+        if self.state.unposted.get() == accum::Unposted::Refused {
+            return Err(self
+                .refuse("Для Каждого: состояние набора после отмены проведения не наблюдено")
+                .into());
+        }
+        Ok(None)
+    }
+
+    fn retained_memory(
+        &self,
+        visit: &mut dyn bsl_vm::RetainedMemory,
+    ) -> Result<bool, bsl_vm::Exception> {
+        visit.work(1)?;
+        visit.mutable();
+        for r in self.records.borrow().iter() {
+            let r: Rc<dyn HostObject> = r.clone();
+            visit.value(&Value::Object(r))?;
+        }
+        Ok(true)
     }
 }
 
@@ -1560,13 +1994,25 @@ impl HostObject for AccumFilterItem {
     }
 }
 
+mod accum;
+
+pub(crate) use accum::{
+    any_set_changed, document_movements, movements_after_rollback, movements_failed_new,
+    movements_unposted, movements_written, posting_begin, posting_end, posting_finish,
+    remove_records, sets_touched, write_movements,
+};
+
 pub(crate) struct Movements {
     app: Arc<Application>,
     doc: ObjId,
-    r: Option<RefValue>,
+    r: Cell<Option<RefValue>>,
     ty: platform_catalog::TypeIdx,
     registers: Vec<ObjId>,
     sets: RefCell<Vec<Option<Value>>>,
+    posting: Rc<Cell<bool>>,
+    written: RefCell<Vec<Value>>,
+    unposted: Rc<Cell<accum::Unposted>>,
+    after_rollback: Rc<Cell<bool>>,
 }
 
 impl Movements {
@@ -1591,10 +2037,14 @@ impl Movements {
         Ok(Value::Object(Rc::new(Movements {
             app: app.clone(),
             doc,
-            r,
+            r: Cell::new(r),
             ty,
             sets: RefCell::new(vec![None; registers.len()]),
             registers,
+            posting: Rc::default(),
+            written: RefCell::new(Vec::new()),
+            unposted: Rc::default(),
+            after_rollback: Rc::default(),
         })))
     }
 
@@ -1610,11 +2060,20 @@ impl Movements {
             let name = &self.app.model().obj(obj).name;
             return Err(HostError::not_implemented("КоллекцияДвижений", name).into());
         }
-        let recorder = match self.r {
+        let recorder = match self.r.get() {
             Some(r) => Recorder::Of(r),
             None => Recorder::Empty(self.doc),
         };
-        let set = AccumSet::create(ex, &self.app, obj, recorder)?;
+        let set = AccumSet::create(ex, &self.app, obj, recorder, self.posting.clone())?;
+        if let Some(s) = set
+            .as_object()
+            .and_then(|o| o.as_any().downcast_ref::<AccumSet>())
+        {
+            s.state.unposted.set(self.unposted.get());
+            if self.after_rollback.get() {
+                s.state.after_rollback.set(accum::AfterRollback::Refused);
+            }
+        }
         if let Some(slot) = self.sets.borrow_mut().get_mut(i) {
             *slot = Some(set.clone());
         }
@@ -1646,9 +2105,18 @@ impl HostObject for Movements {
         Err(HostError::not_implemented("КоллекцияДвижений", &format!("{} (запись)", m.0)).into())
     }
 
-    fn call(&self, _: &mut Execution, m: MemberId, _: &mut [Arg]) -> CallResult<Value> {
+    fn call(&self, ex: &mut Execution, m: MemberId, args: &mut [Arg]) -> CallResult<Value> {
         let name = member_name(platform_catalog::catalog(), self.ty, m)
             .map_or_else(|| m.0.to_string(), |n| n.1.to_string());
+        if name == "Записать" && self.posting.get() {
+            if !args.is_empty() {
+                return Err(
+                    HostError::not_implemented("КоллекцияДвижений", "Записать: параметр").into(),
+                );
+            }
+            accum::write_selected(ex, self)?;
+            return Ok(Value::Undefined);
+        }
         Err(HostError::not_implemented("КоллекцияДвижений", &name).into())
     }
 
@@ -1692,6 +2160,18 @@ impl CriterionManager {
         HostError::not_implemented("КритерийОтбораМенеджер", member)
     }
 
+    fn has_content(&self) -> bool {
+        self.app
+            .model()
+            .config
+            .objects
+            .iter()
+            .find(|o| o.kind == MdKind::FilterCriterion && o.name == self.name)
+            .is_some_and(
+                |o| matches!(o.prop("Content"), Some(md_model::Value::RefList(r)) if !r.is_empty()),
+            )
+    }
+
     fn admits(&self, v: &Value) -> bool {
         let Some(r) = as_ref(v) else { return false };
         let model = self.app.model();
@@ -1725,8 +2205,13 @@ impl CriterionManager {
                 .refuse("Найти: английский вариант встроенного языка")
                 .into());
         }
+        let poison = poisoned(ex);
+        let refuse_poisoned = || self.refuse("Найти: в отравленной транзакции");
         let out = ex.construct_by_name("Массив", &mut [])?;
         if matches!(v, Value::Number(_)) {
+            if poison {
+                return Err(refuse_poisoned().into());
+            }
             return Ok(out);
         }
         if !self.admits(&v) {
@@ -1734,7 +2219,13 @@ impl CriterionManager {
                 .refuse("Найти: значение не ссылка типа критерия")
                 .into());
         }
-        let mut st = Stmt::default();
+        if poison {
+            if !self.has_content() {
+                return Err(refuse_poisoned().into());
+            }
+            return Err(crate::txn::TxnError::Poisoned.call_error(ex));
+        }
+        let mut st = Stmt::new(QueryingMethod::CriterionFind);
         let p = st.param(v);
         let text = format!(
             "ВЫБРАТЬ Т.Ссылка КАК Ссылка ИЗ КритерийОтбора.{}({p}) КАК Т",

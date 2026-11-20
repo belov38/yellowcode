@@ -1061,13 +1061,21 @@ impl<'scope> Analyzer<'scope> {
     }
 
     fn needs_dimension_or_resource(&self, id: QTableId) -> bool {
-        if self.schema.table(id).kind != TableKind::Virtual(VtKind::Balance) {
+        let TableKind::Virtual(vt) = self.schema.table(id).kind else {
             return false;
+        };
+        let execute = self.opts.mode == AnalyzeMode::Execute;
+        match (vt, self.schema.table(self.schema.root(id)).kind) {
+            (
+                VtKind::Balance,
+                TableKind::Object(MdKind::AccumulationRegister | MdKind::AccountingRegister),
+            ) => true,
+            (
+                VtKind::Turnovers | VtKind::BalanceAndTurnovers,
+                TableKind::Object(MdKind::AccumulationRegister),
+            ) => execute,
+            _ => false,
         }
-        matches!(
-            self.schema.table(self.schema.root(id)).kind,
-            TableKind::Object(MdKind::AccumulationRegister | MdKind::AccountingRegister)
-        )
     }
 
     fn in_vt_scope<T>(&mut self, level: Level<'scope>, f: impl FnOnce(&mut Self) -> R<T>) -> R<T> {
@@ -1450,6 +1458,16 @@ impl<'scope> Analyzer<'scope> {
             for src in &level.sources {
                 let Some(check) = &src.vt_check else { continue };
                 if !src.dim_res_used {
+                    if !self.defer_accum_balance_failure
+                        && let super::scope::SourceCols::Table { id, .. } = &src.cols
+                        && self.schema.table(*id).kind == TableKind::Virtual(VtKind::Turnovers)
+                        && self
+                            .schema
+                            .meta(self.schema.root(*id))
+                            .is_some_and(|meta| meta.balance_type)
+                    {
+                        continue;
+                    }
                     if self.defer_accum_balance_failure
                         && let super::scope::SourceCols::Table { id, .. } = &src.cols
                         && self.schema.table(self.schema.root(*id)).kind

@@ -17,8 +17,10 @@ testing = []
 thiserror = "2"
 unicode-normalization = "0.1"
 base64 = "0.22"
+sha1 = "0.10"
 sha2 = "0.10"
 tempfile = "3"
+process-containment = { path = "../process-containment" }
 v8users = { path = "../v8users" }
 zraw = { path = "../zraw" }
 x-qbuilder = { path = "../x-qbuilder" }

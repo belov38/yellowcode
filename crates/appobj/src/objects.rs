@@ -59,6 +59,9 @@ pub(crate) struct State {
     pub(crate) written: Option<WriteStamp>,
     pub(crate) group_without_hierarchy: bool,
     pub(crate) issued: Option<crate::codes::IssuedInTxn>,
+    pub(crate) created_in: Option<(std::rc::Weak<crate::txn::CallTxn>, u64)>,
+    pub(crate) failed_new_write: Option<WriteStamp>,
+    pub(crate) document_write: Option<(WriteStamp, bool)>,
 }
 
 impl State {
@@ -78,6 +81,7 @@ pub(crate) struct Snapshot {
     attributes: Vec<Option<Value>>,
     new_ref: Option<RefValue>,
     written: Option<WriteStamp>,
+    issued: Option<crate::codes::IssuedInTxn>,
     tabs: Vec<TabState>,
 }
 
@@ -87,6 +91,7 @@ pub struct ObjectInstance {
     ty: TypeId,
     me: Weak<ObjectInstance>,
     pub(crate) state: RefCell<State>,
+    pub(crate) code_holder: Arc<crate::numerator::HolderMark>,
 }
 
 pub(crate) fn not_selected() -> HostError {
@@ -99,6 +104,15 @@ pub(crate) fn not_selected() -> HostError {
         ErrCat::ScriptRuntimeError,
         ErrCat::ScriptUseError,
     ]));
+    e
+}
+
+fn document_not_selected() -> HostError {
+    let mut e = match errors::msg(keys::DOCUMENT_NOT_SELECTED) {
+        Some(m) => HostError::text(m.ru, m.en),
+        None => internal(keys::DOCUMENT_NOT_SELECTED),
+    };
+    e.categories = not_selected().categories;
     e
 }
 
@@ -128,6 +142,14 @@ pub(crate) fn stored_instance(
     instance(ex, app, r, row, false, false).map(Some)
 }
 
+pub(crate) fn create_document(
+    ex: &mut Execution,
+    app: &Application,
+    obj: ObjId,
+) -> CallResult<Value> {
+    Ok(Value::Object(new_instance(ex, app, obj, false)?))
+}
+
 pub(crate) fn create_item(ex: &mut Execution, app: &Application, obj: ObjId) -> CallResult<Value> {
     Ok(Value::Object(new_instance(ex, app, obj, false)?))
 }
@@ -153,7 +175,14 @@ fn new_instance(
         id: RefId::NIL,
     };
     let row = read_fresh(ex, app, r)?;
-    instance(ex, app, r, row, true, folder)
+    let inst = instance(ex, app, r, row, true, folder)?;
+    if !folder
+        && let Some(txn) = crate::txn::CallTxn::of_call(ex)
+        && let Some(id) = txn.id()
+    {
+        inst.state.borrow_mut().created_in = Some((Rc::downgrade(&txn), id));
+    }
+    Ok(inst)
 }
 
 fn instance(
@@ -217,6 +246,7 @@ fn instance(
         obj: r.obj,
         ty,
         me: me.clone(),
+        code_holder: crate::numerator::HolderMark::new(),
         state: RefCell::new(State {
             r: (!is_new).then_some(r),
             row: Rc::new(row),
@@ -234,6 +264,9 @@ fn instance(
             written: None,
             group_without_hierarchy: folder && folder_field.is_none(),
             issued: None,
+            created_in: None,
+            failed_new_write: None,
+            document_write: None,
         }),
     });
     if let Some(m) = app
@@ -295,6 +328,82 @@ impl ObjectInstance {
         Ok(())
     }
 
+    fn document_after_rollback(&self, method: &str) -> Option<HostError> {
+        let st = self.state.borrow();
+        let failed = st
+            .failed_new_write
+            .as_ref()
+            .is_some_and(|w| w.txn.upgrade().is_some_and(|txn| txn.was_rolled_back(w.id)));
+        if failed {
+            return Some(self.not_implemented(&format!(
+                "{method}: после отката транзакции с несостоявшейся записью нового документа не наблюдено"
+            )));
+        }
+        if !st.new_write_rolled_back() {
+            return None;
+        }
+        let set_04 = st.document_write.as_ref().is_some_and(|(w, single)| {
+            *single && w.txn.upgrade().is_some_and(|txn| txn.was_rolled_back(w.id))
+        });
+        if method == "ЭтоНовый" && set_04 {
+            return Some(document_not_selected());
+        }
+        Some(self.not_implemented(&format!(
+            "{method}: после отката записи нового документа не наблюдено"
+        )))
+    }
+
+    fn document_property_after_rollback(
+        &self,
+        ex: &mut Execution,
+        m: MemberId,
+    ) -> Option<HostError> {
+        let def = self.app.model().obj(self.obj);
+        if def.kind != ObjKind::Document {
+            return None;
+        }
+        self.document_after_rollback("")?;
+        let name = if (ATTR_BASE..TAB_BASE).contains(&m.0) {
+            def.fields.get((m.0 - ATTR_BASE) as usize)?.name.clone()
+        } else if (TAB_BASE..VAR_BASE).contains(&m.0) {
+            def.tabular.get((m.0 - TAB_BASE) as usize)?.name.clone()
+        } else if (VAR_BASE..METHOD_BASE).contains(&m.0) {
+            "переменная модуля".to_string()
+        } else {
+            match self.member(ex, m) {
+                Some((false, "Движения")) => return None,
+                Some((_, ru)) => ru.to_string(),
+                None => m.0.to_string(),
+            }
+        };
+        self.document_after_rollback(&name)
+    }
+
+    pub(crate) fn note_document_write(&self, txn: &Rc<CallTxn>, plain: bool) {
+        let Some(id) = txn.id() else { return };
+        let mut st = self.state.borrow_mut();
+        let first = !st
+            .document_write
+            .as_ref()
+            .is_some_and(|(w, _)| w.id == id && std::ptr::eq(w.txn.as_ptr(), Rc::as_ptr(txn)));
+        st.document_write = Some((
+            WriteStamp {
+                txn: Rc::downgrade(txn),
+                id,
+                was_new: true,
+            },
+            first && plain,
+        ));
+    }
+
+    pub(crate) fn note_failed_new_write(&self, txn: &Rc<CallTxn>) {
+        self.state.borrow_mut().failed_new_write = Some(WriteStamp {
+            txn: Rc::downgrade(txn),
+            id: txn.id().unwrap_or(0),
+            was_new: true,
+        });
+    }
+
     pub(crate) fn refuse_group_without_hierarchy(&self, method: &str) -> Result<(), HostError> {
         if self.state.borrow().group_without_hierarchy {
             return Err(self.not_implemented(&format!("{method}: группа справочника без иерархии")));
@@ -325,6 +434,7 @@ impl ObjectInstance {
             attributes: st.attributes.clone(),
             new_ref: st.new_ref,
             written: st.written.clone(),
+            issued: st.issued.clone(),
             tabs: st.tabular.iter().map(|t| t.state()).collect(),
         }
     }
@@ -354,6 +464,7 @@ impl ObjectInstance {
         st.attributes = s.attributes;
         st.new_ref = s.new_ref;
         st.written = s.written;
+        st.issued = s.issued;
         for (tab, state) in st.tabular.iter().zip(s.tabs) {
             tab.set_state(state);
         }
@@ -508,9 +619,46 @@ impl ObjectInstance {
         Ok(v)
     }
 
+    pub(crate) fn set_posted(&self, posted: bool) -> Result<(), HostError> {
+        let def = self.app.model().obj(self.obj);
+        let i = def
+            .fields
+            .iter()
+            .position(|f| f.std == Some(StdAttr::Posted))
+            .ok_or_else(|| internal("a document without Проведен"))?;
+        let mut st = self.state.borrow_mut();
+        if st.attributes.len() < def.fields.len() {
+            st.attributes.resize(def.fields.len(), None);
+        }
+        let slot = st
+            .attributes
+            .get_mut(i)
+            .ok_or_else(|| internal("no such object attribute"))?;
+        *slot = Some(Value::Bool(posted));
+        Ok(())
+    }
+
+    pub(crate) fn written_in(&self, txn: &CallTxn) -> bool {
+        let id = txn.id();
+        self.state
+            .borrow()
+            .written
+            .as_ref()
+            .is_some_and(|w| id == Some(w.id))
+    }
+
+    pub(crate) fn movements_of(&self, ex: &mut Execution) -> CallResult<Value> {
+        self.movements(ex)
+    }
+
     fn movements(&self, ex: &mut Execution) -> CallResult<Value> {
         if let Some(v) = self.state.borrow().movements.clone() {
             return Ok(v);
+        }
+        if let Some(e) = self.document_after_rollback("Движения")
+            && self.app.model().obj(self.obj).kind == ObjKind::Document
+        {
+            return Err(e.into());
         }
         let r = {
             let st = self.state.borrow();
@@ -584,6 +732,7 @@ impl ObjectInstance {
                 ))
         };
         crate::read_budget::reserve(ex, bytes)?;
+        crate::codes::manual_code(ex, self, index, &cast)?;
         let mut state = self.state.borrow_mut();
         if state.attributes.len() < def.fields.len() {
             state.attributes.resize(def.fields.len(), None);
@@ -805,7 +954,8 @@ impl ObjectInstance {
             if !self.state.borrow().is_new {
                 return Err(self.not_implemented("Заполнить").into());
             }
-            if !matches!(data, Value::Undefined) {
+            let document_ref = def.kind == ObjKind::Document && as_ref(&data).is_some();
+            if !matches!(data, Value::Undefined) && !document_ref {
                 return Err(self.not_implemented("Заполнить: данные заполнения").into());
             }
         }
@@ -828,8 +978,34 @@ impl ObjectInstance {
                 self.apply_fill_values(ex)?;
             }
             self.state.borrow().modified.set(true);
+        } else if def.kind == ObjKind::Document {
+            let on = !matches!(standard.temp_value(), Some(Value::Bool(false)));
+            if on {
+                if let Some(r) = as_ref(&data) {
+                    self.document_ref_fill(ex, r)?;
+                }
+                self.apply_fill_values(ex)?;
+            }
+            self.state.borrow().modified.set(true);
         }
         Ok(Value::Undefined)
+    }
+
+    fn document_ref_fill(&self, ex: &mut Execution, r: RefValue) -> CallResult<()> {
+        for i in self.ref_fill_fields(r) {
+            if as_ref(&self.attr(ex, i)?) != Some(r) {
+                let model = self.app.model();
+                let name = model
+                    .obj(self.obj)
+                    .fields
+                    .get(i)
+                    .map_or("", |f| f.name.as_str());
+                return Err(self
+                    .not_implemented(&format!("Заполнить: ссылка как данные заполнения ({name})"))
+                    .into());
+            }
+        }
+        Ok(())
     }
 
     fn fill_from_structure(&self, ex: &mut Execution, data: &Value) -> CallResult<()> {
@@ -889,13 +1065,27 @@ impl ObjectInstance {
     }
 
     fn ref_fill_target(&self, r: RefValue) -> Option<String> {
+        let first = *self.ref_fill_fields(r).first()?;
+        Some(
+            self.app
+                .model()
+                .obj(self.obj)
+                .fields
+                .get(first)?
+                .name
+                .clone(),
+        )
+    }
+
+    fn ref_fill_fields(&self, r: RefValue) -> Vec<usize> {
         let model = self.app.model();
         let def = model.obj(self.obj);
         let kind = model.obj(r.obj).kind;
         let md = model.config.object(def.md);
         def.fields
             .iter()
-            .find(|f| {
+            .enumerate()
+            .filter(|(_, f)| {
                 let candidate = match (f.std, f.md) {
                     (Some(StdAttr::Parent | StdAttr::Owner), _) => true,
                     (_, Some(id)) => md
@@ -916,7 +1106,8 @@ impl ObjectInstance {
                         _ => false,
                     })
             })
-            .map(|f| f.name.clone())
+            .map(|(i, _)| i)
+            .collect()
     }
 
     fn apply_fill_values(&self, ex: &mut Execution) -> CallResult<()> {
@@ -965,6 +1156,13 @@ impl ObjectInstance {
                     }
                 }
                 Some(md_model::Value::Typed(md_model::TypedValue::Nil)) | None => continue,
+                Some(md_model::Value::Typed(md_model::TypedValue::DesignTimeRef(t)))
+                    if t.ends_with(".EmptyRef")
+                        && f.types.single().is_some()
+                        && as_ref(&self.attr(ex, i)?).is_some() =>
+                {
+                    continue;
+                }
                 Some(_) => {
                     return Err(self
                         .not_implemented(&format!("Заполнить: значение заполнения {}", f.name))
@@ -1030,6 +1228,9 @@ impl HostObject for ObjectInstance {
     }
 
     fn get(&self, ex: &mut Execution, m: MemberId) -> CallResult<Value> {
+        if let Some(e) = self.document_property_after_rollback(ex, m) {
+            return Err(e.into());
+        }
         if (ATTR_BASE..TAB_BASE).contains(&m.0) {
             return self.attr(ex, (m.0 - ATTR_BASE) as usize);
         }
@@ -1094,7 +1295,9 @@ impl HostObject for ObjectInstance {
                 .fields
                 .get(index)
                 .ok_or_else(|| internal("no such object field"))?;
-            if def.kind != ObjKind::Catalog {
+            let document_attr =
+                def.kind == ObjKind::Document && matches!(field.std, None | Some(StdAttr::Date));
+            if def.kind != ObjKind::Catalog && !document_attr {
                 return Err(self.not_implemented(&field.name).into());
             }
             return self.assign(ex, index, v);
@@ -1130,6 +1333,17 @@ impl HostObject for ObjectInstance {
                     _ => Err(not_writable(ru).into()),
                 },
             },
+            Some((false, ru)) if def.kind == ObjKind::Document => match field_index(def, ru) {
+                Some(i)
+                    if matches!(
+                        def.fields.get(i).and_then(|f| f.std),
+                        None | Some(StdAttr::Date)
+                    ) =>
+                {
+                    self.assign(ex, i, v)
+                }
+                _ => Err(self.not_implemented(ru).into()),
+            },
             Some((_, ru)) => Err(self.not_implemented(ru).into()),
             None => Err(self.not_implemented(&m.0.to_string()).into()),
         }
@@ -1151,11 +1365,30 @@ impl HostObject for ObjectInstance {
                 .map_err(CallError::Exc);
         }
         let member = self.member(ex, m);
+        let kind = self.app.model().obj(self.obj).kind;
+        if kind == ObjKind::Document
+            && let Some((true, method)) = member
+            && let Some(e) = self.document_after_rollback(method)
+        {
+            return Err(e.into());
+        }
         if member.is_some_and(|(method, _)| method) {
             self.live()?;
         }
-        let catalog = self.app.model().obj(self.obj).kind == ObjKind::Catalog;
+        let catalog = kind == ObjKind::Catalog;
+        let document = kind == ObjKind::Document;
         match member {
+            Some((true, "Записать")) if document => {
+                crate::write::write_document(ex, &self.rc()?, args)?;
+                Ok(Value::Undefined)
+            }
+            Some((true, "УстановитьНовыйНомер")) if document => {
+                crate::codes::set_new_number_method(ex, &self.rc()?, args)
+            }
+            Some((true, "Удалить")) if document => crate::delete::delete_document(ex, self),
+            Some((true, "УстановитьПометкуУдаления")) if document => {
+                crate::delete::set_mark_document(ex, self, args)
+            }
             Some((true, "Заполнить")) => self.fill(ex, args),
             Some((true, "ЭтоНовый")) => Ok(Value::Bool(self.state.borrow().is_new)),
             Some((true, "Модифицированность")) => {
@@ -1175,7 +1408,7 @@ impl HostObject for ObjectInstance {
             }
             Some((true, "Прочитать")) if catalog => self.read_again(ex),
             Some((true, "Уровень")) if catalog => self.level(ex),
-            Some((true, "ПроверитьЗаполнение")) if catalog => {
+            Some((true, "ПроверитьЗаполнение")) if catalog || document => {
                 Ok(Value::Bool(crate::events::check_filling(ex, &self.rc()?)?))
             }
             Some((true, "Скопировать")) if catalog => self.copy(ex),

@@ -39,6 +39,7 @@ impl TableValue {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Context {
     pub order: Vec<String>,
+    pub external_order: Vec<String>,
     pub props: Vec<(String, PropEntry)>,
 }
 
@@ -152,6 +153,9 @@ fn apply_overlay(base: &mut Value, ov: &Value, v85: bool, file: &str) -> Result<
         {
             c.insert("order".into(), o.clone());
         }
+        if let Some(order) = d.get("external_order") {
+            c.insert("external_order".into(), order.clone());
+        }
         let Some(props) = d.get("props").and_then(Value::as_object) else {
             continue;
         };
@@ -215,7 +219,7 @@ fn truthy(v: &Value) -> bool {
 }
 
 fn typed_context(ctx: &str, d: &Value) -> Result<Context, SchemaError> {
-    let order = d
+    let order: Vec<String> = d
         .get("order")
         .and_then(Value::as_array)
         .map(|a| {
@@ -224,6 +228,25 @@ fn typed_context(ctx: &str, d: &Value) -> Result<Context, SchemaError> {
                 .collect()
         })
         .unwrap_or_default();
+    let external_order = if let Some(value) = d.get("external_order") {
+        let invalid = || err("learned", format!("{ctx}: invalid external property order"));
+        let values = value.as_array().ok_or_else(invalid)?;
+        let names = values
+            .iter()
+            .map(|value| value.as_str().ok_or_else(invalid))
+            .collect::<Result<std::collections::BTreeSet<_>, _>>()?;
+        let original: std::collections::BTreeSet<_> = order.iter().map(String::as_str).collect();
+        if values.len() != order.len() || names.len() != values.len() || names != original {
+            return Err(invalid());
+        }
+        values
+            .iter()
+            .filter_map(Value::as_str)
+            .map(String::from)
+            .collect()
+    } else {
+        Vec::new()
+    };
     let mut props = Vec::new();
     if let Some(m) = d.get("props").and_then(Value::as_object) {
         for (prop, e) in m {
@@ -259,7 +282,11 @@ fn typed_context(ctx: &str, d: &Value) -> Result<Context, SchemaError> {
             ));
         }
     }
-    Ok(Context { order, props })
+    Ok(Context {
+        order,
+        external_order,
+        props,
+    })
 }
 
 fn build(
@@ -324,6 +351,14 @@ fn build(
         misc: parse("misc", resource.json("forms/misc.json")?)?,
         types,
     })
+}
+
+pub fn owned_tables(
+    resource: &'static crate::SchemaResource,
+    v85: bool,
+    compat: FormCompat,
+) -> Result<FormTables, SchemaError> {
+    build(resource, v85, compat, None)
 }
 
 pub(crate) type Key = (bool, FormCompat, Option<PathBuf>);

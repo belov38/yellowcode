@@ -302,18 +302,19 @@ pub(super) fn dangling<S: crate::ManagedEntrySource + ?Sized>(
                 .and_then(|id| index.objs.get(&id))
                 .is_some_and(|(kind, _)| *kind == crate::MdKind::Role)
         };
-        let mut seen = HashSet::new();
-        for meta in entries.list() {
-            if rights_entry(&meta.name) {
-                continue;
-            }
-            if let Some(bytes) = entries.raw(&meta.name)? {
-                seen.extend(crate::parts::rights::mentioned(&bytes, &fresh));
-            }
-            if seen.len() == fresh.len() {
-                break;
-            }
-        }
+        let parents = entries.raw(&format!("{}.4", index.header_id))?;
+        let vendor = crate::parts::rights::VendorEntries::of(
+            index.cfg_id,
+            parents.as_deref().map(Vec::as_slice),
+        );
+        drop(parents);
+        let seen = crate::parts::rights::mentioned_in(
+            entries.list().iter().map(|m| m.name.as_str()),
+            rights_entry,
+            &vendor,
+            &fresh,
+            |name| entries.raw(name),
+        )?;
         for id in fresh {
             checked.insert(id, !seen.contains(&id));
         }

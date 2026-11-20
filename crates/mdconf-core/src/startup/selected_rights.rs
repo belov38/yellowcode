@@ -17,6 +17,14 @@ impl<S: ManagedEntrySource> ManagedViewerContext<S> {
         &self,
         id: Guid,
     ) -> Result<Option<SelectedRights>, ManagedConfigurationError<S::Error>> {
+        self.read_rights_checked(id, &mut std::collections::HashMap::new())
+    }
+
+    pub(super) fn read_rights_checked(
+        &self,
+        id: Guid,
+        checked: &mut std::collections::HashMap<Guid, bool>,
+    ) -> Result<Option<SelectedRights>, ManagedConfigurationError<S::Error>> {
         if !self
             .index()
             .objs
@@ -53,12 +61,7 @@ impl<S: ManagedEntrySource> ManagedViewerContext<S> {
             decoded,
             Err(remaining_rights::Error::Semantic("unresolved_object", None))
         ) {
-            let removed = remaining_rights::dangling(
-                &entries,
-                self.index(),
-                node,
-                &mut std::collections::HashMap::new(),
-            )?;
+            let removed = remaining_rights::dangling(&entries, self.index(), node, checked)?;
             if !removed.is_empty() {
                 decoded =
                     remaining_rights::decode(self.index(), self.settings(), node, false, &removed);

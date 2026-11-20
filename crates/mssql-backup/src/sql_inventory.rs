@@ -53,6 +53,77 @@ pub enum Error {
     Json(#[from] serde_json::Error),
     #[error("invalid DT table schema: {0}")]
     Dt(#[from] dtfile::Error),
+    #[error("invalid SQL table inventory: {0}")]
+    Mismatch(Mismatch),
+}
+
+pub const SHOWN_NAMES: usize = 10;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Mismatch {
+    pub missing: Vec<Missing>,
+    pub extra: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Missing {
+    pub name: String,
+    pub system: bool,
+}
+
+impl Mismatch {
+    pub fn extension_twins<'a>(
+        &'a self,
+        extension_ids: &'a [u32],
+    ) -> impl Iterator<Item = &'a str> + 'a {
+        self.extra.iter().map(String::as_str).filter(move |name| {
+            name.starts_with('_')
+                && bak_trace::extension_suffix(name)
+                    .is_some_and(|(_, id)| extension_ids.contains(&id))
+        })
+    }
+}
+
+pub fn sql_tables(count: usize) -> String {
+    if count == 1 {
+        "1 SQL table".to_owned()
+    } else {
+        format!("{count} SQL tables")
+    }
+}
+
+fn list(out: &mut std::fmt::Formatter<'_>, label: &str, names: &[&str]) -> std::fmt::Result {
+    write!(out, "; {label}: ")?;
+    for (i, name) in names.iter().take(SHOWN_NAMES).enumerate() {
+        if i > 0 {
+            out.write_str(", ")?;
+        }
+        out.write_str(name)?;
+    }
+    if names.len() > SHOWN_NAMES {
+        write!(out, " (and {} more)", names.len() - SHOWN_NAMES)?;
+    }
+    Ok(())
+}
+
+impl std::fmt::Display for Mismatch {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            out,
+            "{} missing, {} unexpected",
+            sql_tables(self.missing.len()),
+            sql_tables(self.extra.len())
+        )?;
+        let missing: Vec<&str> = self.missing.iter().map(|m| m.name.as_str()).collect();
+        if !missing.is_empty() {
+            list(out, "missing", &missing)?;
+        }
+        let extra: Vec<&str> = self.extra.iter().map(String::as_str).collect();
+        if !extra.is_empty() {
+            list(out, "unexpected", &extra)?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -172,35 +243,90 @@ pub struct Inventory {
     pub depot_files: bool,
 }
 
+pub fn known_tables(schema: &LogicalSchema) -> Result<Vec<String>, Error> {
+    let mut names: Vec<String> = SYSTEM_TABLES.iter().map(|t| (*t).to_owned()).collect();
+    for head in dtfile::TableHead::database(schema)? {
+        names.push(head.phys_name);
+    }
+    Ok(names)
+}
+
 pub fn validate_inventory(schema: &LogicalSchema, tables: &[String]) -> Result<Inventory, Error> {
     let optional = name(OPTIONAL_SYSTEM_TABLE)?;
-    let mut expected = HashSet::new();
+    let mut expected: HashMap<String, (String, bool)> = HashMap::new();
     for table in SYSTEM_TABLES {
         let key = name(table)?;
         if key == optional {
             continue;
         }
-        if !expected.insert(key) {
+        if expected.insert(key, ((*table).to_owned(), true)).is_some() {
             return Err(Error::Invalid("duplicate system table"));
         }
     }
     for head in dtfile::TableHead::database(schema)? {
-        if !expected.insert(name(&head.phys_name)?) {
+        if expected
+            .insert(name(&head.phys_name)?, (head.phys_name, false))
+            .is_some()
+        {
             return Err(Error::Invalid("duplicate schema table"));
         }
     }
-    if expected.contains(&optional) {
+    if expected.contains_key(&optional) {
         return Err(Error::Invalid("duplicate schema table"));
     }
-    let mut actual = HashSet::new();
+    let mut actual = HashMap::new();
     for table in tables {
-        if !actual.insert(name(table)?) {
+        if actual.insert(name(table)?, table).is_some() {
             return Err(Error::Invalid("ambiguous SQL table"));
         }
     }
-    let depot_files = actual.remove(&optional);
-    if actual != expected {
-        return Err(Error::Invalid("missing or unexpected SQL table"));
+    let depot_files = actual.remove(&optional).is_some();
+    let mut missing: Vec<Missing> = expected
+        .iter()
+        .filter(|(key, _)| !actual.contains_key(*key))
+        .map(|(_, (name, system))| Missing {
+            name: name.clone(),
+            system: *system,
+        })
+        .collect();
+    let mut extra: Vec<String> = actual
+        .iter()
+        .filter(|(key, _)| !expected.contains_key(*key))
+        .map(|(_, table)| (*table).clone())
+        .collect();
+    if missing.is_empty() && extra.is_empty() {
+        return Ok(Inventory { depot_files });
     }
-    Ok(Inventory { depot_files })
+    missing.sort_unstable_by_key(|m| (!m.system, m.name.to_ascii_lowercase()));
+    extra.sort_unstable_by_key(|s| s.to_ascii_lowercase());
+    Err(Error::Mismatch(Mismatch { missing, extra }))
+}
+
+const MAX_SCHEMA_ROWS: usize = 10_000;
+
+pub fn read_schema_ids(input: impl Read) -> Result<Vec<u32>, Error> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Row {
+        schema_id: i64,
+    }
+    let mut bytes = Vec::new();
+    input.take(1024 * 1024 + 1).read_to_end(&mut bytes)?;
+    if bytes.len() > 1024 * 1024 {
+        return Err(Error::Invalid("schema id output limit"));
+    }
+    bytes.retain(|&b| b != b'\r' && b != b'\n');
+    if bytes.iter().all(u8::is_ascii_whitespace) {
+        return Ok(Vec::new());
+    }
+    let rows: Vec<Row> = serde_json::from_slice(&bytes)?;
+    if rows.len() > MAX_SCHEMA_ROWS {
+        return Err(Error::Invalid("schema id count"));
+    }
+    let mut ids = rows
+        .into_iter()
+        .map(|r| u32::try_from(r.schema_id).map_err(|_| Error::Invalid("schema id out of range")))
+        .collect::<Result<Vec<u32>, Error>>()?;
+    ids.sort_unstable();
+    Ok(ids)
 }

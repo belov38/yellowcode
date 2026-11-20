@@ -1,36 +1,119 @@
 use mdconf::{Configuration, ConfigurationExt, LoadOptions, LoadProfile, MdKind};
 use onecd::{BlobVal, Database, OpenOptions, Value};
-use std::{collections::BTreeMap, io::Write, path::Path};
+use std::{collections::BTreeMap, io::Write, ops::ControlFlow, path::Path};
 use unicode_normalization::UnicodeNormalization;
 pub use v8users::card::{Authentication, Card, Role, Separation};
 
-const MAX_USERS: usize = 10_000;
-const MAX_TOTAL_DATA: usize = 64 * 1_048_576;
-const MAX_OUTPUT_BYTES: usize = 32 * 1_048_576;
-const MAX_OUTPUT_ITEMS: usize = 100_000;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Limits {
+    pub rows: usize,
+    pub total_data: usize,
+    pub collections: usize,
+    pub json: usize,
+}
+
+pub const WRITE_LIMITS: Limits = Limits {
+    rows: 10_000,
+    total_data: 64 * 1_048_576,
+    collections: 100_000,
+    json: 32 * 1_048_576,
+};
+
+pub const VIEWER_LIMITS: Limits = Limits {
+    rows: 100_000,
+    total_data: 256 * 1_048_576,
+    collections: 10_000_000,
+    json: 256 * 1_048_576,
+};
+
+const MAX_USERS: usize = WRITE_LIMITS.rows;
+const MAX_TOTAL_DATA: usize = WRITE_LIMITS.total_data;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LimitKind {
+    Rows,
+    RowData,
+    TotalData,
+    Collections,
+    Json,
+}
+
+impl LimitKind {
+    pub fn of(self, limits: &Limits) -> usize {
+        match self {
+            LimitKind::Rows => limits.rows,
+            LimitKind::RowData => v8users::MAX_DATA_BYTES,
+            LimitKind::TotalData => limits.total_data,
+            LimitKind::Collections => limits.collections,
+            LimitKind::Json => limits.json,
+        }
+    }
+
+    pub fn describe(self, limit: usize) -> String {
+        match self {
+            LimitKind::Rows => format!("V8USERS has more than {limit} rows (limit {limit})"),
+            LimitKind::RowData => {
+                format!("DATA of a V8USERS row is larger than {limit} bytes (limit {limit})")
+            }
+            LimitKind::TotalData => {
+                format!("DATA of all V8USERS rows is larger than {limit} bytes (limit {limit})")
+            }
+            LimitKind::Collections => format!(
+                "users have more than {limit} roles and data separation values in total (limit {limit})"
+            ),
+            LimitKind::Json => {
+                format!("the JSON of all users is larger than {limit} bytes (limit {limit})")
+            }
+        }
+    }
+
+    pub fn write_text(self) -> &'static str {
+        match self {
+            LimitKind::Rows => "V8USERS has more than 10000 rows (limit 10000)",
+            LimitKind::RowData => {
+                "DATA of a V8USERS row is larger than 1048576 bytes (limit 1048576)"
+            }
+            LimitKind::TotalData => {
+                "DATA of all V8USERS rows is larger than 67108864 bytes (limit 67108864)"
+            }
+            LimitKind::Collections => {
+                "users have more than 100000 roles and data separation values in total (limit 100000)"
+            }
+            LimitKind::Json => {
+                "the JSON of all users is larger than 33554432 bytes (limit 33554432)"
+            }
+        }
+    }
+}
 
 struct OutputBudget {
     remaining: usize,
     items: usize,
+    max_items: usize,
 }
 
 impl OutputBudget {
     fn new() -> Self {
+        Self::within(&WRITE_LIMITS)
+    }
+
+    fn within(limits: &Limits) -> Self {
         Self {
-            remaining: MAX_OUTPUT_BYTES - 2,
+            remaining: limits.json - 2,
             items: 0,
+            max_items: limits.collections,
         }
     }
 
-    fn admit(&mut self, card: &Card) -> Result<(), Error> {
+    fn admit(&mut self, card: &Card) -> Result<(), LimitKind> {
         self.items = self
             .items
             .checked_add(card.roles.len())
             .and_then(|n| n.checked_add(card.data_separation.len()))
-            .filter(|n| *n <= MAX_OUTPUT_ITEMS)
-            .ok_or(Error::Limit)?;
-        serde_json::to_writer(&mut *self, card).map_err(|_| Error::Limit)?;
-        self.write_all(b",").map_err(|_| Error::Limit)
+            .filter(|n| *n <= self.max_items)
+            .ok_or(LimitKind::Collections)?;
+        serde_json::to_writer(&mut *self, card).map_err(|_| LimitKind::Json)?;
+        self.write_all(b",").map_err(|_| LimitKind::Json)
     }
 }
 
@@ -54,8 +137,16 @@ pub enum Error {
     NotFound,
     #[error("several users have this name; select the UUID")]
     Ambiguous,
-    #[error("infobase user data exceeds the reading limit")]
-    Limit,
+    #[error(
+        "infobase user data exceeds the reading limit: {}{}",
+        row.map(|r| format!("V8USERS row {r}: ")).unwrap_or_default(),
+        what.describe(*limit)
+    )]
+    Limit {
+        what: LimitKind,
+        limit: usize,
+        row: Option<usize>,
+    },
     #[error("V8USERS DATA row {row}: {source}")]
     Data { row: usize, source: v8users::Error },
     #[error("V8USERS DATA column is missing or malformed")]
@@ -64,6 +155,25 @@ pub enum Error {
     Storage(#[from] onecd::Error),
     #[error("reading users configuration: {0}")]
     Configuration(String),
+}
+
+impl Error {
+    fn limit(what: LimitKind, limits: &Limits, row: Option<usize>) -> Self {
+        Error::Limit {
+            what,
+            limit: what.of(limits),
+            row,
+        }
+    }
+
+    pub fn limit_text(&self) -> Option<&'static str> {
+        match self {
+            Error::Limit { what, limit, .. } if *limit == what.of(&WRITE_LIMITS) => {
+                Some(what.write_text())
+            }
+            _ => None,
+        }
+    }
 }
 
 enum NameKey {
@@ -233,13 +343,46 @@ pub fn find<'a>(cards: &'a [Card], identity: &str) -> Result<&'a Card, Error> {
     found.ok_or(Error::NotFound)
 }
 
-pub fn list(base: &Path) -> Result<Vec<Card>, Error> {
-    let db = Database::open(
+fn open(base: &Path) -> Result<Database, Error> {
+    Ok(Database::open(
         &crate::viewer::source::resolve(base),
         OpenOptions::read_only(),
-    )?;
+    )?)
+}
+
+fn role_names(txn: &onecd::ReadTxn) -> Result<BTreeMap<String, String>, Error> {
+    let src = infobase::config::ConfigTxnSource::read(txn, "CONFIG")
+        .map_err(|e| Error::Configuration(e.to_string()))?;
+    if src.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let cfg = Configuration::load(
+        &src,
+        &LoadOptions {
+            keep_source: false,
+            profile: LoadProfile::Query,
+            ..Default::default()
+        },
+    )
+    .map_err(|e| Error::Configuration(e.to_string()))?;
+    Ok(role_map(&cfg)
+        .into_iter()
+        .map(|(id, name)| (id, name.to_owned()))
+        .collect())
+}
+
+fn role_map(cfg: &Configuration) -> BTreeMap<String, &str> {
+    cfg.objects
+        .iter()
+        .filter(|o| o.kind == MdKind::Role)
+        .map(|o| (o.id.to_string(), o.name.as_str()))
+        .collect()
+}
+
+pub fn list(base: &Path) -> Result<Vec<Card>, Error> {
+    let db = open(base)?;
     let txn = db.read();
-    let mut cards = read_cards(&txn)?;
+    let mut cards = read_cards_within(&txn, &VIEWER_LIMITS)?;
     if cards.iter().any(|c| !c.roles.is_empty()) {
         let src = infobase::config::ConfigTxnSource::read(&txn, "CONFIG")
             .map_err(|e| Error::Configuration(e.to_string()))?;
@@ -253,33 +396,34 @@ pub fn list(base: &Path) -> Result<Vec<Card>, Error> {
                 },
             )
             .map_err(|e| Error::Configuration(e.to_string()))?;
-            resolve_roles(&mut cards, &cfg)?;
+            resolve_roles_within(&mut cards, &cfg, &VIEWER_LIMITS)?;
         }
     }
     Ok(cards)
 }
 
 pub fn list_with_configuration(base: &Path, cfg: &Configuration) -> Result<Vec<Card>, Error> {
-    let db = Database::open(
-        &crate::viewer::source::resolve(base),
-        OpenOptions::read_only(),
-    )?;
-    let mut cards = read_cards(&db.read())?;
-    resolve_roles(&mut cards, cfg)?;
+    let db = open(base)?;
+    let mut cards = read_cards_within(&db.read(), &VIEWER_LIMITS)?;
+    resolve_roles_within(&mut cards, cfg, &VIEWER_LIMITS)?;
     Ok(cards)
 }
 
 pub fn resolve_roles(cards: &mut [Card], cfg: &Configuration) -> Result<(), Error> {
-    let roles: BTreeMap<_, _> = cfg
-        .objects
-        .iter()
-        .filter(|o| o.kind == MdKind::Role)
-        .map(|o| (o.id.to_string(), o.name.as_str()))
-        .collect();
-    let mut names = OutputBudget::new();
+    resolve_roles_within(cards, cfg, &WRITE_LIMITS)
+}
+
+fn resolve_roles_within(
+    cards: &mut [Card],
+    cfg: &Configuration,
+    limits: &Limits,
+) -> Result<(), Error> {
+    let roles = role_map(cfg);
+    let refused = |what| Error::limit(what, limits, None);
+    let mut names = OutputBudget::within(limits);
     for role in cards.iter().flat_map(|card| &card.roles) {
         if let Some(name) = roles.get(&role.id) {
-            serde_json::to_writer(&mut names, name).map_err(|_| Error::Limit)?;
+            serde_json::to_writer(&mut names, name).map_err(|_| refused(LimitKind::Json))?;
         }
     }
     for card in cards.iter_mut() {
@@ -287,26 +431,58 @@ pub fn resolve_roles(cards: &mut [Card], cfg: &Configuration) -> Result<(), Erro
             role.name = roles.get(&role.id).map(|n| (*n).to_owned());
         }
     }
-    let mut output = OutputBudget::new();
+    let mut output = OutputBudget::within(limits);
     for card in cards.iter() {
-        output.admit(card)?;
+        output.admit(card).map_err(refused)?;
     }
     Ok(())
 }
 
 fn read_cards(txn: &onecd::ReadTxn) -> Result<Vec<Card>, Error> {
+    read_cards_within(txn, &WRITE_LIMITS)
+}
+
+fn read_cards_within(txn: &onecd::ReadTxn, limits: &Limits) -> Result<Vec<Card>, Error> {
+    let mut cards = Vec::new();
+    let mut total = 0usize;
+    let mut output = OutputBudget::within(limits);
+    let refused = |what| Error::limit(what, limits, None);
+    scan_cards(
+        txn,
+        Some(limits),
+        |len| {
+            total = total
+                .checked_add(len)
+                .filter(|n| *n <= limits.total_data)
+                .ok_or_else(|| refused(LimitKind::TotalData))?;
+            Ok(())
+        },
+        |card| {
+            output.admit(&card).map_err(refused)?;
+            cards.push(card);
+            Ok(ControlFlow::Continue(()))
+        },
+    )?;
+    Ok(cards)
+}
+
+fn scan_cards(
+    txn: &onecd::ReadTxn,
+    limits: Option<&Limits>,
+    mut admit: impl FnMut(usize) -> Result<(), Error>,
+    mut each: impl FnMut(Card) -> Result<ControlFlow<()>, Error>,
+) -> Result<(), Error> {
     let table = txn.table("V8USERS")?;
     let column = table
         .descr()
         .field("DATA")
         .map(|(i, _)| i)
         .ok_or(Error::Column)?;
-    let mut cards = Vec::new();
-    let mut total = 0usize;
-    let mut output = OutputBudget::new();
     for (row_index, row) in table.scan().enumerate() {
-        if row_index >= MAX_USERS {
-            return Err(Error::Limit);
+        if let Some(limits) = limits
+            && row_index >= limits.rows
+        {
+            return Err(Error::limit(LimitKind::Rows, limits, None));
         }
         let (_, row) = row?;
         let value = row.get(column).ok_or(Error::Column)?;
@@ -315,12 +491,13 @@ fn read_cards(txn: &onecd::ReadTxn) -> Result<Vec<Card>, Error> {
             Value::Image(BlobVal::Data(b)) | Value::Binary(b) => b.len(),
             _ => return Err(Error::Column),
         };
-        total = total
-            .checked_add(len)
-            .filter(|n| *n <= MAX_TOTAL_DATA)
-            .ok_or(Error::Limit)?;
+        admit(len)?;
         if len > v8users::MAX_DATA_BYTES {
-            return Err(Error::Limit);
+            return Err(Error::limit(
+                LimitKind::RowData,
+                &WRITE_LIMITS,
+                Some(row_index),
+            ));
         }
         let blob = match value {
             Value::Image(BlobVal::Ref(r)) => table.blob_bytes(*r)?,
@@ -331,12 +508,128 @@ fn read_cards(txn: &onecd::ReadTxn) -> Result<Vec<Card>, Error> {
             row: row_index,
             source,
         })?;
-        if !card.is_service() {
-            output.admit(&card)?;
-            cards.push(card);
+        drop(blob);
+        if !card.is_service() && each(card)?.is_break() {
+            break;
         }
     }
-    Ok(cards)
+    Ok(())
+}
+
+pub fn for_each(
+    base: &Path,
+    named: bool,
+    mut each: impl FnMut(Card) -> Result<ControlFlow<()>, Error>,
+) -> Result<(), Error> {
+    let db = open(base)?;
+    let txn = db.read();
+    let mut names: Option<BTreeMap<String, String>> = None;
+    scan_cards(
+        &txn,
+        None,
+        |_| Ok(()),
+        |mut card| {
+            if named && !card.roles.is_empty() {
+                let names = match &mut names {
+                    Some(names) => names,
+                    none => none.insert(role_names(&txn)?),
+                };
+                name_roles(&mut card, names);
+            }
+            each(card)
+        },
+    )
+}
+
+fn name_roles(card: &mut Card, names: &BTreeMap<String, String>) {
+    for role in &mut card.roles {
+        role.name = names.get(&role.id).cloned();
+    }
+}
+
+pub fn find_in(base: &Path, identity: &str, named: bool) -> Result<Card, Error> {
+    let db = open(base)?;
+    let txn = db.read();
+    let id = brace::Guid::parse(identity).map(|id| id.to_string());
+    let request = id
+        .is_none()
+        .then(|| onecd::KeyRequest::when_bound(None))
+        .flatten();
+    let key = match id {
+        Some(_) => None,
+        None => Some(name_key(identity, request.as_ref())?),
+    };
+    let mut found = None;
+    scan_cards(
+        &txn,
+        None,
+        |_| Ok(()),
+        |card| {
+            let hit = match (&id, &key) {
+                (Some(id), _) => card.id == *id,
+                (None, Some(key)) => name_key(&card.name, request.as_ref())?.bytes() == key.bytes(),
+                (None, None) => false,
+            };
+            if !hit {
+                return Ok(ControlFlow::Continue(()));
+            }
+            if found.is_some() {
+                return Err(Error::Ambiguous);
+            }
+            found = Some(card);
+            Ok(if id.is_some() {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            })
+        },
+    )?;
+    let mut card = found.ok_or(Error::NotFound)?;
+    if named && !card.roles.is_empty() {
+        name_roles(&mut card, &role_names(&txn)?);
+    }
+    Ok(card)
+}
+
+pub fn write_all(base: &Path, json: bool, named: bool, out: &mut dyn Write) -> crate::Result<()> {
+    use serde::ser::{SerializeSeq, Serializer};
+    if json {
+        let mut failed = None;
+        {
+            let mut ser = serde_json::Serializer::pretty(&mut *out);
+            let mut seq = ser.serialize_seq(None)?;
+            for_each(base, named, |card| {
+                Ok(match seq.serialize_element(&card) {
+                    Ok(()) => ControlFlow::Continue(()),
+                    Err(e) => {
+                        failed = Some(e);
+                        ControlFlow::Break(())
+                    }
+                })
+            })?;
+            if let Some(e) = failed {
+                return Err(e.into());
+            }
+            seq.end()?;
+        }
+        writeln!(out)?;
+    } else {
+        writeln!(out, "Name\tFull name\tRoles\tUUID")?;
+        let mut failed = None;
+        for_each(base, named, |card| {
+            Ok(match write_row(out, &card) {
+                Ok(()) => ControlFlow::Continue(()),
+                Err(e) => {
+                    failed = Some(e);
+                    ControlFlow::Break(())
+                }
+            })
+        })?;
+        if let Some(e) = failed {
+            return Err(e.into());
+        }
+    }
+    Ok(())
 }
 
 pub fn write_json(out: &mut dyn Write, value: &impl serde::Serialize) -> crate::Result<()> {
@@ -360,22 +653,26 @@ fn cell(s: &str) -> String {
 pub fn write_list(out: &mut dyn Write, cards: &[Card]) -> crate::Result<()> {
     writeln!(out, "Name\tFull name\tRoles\tUUID")?;
     for c in cards {
-        let roles = c
-            .roles
-            .iter()
-            .map(|r| cell(r.name.as_deref().unwrap_or(&r.id)))
-            .collect::<Vec<_>>()
-            .join(", ");
-        writeln!(
-            out,
-            "{}\t{}\t{}\t{}",
-            cell(&c.name),
-            cell(&c.full_name),
-            roles,
-            c.id
-        )?;
+        write_row(out, c)?;
     }
     Ok(())
+}
+
+fn write_row(out: &mut dyn Write, c: &Card) -> std::io::Result<()> {
+    let roles = c
+        .roles
+        .iter()
+        .map(|r| cell(r.name.as_deref().unwrap_or(&r.id)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    writeln!(
+        out,
+        "{}\t{}\t{}\t{}",
+        cell(&c.name),
+        cell(&c.full_name),
+        roles,
+        c.id
+    )
 }
 
 pub fn write_card(out: &mut dyn Write, card: &Card) -> crate::Result<()> {
@@ -713,6 +1010,10 @@ pub(crate) fn source_identity(
     let path = snapshot::path(base)?;
     let file = std::fs::File::open(&path).map_err(|_| UserWriteError::UnsupportedSource)?;
     Ok((path, snapshot::identity(&file)?))
+}
+
+pub(crate) fn file_identity(file: &std::fs::File) -> Result<(u64, u64), UserWriteError> {
+    snapshot::identity(file)
 }
 
 #[cfg(all(test, feature = "testing"))]

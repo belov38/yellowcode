@@ -80,6 +80,44 @@ pub(crate) fn pop(st: &mut ExecState, sp_base: usize) -> Result<Value, Exception
     Err(internal("operand stack underflow"))
 }
 
+pub(super) fn drop_slots(ex: &mut Execution, base: usize) {
+    crate::teardown(|| {
+        let len = ex.exec.stack.len();
+        for i in base..len {
+            if ex
+                .exec
+                .stack
+                .get(i)
+                .is_some_and(|v| call::arg_ref(v).is_some())
+                && let Some(slot) = ex.exec.stack.get_mut(i)
+            {
+                let r = std::mem::replace(slot, Value::Undefined);
+                crate::with_drop_form(crate::DropForm::Unobserved, || drop(r));
+            }
+        }
+        ex.exec.stack.truncate(base);
+    });
+}
+
+fn store_assigned(ex: &mut Execution, abs: usize, v: Value) -> Result<(), Exception> {
+    let by_ref = ex
+        .exec
+        .stack
+        .get(abs)
+        .is_some_and(|slot| call::arg_ref(slot).is_some());
+    if by_ref {
+        return crate::with_drop_form(crate::DropForm::Unobserved, || call::store_slot(ex, abs, v));
+    }
+    let slot = ex
+        .exec
+        .stack
+        .get_mut(abs)
+        .ok_or_else(|| internal("slot out of range"))?;
+    let old = std::mem::replace(slot, v);
+    crate::drop_assigned(old);
+    Ok(())
+}
+
 fn unsupported(op: Op) -> Exception {
     internal(format!("unsupported op {op:?}"))
 }
@@ -258,14 +296,14 @@ pub(crate) fn run_frames(
         Err(ex.stack_overflow())
     } else {
         ex.exec.nesting += 1;
-        let r = run_loop(ex, floor, snapshot);
+        let r = crate::running(|| run_loop(ex, floor, snapshot));
         ex.exec.nesting -= 1;
         r
     };
     if r.is_err() {
         if let Some(f) = ex.exec.frames.get(floor) {
             let base = f.base;
-            ex.exec.stack.truncate(base);
+            drop_slots(ex, base);
         }
         ex.exec.frames.truncate(floor);
     }
@@ -469,7 +507,7 @@ fn run_ops(
                 Op::StoreLocal(i) => {
                     let v = pop!();
                     let abs = slot!(i);
-                    call::store_slot(ex, abs, v)?;
+                    store_assigned(ex, abs, v)?;
                 }
                 Op::RefModVar(i) => member::ref_mod_var(ex, inst.as_ref(), i)?,
                 Op::LoadModVar(i) => {
@@ -497,7 +535,7 @@ fn run_ops(
                             .ok_or_else(|| internal("module variable out of range"))?;
                         std::mem::replace(slot, v)
                     };
-                    drop(old);
+                    crate::drop_assigned(old);
                 }
                 Op::LoadGlobal(i) => {
                     let g = module
@@ -595,7 +633,7 @@ fn run_ops(
                     } else {
                         Vec::new()
                     };
-                    ex.exec.stack.truncate(base);
+                    drop_slots(ex, base);
                     if let Some(frame) = ex.exec.frames.pop()
                         && let Some(pending) = frame.reuse
                     {
@@ -673,7 +711,7 @@ fn run_ops(
                 Op::StoreOuter(i) => {
                     let v = pop!();
                     let abs = crate::fragment::outer_slot(ex, fi, i as usize)?;
-                    call::store_slot(ex, abs, v)?;
+                    store_assigned(ex, abs, v)?;
                 }
                 Op::RefOuter(i) => {
                     let abs = crate::fragment::outer_slot(ex, fi, i as usize)?;

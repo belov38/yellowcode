@@ -14,20 +14,28 @@ pub mod build;
 #[doc(hidden)]
 pub mod codec;
 pub(crate) mod codec_base64;
+pub mod configinfo;
 pub mod entries;
 mod error;
+pub mod extension_children;
+pub mod extension_objects;
+pub mod extension_reader;
+pub mod external;
 #[allow(hidden_glob_reexports)]
 mod index;
 mod load;
+pub mod root_facts;
 pub use md_model::model;
 mod modules;
 #[cfg_attr(not(test), allow(dead_code))]
 mod objects;
+pub mod startup;
+pub use objects::header as extension_header;
 pub mod parts;
+pub use parts::extension_configuration;
 #[allow(dead_code)]
 mod predefined;
 mod root;
-pub mod startup;
 pub use root::{ErrorKind as RootErrorKind, ManagedRootError, RootInfo};
 mod settings;
 #[cfg(any(test, feature = "testing"))]
@@ -45,7 +53,10 @@ pub use entries::{
     MemEntries, StoredBytes, decode_inflated, decode_stored, decode_stored_budgeted,
 };
 pub use error::{Error, Result};
-pub use load::{ConfigurationInspection, LoadMeter, LoadOptions, LoadProfile, MeterRefusal};
+pub use load::{
+    ConfigurationInspection, KeepObject, LoadMeter, LoadOptions, LoadProfile, MeterRefusal,
+    ObjectFilter,
+};
 pub use md_model::*;
 pub use mdschema::{Codec, MdKind};
 pub use settings::{

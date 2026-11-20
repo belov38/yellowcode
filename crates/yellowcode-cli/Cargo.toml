@@ -9,6 +9,9 @@ autotests = false
 autoexamples = false
 autobenches = false
 
+[features]
+analysis-fault-probes = []
+
 [dependencies]
 yellowcode-core = { path = "../yellowcode-core", features = ["clap"] }
 yellowcode-http = { path = "../yellowcode-http" }
@@ -26,3 +29,10 @@ unused_result_ok = "warn"
 [[bin]]
 name = "yellowcode"
 path = "src/main.rs"
+
+[[bin]]
+name = "external-form-protocol-probe"
+path = "tests/support/external_form_protocol_probe.rs"
+test = false
+bench = false
+required-features = ["analysis-fault-probes"]

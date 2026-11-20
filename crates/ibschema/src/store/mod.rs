@@ -344,6 +344,17 @@ pub trait WriteTxn: ReadTxn {
     fn update(&mut self, t: TableId, h: RowHandle, row: &Row) -> StoreResult<()>;
     fn delete(&mut self, t: TableId, h: RowHandle) -> StoreResult<()>;
     fn commit(self: Box<Self>) -> StoreResult<()>;
+    fn rewrite_system_file(
+        &mut self,
+        table: &str,
+        name: &str,
+        _data: &[u8],
+        _modified: onecd::DateTime,
+    ) -> StoreResult<()> {
+        Err(StoreError::Unsupported(format!(
+            "system file {table}/{name}: the store keeps no system tables"
+        )))
+    }
 }
 
 pub type StoreResult<T> = std::result::Result<T, StoreError>;

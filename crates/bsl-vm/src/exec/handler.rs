@@ -33,7 +33,7 @@ pub(super) fn catch(ex: &mut Execution, floor: usize, info: &Rc<ErrorInfo>) -> b
             f.pc = h.target;
             return true;
         }
-        ex.exec.stack.truncate(base);
+        super::run::drop_slots(ex, base);
         ex.exec.frames.pop();
     }
     false

@@ -13,6 +13,7 @@ import { desktopItems, recentItems, openSource, desktopBusy } from "./desktop.js
 import { skinItems } from "./skin.js";
 import { dialogCommands, openDialog } from "./dialogs.js";
 import { openQuery, openCode, dataTreeItems } from "./x/index.js";
+import { openExtensions } from "./extensions.js";
 
 const registry = new Map();
 const serviceTools = new Map();
@@ -105,6 +106,7 @@ function sortPalette(alpha) {
   $("opt-alpha").dispatchEvent(new Event("change"));
 }
 function installHandlers() {
+  register("IDS_CMD_CONFIGEXTENSIONS", openExtensions, () => !desktopBusy());
   register("IDS_CMD_FILEOPEN", () => openSource(), () => !!openSource && !desktopBusy());
   for (const key of ["IDS_CMD_FILECLOSE", "IDS_CMD_CLOSEWINDOW"])
     register(key, () => closeWindow(activeWindow()), () => !!activeWindow());
@@ -117,7 +119,7 @@ function installHandlers() {
     if (treePath()) setPaletteTarget(treePath());
     if (isTemplate(treePath())) openWindow({ kind: "object", path: treePath(), icon: selectedTreeRow()?.dataset.icon });
   });
-  register("IDS_CMD_FINDOBJECT", () => revealInTree(activeWindow().path), () => !!activeWindow());
+  register("IDS_CMD_FINDOBJECT", () => revealInTree(activeWindow().path), () => !!activeWindow() && activeWindow().kind !== "extensions");
   register("IDS_CMD_FINDINTEXTS", () => $("search").focus());
   register("IDS_CMD_FIND", () => controller() ? controller().find() : $("search").focus());
   for (const key of ["IDS_CMD_FINDFORWARD", "IDS_CMD_FINDREPEAT"]) register(key, () => controller().findNext(), moduleReady);

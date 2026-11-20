@@ -412,13 +412,19 @@ fn constraint_indexes(d: &onecd::TableDescr, ti: &TableInfo) -> Vec<(String, Ind
 }
 
 impl PhysMap {
-    fn build(db: &onecd::Database, map: &StorageMap) -> Result<PhysMap> {
+    fn build(db: &onecd::Database, map: &StorageMap, extension: &[TableId]) -> Result<PhysMap> {
         let txn = db.read();
         let mut tables = Vec::with_capacity(map.tables().len());
-        for ti in map.tables() {
-            let tr = txn.table(&ti.phys).map_err(|e| match e {
+        for (n, ti) in map.tables().iter().enumerate() {
+            let moved = u32::try_from(n).is_ok_and(|n| extension.contains(&TableId(n)));
+            let name = if moved {
+                format!("{}X1", ti.phys)
+            } else {
+                ti.phys.clone()
+            };
+            let tr = txn.table(&name).map_err(|e| match e {
                 onecd::Error::NotFound(_) => {
-                    Error::Inconsistent(format!("{}: the 1CD has no table {}", ti.logical, ti.phys))
+                    Error::Inconsistent(format!("{}: the 1CD has no table {name}", ti.logical))
                 }
                 other => other.into(),
             })?;
@@ -432,8 +438,8 @@ impl PhysMap {
                     .find(|(_, f)| same_name(&f.name, &c.name))
                     .ok_or_else(|| {
                         Error::Inconsistent(format!(
-                            "{}: the 1CD table {} has no column {}",
-                            ti.logical, ti.phys, c.name
+                            "{}: the 1CD table {name} has no column {}",
+                            ti.logical, c.name
                         ))
                     })?;
                 if colval::col_type_of(f) != Some(c.ty) {
@@ -460,7 +466,7 @@ impl PhysMap {
             positions.sort_unstable();
             let writable = positions.iter().copied().eq(0..d.fields.len());
             tables.push(PhysTable {
-                name: ti.phys.clone(),
+                name,
                 cols,
                 indexes,
                 key_index,
@@ -484,11 +490,21 @@ pub struct Store1cd {
 impl Store1cd {
     pub fn new(
         db: Arc<onecd::Database>,
-        mut map: Arc<StorageMap>,
+        map: Arc<StorageMap>,
         gate: Arc<WriterGate>,
         refusal: Option<String>,
     ) -> Result<Store1cd> {
-        let phys = Arc::new(PhysMap::build(&db, &map)?);
+        Store1cd::new_with_extension_tables(db, map, gate, refusal, &[])
+    }
+
+    pub fn new_with_extension_tables(
+        db: Arc<onecd::Database>,
+        mut map: Arc<StorageMap>,
+        gate: Arc<WriterGate>,
+        refusal: Option<String>,
+        extension: &[TableId],
+    ) -> Result<Store1cd> {
+        let phys = Arc::new(PhysMap::build(&db, &map, extension)?);
         for (n, p) in phys.tables.iter().enumerate() {
             for (k, name) in p.indexes.iter().enumerate() {
                 if name.is_none() {

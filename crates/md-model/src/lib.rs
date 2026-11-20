@@ -11,6 +11,7 @@
 
 mod codec_state;
 mod entries;
+pub mod external;
 pub mod forms;
 pub mod graph;
 #[doc(hidden)]

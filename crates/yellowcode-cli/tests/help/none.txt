@@ -26,6 +26,11 @@ Options:
           
           [default: 8.5.1.1529]
 
+      --progress <MODE>
+          Ход работы в stderr: auto — строка на терминале, always — строки для журнала, never — без него (по умолчанию переменная YELLOWCODE_PROGRESS, иначе auto)
+          
+          [possible values: auto, always, never]
+
   -h, --help
           Print help
 

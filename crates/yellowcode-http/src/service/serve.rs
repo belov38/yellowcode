@@ -37,9 +37,11 @@ pub struct Config {
     pub memory: super::memory::Settings,
     pub base: PathBuf,
     pub listen: SocketAddr,
+    pub schema_notes: bool,
 }
 
 pub fn run(args: Config, err: &mut dyn Write) -> yellowcode_core::Result<()> {
+    let schema_notes = args.schema_notes;
     let (process, listener) = yellowcode_server::QueryProcess::start(
         yellowcode_server::QueryConfig {
             platform_build: args.platform_build,
@@ -61,9 +63,7 @@ pub fn run(args: Config, err: &mut dyn Write) -> yellowcode_core::Result<()> {
         listener.local_addr()?
     )?;
     err.flush()?;
-    for note in &console.info().notes {
-        let _ = writeln!(err, "yellowcode: schema note: {note}");
-    }
+    yellowcode_core::service::schema_notes::write(err, &console.info().notes, schema_notes);
     let mut worker: Option<JoinHandle<()>> = None;
     loop {
         let (stream, _) = match listener.accept() {

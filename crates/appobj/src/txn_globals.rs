@@ -25,13 +25,13 @@ fn begin(ex: &mut Execution, args: &mut [Arg]) -> CallResult<Value> {
 
 fn commit(app: &Application, ex: &mut Execution) -> CallResult<Value> {
     let txn = txn_of(ex)?;
-    txn.commit(app).map_err(|e| e.call_error(ex))?;
+    crate::fo_version::commit(ex, app, &txn)?;
     Ok(Value::Undefined)
 }
 
 fn rollback(app: &Application, ex: &mut Execution) -> CallResult<Value> {
     let txn = txn_of(ex)?;
-    txn.rollback(app).map_err(|e| e.call_error(ex))?;
+    txn.rollback_by_script(app).map_err(|e| e.call_error(ex))?;
     Ok(Value::Undefined)
 }
 

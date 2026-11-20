@@ -362,11 +362,40 @@ impl Database {
     pub fn open_storage(storage: Arc<dyn Storage>, opts: OpenOptions) -> Result<Database> {
         Self::open_storage_owner(storage.into(), opts)
     }
+    pub fn open_storage_readonly_bounded(
+        storage: Arc<dyn Storage>,
+        opts: OpenOptions,
+    ) -> Result<Database> {
+        if opts.mode != Mode::ReadOnly || opts.memory_budget.is_none() {
+            return Err(Error::Io(io::ErrorKind::InvalidInput.into()));
+        }
+        Self::open_storage_owner_with_memory(
+            storage.into(),
+            opts,
+            crate::pager::versioned::OpenMemory::PreserveCaller,
+        )
+    }
     fn open_storage_owner(
         storage: crate::pager::storage::StorageOwner,
         opts: OpenOptions,
     ) -> Result<Database> {
-        let (pager, header) = Pager::open(storage, &opts)?;
+        Self::open_storage_owner_with_memory(
+            storage,
+            opts,
+            crate::pager::versioned::OpenMemory::PagerEvictor,
+        )
+    }
+    fn open_storage_owner_with_memory(
+        storage: crate::pager::storage::StorageOwner,
+        opts: OpenOptions,
+        policy: crate::pager::versioned::OpenMemory,
+    ) -> Result<Database> {
+        let (pager, header) = match policy {
+            crate::pager::versioned::OpenMemory::PagerEvictor => Pager::open(storage, &opts)?,
+            crate::pager::versioned::OpenMemory::PreserveCaller => {
+                Pager::open_with_memory(storage, &opts, policy)?
+            }
+        };
         if opts.mode == Mode::ReadWrite && header.format != Format::V838 {
             return Err(Error::Unsupported(Unsupported::WriteLegacyFormat));
         }

@@ -240,7 +240,10 @@ fn open_inner(
     progress("container")?;
     match detect(path)? {
         SourceKind::Cf => {
-            let cf = CfFile::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+            let cf = {
+                let _phase = memory_budget::profile::phase(memory_budget::profile::Phase::CfOpen);
+                CfFile::open(path).map_err(|e| format!("{}: {e}", path.display()))?
+            };
             progress("metadata")?;
             Configuration::load(&cf, opts).map_err(|e| format!("{}: {e}", path.display()).into())
         }
@@ -704,11 +707,18 @@ pub fn inspect(path: &Path, opts: &LoadOptions) -> Result<ConfigurationInspectio
 }
 
 fn open_infobase(path: &Path, opts: &LoadOptions) -> Result<Configuration> {
+    use memory_budget::profile::{Phase, phase};
     let mut o = OpenOptions::read_only();
     o.locking = Locking::None;
-    let ib = RawIb::open_with(path, o).map_err(|e| format!("{}: {e}", path.display()))?;
-    let src = infobase::config::ConfigSource::read(&ib, "CONFIG")
-        .map_err(|e| format!("{}: {e}", path.display()))?;
+    let ib = {
+        let _phase = phase(Phase::InfobaseOpen);
+        RawIb::open_with(path, o).map_err(|e| format!("{}: {e}", path.display()))?
+    };
+    let src = {
+        let _phase = phase(Phase::ConfigRead);
+        infobase::config::ConfigSource::read(&ib, "CONFIG")
+            .map_err(|e| format!("{}: {e}", path.display()))?
+    };
     if src.is_empty() {
         return Ok(Configuration::default());
     }
@@ -741,8 +751,15 @@ fn with_config_entries_inner<T>(
     consume: impl FnOnce(&dyn mdconf::EntrySource) -> Result<T>,
 ) -> Result<T> {
     let path = &resolve(path);
+    use memory_budget::profile::{Phase, phase};
     match detect(path)? {
-        SourceKind::Cf => consume(&CfFile::open(path)?),
+        SourceKind::Cf => {
+            let cf = {
+                let _phase = phase(Phase::CfOpen);
+                CfFile::open(path)?
+            };
+            consume(&cf)
+        }
         SourceKind::Dt => {
             let spool = match memory {
                 Some(memory) => dt::extract_with_memory(path, memory, &mut |_| Ok(()))?,
@@ -753,8 +770,15 @@ fn with_config_entries_inner<T>(
         SourceKind::Infobase => {
             let mut opts = OpenOptions::read_only();
             opts.locking = Locking::None;
-            let raw = RawIb::open_with(path, opts)?;
-            consume(&infobase::config::ConfigSource::read(&raw, "CONFIG")?)
+            let raw = {
+                let _phase = phase(Phase::InfobaseOpen);
+                RawIb::open_with(path, opts)?
+            };
+            let config = {
+                let _phase = phase(Phase::ConfigRead);
+                infobase::config::ConfigSource::read(&raw, "CONFIG")?
+            };
+            consume(&config)
         }
         SourceKind::XmlDir => Err("XML sources need stages C7/C8 (load_xml)".into()),
     }

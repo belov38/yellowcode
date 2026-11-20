@@ -10,7 +10,9 @@
 )]
 
 mod access_right;
+mod aggregates;
 pub mod app;
+mod bgjobs;
 mod changes;
 mod codes;
 mod commit_guard;
@@ -23,9 +25,12 @@ mod event_log;
 mod events;
 mod exchange_params;
 mod extensions;
+mod fo_version;
 mod functional_option;
 mod hierarchy;
+mod history;
 mod host;
+mod journal;
 mod kind_managers;
 pub mod locks;
 pub mod managers;
@@ -38,6 +43,7 @@ pub mod objects;
 mod objtab;
 mod picture_lib;
 mod platform_values;
+mod posting;
 mod predefined;
 pub mod present;
 mod queryhost;
@@ -48,12 +54,15 @@ mod readtab;
 mod recordset;
 mod regread;
 mod rights;
+mod sched;
 mod select;
 mod serial;
 pub mod session;
 mod session_info;
 mod settings_storage;
 mod style;
+#[doc(hidden)]
+pub mod totals;
 pub mod txn;
 mod txn_globals;
 pub mod types;
@@ -69,5 +78,7 @@ pub use app::*;
 pub use error::{AppError, Result};
 pub use queryhost::CallQueryProvider;
 pub use read_scope::{DataArea, ReadOnlyScope};
+#[doc(hidden)]
+pub use regread::QueryingMethod;
 pub use rights::{Right, RightTarget};
 pub use session::*;

@@ -158,6 +158,8 @@ impl RuntimeProcess {
             let catalog = open.catalog;
             let services = crate::service::ServiceTable::from_config(&open.config)?;
             let app = Application::open(open).map_err(|_| ProcessError::Open)?;
+            app.install_users(directory.cards(), directory.name_key())
+                .map_err(|_| ProcessError::Open)?;
             let mut registry = Registry::new(catalog);
             bsl_stdlib::register(&mut registry);
             app.register(&mut registry)

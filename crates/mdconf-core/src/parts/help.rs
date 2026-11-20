@@ -8,7 +8,7 @@ fn payload(n: &Node) -> R<Vec<u8>> {
     n.at(0).and_then(Node::base64).ok_or("malformed")
 }
 
-fn parse_help(t: &Node) -> R<Help> {
+pub(crate) fn parse_help(t: &Node) -> R<Help> {
     let l = t.as_list().ok_or("malformed")?;
     let n = l
         .get(1)

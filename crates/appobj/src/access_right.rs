@@ -4,7 +4,7 @@ use crate::model::{AppModel, Uuid16};
 use crate::rights::Right;
 use crate::session::{call_ctx, internal};
 use crate::session_info::outside_call;
-use crate::users::{UserValue, user_value};
+use crate::users::{UserValue, user_roles, user_value};
 use bsl_prim::fold_name;
 use bsl_vm::{Arg, CallResult, Execution, HostError, Registry, Value};
 use md_model::MdKind;
@@ -210,9 +210,42 @@ fn session_right(app: &Application, key: MdKey, right: &str) -> Option<bool> {
     if right == "Administration" || roles.is_empty() {
         return Some(true);
     }
+    roles_right(app, roles, key, right)
+}
+
+fn roles_right(app: &Application, roles: &[Uuid16], key: MdKey, right: &str) -> Option<bool> {
     let target = rights_target(app.model(), key)?;
     let right = Right(md_model::parts::Right::from_name(right)?);
     Some(app.rights.any_role(roles, target.as_ref(), right))
+}
+
+pub(crate) fn is_admin(app: &Application, user: &crate::SessionUser) -> bool {
+    let config = MdKey::Path(MdPath::Configuration);
+    let admin = if user.no_users {
+        session_right(app, config, "Administration")
+    } else {
+        roles_right(app, &user.roles, config, "Administration")
+    };
+    admin == Some(true)
+}
+
+enum Whom {
+    Session,
+    Role(Uuid16, Arc<Application>),
+    User(Vec<Uuid16>, Arc<Application>),
+}
+
+fn not_admin() -> HostError {
+    let mut e = HostError::text(
+        "Для выполнения операции необходимо наличие административных прав.",
+        "You need administrative rights to perform operation.",
+    );
+    e.categories = Some(bsl_vm::CategorySet::of(&[
+        bsl_vm::Category::AllErrors,
+        bsl_vm::Category::ScriptRuntimeError,
+        bsl_vm::Category::OtherError,
+    ]));
+    e
 }
 
 fn refused(what: &str) -> HostError {
@@ -223,23 +256,26 @@ fn given(args: &[Arg], i: usize) -> bool {
     matches!(args.get(i), Some(Arg::Val(_) | Arg::Place(_)))
 }
 
-fn third_parameter_refusal(who: &Value) -> Option<&'static str> {
+fn third_parameter(who: &Value) -> Result<Whom, &'static str> {
     match user_value(who) {
-        Some(UserValue::Anonymous) => None,
-        Some(UserValue::OfSessionWithUsers) => Some("пользователь сеанса с пользователями"),
-        Some(UserValue::Restored) => Some("пользователь из внутренней строки"),
-        Some(UserValue::Created) => Some("новый пользователь"),
-        None => {
-            let role = key_with_app(who).is_some_and(|(key, owner)| {
-                matches!(key, MdKey::Path(MdPath::Other(i))
-                    if owner.model().config.objects.get(i).is_some_and(|o| o.kind == MdKind::Role))
-            });
-            Some(if role {
-                "роль"
-            } else {
-                "пользователь или роль"
+        Some(UserValue::Anonymous) => Ok(Whom::Session),
+        Some(UserValue::OfSessionWithUsers) => user_roles(who)
+            .map(|(roles, owner)| Whom::User(roles, owner))
+            .ok_or("пользователь сеанса с пользователями"),
+        Some(UserValue::Restored) => Err("пользователь из внутренней строки"),
+        Some(UserValue::Created) => Err("новый пользователь"),
+        None => key_with_app(who)
+            .and_then(|(key, owner)| match key {
+                MdKey::Path(MdPath::Other(i)) => owner
+                    .model()
+                    .config
+                    .objects
+                    .get(i)
+                    .filter(|o| o.kind == MdKind::Role)
+                    .map(|o| Whom::Role(o.id, owner.clone())),
+                _ => None,
             })
-        }
+            .ok_or("пользователь или роль"),
     }
 }
 
@@ -264,22 +300,32 @@ fn kind_label(app: &Application, key: MdKey) -> String {
 }
 
 fn access_right(ex: &mut Execution, args: &mut [Arg]) -> CallResult<Value> {
-    if given(args, 2)
-        && let Some(what) = third_parameter_refusal(&arg_value(ex, args, 2)?)
-    {
-        return Err(refused(what).into());
-    }
+    let whom = if given(args, 2) {
+        third_parameter(&arg_value(ex, args, 2)?).map_err(refused)?
+    } else {
+        Whom::Session
+    };
+    let third = !matches!(whom, Whom::Session);
     if given(args, 3) {
         return Err(refused("стандартный реквизит").into());
     }
-    if !call_ctx(ex).ok_or_else(outside_call)?.sess.user().no_users {
-        return Err(refused("сеанс с пользователями").into());
+    let user = call_ctx(ex).ok_or_else(outside_call)?.sess.user().clone();
+    if ex.effective_flags().privileged && (!user.no_users || third) {
+        return Err(refused(if user.no_users {
+            "привилегированный режим с третьим параметром"
+        } else {
+            "привилегированный режим сеанса с пользователями"
+        })
+        .into());
     }
     let Value::String(name) = arg_value(ex, args, 0)? else {
         return Err(refused("право не строка").into());
     };
     let name = name.to_string_lossy();
     let Some(right) = known_right(&name) else {
+        if third {
+            return Err(refused(&format!("неизвестное право {name} с третьим параметром")).into());
+        }
         return Err(HostError::text(
             &format!("Указанное право не существует: {name}"),
             &format!("The right specified doesn't exist: {name}"),
@@ -298,9 +344,33 @@ fn access_right(ex: &mut Execution, args: &mut [Arg]) -> CallResult<Value> {
         ))
     };
     match (verdict, key) {
-        (Some(true), _) => session_right(owner, key, right)
-            .map(Value::Bool)
-            .ok_or_else(|| unknown().into()),
+        (Some(true), _) => {
+            let answer = match &whom {
+                Whom::Session if user.no_users => session_right(owner, key, right),
+                Whom::Session => roles_right(owner, &user.roles, key, right),
+                Whom::Role(role, of) => {
+                    if !Arc::ptr_eq(of, owner) {
+                        return Err(refused("роль другой конфигурации").into());
+                    }
+                    roles_right(owner, std::slice::from_ref(role), key, right)
+                }
+                Whom::User(roles, of) => {
+                    if !Arc::ptr_eq(of, owner) {
+                        return Err(refused("пользователь другой конфигурации").into());
+                    }
+                    if !is_admin(owner, &user) {
+                        return Err(not_admin().into());
+                    }
+                    roles_right(owner, roles, key, right)
+                }
+            };
+            answer.map(Value::Bool).ok_or_else(|| unknown().into())
+        }
+        (Some(false), _) if third => Err(refused(&format!(
+            "право {name} неприменимо к виду «{}» с третьим параметром",
+            kind_label(owner, key)
+        ))
+        .into()),
         (Some(false), MdKey::Path(path)) => {
             let cx = owner
                 .md_ctx()

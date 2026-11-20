@@ -86,6 +86,18 @@ export async function openConvert(path = null) {
   output.addEventListener("input", () => { rawOutput = null; update(); });
   layout.addEventListener("change", update);
   const stopPoll = () => { clearInterval(polling); polling = null; };
+  const reduced = list => {
+    if (!list.length) return null;
+    const gib = n => (n / 1073741824).toFixed(1);
+    return el("div", null,
+      el("p", null, el("strong", null, tr("Таблицы загружены без части индексов: ", "Tables loaded without some indexes: ") + list.length)),
+      el("p", null, tr("Индексы этих таблиц не помещаются в файловую базу. Чтение и запись в 1С работают, но отборы по снятым индексам идут просмотром всей таблицы и медленнее; полный набор индексов даёт только клиент-серверная база.",
+        "The indexes of these tables do not fit a file base. 1C reads and writes them, but filters on the dropped indexes scan the whole table and are slower; only a client-server base holds every index.")),
+      el("ul", null, list.map(t => el("li", null,
+        display(t.object ? t.object + " (" + t.table + ")" : t.table) + ", " + t.rows + tr(" строк, индексы ", " rows, indexes ") +
+        gib(t.estimateBytes) + tr(" ГиБ при пределе ", " GiB over the limit of ") + gib(t.capBytes) + tr(" ГиБ; сняты: ", " GiB; dropped: ") +
+        display(t.dropped.join(", "))))));
+  };
   const render = snapshot => {
     running = snapshot.state === "running";
     if (snapshot.targets?.length) {
@@ -101,7 +113,8 @@ export async function openConvert(path = null) {
       fill(status, el("strong", null, tr("Готово", "Done")), el("p", null, display(snapshot.output)),
         r.usersDropped ? el("p", null, tr("Не перенесено пользователей: ", "Users not transferred: ") + r.usersDropped) : null,
         (r.warnings || []).map(w => el("p", null, display(w.kind) + ": " + w.items)),
-        snapshot.progress ? el("p", null, display(snapshot.progress)) : null);
+        reduced(r.reducedIndexes || []),
+        snapshot.progress && !(r.reducedIndexes || []).length ? el("p", null, display(snapshot.progress)) : null);
       stopPoll();
     }
     update();

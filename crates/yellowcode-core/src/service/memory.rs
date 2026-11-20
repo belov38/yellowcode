@@ -198,6 +198,18 @@ pub fn process_root() -> Result<&'static MemoryBudget, BudgetError> {
     Ok(ROOT.get_or_init(|| candidate))
 }
 
+pub(crate) fn extension_info_budgets() -> Result<(MemoryBudget, MemoryBudget), BudgetError> {
+    let source = MemoryBudget::try_new(memory_budget::Limits::new(32 << 20))?;
+    let read_response = MemoryBudget::try_new(memory_budget::Limits::new(80 << 20))?;
+    Ok((source, read_response))
+}
+
+pub(crate) fn intercepts_budget(
+    limits: memory_budget::Limits,
+) -> Result<MemoryBudget, BudgetError> {
+    MemoryBudget::try_new(limits)
+}
+
 impl Context {
     pub fn new(raw: &Raw, observation: &Observation) -> crate::Result<Self> {
         let startup = numeric::resolve(

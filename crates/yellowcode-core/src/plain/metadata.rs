@@ -7,7 +7,7 @@ use crate::{
         tree::{self, TreeNode},
     },
 };
-use mdconf::{Configuration, LoadOptions};
+use mdconf::Configuration;
 use serde::Serialize;
 use serde_json::json;
 use std::{io::Write, path::PathBuf};
@@ -20,6 +20,23 @@ pub enum Format {
 }
 
 pub enum Command {
+    ExtensionInfo {
+        source: PathBuf,
+        format: Format,
+    },
+    ExtensionObjects {
+        source: PathBuf,
+        format: Format,
+    },
+    ExtensionModules {
+        source: PathBuf,
+        format: Format,
+        selection: Option<(String, String)>,
+    },
+    ExtensionIntercepts {
+        source: PathBuf,
+        format: Format,
+    },
     Tree {
         source: PathBuf,
         depth: Option<usize>,
@@ -37,6 +54,7 @@ pub enum Command {
 }
 
 #[derive(Clone, Serialize)]
+#[cfg_attr(test, derive(serde::Deserialize))]
 #[serde(rename_all = "camelCase")]
 struct Node {
     id: String,
@@ -67,7 +85,7 @@ fn uuid(target: &Target<'_>) -> Option<String> {
     )
 }
 
-fn project(cfg: &Configuration, node: &TreeNode, parent: &str) -> Node {
+fn project(paths: &path::Resolver<'_>, node: &TreeNode, parent: &str) -> Node {
     let icon = node.icon.as_deref().unwrap_or("group:Unknown");
     let (node_type, kind) = match icon.split_once(':') {
         Some((typ, kind)) => (typ, kind),
@@ -82,13 +100,17 @@ fn project(cfg: &Configuration, node: &TreeNode, parent: &str) -> Node {
     let uuid = if node.module.is_none() {
         node.path
             .as_deref()
-            .and_then(|p| path::resolve(cfg, p).ok())
+            .and_then(|p| paths.resolve(p).ok())
             .and_then(|t| uuid(&t))
     } else {
         None
     };
     Node {
-        children: node.children.iter().map(|c| project(cfg, c, &id)).collect(),
+        children: node
+            .children
+            .iter()
+            .map(|c| project(paths, c, &id))
+            .collect(),
         id,
         kind: kind.into(),
         node_type: node_type.into(),
@@ -173,6 +195,10 @@ fn text(node: &Node, depth: usize, out: &mut dyn Write) -> Result<()> {
     Ok(())
 }
 
+pub fn parse_entry_id(value: &str) -> std::result::Result<String, String> {
+    super::extension_modules::parse_entry_id(value)
+}
+
 pub fn run(command: Command, out: &mut dyn Write) -> Result<()> {
     run_with_memory_limit(command, None, out)
 }
@@ -181,8 +207,21 @@ pub fn run_with_memory_limit(
     limit: Option<String>,
     out: &mut dyn Write,
 ) -> Result<()> {
-    let memory = viewer::source::OpenMemory::resolve(limit)?;
     match command {
+        Command::ExtensionModules {
+            source,
+            format,
+            selection,
+        } => super::extension_modules::run(&source, format, selection, out)?,
+        Command::ExtensionIntercepts { source, format } => {
+            super::extension_modules::run_intercepts(&source, format, out)?
+        }
+        Command::ExtensionObjects { source, format } => {
+            super::extension_objects::run(&source, format, out)?
+        }
+        Command::ExtensionInfo { source, format } => {
+            super::extension_info::run(&source, format, out)?
+        }
         Command::Tree {
             source,
             depth,
@@ -192,95 +231,189 @@ pub fn run_with_memory_limit(
             flat,
             format,
         } => {
-            let cfg = viewer::source::open_with_memory(
-                &source,
-                &LoadOptions::default(),
-                &memory,
-                &mut |_| Ok(()),
-            )?;
-            let kinds = kind
-                .as_deref()
-                .map(|kinds| {
-                    kinds
-                        .split(',')
-                        .map(|kind| {
-                            viewer::names::kind_from_name(kind.trim())
-                                .ok_or_else(|| format!("unknown metadata kind: {kind}"))
-                        })
-                        .collect::<std::result::Result<Vec<_>, _>>()
-                })
-                .transpose()?
-                .unwrap_or_default();
-            let scope = Scope::resolve(
-                &cfg,
-                &ScopeArgs {
-                    subsystems,
-                    ..Default::default()
-                },
-            )?;
-            let mut root = project(&cfg, &tree::tree(&cfg, None, &kinds, Lang::Ru), "");
-            if !scope.is_all() {
-                prune_scope(&mut root, &scope);
-            }
-            if let Some(path) = path {
-                let target = path::resolve(&cfg, &path)?;
-                let id = uuid(&target).ok_or("metadata target has no UUID")?;
-                let selected =
-                    find(&root, &id).ok_or("metadata path excluded by kind or subsystem filter")?;
-                root = selected.clone();
-            }
-            if let Some(depth) = depth {
-                prune(&mut root, depth);
-            }
-            match format {
-                Format::Text => text(&root, 0, out)?,
-                Format::Json => {
-                    let value = if flat {
-                        let mut rows = Vec::new();
-                        flatten(&root, None, 0, &mut rows)?;
-                        json!({"schemaVersion": 1, "nodes": rows})
-                    } else {
-                        json!({"schemaVersion": 1, "root": root})
-                    };
-                    serde_json::to_writer_pretty(&mut *out, &value)?;
-                    writeln!(out)?;
+            let memory = viewer::source::OpenMemory::resolve(limit)?;
+            let cfg = match root_source(&source, depth, path.as_deref(), &subsystems) {
+                Some(kind) => {
+                    viewer::source::with_config_entries_with_memory(&source, &memory, |src| {
+                        root_alone(kind, src)
+                    })?
                 }
-            }
+                None => viewer::source::open_with_memory(
+                    &source,
+                    &super::load_options(super::Reads::Tree {
+                        depth,
+                        rooted: path.is_some(),
+                    }),
+                    &memory,
+                    &mut |_| Ok(()),
+                )?,
+            };
+            write_tree(
+                &cfg,
+                &TreeArgs {
+                    depth,
+                    path: path.as_deref(),
+                    kind: kind.as_deref(),
+                    subsystems,
+                    flat,
+                    format,
+                },
+                out,
+            )?;
         }
         Command::Show {
             source,
             object,
             format,
         } => {
+            let memory = viewer::source::OpenMemory::resolve(limit)?;
             let cfg = viewer::source::open_with_memory(
                 &source,
-                &LoadOptions::default(),
+                &super::load_options(super::Reads::Show),
                 &memory,
                 &mut |_| Ok(()),
             )?;
-            let target = path::resolve(&cfg, &object)?;
-            let root = project(&cfg, &tree::tree(&cfg, None, &[], Lang::Ru), "");
-            let id = uuid(&target).ok_or("metadata target has no UUID")?;
-            let selected = find(&root, &id).ok_or("metadata path absent from viewer tree")?;
-            let props = viewer::show::show(&cfg, &target, Lang::Ru);
-            match format {
-                Format::Json => {
-                    serde_json::to_writer_pretty(
-                        &mut *out,
-                        &json!({"schemaVersion": 1, "object": selected, "properties": props}),
-                    )?;
-                    writeln!(out)?;
-                }
-                Format::Text => {
-                    writeln!(
-                        out,
-                        "{}",
-                        selected.path.as_deref().unwrap_or(&selected.label)
-                    )?;
-                    for prop in props {
-                        writeln!(out, "{}: {}", prop.title, prop.text)?;
-                    }
-                }
+            write_show(&cfg, &object, format, out)?;
+        }
+    }
+    Ok(())
+}
+
+fn root_source(
+    source: &std::path::Path,
+    depth: Option<usize>,
+    path: Option<&str>,
+    subsystems: &[String],
+) -> Option<viewer::source::SourceKind> {
+    use viewer::source::SourceKind;
+    if depth != Some(0) || path.is_some() || !subsystems.is_empty() {
+        return None;
+    }
+    match viewer::source::detect(&viewer::source::resolve(source)) {
+        Ok(kind @ (SourceKind::Cf | SourceKind::Dt | SourceKind::Infobase)) => Some(kind),
+        _ => None,
+    }
+}
+
+fn root_alone(
+    kind: viewer::source::SourceKind,
+    src: &dyn mdconf::EntrySource,
+) -> Result<Configuration> {
+    if kind == viewer::source::SourceKind::Infobase && src.list()?.is_empty() {
+        return Ok(Configuration::default());
+    }
+    Ok(mdconf::root_facts::configuration_root(src)?)
+}
+
+struct TreeArgs<'a> {
+    depth: Option<usize>,
+    path: Option<&'a str>,
+    kind: Option<&'a str>,
+    subsystems: Vec<String>,
+    flat: bool,
+    format: Format,
+}
+
+fn write_tree(cfg: &Configuration, args: &TreeArgs<'_>, out: &mut dyn Write) -> Result<()> {
+    let &TreeArgs {
+        depth,
+        path,
+        kind,
+        flat,
+        format,
+        ..
+    } = args;
+    let kinds = kind
+        .map(|kinds| {
+            kinds
+                .split(',')
+                .map(|kind| {
+                    viewer::names::kind_from_name(kind.trim())
+                        .ok_or_else(|| format!("unknown metadata kind: {kind}"))
+                })
+                .collect::<std::result::Result<Vec<_>, _>>()
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let scope = Scope::resolve(
+        cfg,
+        &ScopeArgs {
+            subsystems: args.subsystems.clone(),
+            ..Default::default()
+        },
+    )?;
+    let built = depth
+        .filter(|_| path.is_none() && scope.is_all())
+        .map(|d| d.saturating_add(1));
+    let mut root = {
+        let _phase = memory_budget::profile::phase(memory_budget::profile::Phase::Tree);
+        project(
+            &path::Resolver::new(cfg),
+            &tree::tree(cfg, built, &kinds, Lang::Ru),
+            "",
+        )
+    };
+    if !scope.is_all() {
+        prune_scope(&mut root, &scope);
+    }
+    if let Some(path) = path {
+        let target = path::resolve(cfg, path)?;
+        let id = uuid(&target).ok_or("metadata target has no UUID")?;
+        let selected =
+            find(&root, &id).ok_or("metadata path excluded by kind or subsystem filter")?;
+        root = selected.clone();
+    }
+    if let Some(depth) = depth {
+        prune(&mut root, depth);
+    }
+    match format {
+        Format::Text => text(&root, 0, out)?,
+        Format::Json => {
+            let value = if flat {
+                let mut rows = Vec::new();
+                flatten(&root, None, 0, &mut rows)?;
+                json!({"schemaVersion": 1, "nodes": rows})
+            } else {
+                json!({"schemaVersion": 1, "root": root})
+            };
+            serde_json::to_writer_pretty(&mut *out, &value)?;
+            writeln!(out)?;
+        }
+    }
+    Ok(())
+}
+
+fn write_show(
+    cfg: &Configuration,
+    object: &str,
+    format: Format,
+    out: &mut dyn Write,
+) -> Result<()> {
+    let target = path::resolve(cfg, object)?;
+    let root = project(
+        &path::Resolver::new(cfg),
+        &tree::tree(cfg, None, &[], Lang::Ru),
+        "",
+    );
+    let id = uuid(&target).ok_or("metadata target has no UUID")?;
+    let selected = find(&root, &id).ok_or("metadata path absent from viewer tree")?;
+    let props = viewer::show::show(cfg, &target, Lang::Ru);
+    match format {
+        Format::Json => {
+            serde_json::to_writer_pretty(
+                &mut *out,
+                &json!({"schemaVersion": 1, "object": selected, "properties": props}),
+            )?;
+            writeln!(out)?;
+        }
+        Format::Text => {
+            writeln!(
+                out,
+                "{}",
+                selected.path.as_deref().unwrap_or(&selected.label)
+            )?;
+            for prop in props {
+                writeln!(out, "{}: {}", prop.title, prop.text)?;
             }
         }
     }

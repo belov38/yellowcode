@@ -409,6 +409,221 @@ fn partno_of(n: &Numeric, table: &str) -> Result<u64> {
     })
 }
 
+struct StorageColumns {
+    id: usize,
+    status: usize,
+    current: usize,
+    newgen: [Option<usize>; 2],
+}
+impl StorageColumns {
+    fn new(d: &onecd::TableDescr) -> Result<Self> {
+        let column = |name: &str| {
+            d.field(name)
+                .map(|(i, _)| i)
+                .ok_or_else(|| bad("SCHEMASTORAGE", &format!("missing column {name}")))
+        };
+        Ok(Self {
+            id: column("SCHEMAID")?,
+            status: column("STATUS")?,
+            current: column("CURRENTSCHEMA")?,
+            newgen: [
+                d.field("NEWGENCREATED").map(|(i, _)| i),
+                d.field("NEWGENDROPPED").map(|(i, _)| i),
+            ],
+        })
+    }
+}
+
+fn storage_number(value: Option<&Value>, name: &str) -> Result<u32> {
+    let Some(Value::Numeric(n)) = value else {
+        return Err(bad("SCHEMASTORAGE", &format!("{name} is not numeric")));
+    };
+    if n.scale() != 0 || n.is_negative() {
+        return Err(bad(
+            "SCHEMASTORAGE",
+            &format!("{name} is not an unsigned integer"),
+        ));
+    }
+    n.digits().iter().try_fold(0u32, |value, &digit| {
+        value
+            .checked_mul(10)
+            .and_then(|n| n.checked_add(u32::from(digit)))
+            .ok_or_else(|| bad("SCHEMASTORAGE", &format!("{name} exceeds u32")))
+    })
+}
+
+fn storage_len(value: Option<&Value>, name: &str, limit: u64) -> Result<usize> {
+    let len = match value {
+        Some(Value::Image(BlobVal::Data(bytes)) | Value::Text(BlobVal::Data(bytes))) => bytes.len(),
+        Some(Value::Image(BlobVal::Ref(r)) | Value::Text(BlobVal::Ref(r))) => r.len as usize,
+        _ => {
+            return Err(bad(
+                "SCHEMASTORAGE",
+                &format!("{name} is not image or text"),
+            ));
+        }
+    };
+    if len as u64 > limit {
+        return Err(bad(
+            "SCHEMASTORAGE",
+            &format!("{name} exceeds value byte limit"),
+        ));
+    }
+    Ok(len)
+}
+
+struct StorageRow {
+    id: u32,
+    status: u32,
+    current: usize,
+    newgen: [Option<usize>; 2],
+}
+
+const STORAGE_ROWS_SCANNED: usize = 64;
+const STORAGE_ROWS_LISTED: usize = 16;
+const STORAGE_STATUS: u32 = 100;
+
+#[derive(Default)]
+struct StorageRows {
+    rows: Vec<StorageRow>,
+    more: bool,
+}
+impl StorageRows {
+    fn admit(&mut self) -> bool {
+        if self.rows.len() == STORAGE_ROWS_SCANNED {
+            self.more = true;
+            return false;
+        }
+        true
+    }
+    fn observe(&mut self, columns: &StorageColumns, row: &[Value], limit: u64) -> Result<u32> {
+        let id = storage_number(row.get(columns.id), "SCHEMAID")?;
+        let status = storage_number(row.get(columns.status), "STATUS")?;
+        let current = storage_len(row.get(columns.current), "CURRENTSCHEMA", limit)?;
+        let mut newgen = [None, None];
+        for ((column, name), len) in columns
+            .newgen
+            .iter()
+            .zip(["NEWGENCREATED", "NEWGENDROPPED"])
+            .zip(&mut newgen)
+        {
+            if let Some(column) = column {
+                *len = Some(storage_len(row.get(*column), name, limit)?);
+            }
+        }
+        self.rows.push(StorageRow {
+            id,
+            status,
+            current,
+            newgen,
+        });
+        Ok(id)
+    }
+    fn finish(&self, columns: &StorageColumns) -> Result<bool> {
+        let has = |id: u32| self.rows.iter().any(|r| r.id == id);
+        if self.rows.is_empty() {
+            return Err(self.unsupported("no rows"));
+        }
+        if self.more || self.rows.len() > 2 {
+            return Err(self.unsupported("more than two rows"));
+        }
+        if self.rows.iter().any(|r| r.id > 1) {
+            return Err(self.unsupported("SCHEMAID other than 0 (main) and 1 (extensions)"));
+        }
+        if let [first, second] = self.rows.as_slice()
+            && first.id == second.id
+        {
+            return Err(self.unsupported("duplicate SCHEMAID"));
+        }
+        if !has(0) {
+            return Err(self.unsupported("no main row SCHEMAID 0"));
+        }
+        if self.rows.iter().any(|r| r.status != STORAGE_STATUS) {
+            return Err(self.unsupported("STATUS other than 100"));
+        }
+        if has(1) && columns.newgen.iter().any(Option::is_none) {
+            return Err(bad(
+                "SCHEMASTORAGE",
+                "extension storage requires both NEWGEN columns",
+            ));
+        }
+        Ok(has(1))
+    }
+    fn unsupported(&self, why: &str) -> Error {
+        use std::fmt::Write as _;
+        let count = if self.more {
+            format!("more than {STORAGE_ROWS_SCANNED} rows")
+        } else {
+            format!("{} rows", self.rows.len())
+        };
+        let mut text = format!("SCHEMASTORAGE layout ({why}); {count}");
+        for (n, r) in self.rows.iter().take(STORAGE_ROWS_LISTED).enumerate() {
+            let _ = write!(
+                text,
+                "{} SCHEMAID {} STATUS {} CURRENTSCHEMA {} B",
+                if n == 0 { ":" } else { ";" },
+                r.id,
+                r.status,
+                r.current
+            );
+            for (len, name) in r.newgen.iter().zip(["NEWGENCREATED", "NEWGENDROPPED"]) {
+                if let Some(len) = len {
+                    let _ = write!(text, " {name} {len} B");
+                }
+            }
+        }
+        if self.rows.len() > STORAGE_ROWS_LISTED {
+            let _ = write!(text, "; ...");
+        }
+        Error::Unsupported(text)
+    }
+}
+
+fn storage_scan(
+    t: &TableRead<'_>,
+    columns: &StorageColumns,
+    limit: u64,
+) -> Result<(Vec<Value>, Option<Vec<Value>>)> {
+    let mut shape = StorageRows::default();
+    let (mut main, mut extension) = (None, None);
+    for entry in t.scan() {
+        if !shape.admit() {
+            break;
+        }
+        let (_, row) = entry?;
+        match shape.observe(columns, &row, limit)? {
+            0 if main.is_none() => main = Some(row),
+            1 if extension.is_none() => extension = Some(row),
+            _ => {}
+        }
+    }
+    let has_extension = shape.finish(columns)?;
+    let main = main.ok_or_else(|| bad("SCHEMASTORAGE", "missing main SCHEMAID0"))?;
+    Ok((main, extension.filter(|_| has_extension)))
+}
+
+fn storage_bytes(t: &TableRead<'_>, value: Option<&Value>) -> Result<Vec<u8>> {
+    match value {
+        Some(Value::Image(BlobVal::Data(b)) | Value::Text(BlobVal::Data(b))) => Ok(b.clone()),
+        Some(Value::Image(BlobVal::Ref(r)) | Value::Text(BlobVal::Ref(r))) => Ok(t.blob_bytes(*r)?),
+        _ => Err(bad("SCHEMASTORAGE", "CURRENTSCHEMA is not image or text")),
+    }
+}
+
+pub(crate) fn extension_schema_in(txn: &ReadTxn) -> Result<Option<Vec<u8>>> {
+    let t = match txn.table("SCHEMASTORAGE") {
+        Ok(t) => t,
+        Err(onecd::Error::NotFound(onecd::NotFound::Table(_))) => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    let columns = StorageColumns::new(t.descr())?;
+    let limit = u64::try_from(SNAPSHOT_METADATA_BYTES).unwrap_or(u64::MAX);
+    storage_scan(&t, &columns, limit)?
+        .1
+        .map(|row| storage_bytes(&t, row.get(columns.current)))
+        .transpose()
+}
+
 impl RawIb {
     pub fn open(path: &Path) -> Result<RawIb> {
         RawIb::open_with(path, OpenOptions::read_only())
@@ -437,48 +652,35 @@ impl RawIb {
             Err(onecd::Error::NotFound(onecd::NotFound::Table(_))) => return Ok(None),
             Err(e) => return Err(e.into()),
         };
-        let d = t.descr();
-        let col = |n: &str| {
-            d.field(n)
-                .map(|(i, _)| i)
-                .ok_or_else(|| bad("SCHEMASTORAGE", &format!("no column {n}")))
-        };
-        let (c_id, c_st, c_cur) = (col("SCHEMAID")?, col("STATUS")?, col("CURRENTSCHEMA")?);
-        let mut rows = t.scan();
-        let row = rows
-            .next()
-            .ok_or_else(|| bad("SCHEMASTORAGE", "no rows, expected one"))??
-            .1;
-        if rows.next().transpose()?.is_some() {
-            return Err(bad("SCHEMASTORAGE", "more than one row"));
-        }
-        let small = |i: usize, what: &str| -> Result<u32> {
-            match row.get(i) {
-                Some(Value::Numeric(n)) => u32::try_from(partno_of(n, "SCHEMASTORAGE")?)
-                    .map_err(|_| bad("SCHEMASTORAGE", &format!("{what} is too large"))),
-                v => Err(bad(
-                    "SCHEMASTORAGE",
-                    &format!("{what} is {}", v.map_or("missing", value_kind)),
-                )),
-            }
-        };
-        let current = match row.get(c_cur) {
-            Some(Value::Image(BlobVal::Data(b)) | Value::Text(BlobVal::Data(b))) => b.clone(),
-            Some(Value::Image(BlobVal::Ref(r)) | Value::Text(BlobVal::Ref(r))) => {
-                t.blob_bytes(*r)?
-            }
-            v => {
-                return Err(bad(
-                    "SCHEMASTORAGE",
-                    &format!("CURRENTSCHEMA is {}", v.map_or("missing", value_kind)),
-                ));
-            }
-        };
+        let columns = StorageColumns::new(t.descr())?;
+        let (main, _) = storage_scan(&t, &columns, zraw::DEFAULT_LIMIT)?;
         Ok(Some(SchemaStorage {
-            schema_id: small(c_id, "SCHEMAID")?,
-            status: small(c_st, "STATUS")?,
-            current,
+            schema_id: 0,
+            status: storage_number(main.get(columns.status), "STATUS")?,
+            current: storage_bytes(&t, main.get(columns.current))?,
         }))
+    }
+
+    pub(crate) fn schema_storage_state(&self) -> Result<Option<(SchemaStorage, Option<Vec<u8>>)>> {
+        let txn = self.db.read();
+        let t = match txn.table("SCHEMASTORAGE") {
+            Ok(t) => t,
+            Err(onecd::Error::NotFound(onecd::NotFound::Table(_))) => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        let columns = StorageColumns::new(t.descr())?;
+        let (main, extension) = storage_scan(&t, &columns, zraw::DEFAULT_LIMIT)?;
+        let extension = extension
+            .map(|row| storage_bytes(&t, row.get(columns.current)))
+            .transpose()?;
+        Ok(Some((
+            SchemaStorage {
+                schema_id: 0,
+                status: storage_number(main.get(columns.status), "STATUS")?,
+                current: storage_bytes(&t, main.get(columns.current))?,
+            },
+            extension,
+        )))
     }
 
     pub fn has_table(&self, table: &str) -> bool {

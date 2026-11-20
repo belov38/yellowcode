@@ -289,7 +289,7 @@ pub(crate) fn accumulation(cx: &Ctx, names: &mut Names) -> Result<Vec<(Table, Ta
             t.rule_unless_prefix(cx, names, "ByDims{n}", false, &toks, Some(d))?;
         }
         out.push(t.finish());
-    } else {
+    } else if cx.obj.dimensions().any(|d| d.bool_or("UseInTotals", true)) {
         let mut t = table(cx, names, purpose::ACCUM_RG_TN, role::TURNOVERS)?;
         t.std(StdField::Period, fields::period());
         group(&mut t, cx, names, Group::DimsInTotals)?;
@@ -403,7 +403,12 @@ fn aggregates(
     o.rule(cx, names, "ByID", true, &[F(f::REG_ID)], None)?;
     out.push(o.finish());
 
-    for (i, d) in cx.obj.dimensions().enumerate() {
+    let mut dims = Vec::new();
+    for d in cx.obj.dimensions() {
+        dims.push((names.number(d.id, purpose::FLD)?, d));
+    }
+    dims.sort_by_key(|(n, _)| *n);
+    for (i, (_, d)) in dims.into_iter().enumerate() {
         let k = u32::try_from(i + 1).unwrap_or(u32::MAX);
         let mut t = table(
             cx,

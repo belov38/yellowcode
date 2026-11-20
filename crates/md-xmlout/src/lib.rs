@@ -55,7 +55,12 @@ mod managed_picture;
 pub use managed_picture::managed_picture_xml;
 
 mod managed_help;
-pub use managed_help::{managed_help_page, managed_help_xml};
+pub use managed_help::{
+    managed_external_help_page, managed_external_help_xml, managed_help_page, managed_help_xml,
+};
 
 mod managed_configdump;
 pub use managed_configdump::{ManagedDumpNames, managed_configdump_xml};
+
+#[doc(hidden)]
+pub use managed_objects::managed_object_child;

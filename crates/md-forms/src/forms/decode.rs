@@ -593,6 +593,12 @@ fn decode_in(
     if !layout.accepts_tail(tail_nodes.len()) {
         return None;
     }
+    if layout.strict
+        && super::upgrade::form::validate_tail(i64::from(layout.serialization.form), tail_nodes)
+            .is_err()
+    {
+        return None;
+    }
     form.body.extend(tail_nodes.iter().cloned());
     let module_text = t.get(2)?.text()?.to_string();
     strict_sections(layout, t)?;

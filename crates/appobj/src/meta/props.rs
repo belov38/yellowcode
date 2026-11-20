@@ -200,6 +200,22 @@ pub(crate) fn obj_get(
             _ => {}
         }
     }
+    if en == "MethodName"
+        && let MdPath::Other(i) = path
+        && model
+            .config
+            .objects
+            .get(i)
+            .is_some_and(|o| o.kind == MdKind::ScheduledJob)
+    {
+        return match prop_of(inf.props, en).map(|p| &p.value) {
+            Some(Mv::Text(t)) => t
+                .strip_prefix("CommonModule.")
+                .map(Value::from)
+                .ok_or_else(|| not_implemented(ru).into()),
+            _ => Err(not_implemented(ru).into()),
+        };
+    }
     if matches!(path, MdPath::Command(..)) && matches!(en, "Group" | "Shortcut" | "Picture") {
         return Err(not_implemented(ru).into());
     }

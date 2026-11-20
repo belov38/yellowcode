@@ -107,6 +107,7 @@ pub(crate) mod encode_xdtopackages;
     reason = "C7 partial XdtoType backend awaits reviewed diagnostic integration"
 )]
 pub(crate) mod encode_xdtotype;
+pub mod header;
 pub(crate) mod name_lookup;
 pub mod overlay;
 #[allow(

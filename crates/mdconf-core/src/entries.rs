@@ -86,6 +86,14 @@ pub trait EntrySource {
         check()?;
         Ok(list)
     }
+    fn list_prepaid_checked(
+        &self,
+        _budget: &memory_budget::MemoryBudget,
+        check: &dyn Fn() -> Result<()>,
+    ) -> Result<EntryList> {
+        check()?;
+        Err(bad("entry index", "prepaid listing unsupported by source"))
+    }
     fn stored_owned(&self, name: &str) -> Result<Option<StoredBytes>> {
         self.stored(name)
             .map(|value| value.map(EntryBacking::Native))
@@ -166,6 +174,13 @@ impl EntrySource for BudgetedEntries<'_> {
     }
     fn list_owned_checked(&self, check: &dyn Fn() -> Result<()>) -> Result<EntryList> {
         self.inner.list_owned_checked(check)
+    }
+    fn list_prepaid_checked(
+        &self,
+        budget: &memory_budget::MemoryBudget,
+        check: &dyn Fn() -> Result<()>,
+    ) -> Result<EntryList> {
+        self.inner.list_prepaid_checked(budget, check)
     }
     fn stored_owned_bounded(&self, name: &str, limit: usize) -> Result<Option<StoredBytes>> {
         self.inner.stored_owned_bounded(name, limit)
@@ -272,6 +287,20 @@ impl EntrySource for CfFile {
     fn list(&self) -> Result<Vec<EntryMeta>> {
         Ok(self.c.entries().iter().map(meta_of).collect())
     }
+    fn list_prepaid_checked(
+        &self,
+        budget: &memory_budget::MemoryBudget,
+        check: &dyn Fn() -> Result<()>,
+    ) -> Result<EntryList> {
+        prepaid_list(
+            self.c
+                .entries()
+                .iter()
+                .map(|e| (e.name.as_str(), e.ctime, e.mtime, e.attrs)),
+            budget,
+            check,
+        )
+    }
     fn stored(&self, name: &str) -> Result<Option<Vec<u8>>> {
         match self.c.find(name) {
             Some(e) => Ok(Some(self.c.read_data(e)?)),
@@ -300,6 +329,47 @@ fn meta_of(e: &v8cont::EntryInfo) -> EntryMeta {
         mtime: e.mtime,
         attrs: e.attrs,
     }
+}
+
+fn prepaid_list<'a>(
+    entries: impl Iterator<Item = (&'a str, v8cont::V8Time, v8cont::V8Time, u32)> + Clone,
+    budget: &memory_budget::MemoryBudget,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<EntryList> {
+    let mut count = 0usize;
+    let mut bytes = 0u64;
+    for (name, ..) in entries.clone() {
+        check()?;
+        count = count
+            .checked_add(1)
+            .ok_or_else(|| bad("entry index", "size overflow"))?;
+        bytes = bytes
+            .checked_add(name.len() as u64)
+            .and_then(|n| n.checked_add(std::mem::size_of::<EntryMeta>() as u64))
+            .ok_or_else(|| bad("entry index", "size overflow"))?;
+    }
+    let hold = budget
+        .try_reserve(memory_budget::Category::Metadata, bytes)
+        .map_err(Error::Memory)?;
+    check()?;
+    let allocation = |e| Error::Io(std::io::Error::new(std::io::ErrorKind::OutOfMemory, e));
+    let mut list = Vec::new();
+    list.try_reserve_exact(count).map_err(allocation)?;
+    for (name, ctime, mtime, attrs) in entries {
+        check()?;
+        let mut copy = String::new();
+        copy.try_reserve_exact(name.len()).map_err(allocation)?;
+        copy.push_str(name);
+        list.push(EntryMeta {
+            name: copy,
+            ctime,
+            mtime,
+            attrs,
+        });
+    }
+    memory_budget::Shared::try_new(list, hold)
+        .map(EntryBacking::Charged)
+        .map_err(|e| memory_error("entry index", e))
 }
 
 pub struct CfWriter {
@@ -397,6 +467,19 @@ impl MemEntries {
 impl EntrySource for MemEntries {
     fn list(&self) -> Result<Vec<EntryMeta>> {
         Ok(self.items.iter().map(|(m, _)| m.clone()).collect())
+    }
+    fn list_prepaid_checked(
+        &self,
+        budget: &memory_budget::MemoryBudget,
+        check: &dyn Fn() -> Result<()>,
+    ) -> Result<EntryList> {
+        prepaid_list(
+            self.items
+                .iter()
+                .map(|(e, _)| (e.name.as_str(), e.ctime, e.mtime, e.attrs)),
+            budget,
+            check,
+        )
     }
     fn stored(&self, name: &str) -> Result<Option<Vec<u8>>> {
         Ok(self

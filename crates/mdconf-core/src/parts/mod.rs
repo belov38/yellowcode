@@ -8,7 +8,9 @@ use std::sync::Arc;
 mod cmdi;
 pub(crate) mod configdump;
 mod configuration;
-mod help;
+#[path = "configuration/extension.rs"]
+pub mod extension_configuration;
+pub(crate) mod help;
 mod misc;
 mod pictures;
 mod predefined;

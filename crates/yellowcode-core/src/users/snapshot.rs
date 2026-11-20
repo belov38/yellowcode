@@ -208,10 +208,12 @@ pub(super) fn load(base: &Path) -> Result<UserWriteSnapshot, UserWriteError> {
     let tx = db.read();
     let facts = Facts::read(&tx)?;
     let source_refusal = super::mutation::admit_source(&tx).err();
-    let mut users = read_cards(&tx)
-        .map_err(|_| UserWriteError::UnsupportedLayout("user DATA or collection limit"))?;
-    resolve_roles(&mut users, &facts.cfg)
-        .map_err(|_| UserWriteError::UnsupportedLayout("public output limit"))?;
+    let mut users = read_cards(&tx).map_err(|e| {
+        UserWriteError::UnsupportedLayout(e.limit_text().unwrap_or("user DATA or collection limit"))
+    })?;
+    resolve_roles(&mut users, &facts.cfg).map_err(|e| {
+        UserWriteError::UnsupportedLayout(e.limit_text().unwrap_or("public output limit"))
+    })?;
     #[cfg(unix)]
     let after = {
         source.verify_path()?;

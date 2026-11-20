@@ -3,7 +3,10 @@ mod managed;
 mod managed_write;
 pub use managed_write::{write_doc_budgeted, write_node_budgeted};
 mod parse;
-pub use managed::{ManagedParseError, parse_bytes_budgeted, parse_doc_budgeted};
+pub use managed::{
+    LimitedParseError, ManagedParseError, ParseLimit, parse_bytes_budgeted,
+    parse_bytes_budgeted_limited, parse_doc_budgeted,
+};
 mod write;
 
 pub use base64::base64_atom;

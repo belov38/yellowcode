@@ -13,6 +13,22 @@ pub enum ReadError {
 }
 #[derive(Debug)]
 #[doc(hidden)]
+pub enum CheckedReadError {
+    Read(ReadError),
+    Cancelled,
+}
+impl From<ReadError> for CheckedReadError {
+    fn from(error: ReadError) -> Self {
+        Self::Read(error)
+    }
+}
+impl From<BudgetError> for CheckedReadError {
+    fn from(error: BudgetError) -> Self {
+        Self::Read(ReadError::Memory(error))
+    }
+}
+#[derive(Debug)]
+#[doc(hidden)]
 pub enum ErrorKind {
     Static(&'static str),
     Syntax(&'static str),
@@ -46,24 +62,28 @@ impl From<BudgetError> for ReadError {
         Self::Memory(value)
     }
 }
-fn error(offset: usize, kind: ErrorKind) -> ReadError {
-    ReadError::Semantic { offset, kind }
+fn error(offset: usize, kind: ErrorKind) -> CheckedReadError {
+    ReadError::Semantic { offset, kind }.into()
 }
-fn fixed(offset: usize, text: &'static str) -> ReadError {
+fn fixed(offset: usize, text: &'static str) -> CheckedReadError {
     error(offset, ErrorKind::Static(text))
 }
 fn space(b: u8) -> bool {
     matches!(b, b' ' | b'\t' | b'\r' | b'\n')
 }
-fn blank(s: &str) -> bool {
-    s.bytes().all(space)
-}
 fn span(start: usize, end: usize) -> Span {
     Span { start, end }
 }
-fn split(source: &str, name: Span) -> Result<(Option<Span>, Span), ReadError> {
+fn split(
+    source: &str,
+    name: Span,
+    control: Control<'_>,
+) -> Result<(Option<Span>, Span), CheckedReadError> {
     Ok(
-        match name.get(source).ok_or(BudgetError::Overflow)?.find(':') {
+        match control.find(
+            name.get(source).ok_or(BudgetError::Overflow)?.as_bytes(),
+            b":",
+        )? {
             Some(p) => (
                 Some(span(name.start, name.start + p)),
                 span(name.start + p + 1, name.end),
@@ -237,7 +257,71 @@ impl LegacyText {
             .native()
     }
 }
-fn byte(input: &[u8], at: usize) -> Result<u8, ReadError> {
+#[derive(Clone, Copy)]
+struct Control<'a>(Option<&'a dyn Fn() -> bool>);
+impl Control<'_> {
+    fn check(self) -> Result<(), CheckedReadError> {
+        if self.0.is_some_and(|cancelled| cancelled()) {
+            return Err(CheckedReadError::Cancelled);
+        }
+        Ok(())
+    }
+    fn at(self, at: usize) -> Result<(), CheckedReadError> {
+        if at.is_multiple_of(4096) {
+            self.check()?;
+        }
+        Ok(())
+    }
+    fn position(
+        self,
+        bytes: &[u8],
+        predicate: impl Fn(u8) -> bool,
+    ) -> Result<Option<usize>, CheckedReadError> {
+        self.check()?;
+        for (at, &byte) in bytes.iter().enumerate() {
+            self.at(at)?;
+            if predicate(byte) {
+                return Ok(Some(at));
+            }
+        }
+        Ok(None)
+    }
+    fn find(self, bytes: &[u8], needle: &[u8]) -> Result<Option<usize>, CheckedReadError> {
+        self.check()?;
+        for (at, candidate) in bytes.windows(needle.len()).enumerate() {
+            self.at(at)?;
+            if candidate == needle {
+                return Ok(Some(at));
+            }
+        }
+        Ok(None)
+    }
+    fn blank(self, value: &str) -> Result<bool, CheckedReadError> {
+        Ok(self.position(value.as_bytes(), |b| !space(b))?.is_none())
+    }
+    fn equal(self, a: &str, b: &str) -> Result<bool, CheckedReadError> {
+        self.check()?;
+        if a.len() != b.len() {
+            return Ok(false);
+        }
+        for (a, b) in a.as_bytes().chunks(4096).zip(b.as_bytes().chunks(4096)) {
+            self.check()?;
+            if a != b {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+    fn extend(self, output: &mut Vector<u8>, bytes: &[u8]) -> Result<(), CheckedReadError> {
+        for chunk in bytes.chunks(4096) {
+            self.check()?;
+            output.extend(chunk)?;
+        }
+        Ok(())
+    }
+}
+
+fn byte(input: &[u8], at: usize) -> Result<u8, CheckedReadError> {
     input
         .get(at)
         .copied()
@@ -246,7 +330,7 @@ fn byte(input: &[u8], at: usize) -> Result<u8, ReadError> {
 fn slice<I: std::slice::SliceIndex<str, Output = str>>(
     source: &str,
     range: I,
-) -> Result<&str, ReadError> {
+) -> Result<&str, CheckedReadError> {
     source
         .get(range)
         .ok_or_else(|| BudgetError::Overflow.into())
@@ -261,9 +345,12 @@ fn next_attr(
     end: usize,
     base: usize,
     off: usize,
-) -> Result<Option<RawAttr>, ReadError> {
+    control: Control<'_>,
+) -> Result<Option<RawAttr>, CheckedReadError> {
+    control.check()?;
     let b = source.as_bytes();
     while *cursor < end && space(byte(b, *cursor)?) {
+        control.at(*cursor)?;
         *cursor += 1;
     }
     if *cursor == end {
@@ -272,10 +359,12 @@ fn next_attr(
     let start = *cursor;
     *cursor += 1;
     while *cursor < end && !space(byte(b, *cursor)?) && byte(b, *cursor)? != b'=' {
+        control.at(*cursor)?;
         *cursor += 1;
     }
     let name = span(start, *cursor);
     while *cursor < end && space(byte(b, *cursor)?) {
+        control.at(*cursor)?;
         *cursor += 1;
     }
     if *cursor == end || byte(b, *cursor)? != b'=' {
@@ -290,6 +379,7 @@ fn next_attr(
     }
     *cursor += 1;
     while *cursor < end && space(byte(b, *cursor)?) {
+        control.at(*cursor)?;
         *cursor += 1;
     }
     if *cursor == end {
@@ -316,6 +406,7 @@ fn next_attr(
     *cursor += 1;
     let value_start = *cursor;
     while *cursor < end && byte(b, *cursor)? != quote {
+        control.at(*cursor)?;
         *cursor += 1;
     }
     if *cursor == end {
@@ -332,7 +423,7 @@ fn next_attr(
     *cursor += 1;
     Ok(Some(RawAttr { name, value }))
 }
-fn declaration(source: &str, name: Span) -> Result<Option<Option<Span>>, ReadError> {
+fn declaration(source: &str, name: Span) -> Result<Option<Option<Span>>, CheckedReadError> {
     let name_str = name.get(source).ok_or(BudgetError::Overflow)?;
     Ok(if name_str == "xmlns" {
         Some(None)
@@ -343,31 +434,43 @@ fn declaration(source: &str, name: Span) -> Result<Option<Option<Span>>, ReadErr
     })
 }
 impl XmlArena<'_> {
-    fn store(&mut self, value: Owned<String>) -> Result<Text, ReadError> {
+    fn store(&mut self, value: Owned<String>) -> Result<Text, CheckedReadError> {
         let id = self.pool.len();
         self.pool.push(Some(value))?;
         Ok(Text::Pool(id))
     }
-    fn discard(&mut self, value: Text) -> Result<(), ReadError> {
+    fn discard(&mut self, value: Text) -> Result<(), CheckedReadError> {
         if let Text::Pool(id) = value {
             drop(self.pool.get_mut(id).ok_or(BudgetError::Overflow)?.take());
         }
         Ok(())
     }
-    fn decode(&mut self, raw: Span, a: Allocation<'_>, off: usize) -> Result<Text, ReadError> {
+    fn decode(
+        &mut self,
+        raw: Span,
+        a: Allocation<'_>,
+        off: usize,
+        control: Control<'_>,
+    ) -> Result<Text, CheckedReadError> {
         let text = raw.get(self.source()?).ok_or(BudgetError::Overflow)?;
-        if !text.contains('&') {
+        if control.find(text.as_bytes(), b"&")?.is_none() {
             return Ok(Text::Source(raw));
         }
         let mut out = a.vector(text.len())?;
         let mut at = 0;
-        while let Some(found) = slice(text, at..)?.find('&') {
+        while let Some(found) = control.find(slice(text, at..)?.as_bytes(), b"&")? {
             let start = at + found;
-            out.extend(slice(text, at..start)?.as_bytes())?;
-            let Some(end) = slice(text, start + 1..)?.find(';').map(|p| start + 1 + p) else {
+            control.extend(&mut out, slice(text, at..start)?.as_bytes())?;
+            let Some(end) = control
+                .find(slice(text, start + 1..)?.as_bytes(), b";")?
+                .map(|p| start + 1 + p)
+            else {
                 return Err(error(off, ErrorKind::UnterminatedEntity(start, text.len())));
             };
-            if slice(text, start + 1..end)?.contains('&') {
+            if control
+                .find(slice(text, start + 1..end)?.as_bytes(), b"&")?
+                .is_some()
+            {
                 return Err(error(off, ErrorKind::UnterminatedEntity(start, text.len())));
             }
             let name = slice(text, start + 1..end)?;
@@ -385,7 +488,13 @@ impl XmlArena<'_> {
                     if digits.starts_with(['+', '-']) {
                         return Err(error(off, ErrorKind::CharSign));
                     }
-                    let n = u32::from_str_radix(digits, radix)
+                    let first = control.position(digits.as_bytes(), |b| b != b'0')?;
+                    let bounded = match first {
+                        Some(at) => slice(digits, at.saturating_sub(1)..)?,
+                        None if !digits.is_empty() => "0",
+                        None => digits,
+                    };
+                    let n = u32::from_str_radix(bounded, radix)
                         .map_err(|e| error(off, ErrorKind::CharNumber(e)))?;
                     if n == 0 {
                         return Err(error(off, ErrorKind::CharZero));
@@ -408,8 +517,10 @@ impl XmlArena<'_> {
             out.extend(decoded.as_bytes())?;
             at = end + 1;
         }
-        out.extend(slice(text, at..)?.as_bytes())?;
+        control.extend(&mut out, slice(text, at..)?.as_bytes())?;
+        control.check()?;
         let owned = out.finish().map(String::from_utf8).try_string()?;
+        control.check()?;
         self.store(owned)
     }
     fn resolve(
@@ -418,7 +529,8 @@ impl XmlArena<'_> {
         prefix: Option<Span>,
         attribute: bool,
         off: usize,
-    ) -> Result<Option<Text>, ReadError> {
+        control: Control<'_>,
+    ) -> Result<Option<Text>, CheckedReadError> {
         if attribute && prefix.is_none() {
             return Ok(None);
         }
@@ -439,6 +551,7 @@ impl XmlArena<'_> {
         }
         let mut at = Some(node);
         while let Some(id) = at {
+            control.check()?;
             let n = self.nodes.get(id.0).ok_or(BudgetError::Overflow)?;
             for d in self
                 .decls
@@ -447,12 +560,18 @@ impl XmlArena<'_> {
                 .iter()
                 .rev()
             {
-                if d.prefix
+                control.check()?;
+                let declared = d
+                    .prefix
                     .map(|s| s.get(self.source()?).ok_or(BudgetError::Overflow))
                     .transpose()?
-                    .filter(|s| !s.is_empty())
-                    == p
-                {
+                    .filter(|s| !s.is_empty());
+                let equal = match (declared, p) {
+                    (Some(a), Some(b)) => control.equal(a, b)?,
+                    (None, None) => true,
+                    _ => false,
+                };
+                if equal {
                     return if d.raw.start == d.raw.end {
                         if let Some(p) = prefix {
                             Err(error(off, ErrorKind::UnknownPrefix(p)))
@@ -460,7 +579,11 @@ impl XmlArena<'_> {
                             Ok(None)
                         }
                     } else {
-                        Ok(Some(Text::Source(d.raw)))
+                        Ok(Some(if control.0.is_some() {
+                            d.value
+                        } else {
+                            Text::Source(d.raw)
+                        }))
                     };
                 }
             }
@@ -477,9 +600,10 @@ impl XmlArena<'_> {
         text: Text,
         a: Allocation<'_>,
         off: usize,
-    ) -> Result<(), ReadError> {
+        control: Control<'_>,
+    ) -> Result<(), CheckedReadError> {
         let Some(id) = stack.last().copied() else {
-            return if blank(self.text(text)?) {
+            return if control.blank(self.text(text)?)? {
                 self.discard(text)?;
                 Ok(())
             } else {
@@ -488,7 +612,18 @@ impl XmlArena<'_> {
         };
         let old = self.nodes.get(id.0).ok_or(BudgetError::Overflow)?.text;
         let next = if let Some(old) = old {
-            let combined = a.text(&[self.text(old)?, self.text(text)?])?;
+            let first = self.text(old)?;
+            let second = self.text(text)?;
+            let size = first
+                .len()
+                .checked_add(second.len())
+                .ok_or(BudgetError::Overflow)?;
+            let mut bytes = a.vector(size)?;
+            control.extend(&mut bytes, first.as_bytes())?;
+            control.extend(&mut bytes, second.as_bytes())?;
+            control.check()?;
+            let combined = bytes.finish().map(String::from_utf8).try_string()?;
+            control.check()?;
             let combined = self.store(combined)?;
             self.discard(old)?;
             self.discard(text)?;
@@ -499,7 +634,12 @@ impl XmlArena<'_> {
         self.nodes.get_mut(id.0).ok_or(BudgetError::Overflow)?.text = Some(next);
         Ok(())
     }
-    fn close(&mut self, id: NodeId, off: usize) -> Result<(), ReadError> {
+    fn close(
+        &mut self,
+        id: NodeId,
+        off: usize,
+        control: Control<'_>,
+    ) -> Result<(), CheckedReadError> {
         if self
             .nodes
             .get(id.0)
@@ -508,7 +648,7 @@ impl XmlArena<'_> {
             .is_some()
             && let Some(text) = self.nodes.get(id.0).ok_or(BudgetError::Overflow)?.text
         {
-            if !blank(self.text(text)?) {
+            if !control.blank(self.text(text)?)? {
                 return Err(error(
                     off,
                     ErrorKind::Mixed(self.nodes.get(id.0).ok_or(BudgetError::Overflow)?.local),
@@ -521,10 +661,12 @@ impl XmlArena<'_> {
     }
 }
 #[doc(hidden)]
-pub fn parse_owned_arena(
+fn parse_owned_control(
     input: Owned<Vec<u8>>,
     a: Allocation<'_>,
-) -> Result<XmlArena<'static>, ReadError> {
+    control: Control<'_>,
+) -> Result<XmlArena<'static>, CheckedReadError> {
+    control.check()?;
     let compatible = match (&input, a) {
         (Owned::Native(_), Allocation::Native) => true,
         (Owned::Managed(value), Allocation::Managed(budget)) => {
@@ -549,8 +691,10 @@ pub fn parse_owned_arena(
         pool,
         root,
         native,
-    } = parse_arena(&input, a)?;
+    } = parse_control(&input, a, control)?;
+    control.check()?;
     let value = input.map(String::from_utf8).try_string()?;
+    control.check()?;
     Ok(XmlArena {
         source: Source::Owned {
             value,
@@ -566,13 +710,16 @@ pub fn parse_owned_arena(
 }
 
 #[doc(hidden)]
-pub fn parse_arena<'src>(
+fn parse_control<'src>(
     input: &'src [u8],
     a: Allocation<'_>,
-) -> Result<XmlArena<'src>, ReadError> {
+    control: Control<'_>,
+) -> Result<XmlArena<'src>, CheckedReadError> {
+    control.check()?;
     let input = input.strip_prefix(b"\xef\xbb\xbf").unwrap_or(input);
     let source =
         std::str::from_utf8(input).map_err(|e| error(e.valid_up_to(), ErrorKind::Utf8(e)))?;
+    control.check()?;
     let mut arena = XmlArena {
         source: Source::Borrowed(source),
         nodes: a.vector(0)?,
@@ -590,18 +737,16 @@ pub fn parse_arena<'src>(
         0
     };
     let event_origin = at;
-    let events: Result<(), ReadError> = (|| {
+    let events: Result<(), CheckedReadError> = (|| {
         while at < input.len() {
+            control.check()?;
             if byte(input, at)? != b'<' {
                 let start = at;
-                at = input
-                    .get(at..)
-                    .ok_or(BudgetError::Overflow)?
-                    .iter()
-                    .position(|&b| b == b'<')
+                at = control
+                    .find(input.get(at..).ok_or(BudgetError::Overflow)?, b"<")?
                     .map_or(input.len(), |p| at + p);
-                let value = arena.decode(span(start, at), a, at)?;
-                arena.add_text(&stack, value, a, at)?;
+                let value = arena.decode(span(start, at), a, at, control)?;
+                arena.add_text(&stack, value, a, at, control)?;
                 continue;
             }
             let start = at;
@@ -610,11 +755,12 @@ pub fn parse_arena<'src>(
                 .ok_or(BudgetError::Overflow)?
                 .starts_with(b"<!-")
             {
-                let Some(p) = input
-                    .get((at + 4).min(input.len())..)
-                    .ok_or(BudgetError::Overflow)?
-                    .windows(3)
-                    .position(|bytes| bytes == b"-->")
+                let Some(p) = control.find(
+                    input
+                        .get((at + 4).min(input.len())..)
+                        .ok_or(BudgetError::Overflow)?,
+                    b"-->",
+                )?
                 else {
                     return Err(error(
                         input.len(),
@@ -644,8 +790,11 @@ pub fn parse_arena<'src>(
                 .starts_with(b"<![")
             {
                 let begin = (at + 9).min(input.len());
-                let Some(p) = slice(source, (at + 3).min(input.len())..)?
-                    .find("]]>")
+                let Some(p) = control
+                    .find(
+                        slice(source, (at + 3).min(input.len())..)?.as_bytes(),
+                        b"]]>",
+                    )?
                     .map(|p| at + 3 + p)
                 else {
                     return Err(error(
@@ -664,7 +813,7 @@ pub fn parse_arena<'src>(
                         ErrorKind::Syntax("CDATA not closed: `]]>` not found before end of input"),
                     ));
                 }
-                arena.add_text(&stack, Text::Source(span(begin, p)), a, at)?;
+                arena.add_text(&stack, Text::Source(span(begin, p)), a, at, control)?;
                 continue;
             }
             if input
@@ -672,7 +821,7 @@ pub fn parse_arena<'src>(
                 .ok_or(BudgetError::Overflow)?
                 .starts_with(b"<?")
             {
-                let Some(p) = slice(source, at + 1..)?.find("?>") else {
+                let Some(p) = control.find(slice(source, at + 1..)?.as_bytes(), b"?>")? else {
                     return Err(error(
                         input.len(),
                         ErrorKind::Syntax(
@@ -704,6 +853,7 @@ pub fn parse_arena<'src>(
                 let begin = (start + 9).min(input.len());
                 let mut balance = 0usize;
                 while at < input.len() {
+                    control.at(at)?;
                     match byte(input, at)? {
                         b'<' => balance = balance.checked_add(1).ok_or(BudgetError::Overflow)?,
                         b'>' if balance == 0 => break,
@@ -729,7 +879,7 @@ pub fn parse_arena<'src>(
                         ErrorKind::Syntax("DOCTYPE not closed: `>` not found before end of input"),
                     ));
                 }
-                if blank(slice(source, begin..at)?) {
+                if control.blank(slice(source, begin..at)?)? {
                     return Err(fixed(
                         at + 1,
                         "ill-formed document: `<!DOCTYPE>` declaration does not contain a name of a document type",
@@ -757,6 +907,7 @@ pub fn parse_arena<'src>(
             let begin = at;
             let mut quote = None;
             while at < input.len() {
+                control.at(at)?;
                 let b = byte(input, at)?;
                 if let Some(q) = quote {
                     if b == q {
@@ -780,6 +931,7 @@ pub fn parse_arena<'src>(
             if closing {
                 let mut name_end = end;
                 while name_end > begin && space(byte(input, name_end - 1)?) {
+                    control.at(name_end)?;
                     name_end -= 1;
                 }
                 if name_end == begin {
@@ -789,15 +941,16 @@ pub fn parse_arena<'src>(
                 let Some(id) = stack.pop() else {
                     return Err(error(at, ErrorKind::Unmatched(name)));
                 };
-                if arena
-                    .nodes
-                    .get(id.0)
-                    .ok_or(BudgetError::Overflow)?
-                    .name
-                    .get(source)
-                    .ok_or(BudgetError::Overflow)?
-                    != name.get(source).ok_or(BudgetError::Overflow)?
-                {
+                if !control.equal(
+                    arena
+                        .nodes
+                        .get(id.0)
+                        .ok_or(BudgetError::Overflow)?
+                        .name
+                        .get(source)
+                        .ok_or(BudgetError::Overflow)?,
+                    name.get(source).ok_or(BudgetError::Overflow)?,
+                )? {
                     return Err(error(
                         at,
                         ErrorKind::Mismatch(
@@ -806,7 +959,7 @@ pub fn parse_arena<'src>(
                         ),
                     ));
                 }
-                arena.close(id, at)?;
+                arena.close(id, at, control)?;
                 if stack.is_empty() {
                     root = Some(id);
                 }
@@ -814,11 +967,14 @@ pub fn parse_arena<'src>(
             }
             let empty = end > begin && byte(input, end - 1)? == b'/';
             let attrs_end = end - usize::from(empty);
-            let name_end = (begin..attrs_end)
-                .find(|&i| input.get(i).is_some_and(|&b| space(b)))
-                .unwrap_or(attrs_end);
+            let name_end = control
+                .position(
+                    input.get(begin..attrs_end).ok_or(BudgetError::Overflow)?,
+                    space,
+                )?
+                .map_or(attrs_end, |at| begin + at);
             let name = span(begin, name_end);
-            let (prefix, local) = split(source, name)?;
+            let (prefix, local) = split(source, name, control)?;
             if root.is_some() {
                 return Err(fixed(at, "content after the root element"));
             }
@@ -830,13 +986,18 @@ pub fn parse_arena<'src>(
             let decl_start = arena.decls.len();
             let mut cursor = name_end;
             loop {
-                let raw = match next_attr(source, &mut cursor, attrs_end, base, at) {
+                let raw = match next_attr(source, &mut cursor, attrs_end, base, at, control) {
                     Ok(Some(raw)) => raw,
-                    Ok(None) | Err(ReadError::Semantic { .. }) => break,
-                    Err(memory @ ReadError::Memory(_)) => return Err(memory),
+                    Ok(None) | Err(CheckedReadError::Read(ReadError::Semantic { .. })) => break,
+                    Err(failure) => return Err(failure),
                 };
                 if let Some(p) = declaration(source, raw.name)? {
-                    let value = raw.value.get(source).ok_or(BudgetError::Overflow)?;
+                    let decoded = if control.0.is_some() {
+                        arena.decode(raw.value, a, at, control)?
+                    } else {
+                        Text::Source(raw.value)
+                    };
+                    let value = arena.text(decoded)?;
                     let pstr = p
                         .map(|p| p.get(source).ok_or(BudgetError::Overflow))
                         .transpose()?;
@@ -853,7 +1014,7 @@ pub fn parse_arena<'src>(
                     arena.decls.push(Declaration {
                         prefix: p,
                         raw: raw.value,
-                        value: Text::Source(raw.value),
+                        value: decoded,
                     })?;
                 }
             }
@@ -870,13 +1031,15 @@ pub fn parse_arena<'src>(
                 decls: decl_start..arena.decls.len(),
                 text: None,
             })?;
-            let ns = arena.resolve(id, prefix, false, at)?;
+            let ns = arena.resolve(id, prefix, false, at, control)?;
             arena.nodes.get_mut(id.0).ok_or(BudgetError::Overflow)?.ns = ns;
             let mut cursor = name_end;
             let mut decl_at = decl_start;
             loop {
+                control.check()?;
                 let mut key_start = cursor;
                 while key_start < attrs_end && space(byte(input, key_start)?) {
+                    control.at(key_start)?;
                     key_start += 1;
                 }
                 if key_start == attrs_end {
@@ -887,19 +1050,24 @@ pub fn parse_arena<'src>(
                     && !space(byte(input, key_end)?)
                     && byte(input, key_end)? != b'='
                 {
+                    control.at(key_end)?;
                     key_end += 1;
                 }
                 let mut eq = key_end;
                 while eq < attrs_end && space(byte(input, eq)?) {
+                    control.at(eq)?;
                     eq += 1;
                 }
                 if eq < attrs_end && byte(input, eq)? == b'=' {
                     let key = span(key_start, key_end);
                     let mut previous = name_end;
-                    while let Some(old) = next_attr(source, &mut previous, key_start, base, at)? {
-                        if old.name.get(source).ok_or(BudgetError::Overflow)?
-                            == key.get(source).ok_or(BudgetError::Overflow)?
-                        {
+                    while let Some(old) =
+                        next_attr(source, &mut previous, key_start, base, at, control)?
+                    {
+                        if control.equal(
+                            old.name.get(source).ok_or(BudgetError::Overflow)?,
+                            key.get(source).ok_or(BudgetError::Overflow)?,
+                        )? {
                             return Err(error(
                                 at,
                                 ErrorKind::Attr {
@@ -911,11 +1079,17 @@ pub fn parse_arena<'src>(
                         }
                     }
                 }
-                let Some(raw) = next_attr(source, &mut cursor, attrs_end, base, at)? else {
+                let Some(raw) = next_attr(source, &mut cursor, attrs_end, base, at, control)?
+                else {
                     break;
                 };
-                let value = arena.decode(raw.value, a, at)?;
-                if declaration(source, raw.name)?.is_some() {
+                let is_declaration = declaration(source, raw.name)?.is_some();
+                let value = if is_declaration && control.0.is_some() {
+                    arena.decls.get(decl_at).ok_or(BudgetError::Overflow)?.value
+                } else {
+                    arena.decode(raw.value, a, at, control)?
+                };
+                if is_declaration {
                     arena
                         .decls
                         .get_mut(decl_at)
@@ -923,8 +1097,8 @@ pub fn parse_arena<'src>(
                         .value = value;
                     decl_at += 1;
                 } else {
-                    let (prefix, local) = split(source, raw.name)?;
-                    let ns = arena.resolve(id, prefix, true, at)?;
+                    let (prefix, local) = split(source, raw.name, control)?;
+                    let ns = arena.resolve(id, prefix, true, at, control)?;
                     arena.attrs.push(Attr {
                         local,
                         prefix,
@@ -952,7 +1126,7 @@ pub fn parse_arena<'src>(
                 arena.nodes.get_mut(p.0).ok_or(BudgetError::Overflow)?.last = Some(id);
             }
             if empty {
-                arena.close(id, at)?;
+                arena.close(id, at, control)?;
                 if parent.is_none() {
                     root = Some(id);
                 }
@@ -963,18 +1137,59 @@ pub fn parse_arena<'src>(
         Ok(())
     })();
     events.map_err(|failure| match failure {
-        ReadError::Semantic { offset, kind } => match offset.checked_sub(event_origin) {
-            Some(offset) => ReadError::Semantic { offset, kind },
-            None => BudgetError::Overflow.into(),
-        },
+        CheckedReadError::Read(ReadError::Semantic { offset, kind }) => {
+            match offset.checked_sub(event_origin) {
+                Some(offset) => ReadError::Semantic { offset, kind }.into(),
+                None => BudgetError::Overflow.into(),
+            }
+        }
         memory => memory,
     })?;
     if !stack.is_empty() {
         return Err(fixed(input.len(), "unclosed element"));
     }
+    control.check()?;
     arena.root = root.ok_or_else(|| fixed(input.len(), "no root element"))?;
     Ok(arena)
 }
+
+fn legacy_result<T>(result: Result<T, CheckedReadError>) -> Result<T, ReadError> {
+    result.map_err(|failure| match failure {
+        CheckedReadError::Read(error) => error,
+        CheckedReadError::Cancelled => ReadError::Memory(BudgetError::Overflow),
+    })
+}
+#[doc(hidden)]
+pub fn parse_arena<'src>(
+    input: &'src [u8],
+    allocation: Allocation<'_>,
+) -> Result<XmlArena<'src>, ReadError> {
+    legacy_result(parse_control(input, allocation, Control(None)))
+}
+#[doc(hidden)]
+pub fn parse_owned_arena(
+    input: Owned<Vec<u8>>,
+    allocation: Allocation<'_>,
+) -> Result<XmlArena<'static>, ReadError> {
+    legacy_result(parse_owned_control(input, allocation, Control(None)))
+}
+#[doc(hidden)]
+pub fn parse_arena_checked<'src>(
+    input: &'src [u8],
+    allocation: Allocation<'_>,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<XmlArena<'src>, CheckedReadError> {
+    parse_control(input, allocation, Control(Some(cancelled)))
+}
+#[doc(hidden)]
+pub fn parse_owned_arena_checked(
+    input: Owned<Vec<u8>>,
+    allocation: Allocation<'_>,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<XmlArena<'static>, CheckedReadError> {
+    parse_owned_control(input, allocation, Control(Some(cancelled)))
+}
+
 fn prefix_span(name: Span) -> Span {
     span(name.start + 6, name.end)
 }

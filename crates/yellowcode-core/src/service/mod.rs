@@ -5,4 +5,5 @@ pub mod memory;
 pub mod memory_diagnostic;
 pub mod query;
 pub mod query_output;
+pub mod schema_notes;
 pub mod table;

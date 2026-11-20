@@ -373,6 +373,12 @@ pub(crate) struct ValueIndex {
     pub unstored: std::collections::HashSet<QTableId>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DataSeparator {
+    pub id: Guid,
+    pub name: String,
+}
+
 pub struct QuerySchema {
     version: u64,
     script: ScriptVariant,
@@ -389,6 +395,7 @@ pub struct QuerySchema {
     meta: HashMap<QTableId, ObjMeta>,
     diagnostics: Vec<String>,
     schedules: HashMap<QTableId, schedule::Facts>,
+    data_separators: Vec<DataSeparator>,
 }
 
 static EMPTY_TABLE: QTable = QTable {
@@ -755,6 +762,14 @@ impl QuerySchema {
         &self.diagnostics
     }
 
+    pub fn data_separators(&self) -> &[DataSeparator] {
+        &self.data_separators
+    }
+
+    pub fn is_data_separator(&self, md: Guid) -> bool {
+        self.data_separators.iter().any(|s| s.id == md)
+    }
+
     pub(crate) fn meta(&self, t: QTableId) -> Option<&ObjMeta> {
         self.meta.get(&t)
     }
@@ -778,6 +793,14 @@ fn build_core<'cfg, P: accounting_flags::Proof<'cfg>>(
 ) -> Result<QuerySchema, P::Error> {
     let mut b = Builder::new(cfg, cat);
     let commons = objects::build(&mut b)?;
+    b.data_separators = commons
+        .iter()
+        .filter(|c| c.separator)
+        .map(|c| DataSeparator {
+            id: c.id,
+            name: c.name.clone(),
+        })
+        .collect();
     registers::build(&mut b, &commons, proof)?;
     misc::build(&mut b, &commons)?;
     qr8::build(&mut b);
@@ -798,6 +821,7 @@ pub(crate) struct Builder<'a> {
     pub sys_enums: SysEnums,
     pub values: ValueIndex,
     pub diagnostics: Vec<String>,
+    data_separators: Vec<DataSeparator>,
 }
 
 impl<'a> Builder<'a> {
@@ -818,6 +842,7 @@ impl<'a> Builder<'a> {
             sys_enums: SysEnums::new(cat),
             values: ValueIndex::default(),
             diagnostics,
+            data_separators: Vec::new(),
         }
     }
 
@@ -915,6 +940,7 @@ impl<'a> Builder<'a> {
             values: self.values,
             meta: self.meta,
             diagnostics: self.diagnostics,
+            data_separators: self.data_separators,
         })
     }
 }

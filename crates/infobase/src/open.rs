@@ -176,6 +176,59 @@ fn schema_error(error: ibschema::Error) -> Error {
     }
 }
 
+fn extension_schema_error(error: ibschema::Error, len: usize) -> Error {
+    match error {
+        ibschema::Error::Memory(e) => Error::Memory(e),
+        other => Error::Unsupported(format!(
+            "SCHEMASTORAGE: the extension schema (SCHEMAID 1, {len} bytes) does not parse: {other}"
+        )),
+    }
+}
+
+fn extension_moved_tables(
+    map: &StorageMap,
+    main: &LogicalSchema,
+    extension: &LogicalSchema,
+) -> Result<Vec<TableId>> {
+    use ibschema::logical::Table;
+    fn check(logical: &str, main: &Table, extension: &Table) -> Result<()> {
+        for f in &main.fields {
+            match extension.field(&f.name) {
+                Some(e) if e.types == f.types && e.nullable == f.nullable => {}
+                _ => {
+                    return Err(Error::Inconsistent(format!(
+                        "{logical}: field {} of the main schema is missing or differs in the extension schema \
+                         (SCHEMASTORAGE SCHEMAID 1)",
+                        f.name
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+    let mut moved = Vec::new();
+    let mut push = |logical: &str, main: &Table, extension: &Table| -> Result<()> {
+        check(logical, main, extension)?;
+        let id = map.table_by_name(logical).ok_or_else(|| {
+            Error::Inconsistent(format!("{logical}: in DBSCHEMA but not in the storage map"))
+        })?;
+        moved.push(id);
+        Ok(())
+    };
+    for et in &extension.tables {
+        let Some(mt) = main.tables.iter().find(|t| t.name == et.name) else {
+            continue;
+        };
+        push(&et.name, mt, et)?;
+        for en in &et.nested {
+            if let Some(mn) = mt.nested.iter().find(|n| n.name == en.name) {
+                push(&format!("{}.{}", et.name, en.name), mn, en)?;
+            }
+        }
+    }
+    Ok(moved)
+}
+
 fn load_config_metered(
     txn: &onecd::ReadTxn,
     budget: &memory_budget::MemoryBudget,
@@ -293,17 +346,28 @@ impl Infobase {
         let schema_text = raw.dbschema_text()?;
         let schema = Arc::new(LogicalSchema::from_text(&schema_text)?);
         let mut warnings = Vec::new();
-        match raw.schema_storage()? {
+        let mut extension_schema = None;
+        match raw.schema_storage_state()? {
             None => warnings.push(Warning::NoSchemaStorage),
-            Some(s) if s.current != schema_text => {
+            Some((s, _)) if s.current != schema_text => {
                 return Err(Error::Inconsistent(
                     "SCHEMASTORAGE.CURRENTSCHEMA differs from DBSCHEMA".into(),
                 ));
             }
-            Some(_) => {}
+            Some((_, Some(text))) => {
+                extension_schema = Some(
+                    LogicalSchema::from_text(&text)
+                        .map_err(|e| extension_schema_error(e, text.len()))?,
+                );
+            }
+            Some((_, None)) => {}
+        }
+        let extension_storage = extension_schema.is_some();
+        if extension_storage {
+            warnings.push(Warning::Extensions);
         }
 
-        let mut write_refusal = None;
+        let mut write_refusal = extension_storage.then(|| "extensions".to_string());
         let mut pinned = Vec::new();
         let mut closed = Vec::new();
         let kept_schema = MaybeCharged::Legacy(Arc::clone(&schema));
@@ -350,7 +414,8 @@ impl Infobase {
                     }
                     if !diff.is_empty() {
                         if !pinned_open {
-                            write_refusal = Some("schema differs from the rules".to_string());
+                            write_refusal
+                                .get_or_insert_with(|| "schema differs from the rules".to_string());
                         }
                         warnings.push(Warning::SchemaMismatch(diff));
                     }
@@ -404,7 +469,9 @@ impl Infobase {
                 )));
             }
             if raw.has_rows(&t.phys)? {
-                warnings.push(Warning::Extensions);
+                if !extension_storage {
+                    warnings.push(Warning::Extensions);
+                }
                 write_refusal.get_or_insert_with(|| "extensions".to_string());
             }
         }
@@ -430,12 +497,17 @@ impl Infobase {
             return Err(Error::Unsupported(format!("{why}: read only")));
         }
         let gate = WriterGate::new();
+        let moved = match &extension_schema {
+            Some(extension) => extension_moved_tables(&map, map.schema(), extension)?,
+            None => Vec::new(),
+        };
         let store = Arc::new(
-            Store1cd::new(
+            Store1cd::new_with_extension_tables(
                 Arc::clone(raw.db_arc()),
                 Arc::new(map),
                 Arc::clone(&gate),
                 write_refusal.clone(),
+                &moved,
             )?
             .refusing_writes(&closed, PINNED_WHY),
         );
@@ -468,7 +540,8 @@ impl Infobase {
         use crate::config::metered::model;
         use crate::raw::managed::{
             dbnames_text_in_budgeted, dbschema_text_in_budgeted, folder_file_data_in_budgeted,
-            has_rows_in_budgeted, schema_storage_current_in_budgeted,
+            has_rows_in_budgeted, schema_storage_extension_in_budgeted,
+            schema_storage_main_in_budgeted,
         };
         let evictor: std::sync::Weak<dyn memory_budget::Evictor + Send> =
             Arc::<Database>::downgrade(&db);
@@ -493,18 +566,34 @@ impl Infobase {
             .map(Arc::new);
         probe("open:schema_storage");
         let mut warnings = Vec::new();
-        match schema_storage_current_in_budgeted(&txn, &budget, METADATA_VALUE_LIMIT)? {
+        let mut extension_storage = false;
+        match schema_storage_main_in_budgeted(&txn, &budget, METADATA_VALUE_LIMIT)? {
             None => warnings.push(Warning::NoSchemaStorage),
-            Some(current) if current.as_slice() != schema_text.as_slice() => {
+            Some((current, _)) if current.as_slice() != schema_text.as_slice() => {
                 return Err(Error::Inconsistent(
                     "SCHEMASTORAGE.CURRENTSCHEMA differs from DBSCHEMA".into(),
                 ));
             }
-            Some(_) => {}
+            Some((_, extensions)) => extension_storage = extensions,
         }
         drop(schema_text);
+        let extension_schema = if extension_storage {
+            let text = schema_storage_extension_in_budgeted(&txn, &budget, METADATA_VALUE_LIMIT)?
+                .ok_or(Error::InconsistentStatic(
+                "SCHEMASTORAGE: the extension row disappeared",
+            ))?;
+            Some(
+                LogicalSchema::from_text_budgeted(&text, &budget)
+                    .map_err(|e| extension_schema_error(e, text.len()))?,
+            )
+        } else {
+            None
+        };
+        if extension_storage {
+            warnings.push(Warning::Extensions);
+        }
 
-        let mut write_refusal = None;
+        let mut write_refusal = extension_storage.then(|| "extensions".to_string());
         let plain_map = |grow: &dyn Fn(u64, bool) -> Result<()>| -> Result<StorageMap> {
             grow(model::PER_MAP_BYTE.saturating_mul(schema_len), true)?;
             Ok(StorageMap::from_schema(Arc::clone(&schema))?)
@@ -559,7 +648,8 @@ impl Infobase {
                         return Err(Error::SchemaMismatch(diff));
                     };
                     if !diff.is_empty() {
-                        write_refusal = Some("schema differs from the rules".to_string());
+                        write_refusal
+                            .get_or_insert_with(|| "schema differs from the rules".to_string());
                         warnings.push(Warning::SchemaMismatch(diff));
                     }
                     if !built.skipped.is_empty() {
@@ -609,7 +699,9 @@ impl Infobase {
                 )));
             }
             if has_rows_in_budgeted(&txn, &t.phys, &budget)? {
-                warnings.push(Warning::Extensions);
+                if !extension_storage {
+                    warnings.push(Warning::Extensions);
+                }
                 write_refusal.get_or_insert_with(|| "extensions".to_string());
             }
         }
@@ -622,11 +714,17 @@ impl Infobase {
         let readers = model::PER_STORE_TABLE.saturating_mul(map.tables().len() as u64);
         grow(readers, false)?;
         let gate = WriterGate::new();
-        let store = Arc::new(Store1cd::new(
+        let moved = match &extension_schema {
+            Some(extension) => extension_moved_tables(&map, map.schema(), extension)?,
+            None => Vec::new(),
+        };
+        drop(extension_schema);
+        let store = Arc::new(Store1cd::new_with_extension_tables(
             Arc::clone(&db),
             Arc::new(map),
             Arc::clone(&gate),
             write_refusal.clone(),
+            &moved,
         )?);
         let map = Arc::clone(store.map());
         lease.shrink(readers).map_err(memory)?;

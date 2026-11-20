@@ -20,13 +20,27 @@ fn chain(messages: impl IntoIterator<Item = String>) -> HostError {
     let mut out = None;
     let items: Vec<_> = messages.into_iter().collect();
     for message in items.into_iter().rev() {
-        let mut e = HostError::text(&message, &message);
+        let mut e = link(&message);
         if let Some(c) = out {
             e = e.caused_by(Cause::Host(Box::new(c)));
         }
         out = Some(e);
     }
-    out.unwrap_or_else(|| HostError::text("Ошибка выполнения запроса", "Query execution error"))
+    out.unwrap_or_else(|| {
+        let mut e = HostError::text(QUERY_EXECUTION_ERROR[0], QUERY_EXECUTION_ERROR[1]);
+        e.categories = Some(CategorySet::of(&[Category::OtherError]));
+        e
+    })
+}
+
+const QUERY_EXECUTION_ERROR: [&str; 2] = ["Ошибка выполнения запроса", "Query execution error"];
+
+fn link(message: &str) -> HostError {
+    let mut e = HostError::text(message, message);
+    if QUERY_EXECUTION_ERROR.contains(&message) {
+        e.categories = Some(CategorySet::of(&[Category::OtherError]));
+    }
+    e
 }
 fn query_text_error(text: &str) -> HostError {
     let mut e = HostError::text(text, text);
@@ -40,7 +54,24 @@ pub(crate) fn host_error(e: query_ir::HostError) -> HostError {
         messages.push(e.message);
         next = e.cause;
     }
+    if messages.len() > 1 && messages.last().is_some_and(|m| is_poisoned_transaction(m)) {
+        let last = messages.pop().unwrap_or_default();
+        let mut out = HostError::text(&last, &last);
+        out.categories = Some(CategorySet::of(&[Category::OtherError]));
+        for message in messages.into_iter().rev() {
+            out = link(&message).caused_by(Cause::Host(Box::new(out)));
+        }
+        return out;
+    }
     chain(messages)
+}
+
+pub(crate) fn is_poisoned_transaction(text: &str) -> bool {
+    matches!(
+        text,
+        "В данной транзакции уже происходили ошибки!"
+            | "Errors occurred earlier in this transaction!"
+    )
 }
 pub(crate) fn batch_error(ex: &Execution, text: &str, e: BatchError) -> CallError {
     let lang = match ex.lang() {

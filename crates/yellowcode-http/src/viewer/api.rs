@@ -37,7 +37,7 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 
 pub fn handle(state: &State, req: &Request) -> Option<Response> {
     let r = match req.path.as_str() {
-        "/api/info" => info(state),
+        "/api/info" => info(state, req),
         p if p == "/api/users" || p.starts_with("/api/users/") => super::users::handle(state, req),
         "/api/tree" => tree_children(state, req),
         "/api/show" => show(state, req),
@@ -94,7 +94,23 @@ struct Info<'a> {
     icons_v: &'static str,
 }
 
-fn info(state: &State) -> Response {
+#[derive(serde::Serialize)]
+struct ExtensionsAvailability {
+    extensions_unavailable: Option<yellowcode_core::viewer::extensions::Code>,
+}
+
+fn info(state: &State, req: &Request) -> Response {
+    if req.query.iter().any(|(key, _)| key == "extensions") {
+        if req.query.len() != 1 || param(req, "extensions") != Some("1") {
+            return error(400, "extensions: expected exactly extensions=1");
+        }
+        return reply(
+            200,
+            &ExtensionsAvailability {
+                extensions_unavailable: yellowcode_core::viewer::extensions::admission_error(state),
+            },
+        );
+    }
     let text = |name| {
         state
             .cfg

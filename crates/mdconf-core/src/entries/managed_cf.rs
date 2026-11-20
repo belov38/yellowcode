@@ -81,6 +81,20 @@ impl EntrySource for ManagedCfFile<'_> {
             })
             .collect())
     }
+    fn list_prepaid_checked(
+        &self,
+        budget: &MemoryBudget,
+        check: &dyn Fn() -> Result<()>,
+    ) -> Result<super::EntryList> {
+        super::prepaid_list(
+            self.container
+                .entries()
+                .iter()
+                .map(|e| (e.name.as_str(), e.ctime, e.mtime, e.attrs)),
+            budget,
+            check,
+        )
+    }
     fn stored(&self, name: &str) -> Result<Option<Vec<u8>>> {
         Err(bad(name, "a managed .cf reads charged entries only"))
     }

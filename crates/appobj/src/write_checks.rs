@@ -309,3 +309,17 @@ pub(crate) fn check_predefined_name(
     )
     .into())
 }
+
+pub(crate) fn check_document_date(ex: &mut Execution, ctx: &WriteCtx<'_>) -> CallResult<()> {
+    let inst = ctx.inst;
+    let def = inst.app.model().obj(inst.obj);
+    let Some(i) = def.fields.iter().position(|f| f.std == Some(StdAttr::Date)) else {
+        return Ok(());
+    };
+    if let Value::Date(d) = inst.attr(ex, i)?
+        && d == bsl_prim::BslDate::EMPTY
+    {
+        return Err(other_error(field_message(keys::DOC_DATE_EMPTY, &[], StdAttr::Date)).into());
+    }
+    Ok(())
+}

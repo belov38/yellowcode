@@ -1,8 +1,7 @@
 use super::chart::{self, TEMPLATE_DECLARED};
 use super::read::{R as F, Read, ReadError};
 use super::scalar::Text;
-use super::values::{GraphError, R, is};
-use crate::Configuration;
+use super::values::{GraphError, is};
 use crate::templates::mxlxml::{self, DrawingHook, Unsupported, Writer, bool_s, split_cell_with};
 use crate::templates::{allocation::Allocation, tree};
 use crate::templates::{allocation::Owned, context::Lookup};
@@ -119,32 +118,11 @@ fn chart_drawing(w: &mut Writer<'_>, tag: &str, dr: &[Node], zorder: Option<usiz
     Ok(())
 }
 
-pub(crate) fn sheet_xml(cfg: &Configuration, data: &[u8]) -> R<Vec<u8>> {
-    sheet_xml_with(cfg, data, Allocation::Native)
-        .map_err(ReadError::legacy)?
-        .native()
-        .map_err(|error| GraphError(error.to_string()))
-}
-pub(crate) fn sheet_xml_with(
-    cfg: &dyn Lookup,
-    data: &[u8],
-    allocation: Allocation<'_>,
-) -> F<Owned<Vec<u8>>> {
-    let read = Read::new(allocation);
-    let source = tree::MoxelSource::read(data, allocation)
-        .map_err(|error| mxlxml::source_error(error, read))?;
-    let view = source
-        .view()
-        .map_err(|error| mxlxml::source_error(error, read))?;
-    Writer::construct(cfg, view, read)?
-        .with_hook(&ChartHook)
-        .run_with()
-}
-
 pub(crate) fn template_xml_with(
     cfg: &dyn Lookup,
     data: &[u8],
     allocation: Allocation<'_>,
+    row_coverage: mxlxml::RowCoverage,
 ) -> F<Owned<Vec<u8>>> {
     let read = Read::new(allocation);
     let source = tree::MoxelSource::read(data, allocation)
@@ -152,12 +130,16 @@ pub(crate) fn template_xml_with(
     let view = source
         .view()
         .map_err(|error| mxlxml::source_error(error, read))?;
-    match Writer::construct(cfg, view, read).and_then(Writer::run_with) {
+    match Writer::construct(cfg, view, read)
+        .map(|writer| writer.with_row_coverage(row_coverage))
+        .and_then(Writer::run_with)
+    {
         Err(ReadError::Semantic { .. }) => {
             let view = source
                 .view()
                 .map_err(|error| mxlxml::source_error(error, read))?;
             Writer::construct(cfg, view, read)?
+                .with_row_coverage(row_coverage)
                 .with_hook(&ChartHook)
                 .run_with()
         }

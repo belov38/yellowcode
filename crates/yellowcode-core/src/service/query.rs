@@ -38,6 +38,7 @@ pub struct Request {
     pub format: Option<Format>,
     pub timeout: Duration,
     pub max_rows: usize,
+    pub schema_notes: bool,
 }
 
 impl Request {
@@ -233,9 +234,7 @@ fn run_with_memory(
     }
     let console = memory.open(&args.base)?;
     super::control::trim_heap();
-    for note in &console.info().notes {
-        let _ = writeln!(err, "yellowcode: schema note: {note}");
-    }
+    super::schema_notes::write(err, &console.info().notes, args.schema_notes);
     let req = text.try_zip(params)?.map(|(text, params)| RunRequest {
         text,
         params,

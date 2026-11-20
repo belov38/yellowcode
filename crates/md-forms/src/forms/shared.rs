@@ -54,7 +54,7 @@ pub struct LegacyShared {
     common_attributes: Vec<Guid>,
     constants: Vec<Guid>,
     by_name: HashMap<String, Vec<Node>>,
-    std: &'static [KindStdAttrs],
+    std: std::borrow::Cow<'static, [KindStdAttrs]>,
     props: HashMap<String, HashMap<String, usize>>,
 }
 
@@ -182,11 +182,28 @@ impl Shared {
             v85,
             compat,
             TableOwner::Embedded(v85, compat),
-            mdschema::forms::std_attrs()?,
+            mdschema::forms::std_attrs()?.into(),
             names_order,
             child_patterns,
             |id| facts.name(id),
         )))
+    }
+    pub(crate) fn from_owned_resolution(
+        tables: Arc<FormTables>,
+        std: Vec<KindStdAttrs>,
+        names_order: Vec<Guid>,
+        child_patterns: HashMap<Guid, Node>,
+        facts: &dyn super::FormSettingsLookup,
+    ) -> Self {
+        Self::Legacy(LegacyShared::with_tables(
+            false,
+            FormCompat::Base,
+            TableOwner::Native(tables),
+            std.into(),
+            names_order,
+            child_patterns,
+            |id| facts.name(id),
+        ))
     }
     pub fn v85(&self) -> bool {
         match self {
@@ -243,6 +260,18 @@ impl Shared {
             .learned
             .get(context)
             .map_or(StringsRef::Native(&[]), |c| c.order)
+    }
+    pub(crate) fn order_for(&self, context: &str, external: bool) -> StringsRef<'_> {
+        if external
+            && let Some(order) = self
+                .tables()
+                .learned
+                .get(context)
+                .and_then(|c| c.external_order)
+        {
+            return order;
+        }
+        self.order(context)
     }
     pub(crate) fn prop(&self, context: &str, property: &str) -> Option<PropRef<'_>> {
         match self {
@@ -544,7 +573,7 @@ impl LegacyShared {
             v85,
             FormCompat::Base,
             tables,
-            std,
+            std.into(),
             names_order,
             child_patterns,
             |id| names.get(id).map(String::as_str),
@@ -555,7 +584,7 @@ impl LegacyShared {
         v85: bool,
         compat: FormCompat,
         tables: TableOwner,
-        std: &'static [KindStdAttrs],
+        std: std::borrow::Cow<'static, [KindStdAttrs]>,
         names_order: Vec<Guid>,
         child_patterns: HashMap<Guid, Node>,
         name: impl Fn(&Guid) -> Option<&'n str>,
@@ -614,7 +643,7 @@ impl LegacyShared {
                 _ => {}
             }
         }
-        for (_, m) in std {
+        for (_, m) in sh.std.iter() {
             for (k, nm) in m {
                 let c = Node::list(vec![Node::atom(k.clone())]);
                 let v = sh.by_name.entry(nm.clone()).or_default();
@@ -625,4 +654,32 @@ impl LegacyShared {
         }
         sh
     }
+}
+
+#[doc(hidden)]
+pub fn external(
+    context: &LoadCtx<'_>,
+    tree: &Node,
+    document: &md_model::external::ExternalDocument,
+) -> Result<Shared> {
+    let mut walk = Walk::default();
+    walk.name(document.object.id);
+    if let Some(spec) =
+        crate::objects::overlay::kind(context.schema, document.kind.base_kind().as_str())
+    {
+        walk.children(tree, &spec.children);
+    }
+    for form in &document.object.forms {
+        walk.name(form.id);
+    }
+    for template in &document.object.templates {
+        walk.name(template.id);
+    }
+    Shared::from_resolution(
+        false,
+        form_compat(document.compat.unwrap_or(0), false),
+        walk.order,
+        walk.child_patterns,
+        document,
+    )
 }

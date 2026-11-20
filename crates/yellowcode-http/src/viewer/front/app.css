@@ -811,3 +811,23 @@ html.desktop-mac #statusbar, html.desktop-mac #tabbar { padding-inline: var(--de
 .convert-body progress { width: 100%; }
 .convert-actions { display: flex; justify-content: flex-end; gap: 8px; }
 .convert-actions button { padding: 5px 12px; }
+
+.extensions-nav { padding: 4px 8px; border-bottom: 1px solid var(--cfg-border-control); }
+.extensions-nav button { width: 100%; text-align: start; }
+.extensions-view { height: 100%; overflow: auto; padding: 8px; box-sizing: border-box; }
+.extensions-columns { display: grid; grid-template-columns: minmax(160px, 1fr) minmax(240px, 2fr); gap: 12px; }
+.extensions-list { display: flex; flex-direction: column; gap: 2px; overflow-wrap: anywhere; }
+.extensions-list button { text-align: start; white-space: pre-wrap; overflow-wrap: anywhere; }
+.extensions-list button[aria-selected="true"] { background: var(--cfg-selection-hot); color: var(--cfg-text); }
+.extensions-properties { min-width: 0; }
+.extensions-properties h2 { font-size: 1em; margin-top: 0; }
+.extensions-fields { display: grid; grid-template-columns: minmax(110px, 1fr) minmax(100px, 2fr); gap: 6px 12px; }
+.extensions-fields dt { font-weight: 600; }
+.extensions-fields dd { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+@media (max-width: 700px) { .extensions-columns { grid-template-columns: 1fr; } }
+
+.extensions-content { margin-top: 12px; }
+.extensions-content table { width: 100%; margin-top: 8px; border-collapse: collapse; table-layout: fixed; }
+.extensions-content th, .extensions-content td { padding: 6px 8px; text-align: start; vertical-align: top; overflow-wrap: anywhere; }
+.extensions-content th:nth-child(2) { width: 44%; }
+.extensions-content details summary { cursor: pointer; }

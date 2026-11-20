@@ -142,6 +142,11 @@ pub(crate) static MESSAGES: &[L5Msg] = &[
         en: "In the managed lock mode, using locks is only allowed within transactions!",
     },
     L5Msg {
+        key: "backend:IDS_DBERROR_ACCESS",
+        ru: "Нарушение прав доступа!",
+        en: "Access violation!",
+    },
+    L5Msg {
         key: "backend:IDS_DBERROR_LOCKING",
         ru: "Конфликт блокировок при выполнении транзакции:",
         en: "Lock conflict during the transaction:",
@@ -327,6 +332,16 @@ pub(crate) static MESSAGES: &[L5Msg] = &[
         en: "Document journal Selected data",
     },
     L5Msg {
+        key: "basic:IDS_DOCOBJERROR_CANTPOSTOPERATIONAL",
+        ru: "Дата документа не соответствует текущей дате или дате последнего оперативно проведенного документа!\nДокумент не может быть проведен оперативно.",
+        en: "The document date doesn't match today's date or the date of the last document posted in real-time mode.\nThe document cannot be posted in real-time.",
+    },
+    L5Msg {
+        key: "basic:IDS_DOCOBJERROR_DATEISEMPTY",
+        ru: "Значение поля \"%s\" не может быть пустой датой",
+        en: "\"%s\"Field value cannot be an empty date",
+    },
+    L5Msg {
         key: "basic:IDS_DOCUMENT_LIST_TYPE_PRESENT",
         ru: "Документ список",
         en: "Document List",
@@ -335,6 +350,11 @@ pub(crate) static MESSAGES: &[L5Msg] = &[
         key: "basic:IDS_DOCUMENT_MANAGER_TYPE_PRESENT",
         ru: "Документ менеджер",
         en: "Document Manager",
+    },
+    L5Msg {
+        key: "basic:IDS_DOCUMENT_NOT_SELECTED",
+        ru: "Документ не выбран",
+        en: "No document selected",
     },
     L5Msg {
         key: "basic:IDS_DOCUMENT_OBJECT_TYPE_PRESENT",
@@ -495,6 +515,11 @@ pub(crate) static MESSAGES: &[L5Msg] = &[
         key: "basic:IDS_REFERENCE_CANTDELETE",
         ru: "Не удалось удалить",
         en: "Failed to delete",
+    },
+    L5Msg {
+        key: "basic:IDS_REFERENCE_CANTPOSTING",
+        ru: "Не удалось провести",
+        en: "Failed to post",
     },
     L5Msg {
         key: "basic:IDS_REFERENCE_CANTSAVE",
@@ -835,8 +860,12 @@ pub mod keys {
     pub const CODE_NOT_UNIQUE: &str = "basic:IDS_REFOBJERROR_CODENOTUNIQUE";
     pub const DATALOCK_OUTSIDE_TRANSACTION: &str =
         "backend:IDS_DATALOCK_CAN_USE_ONLY_IN_TRANSACTION";
+    pub const DB_ACCESS: &str = "backend:IDS_DBERROR_ACCESS";
     pub const DB_LOCKING: &str = "backend:IDS_DBERROR_LOCKING";
     pub const DB_OBJECT_NOT_FOUND: &str = "backend:IDS_DBOBJECT_NOTFOUND";
+    pub const DOCOBJ_CANT_POST_OPERATIONAL: &str = "basic:IDS_DOCOBJERROR_CANTPOSTOPERATIONAL";
+    pub const DOCUMENT_NOT_SELECTED: &str = "basic:IDS_DOCUMENT_NOT_SELECTED";
+    pub const DOC_DATE_EMPTY: &str = "basic:IDS_DOCOBJERROR_DATEISEMPTY";
     pub const ELEMENT_NOT_SELECTED: &str = "basic:IDS_ELEMENT_NOT_SELECTED";
     pub const ENUMERATED_PROPERTY_TYPE: &str = "backend:IDS_TYPE_PRESENTATION_OBJECTPROPERTY";
     pub const FIELD_WORD: &str = "backend:IDS_FIELD";
@@ -1013,6 +1042,7 @@ pub mod keys {
     pub const RECORD_LINE_NUMBER: &str = "backend:IDS_RECORDLINENO_PRESENT";
     pub const RECORD_OUTSIDE_FILTER: &str = "backend:IDS_FIELD_VALUE_DISABLED_BY_SELECT_CONDITIONS";
     pub const REFERENCE_CANT_DELETE: &str = "basic:IDS_REFERENCE_CANTDELETE";
+    pub const REFERENCE_CANT_POST: &str = "basic:IDS_REFERENCE_CANTPOSTING";
     pub const REFERENCE_CANT_SAVE: &str = "basic:IDS_REFERENCE_CANTSAVE";
     pub const REF_NOT_UNIQUE: &str = "backend:IDS_DBERROR_REFISNOTUNIQUE";
     pub const REF_NOT_UNIQUE_TABLE: &str = "backend:IDS_SDBLERR_REFSELFISNTUNIQUE";

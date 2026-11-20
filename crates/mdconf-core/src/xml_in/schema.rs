@@ -55,7 +55,7 @@ pub(super) fn resolve(
 ) -> Option<Codec> {
     descriptor(s, spec, tag, scope, name).map(|p| p.codec)
 }
-pub(super) fn descriptor(
+pub(crate) fn descriptor(
     s: &Schema,
     spec: &[(String, PropSpec)],
     tag: &str,

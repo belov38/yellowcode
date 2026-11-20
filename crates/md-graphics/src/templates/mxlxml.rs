@@ -4,12 +4,13 @@ use super::context::Lookup;
 use super::moxel::MoxelError;
 use super::moxel_view::MoxelView;
 use super::mxltables::{self as t, Codec, FormatSlot, ViewKind};
-use crate::Configuration;
 use crate::graph::{
     lstr::{Grammar, LocalStrings},
     read::{R as F, Read, ReadError},
 };
 use crate::xml_out::emit::XmlEmit;
+use crate::xml_out::semantic::SemanticEmit;
+mod rows;
 use brace::Node;
 use memory_budget::BudgetError;
 
@@ -264,6 +265,12 @@ pub(crate) trait DrawingHook {
     ) -> Option<F<()>>;
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RowCoverage {
+    Stored,
+    FullHeight,
+}
+
 pub(crate) struct Writer<'a> {
     pub(crate) cfg: &'a dyn Lookup,
     pub(crate) read: Read<'a>,
@@ -277,6 +284,7 @@ pub(crate) struct Writer<'a> {
     style_colors: SourceMap<i64, &'a Node>,
     default_index: Option<usize>,
     hook: Option<&'a dyn DrawingHook>,
+    row_coverage: RowCoverage,
 }
 
 impl<'a> Writer<'a> {
@@ -307,7 +315,13 @@ impl<'a> Writer<'a> {
             style_colors,
             default_index: None,
             hook: None,
+            row_coverage: RowCoverage::FullHeight,
         })
+    }
+
+    pub(crate) fn with_row_coverage(mut self, coverage: RowCoverage) -> Self {
+        self.row_coverage = coverage;
+        self
     }
 
     pub(crate) fn with_hook(mut self, hook: &'a dyn DrawingHook) -> Self {
@@ -599,8 +613,15 @@ impl<'a> Writer<'a> {
             rc.push(row, column)?;
         }
         rc.sort();
-        let mut rows = d.rows.iter().peekable();
-        while let Some((idx, fmt, cells)) = rows.next() {
+        let spans = rows::spans(&d, &rc, read, self.row_coverage)?;
+        let mut rows = spans.iter().copied().peekable();
+        while let Some(rows::RowSpan {
+            begin: idx,
+            end: span_end,
+            format: fmt,
+            cells,
+        }) = rows.next()
+        {
             let cid = match rc.get(&idx) {
                 Some(&k) => Some(self.colset_id(k)?),
                 None => None,
@@ -617,15 +638,15 @@ impl<'a> Writer<'a> {
                 Ok(())
             };
             if cells.is_empty() {
-                let mut last = idx;
-                let mut combined = false;
+                let mut last = span_end;
+                let mut combined = last != idx;
                 while let Some(next) = rows.peek() {
-                    if next.2.is_empty()
-                        && next.1 == fmt
-                        && last.checked_add(1) == Some(next.0)
-                        && rc.get(&next.0) == rc.get(&idx)
+                    if next.cells.is_empty()
+                        && next.format == fmt
+                        && last.checked_add(1) == Some(next.begin)
+                        && rc.get(&next.begin) == rc.get(&idx)
                     {
-                        last = next.0;
+                        last = next.end;
                         combined = true;
                         rows.next();
                     } else {
@@ -696,10 +717,11 @@ impl<'a> Writer<'a> {
         };
         if self.fill_type(p.fmt)? == Some(1) {
             let items = local(text)?;
-            leaf(
-                &mut self.w,
+            self.w.value(
                 "parameter",
-                items.iter().next().map_or("", |(_, text)| text),
+                Some(items.iter().next().map_or("", |(_, text)| text)),
+                true,
+                &[],
             )?;
             Ok(())
         } else {
@@ -1366,17 +1388,6 @@ impl<'a> Writer<'a> {
     }
 }
 
-pub(crate) fn entry_xml_with(
-    cfg: &dyn Lookup,
-    bytes: &[u8],
-    allocation: Allocation<'_>,
-) -> F<Owned<Vec<u8>>> {
-    let read = Read::new(allocation);
-    let source = super::tree::MoxelSource::read(bytes, allocation)
-        .map_err(|error| source_error(error, read))?;
-    let view = source.view().map_err(|error| source_error(error, read))?;
-    Writer::construct(cfg, view, read)?.run_with()
-}
 pub(crate) fn source_error(error: super::tree::TreeError, read: Read<'_>) -> ReadError {
     match error {
         super::tree::TreeError::Memory(error) => ReadError::Memory(error),
@@ -1385,10 +1396,4 @@ pub(crate) fn source_error(error: super::tree::TreeError, read: Read<'_>) -> Rea
         }
         super::tree::TreeError::Semantic(code) => read.invalid(code),
     }
-}
-pub(crate) fn entry_xml(cfg: &Configuration, bytes: &[u8]) -> R<Vec<u8>> {
-    entry_xml_with(cfg, bytes, Allocation::Native)
-        .map_err(native_error)?
-        .native()
-        .map_err(Into::into)
 }

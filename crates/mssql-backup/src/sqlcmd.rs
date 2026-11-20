@@ -25,6 +25,7 @@ pub(crate) const CONFIG_ROW_LIMIT: usize = 128 * 1024 * 1024;
 
 mod cleaned;
 mod diag;
+mod header;
 mod lifecycle;
 mod tracing;
 mod unfinished;
@@ -418,13 +419,96 @@ fn restore(request: &Request, plan: &SqlPlan) -> Result<Restored, (RunError, Pha
     .map_err(|failure| (failure, phase.get()))
 }
 
+const TRACED_TABLES: usize = 50;
+
+fn inventory_refusal(
+    request: &Request,
+    plan: &SqlPlan,
+    schema: &ibschema::logical::LogicalSchema,
+    mismatch: &crate::sql_inventory::Mismatch,
+) -> String {
+    let storage_missing = mismatch
+        .missing
+        .iter()
+        .any(|m| m.name.eq_ignore_ascii_case("SchemaStorage"));
+    let extension_ids: Option<Vec<u32>> = if storage_missing {
+        None
+    } else {
+        run(request, &plan.schema_storage_ids_script(), |stdout| {
+            crate::sql_inventory::read_schema_ids(stdout).map_err(|e| e.to_string())
+        })
+        .ok()
+        .map(|ids| ids.into_iter().filter(|&id| id != 0).collect())
+    };
+    let ids = extension_ids.as_deref().unwrap_or_default();
+    let twins: Vec<&str> = mismatch.extension_twins(ids).collect();
+    if let Some(trace) = bak_trace::Trace::current() {
+        let known = crate::sql_inventory::known_tables(schema).unwrap_or_default();
+        let vocabulary = bak_trace::TableVocabulary::new(known.iter().map(String::as_str));
+        trace.inventory(
+            mismatch.missing.len() as u64,
+            mismatch.extra.len() as u64,
+            twins.len() as u64,
+            extension_ids.as_ref().map(|ids| ids.len() as u64),
+        );
+        for table in mismatch.missing.iter().take(TRACED_TABLES) {
+            let kind = if table.system { "system" } else { "schema" };
+            trace.inventory_table("missing", kind, &vocabulary, &table.name);
+        }
+        for table in mismatch.extra.iter().take(TRACED_TABLES) {
+            let kind = if twins.contains(&table.as_str()) {
+                "extension"
+            } else {
+                "other"
+            };
+            trace.inventory_table("extra", kind, &vocabulary, table);
+        }
+    }
+    if ids.is_empty() {
+        return crate::sql_inventory::Error::Mismatch(mismatch.clone()).to_string();
+    }
+    let schemas: Vec<String> = ids.iter().map(u32::to_string).collect();
+    let mut text = format!(
+        "unsupported: the base has extension storage (SchemaStorage SchemaID {}; {} with the suffix X<SchemaID>); \
+         BAK -> DT and BAK -> 1CD do not write the extension block yet, so the data of the objects the extensions change \
+         would be lost; BAK -> CF works",
+        schemas.join(", "),
+        crate::sql_inventory::sql_tables(twins.len())
+    );
+    let rest = crate::sql_inventory::Mismatch {
+        missing: mismatch.missing.clone(),
+        extra: mismatch
+            .extra
+            .iter()
+            .filter(|name| !twins.contains(&name.as_str()))
+            .cloned()
+            .collect(),
+    };
+    if !rest.missing.is_empty() || !rest.extra.is_empty() {
+        text.push_str("; besides, the table inventory differs: ");
+        text.push_str(&rest.to_string());
+    }
+    text
+}
+
 fn unreadable_hint(diagnostics: &str) -> &'static str {
-    let has = |number: &str| diagnostics.contains(&format!("Msg {number},"));
-    if ["3287", "3241", "3242", "3243"].iter().any(|n| has(n)) {
+    let numbers = header::error_numbers(diagnostics);
+    let has = |number: u32| numbers.contains(&number);
+    if [3287, 3241, 3242, 3243].into_iter().any(has) {
         "the file is not a complete, readable SQL Server backup (truncated, damaged or not a backup); "
-    } else if has("3201") {
-        "SQL Server cannot open the file (check that the path exists on the SQL Server machine and that its service account can read it); "
-    } else if has("3203") {
+    } else if has(3201) {
+        match header::os_error(diagnostics) {
+            Some(5) => {
+                "SQL Server cannot open the file: its service account has no access to it (operating system error 5); a file on a network share needs read access for the account of the SQL Server service, or copy the file to the SQL Server machine; "
+            }
+            Some(2 | 3) => {
+                "SQL Server cannot open the file: the path is not found on the SQL Server machine (operating system error 2 or 3); a network drive letter mapped in your session is not visible to the SQL Server service; "
+            }
+            _ => {
+                "SQL Server cannot open the file (check that the path exists on the SQL Server machine and that its service account can read it); "
+            }
+        }
+    } else if has(3203) {
         "SQL Server hit a read error on the file; "
     } else {
         ""
@@ -432,7 +516,7 @@ fn unreadable_hint(diagnostics: &str) -> &'static str {
 }
 
 fn is_own_check_failure(detail: &str) -> bool {
-    detail.contains("Msg 51000,")
+    header::error_numbers(detail).contains(&51000)
         && [
             "temporary database already exists",
             "unsupported server data path",
@@ -442,24 +526,19 @@ fn is_own_check_failure(detail: &str) -> bool {
 }
 
 fn has_server_error(text: &str) -> bool {
-    text.match_indices("Msg ").any(|(at, _)| {
-        let rest = text.get(at + 4..).unwrap_or_default();
-        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
-        digits > 0
-            && rest
-                .get(digits..)
-                .is_some_and(|after| after.starts_with(','))
-    })
+    header::has_server_error(text)
 }
 
 fn login_refused(text: &str) -> bool {
-    text.contains("Login failed") || text.contains("Login timeout expired")
+    text.contains("Login failed")
+        || text.contains("Login timeout expired")
+        || header::error_numbers(text).contains(&18456)
 }
 
 fn inspection_failure(detail: &str) -> String {
     if is_own_check_failure(detail) {
         format!("SQL restore script stopped before RESTORE: {detail}")
-    } else if detail.contains("Msg 213,") {
+    } else if header::error_numbers(detail).contains(&213) {
         format!(
             "SQL restore script stopped before RESTORE: this SQL Server returns a result layout that Yellowcode does not expect (verified: SQL Server 2022); {detail}"
         )
@@ -729,6 +808,10 @@ fn restore_or_explain(
     backup_set: u32,
     progress: &mut dyn Write,
 ) -> Result<(), Error> {
+    if let Some(warning) = crate::source_path::warning(&request.backup_path, &request.server) {
+        writeln!(progress, "{}", warning.text())
+            .map_err(|e| err(format!("writing progress: {e}")))?;
+    }
     let outcome = restore(request, plan);
     if let Err((failure, _)) = &outcome
         && let Some(kind) = requested()
@@ -1182,9 +1265,18 @@ fn convert_dt_inner_owned(
             }
             true
         } else {
-            sql_inventory::validate_inventory(&schema.schema, &inventory)
-                .map_err(|e| err(e.to_string()))?
-                .depot_files
+            match sql_inventory::validate_inventory(&schema.schema, &inventory) {
+                Ok(found) => found.depot_files,
+                Err(sql_inventory::Error::Mismatch(mismatch)) => {
+                    return Err(err(inventory_refusal(
+                        request,
+                        &plan,
+                        &schema.schema,
+                        &mismatch,
+                    )));
+                }
+                Err(e) => return Err(err(e.to_string())),
+            }
         };
         let support_script = if legacy {
             plan.legacy_support_script()

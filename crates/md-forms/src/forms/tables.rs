@@ -237,6 +237,7 @@ impl<'a> PropRef<'a> {
 pub(crate) enum StringsRef<'a> {
     Native(&'a [String]),
     Embedded(StaticFormContext),
+    EmbeddedExternal(StaticFormContext),
 }
 impl<'a> StringsRef<'a> {
     pub fn iter(self) -> impl Iterator<Item = &'a str> {
@@ -248,12 +249,27 @@ impl<'a> StringsRef<'a> {
             Self::Embedded(v) => Some(v),
             _ => None,
         };
-        native.into_iter().flatten().map(String::as_str).chain(
-            embedded
-                .into_iter()
-                .flat_map(|v| v.order())
-                .map(|value| -> &'a str { value }),
-        )
+        let external = match self {
+            Self::EmbeddedExternal(value) => Some(value),
+            _ => None,
+        };
+        native
+            .into_iter()
+            .flatten()
+            .map(String::as_str)
+            .chain(
+                embedded
+                    .into_iter()
+                    .flat_map(|v| v.order())
+                    .map(|value| -> &'a str { value }),
+            )
+            .chain(
+                external
+                    .into_iter()
+                    .filter_map(|value| value.external_order())
+                    .flatten()
+                    .map(|value| -> &'a str { value }),
+            )
     }
 }
 #[derive(Debug, Clone, Copy)]
@@ -289,18 +305,24 @@ impl<'a> PropsRef<'a> {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ContextRef<'a> {
     pub order: StringsRef<'a>,
+    pub external_order: Option<StringsRef<'a>>,
     pub props: PropsRef<'a>,
 }
 impl<'a> ContextRef<'a> {
     fn native(value: &'a Context) -> Self {
         Self {
             order: StringsRef::Native(&value.order),
+            external_order: (!value.external_order.is_empty())
+                .then_some(StringsRef::Native(&value.external_order)),
             props: PropsRef::Native(&value.props),
         }
     }
     fn embedded(value: StaticFormContext) -> Self {
         Self {
             order: StringsRef::Embedded(value),
+            external_order: value
+                .external_order()
+                .map(|_| StringsRef::EmbeddedExternal(value)),
             props: PropsRef::Embedded(value),
         }
     }

@@ -12,11 +12,17 @@ pub fn fingerprint(text: &str, mode: ParseMode, ctx: &Ctx<'_>) -> Result<Vec<Str
             auto.extend(auto_names(q));
         }
     }
+    let seps: Vec<&str> = ctx
+        .schema
+        .data_separators()
+        .iter()
+        .map(|s| s.name.as_str())
+        .collect();
     Ok(stmts
         .iter()
         .map(|s| {
             with_deep_stack(s.typed.max_depth, || {
-                let s = normalize(s, &auto, mode);
+                let s = normalize(s, &auto, &seps, mode);
                 erase(&format!("{s:?}"))
             })
         })
@@ -73,20 +79,20 @@ fn span_len(s: &str) -> Option<usize> {
     Some(s.len() - t.len())
 }
 
-fn normalize(s: &CompiledStmt, auto: &[String], mode: ParseMode) -> CompiledStmt {
+fn normalize(s: &CompiledStmt, auto: &[String], seps: &[&str], mode: ParseMode) -> CompiledStmt {
     let mut c = s.clone();
     if let tir::StmtKind::Query(q) = &mut c.typed.kind {
         query(q);
         if mode == ParseMode::Query {
             totals_binding(q);
         }
-        labels(q, auto);
+        labels(q, auto, seps);
         let gone = group_params(q);
         c.params.retain(|p| !gone.contains(&p.name));
-        c.columns.retain(|col| !is_separator(&col.name));
+        c.columns.retain(|col| !is_separator(&col.name, seps));
         blank_columns(&mut c.columns, auto);
         if let Some(query_ir::TempOut::Put(t)) = &mut c.temp_out {
-            *t = clean_temp(t, auto);
+            *t = clean_temp(t, auto, seps);
         }
     }
     c
@@ -109,13 +115,17 @@ fn totals_binding(q: &mut tir::Query) {
     }
 }
 
-fn is_separator(name: &str) -> bool {
-    name == "ОбластьДанныхОсновныеДанные" || name == "ОбластьДанныхВспомогательныеДанные"
+fn is_separator(name: &str, seps: &[&str]) -> bool {
+    seps.contains(&name)
 }
 
-fn clean_temp(t: &query_ir::TempSchema, auto: &[String]) -> std::sync::Arc<query_ir::TempSchema> {
+fn clean_temp(
+    t: &query_ir::TempSchema,
+    auto: &[String],
+    seps: &[&str],
+) -> std::sync::Arc<query_ir::TempSchema> {
     let mut t2 = t.clone();
-    t2.columns.retain(|c| !is_separator(&c.name));
+    t2.columns.retain(|c| !is_separator(&c.name, seps));
     for col in &mut t2.columns {
         if col.unknown || is_auto(&col.name, auto) {
             col.name.clear();
@@ -124,7 +134,7 @@ fn clean_temp(t: &query_ir::TempSchema, auto: &[String]) -> std::sync::Arc<query
     std::sync::Arc::new(t2)
 }
 
-fn labels(q: &mut tir::Query, auto: &[String]) {
+fn labels(q: &mut tir::Query, auto: &[String], seps: &[&str]) {
     let params: Vec<usize> = q
         .parts
         .first()
@@ -157,10 +167,10 @@ fn labels(q: &mut tir::Query, auto: &[String]) {
     }
     for p in &mut q.parts {
         completed_group(p);
-        p.items.retain(|i| !is_separator(&i.name));
+        p.items.retain(|i| !is_separator(&i.name, seps));
         blank_items(&mut p.items, auto);
         for s in &mut p.sources {
-            source_labels(s, auto);
+            source_labels(s, auto, seps);
         }
     }
 }
@@ -216,15 +226,15 @@ fn group_params(q: &mut tir::Query) -> Vec<String> {
     gone
 }
 
-fn source_labels(s: &mut tir::Source, auto: &[String]) {
+fn source_labels(s: &mut tir::Source, auto: &[String], seps: &[&str]) {
     match &mut s.from {
-        tir::From::Temp(t) => *t = clean_temp(t, auto).into(),
-        tir::From::Param { schema, .. } => *schema = clean_temp(schema, auto).into(),
-        tir::From::Subquery(q) => labels(q, auto),
+        tir::From::Temp(t) => *t = clean_temp(t, auto, seps).into(),
+        tir::From::Param { schema, .. } => *schema = clean_temp(schema, auto, seps).into(),
+        tir::From::Subquery(q) => labels(q, auto, seps),
         tir::From::Table { .. } => {}
     }
     for j in &mut s.joins {
-        source_labels(&mut j.right, auto);
+        source_labels(&mut j.right, auto, seps);
     }
 }
 

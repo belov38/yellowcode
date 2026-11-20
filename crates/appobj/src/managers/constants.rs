@@ -1,7 +1,7 @@
 use crate::Application;
 use crate::exchange_params::ExchangeParams;
 use crate::model::{FieldDef, ObjId, TypeAtom};
-use crate::read::{admit_data_read, internal, read_view, store_call_error};
+use crate::read::{internal, read_view, store_call_error};
 use crate::read_budget as budget;
 use crate::txn::{CallTxn, Commit};
 use crate::values::field::from_field;
@@ -44,7 +44,26 @@ fn default_value(ex: &mut Execution, app: &Application, field: &FieldDef) -> Cal
 }
 
 pub(crate) fn get(ex: &mut Execution, app: &Application, obj: ObjId) -> CallResult<Value> {
-    admit_data_read(ex)?;
+    let md = app.model().obj(obj).md;
+    if crate::rights::data_read(ex, app, md)? == crate::rights::DataRead::Denied {
+        return Err(crate::rights::access_violation().into());
+    }
+    read_value(ex, app, obj)
+}
+
+fn get_by_manager(ex: &mut Execution, app: &Application, obj: ObjId) -> CallResult<Value> {
+    let md = app.model().obj(obj).md;
+    if crate::rights::data_read(ex, app, md)? == crate::rights::DataRead::Denied {
+        return Err(HostError::not_implemented(
+            "P6",
+            "МенеджерЗначенияКонстанты.Прочитать: без права Чтение в сеансе с пользователями",
+        )
+        .into());
+    }
+    read_value(ex, app, obj)
+}
+
+fn read_value(ex: &mut Execution, app: &Application, obj: ObjId) -> CallResult<Value> {
     let model = app.model();
     let (Some(st), Some(field)) = (model.storage_of(obj), model.obj(obj).value.as_ref()) else {
         return Err(internal("the constant is not bound to a table").into());
@@ -199,7 +218,7 @@ pub(crate) fn write(
         Ok(())
     })();
     let ended = match result {
-        Ok(()) => txn.commit(app).map_err(|e| e.call_error(ex)),
+        Ok(()) => crate::fo_version::commit(ex, app, &txn),
         Err(e) => {
             let _ = txn.rollback(app);
             Err(e)
@@ -342,7 +361,7 @@ impl HostObject for ValueManager {
     fn call(&self, ex: &mut Execution, m: MemberId, _: &mut [Arg]) -> CallResult<Value> {
         match self.member(ex, m) {
             Some((true, "Прочитать")) => {
-                let v = get(ex, &self.app, self.obj)?;
+                let v = get_by_manager(ex, &self.app, self.obj)?;
                 *self.value.borrow_mut() = Some(v);
                 Ok(Value::Undefined)
             }

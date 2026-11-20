@@ -132,6 +132,13 @@ pub struct StaticFormContext {
     compat851: bool,
 }
 impl StaticFormContext {
+    pub fn external_order(&self) -> Option<impl Iterator<Item = &'static str> + use<>> {
+        let value = self
+            .overlay
+            .and_then(|value| value.get("external_order"))
+            .or_else(|| self.base.and_then(|value| value.get("external_order")))?;
+        Some(array(Some(value)).iter().filter_map(StaticValue::as_str))
+    }
     pub fn order(&self) -> impl Iterator<Item = &'static str> + use<> {
         let overlay = self
             .overlay

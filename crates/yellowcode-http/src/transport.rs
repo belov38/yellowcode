@@ -107,6 +107,37 @@ fn read_line(
     }
 }
 
+fn field_name_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
+        || matches!(
+            byte,
+            b'!' | b'#'
+                | b'$'
+                | b'%'
+                | b'&'
+                | b'\''
+                | b'*'
+                | b'+'
+                | b'-'
+                | b'.'
+                | b'^'
+                | b'_'
+                | b'`'
+                | b'|'
+                | b'~'
+        )
+}
+
+fn trim_ows(mut value: &[u8]) -> &[u8] {
+    while let Some((b' ' | b'\t', rest)) = value.split_first() {
+        value = rest;
+    }
+    while let Some((b' ' | b'\t', rest)) = value.split_last() {
+        value = rest;
+    }
+    value
+}
+
 pub fn read_json_request(r: &mut dyn BufRead, max_body: usize) -> Result<Request, HttpError> {
     read_request_with(r, &|_| true, max_body)
 }
@@ -123,6 +154,15 @@ pub(crate) fn read_request_with_body_limit(
     r: &mut dyn BufRead,
     accepts_post: &dyn Fn(&str) -> bool,
     max_body: &dyn Fn(&str) -> usize,
+) -> Result<Request, HttpError> {
+    read_request_with_body_policy(r, accepts_post, max_body, &|_| false)
+}
+
+pub(crate) fn read_request_with_body_policy(
+    r: &mut dyn BufRead,
+    accepts_post: &dyn Fn(&str) -> bool,
+    max_body: &dyn Fn(&str) -> usize,
+    bodyless_get: &dyn Fn(&str) -> bool,
 ) -> Result<Request, HttpError> {
     let line =
         read_line(r, MAX_REQUEST_LINE, || HttpError::UriTooLong)?.ok_or(HttpError::BadRequest)?;
@@ -143,6 +183,8 @@ pub(crate) fn read_request_with_body_limit(
     let mut lengths: Vec<String> = Vec::new();
     let mut content_type = None;
     let mut chunked = false;
+    let mut malformed_header = false;
+    let mut raw_length_zero = None;
     loop {
         let h = read_line(r, MAX_HEADERS, || HttpError::HeadersTooLarge)?
             .ok_or(HttpError::BadRequest)?;
@@ -152,6 +194,22 @@ pub(crate) fn read_request_with_body_limit(
         total += h.len() + 2;
         if total > MAX_HEADERS {
             return Err(HttpError::HeadersTooLarge);
+        }
+        malformed_header |= std::str::from_utf8(&h).is_err();
+        match h.iter().position(|byte| *byte == b':') {
+            Some(colon) => {
+                let name = h.get(..colon).unwrap_or_default();
+                let value = h.get(colon + 1..).unwrap_or_default();
+                malformed_header |= name.is_empty()
+                    || !name.iter().copied().all(field_name_byte)
+                    || value.iter().any(|b| (*b < 32 && *b != b'\t') || *b == 127);
+                if name.eq_ignore_ascii_case(b"content-length") {
+                    malformed_header |= raw_length_zero.is_some();
+                    let value = trim_ows(value);
+                    raw_length_zero = Some(!value.is_empty() && value.iter().all(|b| *b == b'0'));
+                }
+            }
+            None => malformed_header = true,
         }
         if let Some((name, value)) = String::from_utf8_lossy(&h).split_once(':') {
             let value = value.trim().to_string();
@@ -180,6 +238,14 @@ pub(crate) fn read_request_with_body_limit(
     let path = percent_decode(raw_path).ok_or(HttpError::BadRequest)?;
     if path.contains('\0') || path.split('/').any(|s| s == "..") {
         return Err(HttpError::BadRequest);
+    }
+    if method == "GET" && bodyless_get(&path) {
+        if malformed_header || !raw_length_zero.unwrap_or(true) {
+            return Err(HttpError::BadRequest);
+        }
+        if chunked {
+            return Err(HttpError::NotImplemented);
+        }
     }
     if method == "POST" && !accepts_post(&path) {
         return Err(HttpError::Method(method.to_string()));

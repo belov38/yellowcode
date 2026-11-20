@@ -272,11 +272,7 @@ fn separator(qs: &QuerySchema, it: &tir::Item, flat: &[&tir::Source]) -> bool {
         return false;
     };
     qs.field(*id, *f).is_some_and(|f| {
-        f.role == FieldRole::Common
-            && matches!(
-                f.name_ru.as_str(),
-                "ОбластьДанныхОсновныеДанные" | "ОбластьДанныхВспомогательныеДанные"
-            )
+        f.role == FieldRole::Common && f.md.is_some_and(|md| qs.is_data_separator(md))
     })
 }
 

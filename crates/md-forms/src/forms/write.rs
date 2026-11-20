@@ -1,4 +1,4 @@
-use super::tables::{PropRef, TableView};
+use super::tables::{JsonRef, PropRef, TableView};
 use brace::Node;
 
 use super::FormResolution;
@@ -40,7 +40,7 @@ const NESTED_ITEM_TAGS: [&str; 6] = [
     "SearchControlAddition",
 ];
 
-fn di_at(class: &str) -> Option<usize> {
+pub(crate) fn di_at(class: &str) -> Option<usize> {
     Some(match class {
         "Button" => 48,
         "Table" => 96,
@@ -52,7 +52,7 @@ fn di_at(class: &str) -> Option<usize> {
     })
 }
 
-fn di_at_nested(version: &str) -> Option<usize> {
+pub(crate) fn di_at_nested(version: &str) -> Option<usize> {
     match version {
         "22" => Some(28),
         "6" => Some(23),
@@ -60,7 +60,7 @@ fn di_at_nested(version: &str) -> Option<usize> {
     }
 }
 
-fn display_importance(code: &str) -> Option<&'static str> {
+pub(crate) fn display_importance(code: &str) -> Option<&'static str> {
     Some(match code {
         "1" => "VeryHigh",
         "2" => "High",
@@ -180,6 +180,7 @@ pub(crate) struct FormCtx<'a> {
     pub files: Vec<(String, Vec<u8>)>,
     pub deferred: bool,
     pub form_cat: String,
+    pub source_serialization: super::Serialization,
     pub prop_depth: usize,
     raised: bool,
 }
@@ -189,6 +190,7 @@ impl<'a> FormCtx<'a> {
         let mut fc = FormCtx {
             cfg,
             shared,
+            source_serialization: info.form.layout.serialization,
             info,
             files: Vec::new(),
             deferred: false,
@@ -236,15 +238,19 @@ pub(crate) const CUSTOM: &[(&str, &str, &str, Custom)] = {
     use super::sections as s;
     &[
         ("*", "Title", "c_fmt_title", a::c_fmt_title),
+        ("*", "WarningOnEditRepresentation", "c_warning_on_edit", a::c_warning_on_edit),
         ("*", "Events", "c_events", a::c_events),
         ("*", "DataPath", "c_datapath", a::c_datapath),
         ("InputField", "FooterDataPath", "c_dp_at", a::c_dp_footer),
+        ("InputField", "MinValue", "c_numeric_bound", b::c_numeric_bound),
+        ("InputField", "MaxValue", "c_numeric_bound", b::c_numeric_bound),
         ("LabelField", "FooterDataPath", "c_dp_at", a::c_dp_footer),
         ("Page", "TitleDataPath", "c_dp_at", a::c_dp_page_title),
         ("UsualGroup", "TitleDataPath", "c_dp_at", a::c_dp_group_title),
         ("Table", "RowPictureDataPath", "c_rowpicture", a::c_rowpicture),
         ("Table", "RowFilter", "c_row_filter", a::c_row_filter),
         ("*", "AdditionSource", "c_addition_source", a::c_addition_source),
+        ("SearchControlAddition", "AutoMaxWidth", "c_search_control_width", a::c_search_control_width),
         ("Table", "UserSettingsGroup", "c_user_settings_group", a::c_user_settings_group),
         ("ButtonGroup", "CommandSource", "c_cmd_source", a::c_cmd_source),
         ("CommandBar", "CommandSource", "c_cmd_source", a::c_cmd_source),
@@ -354,6 +360,20 @@ pub(crate) fn emit_generic(
         }
         "flstr" => flstr(prop, v),
         "table" => {
+            if fc_external_owner(fc.info.owner)
+                && let Some(value) = ent
+                    .raw
+                    .get("external_values")
+                    .and_then(|values| values.get(bv.as_str()))
+            {
+                return match from_json(value) {
+                    Some(element) => Emit::El(element),
+                    None => {
+                        fc.raise();
+                        Emit::Cannot
+                    }
+                };
+            }
             if !ent.raw.get("table").is_some_and(|t| t.is_object()) {
                 fc.raise();
                 return Emit::Cannot;
@@ -385,12 +405,211 @@ pub(crate) fn emit_generic(
     }
 }
 
+pub(crate) fn external_parameter_names(element: &mut E) -> Py<()> {
+    fn walk(
+        element: &mut E,
+        appearance: bool,
+        appearance_parent: bool,
+        parameter_parent: bool,
+        names: &mdschema::FactMap<String, String>,
+        aliases: &[(&str, mdschema::StaticValue)],
+    ) -> Py<()> {
+        let appearance = appearance || element.tag == "dcsset:appearance";
+        if appearance
+            && element.tag == "dcscor:parameter"
+            && element.kids.is_empty()
+            && let Some(text) = &element.text
+            && let Some((native, _)) = names.iter().find(|(_, value)| *value == text)
+        {
+            element.text = Some(native.clone());
+        }
+        if parameter_parent
+            && element.tag == "dcscor:parameter"
+            && element.kids.is_empty()
+            && element.attrs.is_empty()
+            && let Some(text) = &element.text
+            && let Some((_, alias)) = aliases.iter().find(|(native, _)| *native == text.as_str())
+        {
+            element.text = Some(alias.as_str().ok_or(Raised)?.to_owned());
+        }
+        let parameter_parent = appearance_parent
+            && element.tag == "dcscor:item"
+            && element
+                .attrs
+                .iter()
+                .any(|(key, value)| key == "xsi:type" && value == "dcsset:SettingsParameterValue");
+        let appearance_parent = element.tag == "dcsset:appearance";
+        for child in &mut element.kids {
+            walk(
+                child,
+                appearance,
+                appearance_parent,
+                parameter_parent,
+                names,
+                aliases,
+            )?;
+        }
+        Ok(())
+    }
+    let tables = mdschema::forms_upgrade::upgrade_tables().map_err(|_| Raised)?;
+    let aliases = mdschema::static_schema()
+        .table("forms/misc.json")
+        .and_then(|table| table.get("external_dcs_names"))
+        .and_then(|table| table.as_object())
+        .ok_or(Raised)?;
+    walk(
+        element,
+        false,
+        false,
+        false,
+        &tables.writer_set.dcs_names,
+        aliases,
+    )
+}
+
+pub(crate) fn fc_external_owner(owner: Option<&str>) -> bool {
+    owner.is_some_and(|o| {
+        o.starts_with("ExternalDataProcessor.") || o.starts_with("ExternalReport.")
+    })
+}
+
+pub(crate) fn external_shape_matches(shape: JsonRef<'_>, item: &Item) -> bool {
+    if let Some(choices) = shape.as_array() {
+        return choices
+            .iter()
+            .filter(|shape| shape.is_object())
+            .any(|shape| external_shape_matches(shape, item));
+    }
+    let number = |key| shape.get(key).and_then(JsonRef::as_i64);
+    let index = |key| number(key).and_then(|n| usize::try_from(n).ok());
+    let Some(kind) = index("kind_slot").and_then(|n| item.body.get(n)) else {
+        return false;
+    };
+    let Some(sublist) = index("sublist_slot")
+        .and_then(|n| item.body.get(n))
+        .and_then(Node::as_list)
+    else {
+        return false;
+    };
+    let class_matches = |class: JsonRef<'_>| {
+        if class.is_null() {
+            item.class.is_none()
+        } else {
+            class.as_str().is_some_and(|c| item.class == Some(c))
+        }
+    };
+    let matched = shape.get("class").is_some_and(|class| {
+        class.as_array().map_or_else(
+            || class_matches(class),
+            |classes| classes.iter().any(class_matches),
+        )
+    }) && shape.get("version").and_then(JsonRef::as_str)
+        == Some(item.version.as_str())
+        && index("len") == Some(item.body.len())
+        && number("kind").is_some_and(|n| kind.as_i64() == Some(n))
+        && index("sublist_len") == Some(sublist.len())
+        && shape
+            .get("sublist_versions")
+            .and_then(JsonRef::as_array)
+            .is_some_and(|versions| {
+                versions
+                    .iter()
+                    .filter_map(JsonRef::as_i64)
+                    .any(|n| sublist.first().and_then(Node::as_i64) == Some(n))
+            });
+    if !matched {
+        return false;
+    }
+    match (shape.get("value_path"), shape.get("values")) {
+        (None, None) => true,
+        (Some(path), Some(values)) => {
+            let Some(path) = path.as_array() else {
+                return false;
+            };
+            let mut indexes = path
+                .iter()
+                .map(|index| index.as_i64().and_then(|i| usize::try_from(i).ok()));
+            let Some(mut value) = indexes
+                .next()
+                .flatten()
+                .and_then(|index| item.body.get(index))
+            else {
+                return false;
+            };
+            for index in indexes {
+                let Some(next) = index.and_then(|index| value.at(index)) else {
+                    return false;
+                };
+                value = next;
+            }
+            let Some(value) = value.as_i64() else {
+                return false;
+            };
+            values.as_array().is_some_and(|values| {
+                values
+                    .iter()
+                    .filter_map(JsonRef::as_i64)
+                    .any(|allowed| allowed == value)
+            })
+        }
+        _ => false,
+    }
+}
+
 pub(crate) fn emit_prop(fc: &mut FormCtx<'_>, ctx: &str, prop: &str, src: &Src<'_>) -> Emit {
     let shared = fc.shared;
-    let ent = shared.prop(ctx, prop);
-    if let Some(f) = custom(ctx, prop).or_else(|| custom("*", prop))
-        && let Some(r) = f(fc, ctx, prop, src, ent)
+    let external = fc_external_owner(fc.info.owner);
+    let moved = external
+        .then(|| {
+            TableView::embedded(true).learned.get(ctx).and_then(|c| {
+                c.props
+                    .iter()
+                    .find(|(name, entry)| {
+                        *name == prop
+                            && entry.raw.get("moved").and_then(|v| v.as_bool()) == Some(true)
+                    })
+                    .map(|(_, entry)| entry)
+            })
+        })
+        .flatten();
+    let ent = moved.or_else(|| shared.prop(ctx, prop));
+    let external_only =
+        ent.is_some_and(|e| e.raw.get("external_only").and_then(JsonRef::as_bool) == Some(true));
+    let external_strict = external
+        && ent
+            .is_some_and(|e| e.raw.get("external_strict").and_then(JsonRef::as_bool) == Some(true));
+    if external_only && !external {
+        return Emit::Absent;
+    }
+    if (external_only || external_strict)
+        && !ent
+            .and_then(|e| e.raw.get("external_shape"))
+            .zip(src.item())
+            .is_some_and(|(shape, item)| external_shape_matches(shape, item))
     {
+        fc.raise();
+        return Emit::Cannot;
+    }
+    if let Some(f) = custom(ctx, prop).or_else(|| custom("*", prop))
+        && let Some(mut r) = f(fc, ctx, prop, src, ent)
+    {
+        if external
+            && let Emit::El(element) = &mut r
+            && external_parameter_names(element).is_err()
+        {
+            fc.raise();
+            return Emit::Cannot;
+        }
+        if external
+            && prop == "Events"
+            && let Emit::El(e) = &mut r
+        {
+            e.kids
+                .retain(|event| event.text.as_deref().is_some_and(|s| !s.is_empty()));
+            if e.kids.is_empty() {
+                r = Emit::Absent;
+            }
+        }
         return r;
     }
     let Some(ent) = ent else {
@@ -406,7 +625,11 @@ pub(crate) fn emit_prop(fc: &mut FormCtx<'_>, ctx: &str, prop: &str, src: &Src<'
     let Some(v) = fc.check(value_at(src, &path)) else {
         return Emit::Cannot;
     };
-    emit_generic(fc, prop, ent, v)
+    let result = emit_generic(fc, prop, ent, v);
+    if (external_only || external_strict) && matches!(result, Emit::Cannot) {
+        fc.raise();
+    }
+    result
 }
 
 pub(crate) fn esc_attr(s: &str) -> String {
@@ -467,7 +690,10 @@ fn write_item(
         }
     }
     let mut body: Vec<String> = Vec::new();
-    for el in shared.order(ctx).iter() {
+    for el in shared
+        .order_for(ctx, fc_external_owner(fc.info.owner))
+        .iter()
+    {
         if fc.raised() {
             return;
         }
@@ -523,7 +749,23 @@ pub(crate) fn form_to_xml(
     entry: &Node,
     owner: Option<&str>,
 ) -> Option<FormXml> {
-    let df = decode_form(entry)?;
+    form_to_xml_from_source(cfg, shared, entry, owner, super::Serialization::of(entry)?)
+}
+
+pub(crate) fn form_to_xml_from_source(
+    cfg: &dyn FormResolution,
+    shared: &Shared,
+    entry: &Node,
+    owner: Option<&str>,
+    source: super::Serialization,
+) -> Option<FormXml> {
+    let mut df = decode_form(entry)?;
+    if fc_external_owner(owner) {
+        let tail = super::upgrade::form::xml_tail(df.tail()).ok()?;
+        let begin = df.form.children_at?.checked_add(1)?;
+        df.form.body.truncate(begin);
+        df.form.body.extend(tail);
+    }
     debug_assert!(
         df.layout.serialization.is_4_59(),
         "form_to_xml: a 4/59 entry expected"
@@ -534,6 +776,7 @@ pub(crate) fn form_to_xml(
 
     let info = FormInfo::new(cfg, shared, &df, owner)?;
     let mut fc = FormCtx::new(cfg, shared, info);
+    fc.source_serialization = source;
     if !shared.tables().learned.contains_key("Form") {
         return None;
     }
@@ -542,7 +785,10 @@ pub(crate) fn form_to_xml(
         FormCompat::V8_3_12 => HEAD.replacen(DCSSCH, "", 1),
         FormCompat::Base | FormCompat::V8_5_1 => HEAD.to_string(),
     }];
-    for el in shared.order("Form").iter() {
+    for el in shared
+        .order_for("Form", fc_external_owner(fc.info.owner))
+        .iter()
+    {
         if fc.raised() {
             return None;
         }

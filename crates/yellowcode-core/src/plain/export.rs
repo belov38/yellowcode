@@ -436,7 +436,23 @@ pub fn run_with_memory_limit(
 ) -> crate::Result<()> {
     check_output_dir(&output)?;
     let memory = source::OpenMemory::resolve(limit)?;
-    let cfg = source::open_with_memory(&src, &LoadOptions::default(), &memory, &mut |_| Ok(()))?;
+    let options = LoadOptions::default();
+    let cfg = if scope.kinds.is_empty() && scope.subsystems.is_empty() && !scope.paths.is_empty() {
+        let paths: Vec<&str> = scope.paths.iter().map(String::as_str).collect();
+        super::load_objects(
+            &paths,
+            true,
+            &options,
+            &|cfg| {
+                split_module_addresses(cfg, &scope)
+                    .and_then(|split| Scope::resolve(cfg, &split.args).map(|_| ()))
+                    .is_ok()
+            },
+            &mut |options| source::open_with_memory(&src, options, &memory, &mut |_| Ok(())),
+        )?
+    } else {
+        source::open_with_memory(&src, &options, &memory, &mut |_| Ok(()))?
+    };
     let split = split_module_addresses(&cfg, &scope)?;
     let resolved = Scope::resolve(&cfg, &split.args)?;
     let exported = export_with_modules(cfg, &resolved, &split.modules, &split.elements, &output)

@@ -40,8 +40,12 @@ pub(crate) fn own_categories(w: Wrapper) -> CategorySet {
     use Category::*;
     match w {
         Wrapper::None => CategorySet::of(&[AllErrors]),
-        Wrapper::Compile => CategorySet::of(&[AllErrors, ScriptRuntimeError, ScriptUseError]),
-        _ => CategorySet::of(&[AllErrors, ScriptRuntimeError]),
+        Wrapper::Compile | Wrapper::CtorCall | Wrapper::BuiltinArg => {
+            CategorySet::of(&[AllErrors, ScriptRuntimeError, ScriptUseError])
+        }
+        Wrapper::ContextCall | Wrapper::SetAttr | Wrapper::GetAttr => {
+            CategorySet::of(&[AllErrors, ScriptRuntimeError])
+        }
     }
 }
 

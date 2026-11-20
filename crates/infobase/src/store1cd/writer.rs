@@ -239,6 +239,30 @@ impl WriteTxn for Write1cd {
         self.change(|txn| txn.table(&name)?.delete(id))
     }
 
+    fn rewrite_system_file(
+        &mut self,
+        table: &str,
+        name: &str,
+        data: &[u8],
+        modified: onecd::DateTime,
+    ) -> StoreResult<()> {
+        if !table.eq_ignore_ascii_case("FILES") {
+            return Err(StoreError::Unsupported(format!(
+                "system file {table}/{name}: only FILES is written"
+            )));
+        }
+        let (map, phys) = (&self.map, &self.phys);
+        self.txn.with_dependent_mut(|_, txn| {
+            let txn = txn.as_mut().ok_or_else(ended)?;
+            match crate::folder::rewrite_single_part(txn, table, name, data, modified) {
+                Ok(true) => Ok(()),
+                Ok(false) => Err(StoreError::NotFound(format!("{table}/{name}"))),
+                Err(crate::Error::Engine(e)) => Err(write_err(map, phys, e)),
+                Err(e) => Err(StoreError::Unsupported(format!("{table}/{name}: {e}"))),
+            }
+        })
+    }
+
     fn commit(mut self: Box<Self>) -> StoreResult<()> {
         self.txn.with_dependent_mut(|_, txn| {
             txn.take()

@@ -21,6 +21,7 @@ md-model = { path = "../md-model" }
 mdschema = { path = "../mdschema" }
 brace = { path = "../brace" }
 memory-budget = { path = "../memory-budget" }
+zraw = { path = "../zraw" }
 
 [lints.clippy]
 dbg_macro = "warn"
