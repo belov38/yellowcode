@@ -318,6 +318,7 @@ struct Loaded<'a> {
     tree: Charged<Node>,
     reference: ObjectReference<'a>,
     path: StaticPath,
+    installed: bool,
 }
 impl Loaded<'_> {
     fn header_node(&self) -> Result<&Node, ObjectReadError> {
@@ -332,6 +333,21 @@ impl Loaded<'_> {
             position: self.reference.position(),
             source,
         })
+    }
+
+    fn installed_header(&self) -> Result<InstalledHeader<'_>, ObjectReadError> {
+        InstalledHeader::from_node(self.header_node()?).map_err(|source| ObjectReadError::Header {
+            position: self.reference.position(),
+            source,
+        })
+    }
+
+    pub(super) fn header_id(&self) -> Result<Guid, ObjectReadError> {
+        if self.installed {
+            Ok(self.installed_header()?.id)
+        } else {
+            Ok(self.header()?.id)
+        }
     }
 }
 
@@ -357,6 +373,10 @@ impl ExtensionObject<'_> {
     pub fn header(&self) -> Result<ExtensionHeader<'_>, ObjectReadError> {
         self.loaded.header()
     }
+
+    pub fn installed_header(&self) -> Result<InstalledHeader<'_>, ObjectReadError> {
+        self.loaded.installed_header()
+    }
 }
 
 struct Session<'a> {
@@ -365,6 +385,7 @@ struct Session<'a> {
     _caller: Reservation,
     classes: ExtensionClasses<'a>,
     references: Option<ExtensionReferences<'a>>,
+    installed: bool,
 }
 impl<'a> Session<'a> {
     fn advance(
@@ -388,8 +409,9 @@ impl<'a> Session<'a> {
             };
             self.references = Some(class?.references());
         };
-        let loaded = load_reference(source, &self.local, reference)?;
-        loaded.header()?;
+        let mut loaded = load_reference(source, &self.local, reference)?;
+        loaded.installed = self.installed;
+        loaded.header_id()?;
         self.loaded = Some(loaded);
         Ok(true)
     }
@@ -429,6 +451,7 @@ fn load_reference<'a>(
         tree,
         reference,
         path,
+        installed: false,
     })
 }
 
@@ -493,15 +516,19 @@ impl<'a> ExtensionObjects<'a> {
         source: &'a dyn EntrySource,
         root_hold: &Reservation,
     ) -> Result<Self, ObjectReadError> {
-        let configuration = root.configuration()?;
+        let (classes, installed) = match root.configuration() {
+            Ok(configuration) => (ExtensionClasses::new(&configuration), false),
+            Err(_) => (root.installed_classes(), true),
+        };
         let (local, caller) = workspace(root_hold)?;
         Ok(Self {
             state: Some(Session {
                 loaded: None,
                 local,
                 _caller: caller,
-                classes: ExtensionClasses::new(&configuration),
+                classes,
                 references: None,
+                installed,
             }),
             source,
             _root: root,

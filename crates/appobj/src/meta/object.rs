@@ -13,6 +13,7 @@ use std::any::Any;
 use std::sync::Arc;
 
 const ROOT_FULL_NAME: u32 = u32::MAX;
+const ROOT_EXTENSION: u32 = u32::MAX - 1;
 
 const NOT_INDEXED: &str = "bsl:IDS_RTE_NOTINDEXED";
 
@@ -485,6 +486,94 @@ pub(crate) fn type_idx(cx: &MdCtx, p: MdPath) -> Option<TypeIdx> {
     cx.catalog.find_type(&format!("MetadataObject: {en}"))
 }
 
+fn md_id(cx: &MdCtx, path: MdPath) -> Option<crate::model::Uuid16> {
+    let model = cx.model();
+    match path {
+        MdPath::Object(o) => Some(model.obj(o).md),
+        MdPath::CommonModule(i) => model.common_modules.get(i).map(|m| m.md),
+        MdPath::SessionParam(i) => model.session_params.get(i).map(|p| p.md),
+        MdPath::Subscription(i) => model.subscriptions.get(i).map(|s| s.md),
+        MdPath::Subsystem(k) => model.subsystem(k).map(|o| o.id),
+        MdPath::Other(i) => model.config.objects.get(i).map(|o| o.id),
+        MdPath::Field(o, tab, i) => field(cx, o, tab, i).and_then(|f| f.md),
+        MdPath::Tabular(o, t) => model.obj(o).tabular.get(t).map(|t| t.md),
+        MdPath::Form(o, i) => md_of(cx, model.obj(o).md)?.forms.get(i).map(|f| f.id),
+        MdPath::Template(o, i) => super::children::template(cx, o, i).map(|t| t.id),
+        _ => None,
+    }
+}
+
+fn is_top(path: MdPath) -> bool {
+    matches!(
+        path,
+        MdPath::Object(_)
+            | MdPath::CommonModule(_)
+            | MdPath::SessionParam(_)
+            | MdPath::Subscription(_)
+            | MdPath::Subsystem(_)
+            | MdPath::Other(_)
+    )
+}
+
+fn extension_refusal(member: &str, why: &str) -> bsl_vm::CallError {
+    not_implemented(&format!("{member}: {why}")).into()
+}
+
+fn object_extension(cx: &MdCtx, path: MdPath, ru: &str) -> CallResult<Value> {
+    let facts =
+        crate::extensions::metadata_facts(&cx.app).map_err(|why| extension_refusal(ru, &why))?;
+    let (Some(facts), Some(id)) = (facts, md_id(cx, path)) else {
+        return Ok(Value::Undefined);
+    };
+    match facts.iter().find(|(_, s)| s.own.contains(&id)) {
+        Some((e, _)) => crate::extensions::extension_value(e),
+        None => Ok(Value::Undefined),
+    }
+}
+
+fn object_changed(cx: &MdCtx, path: MdPath, ru: &str) -> CallResult<Value> {
+    let Some(facts) =
+        crate::extensions::metadata_facts(&cx.app).map_err(|why| extension_refusal(ru, &why))?
+    else {
+        return Ok(Value::Bool(false));
+    };
+    let Some(id) = md_id(cx, path) else {
+        return Err(extension_refusal(ru, "объект без идентификатора"));
+    };
+    let own = facts.iter().any(|(_, s)| s.own.contains(&id));
+    match (is_top(path), own, path) {
+        (true, false, _) => {
+            for (_, s) in &facts {
+                for (k, n) in &s.changed {
+                    let found = cx
+                        .model()
+                        .config
+                        .objects
+                        .iter()
+                        .any(|o| o.kind.as_str() == k.as_str() && fold(&o.name) == fold(n));
+                    if !found {
+                        return Err(extension_refusal(
+                            ru,
+                            &format!("заимствованный объект {k}.{n} не найден в конфигурации"),
+                        ));
+                    }
+                }
+            }
+            let object = md_of(cx, id).ok_or_else(|| extension_refusal(ru, "объект не найден"))?;
+            let (kind, name) = (object.kind.as_str(), fold(&object.name));
+            Ok(Value::Bool(facts.iter().any(|(_, s)| {
+                s.changed.iter().any(|(k, n)| k == kind && fold(n) == name)
+            })))
+        }
+        (false, true, MdPath::Field(..)) => Ok(Value::Bool(true)),
+        (true, true, _) => Err(extension_refusal(ru, "собственный объект расширения")),
+        _ => Err(extension_refusal(
+            ru,
+            "подчиненный объект в базе с расширениями",
+        )),
+    }
+}
+
 pub(crate) struct MdRoot {
     pub cx: Arc<MdCtx>,
 }
@@ -519,6 +608,9 @@ impl HostObject for MdRoot {
             return Ok(Value::from(
                 full_name(&self.cx, MdPath::Configuration).as_str(),
             ));
+        }
+        if m.0 == ROOT_EXTENSION {
+            return Ok(Value::Undefined);
         }
         match member_name(self.cx.catalog, self.cx.root.idx, m) {
             Some((true, ru, _)) => match fold(ru).as_str() {
@@ -556,11 +648,14 @@ impl HostObject for MdRoot {
     fn find_member(&self, name: &str) -> Option<MemberId> {
         match fold(name).as_str() {
             "полноеимя" | "fullname" => Some(MemberId(ROOT_FULL_NAME)),
+            "расширениеконфигурации" | "configurationextension" => {
+                Some(MemberId(ROOT_EXTENSION))
+            }
             _ => None,
         }
     }
     fn member_kind(&self, m: MemberId) -> Option<MemberKind> {
-        (m.0 == ROOT_FULL_NAME).then_some(MemberKind::Method {
+        (m.0 == ROOT_FULL_NAME || m.0 == ROOT_EXTENSION).then_some(MemberKind::Method {
             is_function: true,
             min_args: 0,
             max_args: Some(0),
@@ -658,9 +753,11 @@ impl HostObject for MdObj {
             "получитьименапредопределенных" => {
                 props::predefined_names(&self.cx, ex, self.path)
             }
-            "расширениеконфигурации" => Ok(Value::Undefined),
+            "расширениеконфигурации" => {
+                object_extension(&self.cx, self.path, ru)
+            }
             "естьизменениярасширениямиконфигурации" => {
-                Ok(Value::Bool(false))
+                object_changed(&self.cx, self.path, ru)
             }
             _ => Err(not_implemented(ru).into()),
         }

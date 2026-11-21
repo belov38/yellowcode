@@ -16,7 +16,7 @@ impl Infobase {
                 "service writes require ReadWrite mode".into(),
             ));
         }
-        if let Some(why) = self.write_refusal().filter(|why| *why != "extensions") {
+        if let Some(why) = self.write_refusal() {
             return Err(Error::Unsupported(why.into()));
         }
         let ticket = self.gate().acquire(wait).map_err(|e| match e {

@@ -128,10 +128,10 @@ impl ServiceTable {
     pub fn route<'a>(&'a self, verb: &str, path: &str) -> Result<Route<'a>, RouteError> {
         let service = self.service(path)?;
         let route_prefix = format!("/hs/{}", service.root);
-        let relative_url = path
+        let tail = path
             .strip_prefix(&route_prefix)
-            .ok_or(RouteError::NotFound)?
-            .trim_end_matches('/');
+            .ok_or(RouteError::NotFound)?;
+        let relative_url = tail.trim_end_matches('/');
         if service
             .templates
             .iter()
@@ -139,25 +139,30 @@ impl ServiceTable {
         {
             return Err(RouteError::InvalidTemplate);
         }
-        if relative_url.is_empty() {
-            return Err(RouteError::NotFound);
-        }
-        let mut best: Option<Candidate<'_>> = None;
-        for template in &service.templates {
-            if let Some((class, segments, params)) = matches(&template.pattern, relative_url) {
-                let score = (class, segments);
-                if let Some((_, previous, _)) = &best {
-                    if score == *previous {
-                        return Err(RouteError::Ambiguous);
-                    }
-                    if score < *previous {
-                        continue;
-                    }
-                }
-                best = Some((template, score, params));
+        let (template, params) = if relative_url.is_empty() {
+            if tail.len() > 1 {
+                return Err(RouteError::NotFound);
             }
-        }
-        let (template, _, params) = best.ok_or(RouteError::NotFound)?;
+            empty_path(service)?
+        } else {
+            let mut best: Option<Candidate<'_>> = None;
+            for template in &service.templates {
+                if let Some((class, segments, params)) = matches(&template.pattern, relative_url) {
+                    let score = (class, segments);
+                    if let Some((_, previous, _)) = &best {
+                        if score == *previous {
+                            return Err(RouteError::Ambiguous);
+                        }
+                        if score < *previous {
+                            continue;
+                        }
+                    }
+                    best = Some((template, score, params));
+                }
+            }
+            let (template, _, params) = best.ok_or(RouteError::NotFound)?;
+            (template, params)
+        };
         let method = template
             .methods
             .iter()
@@ -173,6 +178,17 @@ impl ServiceTable {
             params,
         })
     }
+}
+fn empty_path(service: &ServiceDef) -> Result<(&TemplateDef, Parameters), RouteError> {
+    let mut stars = service
+        .templates
+        .iter()
+        .filter(|t| t.pattern.trim_end_matches('/') == "/*");
+    let template = stars.next().ok_or(RouteError::NotFound)?;
+    if stars.next().is_some() {
+        return Err(RouteError::Ambiguous);
+    }
+    Ok((template, vec![("*".to_owned(), String::new())]))
 }
 fn put(params: &mut Vec<(String, String)>, key: &str, value: String) {
     if let Some((_, old)) = params.iter_mut().find(|(k, _)| k == key) {

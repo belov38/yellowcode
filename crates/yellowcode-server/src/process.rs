@@ -1,3 +1,7 @@
+use crate::service::{
+    wire::Unimplemented,
+    ws::{self, WsError},
+};
 use crate::users::{Credentials, UserDirectory};
 use appobj::{
     AppKind, AppOpen, Application, CallOptions, Right, RightTarget, SessionError, SessionHooks,
@@ -120,6 +124,7 @@ struct Sessions {
 pub struct RuntimeProcess {
     app: Arc<Application>,
     services: crate::service::ServiceTable,
+    ws: crate::service::ws::WsTable,
     runtime: Runtime,
     directory: UserDirectory,
     config: ProcessConfig,
@@ -157,6 +162,7 @@ impl RuntimeProcess {
         catch_unwind(AssertUnwindSafe(|| {
             let catalog = open.catalog;
             let services = crate::service::ServiceTable::from_config(&open.config)?;
+            let ws = crate::service::ws::WsTable::from_config(&open.config);
             let app = Application::open(open).map_err(|_| ProcessError::Open)?;
             app.install_users(directory.cards(), directory.name_key())
                 .map_err(|_| ProcessError::Open)?;
@@ -170,6 +176,7 @@ impl RuntimeProcess {
             Ok(Self {
                 app,
                 services,
+                ws,
                 runtime,
                 directory,
                 config,
@@ -302,6 +309,29 @@ impl RuntimeProcess {
         reuse: Reuse,
         run: impl FnOnce(&Application, &mut Execution) -> Result<T, ProcessError>,
     ) -> Result<T, ProcessError> {
+        self.call_as(
+            context,
+            handle,
+            credentials,
+            RightTarget::HttpMethod {
+                service: method.service,
+                template: method.template,
+                method: method.method,
+            },
+            reuse,
+            run,
+        )
+    }
+
+    fn call_as<T: Send>(
+        &self,
+        context: &NativeContext,
+        handle: SessionHandle,
+        credentials: Option<Credentials<'_>>,
+        target: RightTarget<'_>,
+        reuse: Reuse,
+        run: impl FnOnce(&Application, &mut Execution) -> Result<T, ProcessError>,
+    ) -> Result<T, ProcessError> {
         let user = self.admit(context, credentials)?;
         let (state, number) = {
             let mut sessions = self.lock();
@@ -320,15 +350,7 @@ impl RuntimeProcess {
             }
             let use_right =
                 md_model::parts::Right::from_name("Use").ok_or(ProcessError::Internal)?;
-            if !self.app.has_right(
-                &user,
-                RightTarget::HttpMethod {
-                    service: method.service,
-                    template: method.template,
-                    method: method.method,
-                },
-                Right(use_right),
-            ) {
+            if !self.app.has_right(&user, target, Right(use_right)) {
                 return Err(ProcessError::Forbidden);
             }
             (slot.state.take().ok_or(ProcessError::Busy)?, slot.number)
@@ -427,6 +449,133 @@ impl RuntimeProcess {
             },
         )
         .map_err(Into::into)
+    }
+
+    pub fn ws_call_fresh(
+        &self,
+        context: &NativeContext,
+        credentials: Option<Credentials<'_>>,
+        request: &crate::service::RequestData,
+    ) -> Result<crate::service::ResponseData, WsError> {
+        let service = self.ws.service(&request.path)?;
+        if request.method == "GET" {
+            self.admit(context, credentials)?;
+            return Ok(ws::page(request)?);
+        }
+        if service.reuse != "DontUse" {
+            return Err(
+                Unimplemented("a web service with ReuseSessions other than DontUse").into(),
+            );
+        }
+        let handle = self.open_session(context, credentials)?;
+        let result = self.ws_in_session(context, handle, credentials, Reuse::Keep, request);
+        let closed = self.close_session(context, handle, credentials);
+        match result {
+            Ok(response) => {
+                closed?;
+                Ok(response)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn ws_in_session(
+        &self,
+        context: &NativeContext,
+        handle: SessionHandle,
+        credentials: Option<Credentials<'_>>,
+        reuse: Reuse,
+        request: &crate::service::RequestData,
+    ) -> Result<crate::service::ResponseData, WsError> {
+        let service = self.ws.service(&request.path)?;
+        self.admit(context, credentials)?;
+        if request.method != "POST" {
+            return Err(Unimplemented("a web service request other than GET and POST").into());
+        }
+        if !request.query.is_empty() {
+            return Err(Unimplemented("a query in the target of a SOAP call").into());
+        }
+        ws::soap::check_content_type(&request.headers)?;
+        let content_type = || vec![("Content-Type".to_owned(), ws::soap::CONTENT_TYPE.to_owned())];
+        let (op, params) = match ws::soap::bind(service, ws::soap::parse(&request.body)?)? {
+            ws::soap::Bound::Call(op, params) => (op, params),
+            ws::soap::Bound::Fault(text) => {
+                return Ok(crate::service::ResponseData {
+                    status: 500,
+                    headers: content_type(),
+                    body: ws::soap::fault(text)?,
+                });
+            }
+            ws::soap::Bound::TooFew(op) => {
+                return match self.call_as(
+                    context,
+                    handle,
+                    credentials,
+                    RightTarget::Object(op.id),
+                    reuse,
+                    |_, _| Ok(()),
+                ) {
+                    Ok(()) => Ok(crate::service::ResponseData {
+                        status: 500,
+                        headers: content_type(),
+                        body: ws::soap::fault(ws::soap::TOO_FEW_PARAMETERS)?,
+                    }),
+                    Err(ProcessError::Forbidden) => Err(Unimplemented(
+                        "missing SOAP parameters of an operation without Use",
+                    )
+                    .into()),
+                    Err(error) => Err(error.into()),
+                };
+            }
+        };
+        let result = self.call_as(
+            context,
+            handle,
+            credentials,
+            RightTarget::Object(op.id),
+            reuse,
+            |app, ex| {
+                if let Err(refusal) = ws::admit_operation(op) {
+                    return Ok(Err(refusal));
+                }
+                let mut args = Vec::with_capacity(params.len());
+                for (p, sent) in op.parameters.iter().zip(&params) {
+                    match ws::values::argument(ex, &p.xdto, p.nillable, sent)? {
+                        Ok(value) => args.push(bsl_vm::Arg::Val(value)),
+                        Err(refusal) => return Ok(Err(refusal)),
+                    }
+                }
+                let instance =
+                    app.module_instance(ex, appobj::ModuleTarget::WebService(service.id))?;
+                let value = match ex.call(&instance, &op.procedure, &mut args) {
+                    Ok(value) => value,
+                    Err(error @ bsl_vm::Exception::Fatal(_)) => return Err(error.into()),
+                    Err(_) => {
+                        return Ok(Err(Unimplemented(
+                            "the SOAP Fault of an error in the procedure of an operation",
+                        )));
+                    }
+                };
+                Ok(match ws::values::answer(ex, &op.returns, &value)? {
+                    Ok(text) => ws::soap::response(service, op, &text),
+                    Err(refusal) => Err(refusal),
+                })
+            },
+        );
+        match result {
+            Ok(Ok(body)) => Ok(crate::service::ResponseData {
+                status: 200,
+                headers: content_type(),
+                body,
+            }),
+            Ok(Err(refusal)) => Err(refusal.into()),
+            Err(ProcessError::Forbidden) => Ok(crate::service::ResponseData {
+                status: 500,
+                headers: content_type(),
+                body: ws::soap::rights_fault(service, op)?,
+            }),
+            Err(error) => Err(error.into()),
+        }
     }
 
     fn cleanup(

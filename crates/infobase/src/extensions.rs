@@ -1,15 +1,22 @@
+mod cas;
+mod compose;
+pub(crate) use compose::compose;
 mod control;
+mod logic;
 mod row;
 mod schema;
 mod source;
+mod zipped;
 use brace::Guid;
 pub use control::{Control, Stop, path_open_scratch};
+pub use logic::{ExtensionFacts, ExtensionLogic, Intercept, scan_intercepts};
 use memory_budget::{BudgetError, BudgetedText, BudgetedVec, Category, MemoryBudget};
 use onecd::DateTime;
 pub use row::dt_generation;
 pub use schema::Projection;
 use serde::{Serialize, Serializer, ser::SerializeStruct};
 pub use source::ReadSource;
+pub use zipped::{ZippedInfo, zipped_info};
 
 pub const FEATURE_BYTES: u64 = 64 << 20;
 pub const SCHEMA_BYTES: u64 = 4 << 20;
@@ -118,32 +125,12 @@ impl Serialize for Inventory {
     }
 }
 
-const GENERATION_BYTES: usize = 16 << 10;
+const GENERATION_BYTES: usize = zipped::ZIPPED_BYTES;
 
 pub fn generation_key(bytes: &[u8], budget: &MemoryBudget) -> Result<Option<[u8; 20]>> {
-    use brace::binary::{AtomValue, BinNode, ReadLimits, Reader};
-    if bytes.len() > GENERATION_BYTES {
-        return Err(Error::Limit("extension generation value"));
-    }
-    let _scratch = budget
-        .try_reserve(Category::ReaderWorking, 512 << 10)
-        .map_err(BudgetError::from)?;
-    let mut reader = Reader::new(bytes);
-    reader
-        .set_depth_limit(32)
-        .map_err(|_| Error::Limit("generation depth"))?;
-    reader.begin_budget(ReadLimits {
-        atom_bytes: GENERATION_BYTES as u64,
-        retained_bytes: GENERATION_BYTES as u64,
-        nodes: 1024,
-    });
+    use brace::binary::{AtomValue, BinNode};
     let malformed = || Error::Invalid("malformed generation stream");
-    let Some(BinNode::List(body)) = reader.read_value().map_err(|_| malformed())? else {
-        return Err(malformed());
-    };
-    if reader.next_event().map_err(|_| malformed())?.is_some() {
-        return Err(malformed());
-    }
+    let body = zipped::read_list(bytes, budget)?;
     let [
         BinNode::Atom(version),
         BinNode::List(locator),

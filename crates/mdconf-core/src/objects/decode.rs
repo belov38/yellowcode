@@ -83,6 +83,44 @@ pub(crate) fn decode_object(
     Decoder::new(ctx).object(e, shell, diag, false)
 }
 
+pub(crate) fn decode_extension_child(
+    main: &Configuration,
+    owner: &MdObject,
+    class: Guid,
+    nested: bool,
+    item: &Node,
+) -> Option<Child> {
+    let schema: &'static Schema = mdschema::schema().ok()?;
+    let spec = overlay::kind(schema, owner.kind.as_str())?;
+    let by_class = |children: &'static [(String, ChildSpec)]| {
+        children
+            .iter()
+            .find(|(id, _)| Guid::parse(id) == Some(class))
+            .map(|(_, cs)| cs)
+    };
+    let (cs, parent_tag) = if nested {
+        let (_, section) = spec
+            .children
+            .iter()
+            .find(|(_, cs)| cs.tag == "TabularSection")?;
+        (by_class(&section.children)?, Some("TabularSection"))
+    } else {
+        (by_class(&spec.children)?, None)
+    };
+    let ctx = Ctx {
+        schema,
+        index: &main.index,
+        predef: &main.predef,
+    };
+    let obj = Owner {
+        kind: owner.kind.as_str().to_string(),
+        name: owner.name.clone(),
+    };
+    let mut diag = Diagnostics::default();
+    let child = Decoder::new(&ctx).child(item, cs, &obj, parent_tag, &mut diag)?;
+    (diag.misses.is_empty() && child.type_desc().is_some()).then_some(child)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub(crate) enum TreeDomain {
     #[default]

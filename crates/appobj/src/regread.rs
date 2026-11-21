@@ -1355,6 +1355,9 @@ impl RecordManager {
         {
             return Err(refuse("обработчики записи набора"));
         }
+        if let Some(why) = crate::extensions::write_refusal(&app, def, "RecordSet") {
+            return Err(refuse(&why));
+        }
         let key = self.key_values();
         match &*self.read_key.borrow() {
             Some(read) => {

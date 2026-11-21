@@ -254,7 +254,7 @@ impl HostObject for Response {
 }
 fn status(ex: &mut Execution, arg: Option<&Arg>) -> CallResult<u16> {
     let n = arg_i64(ex, arg, 1)?;
-    if !(200..=599).contains(&n) || matches!(n, 204 | 205 | 304) {
+    if !(0..=999).contains(&n) {
         return Err(invalid().into());
     }
     u16::try_from(n).map_err(|_| invalid().into())

@@ -575,6 +575,74 @@ fn file_estimate(len: usize) -> usize {
     )
 }
 
+const NATIVE_COMMIT_PAGES: u64 = 128;
+const PAGE_BYTES: u64 = PAGE as u64;
+const BLOB_BLOCK: u64 = 256;
+const BLOB_BLOCK_DATA: u64 = 250;
+
+fn pages_touched(lo: u64, hi: u64) -> u64 {
+    if hi <= lo {
+        0
+    } else {
+        (hi - 1) / PAGE_BYTES - lo / PAGE_BYTES + 1
+    }
+}
+
+struct CommitMeter {
+    record: u64,
+    data_start: u64,
+    data_end: u64,
+    blob_start: u64,
+    blob_end: u64,
+}
+
+impl CommitMeter {
+    fn new(record_len: u32) -> Self {
+        let record = u64::from(record_len);
+        CommitMeter {
+            record,
+            data_start: 0,
+            data_end: record,
+            blob_start: 0,
+            blob_end: 0,
+        }
+    }
+
+    fn row(&mut self, blob_lens: impl IntoIterator<Item = usize>) -> bool {
+        self.data_end = self.data_end.saturating_add(self.record);
+        for len in blob_lens {
+            if len == 0 {
+                continue;
+            }
+            if self.blob_end == 0 {
+                self.blob_end = BLOB_BLOCK;
+            }
+            let blocks = (len as u64).div_ceil(BLOB_BLOCK_DATA);
+            self.blob_end = self
+                .blob_end
+                .saturating_add(blocks.saturating_mul(BLOB_BLOCK));
+        }
+        let touched = pages_touched(self.data_start, self.data_end)
+            .saturating_add(pages_touched(self.blob_start, self.blob_end));
+        if touched > NATIVE_COMMIT_PAGES {
+            self.data_start = self.data_end;
+            self.blob_start = self.blob_end;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+fn blob_lens(row: &onecd::Row) -> impl Iterator<Item = usize> + '_ {
+    row.iter().filter_map(|v| match v {
+        Value::Text(BlobVal::Data(b))
+        | Value::NText(BlobVal::Data(b))
+        | Value::Image(BlobVal::Data(b)) => Some(b.len()),
+        _ => None,
+    })
+}
+
 struct Batches<'db> {
     db: &'db Database,
     tx: Option<onecd::WriteTxn<'db>>,
@@ -614,6 +682,9 @@ impl<'db> Batches<'db> {
 
     fn commit(&mut self) -> Result<()> {
         if let Some(tx) = self.tx.take() {
+            if tx.pending_bytes() == 0 {
+                return Ok(());
+            }
             self.peak = self.peak.max(tx.pending_bytes());
             #[cfg(test)]
             inject("batch")?;
@@ -1723,14 +1794,17 @@ fn stream<R: Read>(
         expect(reader.next_event()?, Event::TableStart(head.clone()))?;
         run.table = head.phys_name.clone();
         run.progress(notes, Phase::Read);
-        let plan = {
+        batches.commit()?;
+        let (plan, mut meter) = {
             let tx = batches.unit(0, "table")?;
-            let descriptor = tx.read_table(&head.phys_name)?.descr().clone();
+            let table = tx.read_table(&head.phys_name)?;
+            let meter = CommitMeter::new(table.layout().record_len);
+            let descriptor = table.descr().clone();
             let plan = Plan::new(&descriptor, &head)?;
             if !scope.contains(&plan.table) {
                 return Err(bad("application row outside import scope"));
             }
-            plan
+            (plan, meter)
         };
         let mut count = 0u64;
         loop {
@@ -1744,6 +1818,9 @@ fn stream<R: Read>(
                     tx.table_for_restore(&plan.table)?
                         .insert(&row)
                         .map_err(|e| cap_hit(e.into(), Some(table_plan)))?;
+                    if meter.row(blob_lens(&row)) {
+                        batches.commit()?;
+                    }
                     count += 1;
                     run.rows += 1;
                     run.tick(notes);
@@ -1751,6 +1828,7 @@ fn stream<R: Read>(
                 _ => return Err(bad("missing logical table end")),
             }
         }
+        batches.commit()?;
         if count != table_plan.rows {
             return Err(bad(format!(
                 "table {}: {count} rows, the pre-pass counted {}",

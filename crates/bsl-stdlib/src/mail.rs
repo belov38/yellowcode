@@ -124,12 +124,6 @@ pub(crate) struct Profile {
     values: RefCell<Vec<Value>>,
 }
 
-pub(crate) fn filled_check_refusal(v: &Value) -> Option<HostError> {
-    v.as_object()?.as_any().downcast_ref::<Profile>()?;
-    let ru = "Проверка мутабельных значений на заполненность не поддерживается";
-    Some(HostError::text(ru, ru).raw())
-}
-
 fn mismatch() -> HostError {
     HostError::key(msg::PROPERTY_TYPE_MISMATCH).raw()
 }
@@ -277,6 +271,11 @@ impl HostObject for Profile {
             Some(t) => TypeId::of_catalog(t.ty),
             None => TypeId::of_catalog(TypeIdx(0)),
         }
+    }
+
+    fn filled_check(&self) -> Option<HostError> {
+        let ru = "Проверка мутабельных значений на заполненность не поддерживается";
+        Some(HostError::text(ru, ru).raw())
     }
 
     fn as_any(&self) -> &dyn Any {

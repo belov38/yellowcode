@@ -10,7 +10,6 @@ use crate::model::{
 use crate::objects::{ObjectInstance, not_selected, stored_instance};
 use crate::predefined::AreaKey;
 use crate::read::{read_fresh, read_view, store_call_error};
-use crate::session::call_ctx;
 use crate::txn::{CallTxn, Commit};
 use crate::values::field::to_field;
 use crate::values::refs::RefValue;
@@ -193,7 +192,13 @@ struct Walk<'a> {
     unrecord: Unrecord,
 }
 
-fn admit(ex: &mut Execution, app: &Application, def: &ObjDef, op: Op) -> CallResult<()> {
+fn admit(
+    ex: &mut Execution,
+    app: &Application,
+    def: &ObjDef,
+    op: Op,
+    inst: &ObjectInstance,
+) -> CallResult<()> {
     if app.options().read_only_scope.is_some() {
         return Err(refuse(def, op, "приложение только для чтения (read_scope)").into());
     }
@@ -206,10 +211,48 @@ fn admit(ex: &mut Execution, app: &Application, def: &ObjDef, op: Op) -> CallRes
     if separated && app.options().area().is_none() {
         return Err(refuse(def, op, "данные разделены, область данных не задана").into());
     }
-    if !call_ctx(ex).is_some_and(|c| c.sess.user().no_users) {
-        return Err(HostError::not_implemented("P6", "application write security provider").into());
+    admit_user(ex, app, def, op, inst)
+}
+
+fn admit_user(
+    ex: &mut Execution,
+    app: &Application,
+    def: &ObjDef,
+    op: Op,
+    inst: &ObjectInstance,
+) -> CallResult<()> {
+    use crate::write::{DataWrite, data_write, user_refusal};
+    let asked = match op {
+        Op::Delete => data_write(ex, app, def.md, &["Delete"])?,
+        Op::Mark(_) => data_write(ex, app, def.md, &[])?,
+    };
+    match asked {
+        DataWrite::NoUsers => return Ok(()),
+        DataWrite::Privileged => {
+            return Err(user_refusal("удаление или пометка в привилегированном режиме").into());
+        }
+        DataWrite::Denied | DataWrite::Allowed => {}
     }
-    Ok(())
+    if op != Op::Delete {
+        return Err(user_refusal("пометка удаления").into());
+    }
+    if def.kind != ObjKind::Catalog {
+        return Err(user_refusal(&format!(
+            "удаление объекта вида {}",
+            def.kind.name(Lang::Ru)
+        ))
+        .into());
+    }
+    if inst.loading() {
+        return Err(user_refusal("удаление при ОбменДанными.Загрузка").into());
+    }
+    if reachable(app, def.id).len() > 1 {
+        return Err(user_refusal("удаление справочника с подчинёнными справочниками").into());
+    }
+    if asked == DataWrite::Denied {
+        return Err(crate::rights::access_violation().into());
+    }
+    Err(user_refusal("удаление с правом Удаление").into())
 }
 
 fn subordinates(app: &Application, obj: ObjId) -> Vec<ObjId> {
@@ -880,7 +923,7 @@ fn delete_with(
         }
         st.r.ok_or_else(|| internal("a stored object without a reference"))?
     };
-    admit(ex, &app, def, op)?;
+    admit(ex, &app, def, op, &inst)?;
     let loading = inst.loading();
     let objs = if loading {
         vec![inst.obj]
@@ -962,7 +1005,7 @@ pub(crate) fn set_mark(
     if current == mark && !walk_below {
         return Ok(Value::Undefined);
     }
-    admit(ex, &app, def, op)?;
+    admit(ex, &app, def, op, &inst)?;
     let txn = CallTxn::of_call(ex).ok_or_else(|| internal("a mark outside a call"))?;
     txn.check().map_err(|e| e.host())?;
     if walk_below {

@@ -4,8 +4,8 @@ use super::store::JobRow;
 use crate::Application;
 use crate::meta::{MdKey, MdPath, member_name, no_field, value_of};
 use bsl_vm::{
-    Arg, CallResult, Exception, Execution, HostObject, MemberId, Number, RetainedMemory, TypeId,
-    TypeIdx, Value, creation_number,
+    Arg, CallResult, Category, CategorySet, Exception, Execution, HostError, HostObject, MemberId,
+    Number, RetainedMemory, TypeId, TypeIdx, Value, creation_number,
 };
 use ibschema::values::Uuid16;
 use platform_catalog::catalog;
@@ -207,6 +207,15 @@ impl HostObject for Job {
             (true, Some(n)) => Ok(Some(bsl_prim::Str::from(format!("{n}:").as_str()))),
             _ => Err(refusal(TYPE, "Представление: с наименованием не наблюдалось").into()),
         }
+    }
+
+    fn filled_check(&self) -> Option<HostError> {
+        let mut e = HostError::text(
+            "Проверка мутабельных значений на заполненность не поддерживается",
+            "Mutable values filling check is unavailable",
+        );
+        e.categories = Some(CategorySet::of(&[Category::OtherError]));
+        Some(e)
     }
 
     fn boost_hash(&self) -> Option<i32> {

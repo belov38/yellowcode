@@ -342,7 +342,9 @@ pub(crate) fn member_of(
             Some((
                 MemberId(id),
                 MemberKind::Method {
-                    is_function: m.returns_value || m.name_ru == "Родитель",
+                    is_function: m.returns_value
+                        || m.name_ru == "Родитель"
+                        || m.name_ru == "ЕстьИзмененияРасширениямиКонфигурации",
                     min_args: u16::try_from(min).unwrap_or(u16::MAX),
                     max_args: max.map(|m| u16::try_from(m).unwrap_or(u16::MAX)),
                 },

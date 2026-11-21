@@ -2848,7 +2848,7 @@ dependencies = [
 
 [[package]]
 name = "onec-desktop"
-version = "0.1.0-alpha.25"
+version = "0.1.0-alpha.26"
 dependencies = [
  "cf-fixtures",
  "dunce",

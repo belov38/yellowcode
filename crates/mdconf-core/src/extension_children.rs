@@ -334,3 +334,14 @@ fn check_count(node: &Node, len: usize, location: ChildLocation) -> Result<(), C
     }
     Ok(())
 }
+
+pub fn decode_attribute(
+    main: &crate::Configuration,
+    owner: &crate::model::MdObject,
+    class: Guid,
+    nested: bool,
+    item: &Node,
+) -> Option<crate::model::Child> {
+    crate::objects::decode::decode_extension_child(main, owner, class, nested, item)
+        .filter(|child| child.tag == crate::model::ChildTag::Attribute)
+}

@@ -291,6 +291,7 @@ fn layout<'a>(
     app: &'a Arc<Application>,
     obj: ObjId,
     posting: bool,
+    recorder: RefValue,
 ) -> CallResult<Layout<'a>> {
     Reg::new(app, obj, "Записать").check_shape()?;
     let def = app.model().obj(obj);
@@ -313,13 +314,23 @@ fn layout<'a>(
     if events::has_write_subscriptions(app, def, "RecordSet") {
         return Err(refuse_write("подписка на события набора").into());
     }
+    if let Some(why) = crate::extensions::write_refusal(app, def, "RecordSet") {
+        return Err(refuse_write(&why).into());
+    }
     if crate::history::kept(app, obj) {
         return Err(refuse_write("история данных регистра").into());
     }
     if app.options().read_only_scope.is_some() {
         return Err(refuse_write("приложение только для чтения (read_scope)").into());
     }
-    if !call_ctx(ex).is_some_and(|c| c.sess.user().no_users) {
+    let privileged_posting = posting
+        && app
+            .model()
+            .obj(recorder.obj)
+            .behavior
+            .post_in_privileged_mode;
+    let in_call = call_ctx(ex).map(|c| c.sess.user().no_users);
+    if !(privileged_posting && in_call.is_some()) && in_call != Some(true) {
         return Err(HostError::not_implemented("P6", "application write security provider").into());
     }
     let st = app
@@ -445,7 +456,7 @@ fn store(
     r: RefValue,
     posting: bool,
 ) -> CallResult<()> {
-    let lay = layout(ex, app, set.obj, posting)?;
+    let lay = layout(ex, app, set.obj, posting, r)?;
     let rows = rows_of(ex, &lay, set, r)?;
     let kept = match (posting, reposting(r)) {
         (true, true) => Kept::Repost,
@@ -486,7 +497,7 @@ pub(crate) fn remove_records(
     reg: ObjId,
     r: RefValue,
 ) -> CallResult<()> {
-    let lay = layout(ex, app, reg, true)?;
+    let lay = layout(ex, app, reg, true, r)?;
     replace(ex, app, txn, &lay, Vec::new(), r, Kept::Nothing)
 }
 
@@ -977,7 +988,7 @@ fn has_records(
     reg: ObjId,
     r: RefValue,
 ) -> CallResult<bool> {
-    let lay = layout(ex, app, reg, true)?;
+    let lay = layout(ex, app, reg, true, r)?;
     let def = app.model().obj(reg);
     let recorder_field = def
         .fields

@@ -1,7 +1,9 @@
 use crate::Application;
 use crate::managers::constants;
 use crate::meta::arg_value;
-use crate::model::{ObjId, ObjKind, TypeAtom};
+use crate::model::{ObjId, ObjKind, StdAttr, TypeAtom};
+use crate::rights::{DataRead, data_read};
+use crate::select::{SelectSpec, select};
 use crate::session::call_ctx;
 use crate::session_info::outside_call;
 use bsl_prim::fold_name;
@@ -49,9 +51,7 @@ fn functional_option(app: &Application, ex: &mut Execution, args: &mut [Arg]) ->
         .find(|o| fold_name(&o.name) == name)
         .ok_or_else(not_found)?;
     let parameters = matches!(args.get(1), Some(Arg::Val(_) | Arg::Place(_)));
-    if !call_ctx(ex).ok_or_else(outside_call)?.sess.user().no_users {
-        return Err(refused("сеанс с пользователями").into());
-    }
+    call_ctx(ex).ok_or_else(outside_call)?;
     if parameters {
         let Some((catalog, field)) = attribute_of(app, option) else {
             return Err(refused("параметры функциональной опции").into());
@@ -59,14 +59,123 @@ fn functional_option(app: &Application, ex: &mut Execution, args: &mut [Arg]) ->
         let given = arg_value(ex, args, 1)?;
         return attribute_value(app, ex, catalog, field, &given);
     }
-    let Some(constant) = constant_of(app, option) else {
-        return Err(refused("хранение не в константе").into());
-    };
-    match constants::get(ex, app, constant)? {
-        Value::Undefined if is_boolean(app, constant) => Ok(Value::Bool(false)),
-        Value::Undefined => Err(refused("константа без строки не Булево").into()),
-        value => Ok(value),
+    if let Some(constant) = constant_of(app, option) {
+        let privileged_get = matches!(option.prop("PrivilegedGetMode"), Some(MdValue::Bool(true)));
+        return match constant_value(ex, app, constant, privileged_get)? {
+            Value::Undefined if is_boolean(app, constant) => Ok(Value::Bool(false)),
+            Value::Undefined => Err(refused("константа без строки не Булево").into()),
+            value => Ok(value),
+        };
     }
+    if let Some((catalog, field)) = attribute_of(app, option) {
+        return any_element(app, ex, catalog, field);
+    }
+    Err(refused("хранение не в константе").into())
+}
+
+fn constant_value(
+    ex: &mut Execution,
+    app: &Application,
+    constant: ObjId,
+    privileged_get: bool,
+) -> CallResult<Value> {
+    if data_read(ex, app, app.model().obj(constant).md)? == DataRead::Allowed {
+        return constants::get(ex, app, constant);
+    }
+    if !privileged_get {
+        return Err(refused("константа без права Чтение без привилегированного получения").into());
+    }
+    if ex.effective_flags().safe_mode {
+        return Err(refused("привилегированное получение в безопасном режиме").into());
+    }
+    ex.set_privileged_mode(true)?;
+    let got = constants::get(ex, app, constant);
+    ex.set_privileged_mode(false)?;
+    got
+}
+
+fn admit_catalog(ex: &mut Execution, app: &Application, catalog: ObjId) -> CallResult<()> {
+    if data_read(ex, app, app.model().obj(catalog).md)? == DataRead::Denied {
+        return Err(refused("реквизит справочника без права Чтение").into());
+    }
+    Ok(())
+}
+
+fn parameter_uses(app: &Application, catalog: ObjId, key: Option<&str>) -> bool {
+    let model = app.model();
+    model
+        .config
+        .of_kind(MdKind::FunctionalOptionsParameter)
+        .filter(|p| key.is_none_or(|key| fold_name(&p.name) == fold_name(key)))
+        .any(|p| match p.prop("Use") {
+            Some(MdValue::RefList(list)) => list.iter().any(|r| {
+                r.id.and_then(|id| model.by_uuid(id)).or_else(|| {
+                    let (word, name) = r.name.split_once('.')?;
+                    model.find(ObjKind::from_word(word)?, name)
+                }) == Some(catalog)
+            }),
+            _ => false,
+        })
+}
+
+fn boolean_attribute(app: &Application, catalog: ObjId, field: usize) -> Option<String> {
+    app.model()
+        .obj(catalog)
+        .fields
+        .get(field)
+        .filter(|f| f.types.single() == Some(&TypeAtom::Bool))
+        .map(|f| f.name.clone())
+}
+
+fn any_element(
+    app: &Application,
+    ex: &mut Execution,
+    catalog: ObjId,
+    field: usize,
+) -> CallResult<Value> {
+    let Some(attribute) = boolean_attribute(app, catalog, field) else {
+        return Err(refused("реквизит не Булево").into());
+    };
+    if !parameter_uses(app, catalog, None) {
+        return Err(refused("реквизит справочника без параметра функциональных опций").into());
+    }
+    admit_catalog(ex, app, catalog)?;
+    let std_name = |attr: StdAttr| {
+        app.model()
+            .obj(catalog)
+            .fields
+            .iter()
+            .any(|f| f.std == Some(attr))
+            .then(|| attr.names().0)
+    };
+    let folder = std_name(StdAttr::IsFolder);
+    let mark = std_name(StdAttr::DeletionMark);
+    let selection = select(ex, app, catalog, SelectSpec::default())?;
+    let (mut seen, mut any) = (false, false);
+    while matches!(
+        ex.call_method(&selection, "Следующий", &mut [], true)?,
+        Value::Bool(true)
+    ) {
+        seen = true;
+        if let Some(name) = folder
+            && matches!(ex.get_member(&selection, name)?, Value::Bool(true))
+        {
+            return Err(refused("без параметров: группа справочника").into());
+        }
+        if let Some(name) = mark
+            && matches!(ex.get_member(&selection, name)?, Value::Bool(true))
+        {
+            return Err(refused("без параметров: элемент помечен на удаление").into());
+        }
+        match ex.get_member(&selection, &attribute)? {
+            Value::Bool(b) => any |= b,
+            _ => return Err(refused("реквизит не Булево").into()),
+        }
+    }
+    if !seen {
+        return Err(refused("без параметров: справочник пуст").into());
+    }
+    Ok(Value::Bool(any))
 }
 
 fn attribute_of(app: &Application, option: &MdObject) -> Option<(ObjId, usize)> {
@@ -107,38 +216,20 @@ fn attribute_value(
     let Some([(key, value)]) = pairs.as_deref() else {
         return Err(refused("параметры функциональной опции").into());
     };
-    let model = app.model();
-    let used = model
-        .config
-        .of_kind(MdKind::FunctionalOptionsParameter)
-        .filter(|p| fold_name(&p.name) == fold_name(key))
-        .any(|p| match p.prop("Use") {
-            Some(MdValue::RefList(list)) => list.iter().any(|r| {
-                r.id.and_then(|id| model.by_uuid(id)).or_else(|| {
-                    let (word, name) = r.name.split_once('.')?;
-                    model.find(ObjKind::from_word(word)?, name)
-                }) == Some(catalog)
-            }),
-            _ => false,
-        });
-    if !used {
+    if !parameter_uses(app, catalog, Some(key)) {
         return Err(refused("параметры функциональной опции").into());
     }
-    let def = model.obj(catalog);
+    let def = app.model().obj(catalog);
     let Some(r) = crate::values::refs::as_ref(value).filter(|r| r.obj == catalog) else {
         return Err(refused(&format!("параметр {key} не ссылка Catalog.{}", def.name)).into());
     };
     if r.is_empty() {
         return Err(refused(&format!("параметр {key} пуст")).into());
     }
-    let Some(f) = def
-        .fields
-        .get(field)
-        .filter(|f| f.types.single() == Some(&TypeAtom::Bool))
-    else {
+    let Some(name) = boolean_attribute(app, catalog, field) else {
         return Err(refused("реквизит не Булево").into());
     };
-    let name = f.name.clone();
+    admit_catalog(ex, app, catalog)?;
     ex.get_member(value, &name).map_err(Into::into)
 }
 

@@ -158,8 +158,24 @@ fn node_count(node: &brace::Node) -> Result<u64> {
     }
 }
 
-fn full_layout(root: &brace::Node, remaining_tables: usize) -> Result<()> {
-    fn table(node: &brace::Node, depth: usize, remaining: &mut usize) -> Result<()> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IndexLayout {
+    Full,
+    Short,
+}
+
+fn full_layout(root: &brace::Node, remaining_tables: usize) -> Result<IndexLayout> {
+    #[derive(Default)]
+    struct Seen {
+        short: bool,
+        full: bool,
+    }
+    fn table(
+        node: &brace::Node,
+        depth: usize,
+        remaining: &mut usize,
+        seen: &mut Seen,
+    ) -> Result<()> {
         *remaining = remaining
             .checked_sub(1)
             .ok_or_else(|| bad("cumulative schema table limit"))?;
@@ -176,13 +192,14 @@ fn full_layout(root: &brace::Node, remaining_tables: usize) -> Result<()> {
             .ok_or_else(|| bad("extension index list"))?;
         for i in indexes.iter().skip(1) {
             match i.as_list().map(<[_]>::len) {
-                Some(6) => {
-                    return Err(bad(
-                        "unsupported extension CURRENTSCHEMA layout: short six-element legacy indexes; full nine-element indexes are required",
-                    ));
-                }
-                Some(9) => {}
+                Some(6) => seen.short = true,
+                Some(9) => seen.full = true,
                 _ => return Err(bad("unsupported extension CURRENTSCHEMA index layout")),
+            }
+            if seen.short && seen.full {
+                return Err(bad(
+                    "unsupported extension CURRENTSCHEMA layout: six-element and nine-element indexes are mixed",
+                ));
             }
         }
         let nested = children
@@ -190,7 +207,7 @@ fn full_layout(root: &brace::Node, remaining_tables: usize) -> Result<()> {
             .and_then(brace::Node::as_list)
             .ok_or_else(|| bad("extension nested table list"))?;
         for child in nested.iter().skip(1) {
-            table(child, depth + 1, remaining)?;
+            table(child, depth + 1, remaining, seen)?;
         }
         Ok(())
     }
@@ -199,10 +216,47 @@ fn full_layout(root: &brace::Node, remaining_tables: usize) -> Result<()> {
         .and_then(brace::Node::as_list)
         .ok_or_else(|| bad("extension schema table list"))?;
     let mut remaining = remaining_tables;
+    let mut seen = Seen::default();
     for t in tables.iter().skip(1) {
-        table(t, 1, &mut remaining)?;
+        table(t, 1, &mut remaining, &mut seen)?;
     }
-    Ok(())
+    Ok(if seen.short {
+        IndexLayout::Short
+    } else {
+        IndexLayout::Full
+    })
+}
+
+fn legacy_allowance(nodes: u64, text_len: usize) -> Result<u64> {
+    let bytes = text_len as u64;
+    add(add(mul(nodes, 116)?, mul(bytes, 8)?)?, bytes)
+}
+
+const LEGACY_TAIL: &[u8] = b",\r\n{0},0,0}";
+
+fn only_tails_added(short: &[u8], full: &[u8], indexes: usize) -> bool {
+    let mut rebuilt = Vec::with_capacity(short.len());
+    let mut rest = full;
+    let mut found = 0;
+    while let Some(at) = rest
+        .windows(LEGACY_TAIL.len())
+        .position(|w| w == LEGACY_TAIL)
+    {
+        let (head, tail) = rest.split_at(at);
+        rebuilt.extend_from_slice(head);
+        rebuilt.push(b'}');
+        rest = tail.get(LEGACY_TAIL.len()..).unwrap_or_default();
+        found += 1;
+    }
+    rebuilt.extend_from_slice(rest);
+    found == indexes && rebuilt == short
+}
+
+fn index_count(schema: &LogicalSchema) -> usize {
+    fn table(t: &Table) -> usize {
+        t.indexes.len() + t.nested.iter().map(table).sum::<usize>()
+    }
+    schema.tables.iter().map(table).sum()
 }
 
 fn state(t: &Table) -> Result<()> {
@@ -609,7 +663,8 @@ impl Block {
         let text = rows.iter().find(|row| matches!(row.first(), Some(ColumnValue::Number(n)) if n.eq_value(&Numeric::from_i64(1))))
             .and_then(|row| row.get(2)).and_then(|v| match v { ColumnValue::Bytes(b) => Some(b.as_slice()), _ => None })
             .ok_or_else(|| bad("missing extension schema1"))?;
-        if add(main_text.len() as u64, text.len() as u64)? > SCHEMA_TEXT_MAX as u64 {
+        let main_len = main_text.len() as u64;
+        if add(main_len, text.len() as u64)? > SCHEMA_TEXT_MAX as u64 {
             return Err(bad("cumulative schema byte limit"));
         }
         drop(main_text);
@@ -619,11 +674,42 @@ impl Block {
             .current;
         let root = brace::parse_bytes_budgeted(text, &budget, Category::Metadata)
             .map_err(|e| bad(format!("extension CURRENTSCHEMA: {e}")))?;
-        if add(main_nodes, node_count(&root)?)? > limits.schema_nodes {
+        let nodes = node_count(&root)?;
+        if add(main_nodes, nodes)? > limits.schema_nodes {
             return Err(bad("cumulative schema node limit"));
         }
-        full_layout(&root, TABLES_MAX.saturating_sub(main_tables))?;
+        let layout = full_layout(&root, TABLES_MAX.saturating_sub(main_tables))?;
         drop(root);
+        let mut lease = None;
+        let canonical = match layout {
+            IndexLayout::Full => None,
+            IndexLayout::Short => {
+                lease = Some(reserve(&budget, legacy_allowance(nodes, text.len())?)?);
+                let legacy = LogicalSchema::from_text_legacy_indexes(text)
+                    .map_err(|e| bad(format!("unsupported extension CURRENTSCHEMA: {e}")))?;
+                let full = legacy.to_text();
+                if !only_tails_added(text, &full, index_count(&legacy)) {
+                    return Err(bad(
+                        "unsupported extension CURRENTSCHEMA layout: short indexes in a noncanonical text",
+                    ));
+                }
+                drop(legacy);
+                if add(main_len, full.len() as u64)? > SCHEMA_TEXT_MAX as u64 {
+                    return Err(bad("cumulative schema byte limit"));
+                }
+                let root = brace::parse_bytes_budgeted(&full, &budget, Category::Metadata)
+                    .map_err(|e| bad(format!("extension CURRENTSCHEMA: {e}")))?;
+                if add(main_nodes, node_count(&root)?)? > limits.schema_nodes {
+                    return Err(bad("cumulative schema node limit"));
+                }
+                if full_layout(&root, TABLES_MAX.saturating_sub(main_tables))? != IndexLayout::Full
+                {
+                    return Err(bad("extension CURRENTSCHEMA legacy index tails"));
+                }
+                Some(full)
+            }
+        };
+        let text = canonical.as_deref().unwrap_or(text);
         let schema = LogicalSchema::from_text_budgeted(text, &budget)
             .map_err(|e| bad(format!("unsupported extension CURRENTSCHEMA: {e}")))?;
         let (_, extension_live, extension_tables) = metrics(&schema)?;
@@ -635,6 +721,21 @@ impl Block {
         }
         memory.derived = Some(reserve(&budget, mul(extension_live, 4)?)?);
         schema_profile(&schema, main)?;
+        if let Some(full) = canonical {
+            for pin in &mut pins {
+                if pin.id == 1 {
+                    pin.schema_len = full.len();
+                    pin.schema_sha = Sha256::digest(&full).into();
+                }
+            }
+            let cell = rows
+                .iter_mut()
+                .find(|row| matches!(row.first(), Some(ColumnValue::Number(n)) if n.eq_value(&Numeric::from_i64(1))))
+                .and_then(|row| row.get_mut(2))
+                .ok_or_else(|| bad("extension CURRENTSCHEMA"))?;
+            *cell = ColumnValue::Bytes(full);
+        }
+        drop(lease);
         let heads = TableHead::extension(SID, &schema)?;
         let mut descriptors = descrs(&schema, NameCase::Upper)?;
         for d in &mut descriptors {
@@ -729,11 +830,16 @@ impl Block {
             expect(reader.next_event()?, Event::TableStart(head.clone()))?;
             run.table.clone_from(&head.phys_name);
             run.progress(notes, Phase::Read);
-            let descriptor = batches
-                .unit(0, "extension table")?
-                .read_table(&head.phys_name)?
-                .descr()
-                .clone();
+            batches.commit()?;
+            let (descriptor, mut meter) = {
+                let table = batches
+                    .unit(0, "extension table")?
+                    .read_table(&head.phys_name)?;
+                (
+                    table.descr().clone(),
+                    CommitMeter::new(table.layout().record_len),
+                )
+            };
             let plan = Plan::new(&descriptor, head)?;
             if !scope.contains(&plan.table) {
                 return Err(bad("extension row outside import scope"));
@@ -748,9 +854,13 @@ impl Block {
                         }
                         check_row(head, &row)?;
                         let tx = batches.unit(plan.estimate(&row), "extension data row")?;
+                        let row = plan.row(row)?;
                         tx.table_for_restore(&plan.table)?
-                            .insert(&plan.row(row)?)
+                            .insert(&row)
                             .map_err(|e| cap_hit(e.into(), Some(table_plan)))?;
+                        if meter.row(blob_lens(&row)) {
+                            batches.commit()?;
+                        }
                         count += 1;
                         run.rows += 1;
                         run.tick(notes);
@@ -758,6 +868,7 @@ impl Block {
                     _ => return Err(bad("missing extension table end")),
                 }
             }
+            batches.commit()?;
             if count != table_plan.rows {
                 return Err(bad("extension row count differs from the pre-pass"));
             }

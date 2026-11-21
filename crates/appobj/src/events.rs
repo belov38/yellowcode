@@ -31,6 +31,23 @@ pub(crate) enum Event {
 }
 
 impl Event {
+    pub(crate) const fn is_write(self) -> bool {
+        !matches!(self, Event::OnCopy | Event::Filling)
+    }
+
+    const ALL: [Event; 10] = [
+        Event::BeforeWrite,
+        Event::OnWrite,
+        Event::NewCode,
+        Event::NewNumber,
+        Event::BeforeDelete,
+        Event::OnCopy,
+        Event::Filling,
+        Event::FillCheck,
+        Event::Posting,
+        Event::UndoPosting,
+    ];
+
     pub(crate) const fn names(self) -> (&'static str, &'static str) {
         match self {
             Event::BeforeWrite => ("ПередЗаписью", "BeforeWrite"),
@@ -199,6 +216,17 @@ pub(crate) fn has_write_subscriptions(app: &Application, def: &ObjDef, category:
     [Event::BeforeWrite, Event::OnWrite]
         .into_iter()
         .any(|e| !subscribed(app, def, category, e).is_empty())
+}
+
+pub(crate) fn subscription_handlers(
+    app: &Application,
+    def: &ObjDef,
+    category: &str,
+) -> Vec<(String, String)> {
+    Event::ALL
+        .into_iter()
+        .flat_map(|e| subscribed(app, def, category, e))
+        .collect()
 }
 
 fn subscribed(
@@ -427,6 +455,14 @@ fn run_with(
     privileged: bool,
 ) -> CallResult<bool> {
     let app = owner.app;
+    if event.is_write()
+        && let Some(why) = crate::extensions::write_refusal(app, owner.def, owner.category)
+    {
+        let name = format!("{}.{}", owner.def.kind.name(Lang::Ru), owner.def.name);
+        return Err(
+            HostError::not_implemented(&name, &format!("{}: {why}", event.names().0)).into(),
+        );
+    }
     let stopped = || {
         cancel
             .and_then(Place::temp_value)

@@ -1,6 +1,6 @@
 use crate::Application;
 use crate::errors::{self, keys};
-use crate::model::{ObjDef, ObjKind, ObjStorage, StdAttr};
+use crate::model::{ObjDef, ObjId, ObjKind, ObjStorage, StdAttr};
 use crate::objects::{ObjectInstance, WriteStamp};
 use crate::predefined::{AreaKey, blank_row};
 use crate::read::read_fresh;
@@ -285,6 +285,177 @@ fn outside_call() -> HostError {
     internal("the write of an object outside a call")
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DataWrite {
+    NoUsers,
+    Privileged,
+    Allowed,
+    Denied,
+}
+
+pub(crate) fn user_refusal(what: &str) -> HostError {
+    HostError::not_implemented("P6", &format!("запись данных под пользователем: {what}"))
+}
+
+pub(crate) fn data_write(
+    ex: &mut Execution,
+    app: &Application,
+    md: crate::model::Uuid16,
+    rights: &[&str],
+) -> Result<DataWrite, HostError> {
+    use md_model::parts::RightTarget as MdTarget;
+    let privileged = ex.effective_flags().privileged;
+    let Some(ctx) = crate::session::call_ctx(ex) else {
+        return Err(HostError::not_implemented(
+            "P6",
+            "application write security provider",
+        ));
+    };
+    let user = ctx.sess.user();
+    if user.no_users {
+        return Ok(DataWrite::NoUsers);
+    }
+    if privileged {
+        return Ok(DataWrite::Privileged);
+    }
+    let config = &app.model().config;
+    let Some(obj) = config.object(md) else {
+        return Err(user_refusal("объект вне конфигурации"));
+    };
+    let mut asked = Vec::with_capacity(rights.len());
+    for name in rights {
+        let Some(right) = md_model::parts::Right::from_name(name) else {
+            return Err(user_refusal(&format!("право {name} не найдено")));
+        };
+        if !right.is_applicable(obj.kind) {
+            return Err(user_refusal(&format!("вид объекта без права {name}")));
+        }
+        asked.push(right);
+    }
+    let mut fields = Vec::new();
+    let mut stack: Vec<&md_model::Child> = obj.children.iter().collect();
+    while let Some(c) = stack.pop() {
+        fields.push(c.id);
+        stack.extend(c.children.iter());
+    }
+    let object = MdTarget::Object(md);
+    for role in user.roles.iter().filter_map(|id| config.object(*id)) {
+        let Some(granted) = role.rights() else {
+            continue;
+        };
+        for &right in &asked {
+            if granted
+                .restrictions(&object, right)
+                .iter()
+                .any(|r| !r.condition.trim().is_empty() || !r.fields.is_empty())
+            {
+                return Err(user_refusal("ограничение на уровне записей"));
+            }
+            let field_right = granted.objects.iter().any(|o| {
+                let named = match &o.target {
+                    MdTarget::Child { id, field: true } => fields.contains(id),
+                    MdTarget::StandardAttribute { owner, .. } => *owner == md,
+                    _ => false,
+                };
+                named && o.rights.iter().any(|rv| rv.right == right)
+            });
+            if field_right {
+                return Err(user_refusal("права на поля"));
+            }
+        }
+    }
+    let target = crate::rights::RightTarget::Object(md);
+    Ok(
+        if asked
+            .iter()
+            .all(|r| app.has_right(user, target, crate::rights::Right(*r)))
+        {
+            DataWrite::Allowed
+        } else {
+            DataWrite::Denied
+        },
+    )
+}
+
+pub(crate) fn admit_insert(
+    ex: &mut Execution,
+    app: &Application,
+    obj: ObjId,
+    method: &str,
+) -> CallResult<()> {
+    if crate::session::call_ctx(ex).is_none() {
+        return Ok(());
+    }
+    let md = app.model().obj(obj).md;
+    match data_write(ex, app, md, &["Insert"])? {
+        DataWrite::NoUsers | DataWrite::Privileged => Ok(()),
+        _ if method == "СоздатьГруппу" => Err(user_refusal("СоздатьГруппу").into()),
+        DataWrite::Allowed => Ok(()),
+        DataWrite::Denied => Err(crate::rights::access_violation().into()),
+    }
+}
+
+fn admit_write(
+    ex: &mut Execution,
+    app: &Application,
+    inst: &ObjectInstance,
+    def: &ObjDef,
+    document: Option<&DocumentModes>,
+) -> CallResult<()> {
+    let is_new = inst.state.borrow().is_new;
+    let op = document.map(|m| m.op);
+    let asked = match data_write(ex, app, def.md, &["Update"])? {
+        DataWrite::NoUsers => return Ok(()),
+        DataWrite::Privileged => {
+            return Err(user_refusal("запись в привилегированном режиме").into());
+        }
+        asked => asked,
+    };
+    if is_new {
+        return Err(user_refusal("запись нового объекта").into());
+    }
+    match op {
+        None | Some(DocWrite::Write) | Some(DocWrite::Post) => {}
+        Some(DocWrite::Unpost) => return Err(user_refusal("отмена проведения").into()),
+        Some(DocWrite::Mark(_)) => return Err(user_refusal("пометка удаления").into()),
+    }
+    if inst.loading() {
+        return Err(user_refusal("ОбменДанными.Загрузка").into());
+    }
+    if asked == DataWrite::Denied {
+        return Err(crate::rights::access_violation().into());
+    }
+    match op {
+        None => Err(user_refusal("запись справочника с правом Изменение").into()),
+        Some(DocWrite::Post)
+            if data_write(ex, app, def.md, &["Posting"])? != DataWrite::Allowed =>
+        {
+            Err(user_refusal("проведение с правом Изменение без права Проведение").into())
+        }
+        _ => plans_read(ex, app, def),
+    }
+}
+
+fn plans_read(ex: &mut Execution, app: &Application, def: &ObjDef) -> CallResult<()> {
+    let Some(ctx) = crate::session::call_ctx(ex) else {
+        return Err(outside_call().into());
+    };
+    let user = ctx.sess.user();
+    let read = md_model::parts::Right::from_name("Read")
+        .ok_or_else(|| internal("the right Read is not known"))?;
+    for (plan, _) in crate::changes::plans_of(app, def.id) {
+        let md = app.model().obj(plan).md;
+        if !app.has_right(
+            user,
+            crate::rights::RightTarget::Object(md),
+            crate::rights::Right(read),
+        ) {
+            return Err(user_refusal("объект плана обмена без права Чтение на план").into());
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn write(ex: &mut Execution, inst: &Rc<ObjectInstance>) -> CallResult<()> {
     write_with(ex, inst, None)
 }
@@ -327,11 +498,7 @@ fn document_modes(
     match (&posting, post) {
         (Value::Undefined, false) => {}
         (_, false) => return Err(refuse("режим проведения при записи")),
-        (Value::Undefined, true) => {
-            return Err(refuse(
-                "РежимЗаписиДокумента.Проведение без режима проведения",
-            ));
-        }
+        (Value::Undefined, true) => default_posting_check(ex, inst)?,
         (v, true) => match bsl_stdlib::enums::as_enum_value(v) {
             Some(e) if Some(e.type_idx()) == enum_type("РежимПроведенияДокумента") => {
                 match e.name_ru() {
@@ -369,6 +536,27 @@ fn document_modes(
         )?,
         op,
     })
+}
+
+fn default_posting_check(ex: &mut Execution, inst: &ObjectInstance) -> CallResult<()> {
+    let def = inst.app.model().obj(inst.obj);
+    if def.behavior.realtime_posting == crate::model::Posting::Deny {
+        return Ok(());
+    }
+    let refuse = |what: &str| -> bsl_vm::CallError {
+        HostError::not_implemented(
+            &inst.type_name(),
+            &format!("Записать: РежимЗаписиДокумента.Проведение без режима проведения, {what}"),
+        )
+        .into()
+    };
+    let Some(i) = def.fields.iter().position(|f| f.std == Some(StdAttr::Date)) else {
+        return Err(refuse("документ без даты"));
+    };
+    match inst.attr(ex, i)? {
+        Value::Date(d) if d != bsl_prim::BslDate::EMPTY => Ok(()),
+        _ => Err(refuse("дата документа пустая")),
+    }
 }
 
 fn real_time_check(ex: &mut Execution, inst: &ObjectInstance) -> CallResult<()> {
@@ -494,9 +682,7 @@ pub(crate) fn write_with(
     if (plan.def.kind == ObjKind::Document) != document.is_some() {
         return Err(internal("the write of a document without its modes").into());
     }
-    if !crate::session::call_ctx(ex).is_some_and(|c| c.sess.user().no_users) {
-        return Err(HostError::not_implemented("P6", "application write security provider").into());
-    }
+    admit_write(ex, &app, inst, plan.def, document.as_ref())?;
     let txn = CallTxn::of_call(ex).ok_or_else(outside_call)?;
     txn.check().map_err(|e| e.host())?;
     let loading = inst.loading();

@@ -208,12 +208,15 @@ impl HostObject for ObjMgr {
         let ru = self.member(ex, m).map_or("", |n| n.1);
         match ru {
             "СоздатьЭлемент" if self.kind() == ObjKind::Catalog => {
+                crate::write::admit_insert(ex, &self.app, self.obj, "СоздатьЭлемент")?;
                 crate::objects::create_item(ex, &self.app, self.obj)
             }
             "СоздатьДокумент" if self.kind() == ObjKind::Document => {
+                crate::write::admit_insert(ex, &self.app, self.obj, "СоздатьДокумент")?;
                 crate::objects::create_document(ex, &self.app, self.obj)
             }
             "СоздатьГруппу" if self.kind() == ObjKind::Catalog => {
+                crate::write::admit_insert(ex, &self.app, self.obj, "СоздатьГруппу")?;
                 crate::objects::create_group(ex, &self.app, self.obj)
             }
             "СоздатьНаборЗаписей" if self.kind() == ObjKind::InformationRegister => {

@@ -174,6 +174,9 @@ pub(crate) fn write(
     {
         return Err(write_refusal(member, "обработчики записи").into());
     }
+    if let Some(why) = crate::extensions::write_refusal(app, def, "ValueManager") {
+        return Err(write_refusal(member, &why).into());
+    }
     let cast = cast_value(ex, app, field, value)?;
     let cell = crate::values::field::to_field(app, field, &cast)?;
     let txn =

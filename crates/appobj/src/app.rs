@@ -35,7 +35,7 @@ pub struct AppOptions {
     pub lock_timeout: Duration,
     pub compile_cache: Option<Arc<CompileCache>>,
     pub uuid_node: Option<[u8; 6]>,
-    pub extensions: Vec<()>,
+    pub extensions: Vec<ExtensionFacts>,
     pub query_mem_limit: u64,
     pub locale: String,
     pub file_system: Option<Arc<dyn bsl_vm::FileSystem>>,
@@ -105,6 +105,70 @@ impl InfoBaseUsers {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExtensionFacts {
+    pub name: String,
+    pub intercepts: Vec<ExtensionIntercept>,
+    pub subscriptions: Vec<String>,
+    pub unreadable: Option<String>,
+    pub row: std::result::Result<ExtensionRow, String>,
+    pub info: std::result::Result<ExtensionInfo, String>,
+    pub version: std::result::Result<String, String>,
+    pub structure: std::result::Result<ExtensionStructure, String>,
+}
+
+impl Default for ExtensionFacts {
+    fn default() -> Self {
+        fn not_given<T>() -> std::result::Result<T, String> {
+            Err("не передано".to_string())
+        }
+        ExtensionFacts {
+            name: String::new(),
+            intercepts: Vec::new(),
+            subscriptions: Vec::new(),
+            unreadable: None,
+            row: not_given(),
+            info: not_given(),
+            version: not_given(),
+            structure: not_given(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExtensionRow {
+    pub id: Uuid16,
+    pub order: i64,
+    pub purpose_code: i64,
+    pub scope_code: i64,
+    pub distributed: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExtensionInfo {
+    pub hash: [u8; 20],
+    pub unsafe_action_warnings: bool,
+    pub safe_mode: bool,
+    pub security_profile: String,
+    pub synonym: Vec<(String, String)>,
+    pub active: bool,
+    pub main_roles: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ExtensionStructure {
+    pub own: Vec<Uuid16>,
+    pub changed: Vec<(String, String)>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExtensionIntercept {
+    pub module: String,
+    pub annotation: String,
+    pub method: String,
+    pub target: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ModuleTarget {
     Common(String),
     HttpService(Uuid16),
@@ -117,6 +181,7 @@ pub struct Application {
     store: Arc<dyn ibschema::store::Store>,
     unscoped_store: Arc<dyn ibschema::store::Store>,
     extensions: OnceLock<crate::extensions::Presence>,
+    pub(crate) extension_refusals: crate::extensions::Refusals,
     names: Arc<AppNamesImpl>,
     modules: Modules,
     types: OnceLock<AppTypes>,
@@ -157,6 +222,12 @@ impl Application {
         } else if let Some(area) = &o.options.data_area {
             o.store = area.bind(o.store)?;
         }
+        if let Some(why) = crate::extensions::whole_refusal(&o.options.extensions) {
+            o.store = Arc::new(crate::extensions::RefusingStore {
+                inner: o.store,
+                why,
+            });
+        }
         let mut model = AppModel::build(o.config)?;
         model.bind(o.store.storage())?;
         let compat = compat_of(&model)?;
@@ -171,6 +242,7 @@ impl Application {
             store: o.store,
             unscoped_store,
             extensions: OnceLock::new(),
+            extension_refusals: Default::default(),
             names,
             modules,
             types: OnceLock::new(),
@@ -301,6 +373,10 @@ impl Application {
     pub(crate) fn extensions(&self) -> &crate::extensions::Presence {
         self.extensions
             .get_or_init(|| crate::extensions::presence(self.unscoped_store.as_ref()))
+    }
+
+    pub(crate) fn unscoped_store(&self) -> &dyn ibschema::store::Store {
+        self.unscoped_store.as_ref()
     }
 
     pub fn names(&self) -> &Arc<AppNamesImpl> {

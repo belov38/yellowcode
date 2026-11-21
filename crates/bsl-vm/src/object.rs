@@ -162,6 +162,10 @@ pub trait HostObject: Any {
         false
     }
 
+    fn filled_check(&self) -> Option<HostError> {
+        None
+    }
+
     fn to_shared(&self) -> Option<SharedValue> {
         None
     }

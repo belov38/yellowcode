@@ -1366,6 +1366,41 @@ fn code_value(def: &crate::model::ObjDef, v: &Value) -> Option<Value> {
     }
 }
 
+fn object_code(
+    ex: &mut Execution,
+    def: &crate::model::ObjDef,
+    code: Value,
+    by_full: bool,
+) -> CallResult<Value> {
+    use crate::users::UserValue;
+    if !matches!(code, Value::Object(_)) {
+        return Ok(code);
+    }
+    let refuse = |what: &str| -> bsl_vm::CallError {
+        HostError::not_implemented(
+            &format!("{}Менеджер", def.kind.name(Lang::Ru)),
+            &format!("НайтиПоКоду: {what}"),
+        )
+        .into()
+    };
+    match crate::users::user_value(&code) {
+        Some(UserValue::Anonymous | UserValue::Restored) => Ok(code),
+        Some(UserValue::OfSessionWithUsers) => {
+            if def.behavior.code_type != CodeType::String {
+                return Err(refuse("пользователь информационной базы в числовом коде"));
+            }
+            if by_full {
+                return Err(refuse("пользователь информационной базы в полном коде"));
+            }
+            Ok(Value::String(
+                ex.present(&code).map_err(bsl_vm::CallError::from)?,
+            ))
+        }
+        Some(UserValue::Created) => Err(refuse("новый пользователь информационной базы")),
+        None => Err(refuse("значение другого типа")),
+    }
+}
+
 fn number_period(d: BslDate, p: NumberPeriodicity) -> Option<(BslDate, BslDate)> {
     let q = d.parts();
     let (y, m) = (q.year, q.month);
@@ -1453,9 +1488,10 @@ pub(crate) fn manager_call(
             if field_index(def, "Код").is_none() {
                 return Ok(Value::Undefined);
             }
-            let code = p.raw("Код").cloned().unwrap_or(Value::Undefined);
             let by_full = matches!(p.opt("ПоискПоПолномуКоду"), Some(Value::Bool(true)))
                 && def.behavior.hierarchical;
+            let code = p.raw("Код").cloned().unwrap_or(Value::Undefined);
+            let code = object_code(ex, def, code, by_full)?;
             let Some(code) = code_value(def, &code) else {
                 if poisoned {
                     return Err(poisoned_error(ex, app));

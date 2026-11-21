@@ -445,7 +445,11 @@ impl HostObject for InfoBaseUser {
         if self.created.is_some() {
             return Err(HostError::not_implemented(USER, "Строка: новый пользователь").into());
         }
-        Ok(self.user.no_users.then(|| bsl_prim::Str::from("")))
+        Ok(Some(bsl_prim::Str::from(if self.user.no_users {
+            ""
+        } else {
+            self.user.name.as_str()
+        })))
     }
 }
 

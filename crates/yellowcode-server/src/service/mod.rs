@@ -1,5 +1,7 @@
 pub mod objects;
 mod routes;
+pub mod wire;
+pub mod ws;
 use crate::process::ProcessError;
 pub use routes::{MethodDef, Route, RouteError, ServiceDef, ServiceTable, TemplateDef};
 

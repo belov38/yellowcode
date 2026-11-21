@@ -146,7 +146,9 @@ fn extreme(ex: &mut Execution, args: &mut [Arg], max: bool) -> CallResult<Value>
 
 fn value_is_filled(ex: &mut Execution, args: &mut [Arg]) -> CallResult<Value> {
     let v = arg_value(ex, args.first())?;
-    if let Some(e) = crate::mail::filled_check_refusal(&v) {
+    if let Value::Object(o) = &v
+        && let Some(e) = o.filled_check()
+    {
         return Err(e.into());
     }
     if crate::values::is_empty_value(&v) {

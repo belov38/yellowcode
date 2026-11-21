@@ -32,6 +32,14 @@ const MIN_WRITABLE_COMPAT: u32 = 80311;
 const PINNED_WHY: &str =
     "the object of a pinned table that differs from the rules is read only as a whole";
 
+const EXTENSIONS_WHY: &str = "extensions";
+
+const EXTENSIONS_UNOBSERVED_WHY: &str =
+    "extensions: writes of this kind of table to its X1 twin are not observed";
+
+const METERED_EXTENSIONS_WHY: &str =
+    "the open with a memory budget does not compose the model with the extensions";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpenMode {
     ReadOnly,
@@ -101,6 +109,8 @@ pub struct Infobase {
     warnings: Vec<Warning>,
     write_refusal: Option<String>,
     pinned: Vec<TableId>,
+    extension_logic: crate::extensions::ExtensionLogic,
+    extension_model_refusal: Option<String>,
     store: Arc<Store1cd>,
     dbnames: MaybeCharged<DbNames>,
     schema: MaybeCharged<Arc<LogicalSchema>>,
@@ -267,6 +277,46 @@ fn load_config_metered(
     Ok(Some((cfg, entries)))
 }
 
+fn moved_refusals(
+    map: &StorageMap,
+    moved: &[TableId],
+    composed: bool,
+) -> (Vec<TableId>, Vec<TableId>) {
+    if !composed {
+        return (moved.to_vec(), Vec::new());
+    }
+    let catalog = |id: TableId| {
+        map.try_table(id).is_some_and(|t| {
+            t.owner.is_none()
+                && t.logical.trim_end_matches(|c: char| c.is_ascii_digit())
+                    == ibschema::names::purpose::REFERENCE
+        })
+    };
+    let mut unobserved: Vec<TableId> = moved.iter().copied().filter(|&id| !catalog(id)).collect();
+    for (n, t) in map.tables().iter().enumerate() {
+        let Ok(n) = u32::try_from(n) else { continue };
+        let id = TableId(n);
+        if t.owner.is_some_and(|o| moved.contains(&o) && catalog(o)) && !unobserved.contains(&id) {
+            unobserved.push(id);
+        }
+    }
+    (Vec::new(), unobserved)
+}
+
+fn unlisted_twins(db: &Database, map: &StorageMap, moved: &[TableId]) -> Vec<TableId> {
+    let names = db.read().table_names();
+    map.tables()
+        .iter()
+        .enumerate()
+        .filter_map(|(n, t)| {
+            let id = TableId(u32::try_from(n).ok()?);
+            let twin = format!("{}X1", t.phys);
+            (!moved.contains(&id) && names.iter().any(|x| x.eq_ignore_ascii_case(&twin)))
+                .then_some(id)
+        })
+        .collect()
+}
+
 pub(crate) fn configuration_in_budget(
     file: &Path,
     budget: &memory_budget::MemoryBudget,
@@ -327,6 +377,11 @@ impl Infobase {
             }
             _ => None,
         };
+        let mut extension_logic = if opts.mode == OpenMode::ReadWrite {
+            crate::extensions::ExtensionLogic::read(&file)
+        } else {
+            crate::extensions::ExtensionLogic::default()
+        };
         let db = match Database::open(&file, eo) {
             Ok(db) => Arc::new(db),
             Err(onecd::Error::Unsupported(onecd::Unsupported::WriteLegacyFormat)) => {
@@ -367,10 +422,12 @@ impl Infobase {
             warnings.push(Warning::Extensions);
         }
 
-        let mut write_refusal = extension_storage.then(|| "extensions".to_string());
+        let mut write_refusal = None;
         let mut pinned = Vec::new();
         let mut closed = Vec::new();
         let kept_schema = MaybeCharged::Legacy(Arc::clone(&schema));
+        let main_schema = Arc::clone(&schema);
+        let mut composable = false;
         let (map, config) = if opts.mode == OpenMode::Raw {
             write_refusal = Some("raw mode".to_string());
             (StorageMap::from_schema(schema)?, None)
@@ -412,6 +469,7 @@ impl Infobase {
                             raw.db(),
                         )?;
                     }
+                    composable = diff.is_empty() && built.skipped.is_empty();
                     if !diff.is_empty() {
                         if !pinned_open {
                             write_refusal
@@ -458,6 +516,7 @@ impl Infobase {
                 )));
             }
         }
+        let mut extension_rows = false;
         if let Some(t) = map
             .table_by_name("ExtensionsInfo")
             .and_then(|id| map.tables().get(id.0 as usize))
@@ -468,13 +527,41 @@ impl Infobase {
                     t.phys
                 )));
             }
-            if raw.has_rows(&t.phys)? {
-                if !extension_storage {
-                    warnings.push(Warning::Extensions);
-                }
-                write_refusal.get_or_insert_with(|| "extensions".to_string());
+            let rows = raw.has_rows(&t.phys)?;
+            extension_rows = rows;
+            if rows && !extension_storage {
+                warnings.push(Warning::Extensions);
             }
+            if !rows {
+                extension_logic = crate::extensions::ExtensionLogic::default();
+            }
+        } else {
+            extension_logic = crate::extensions::ExtensionLogic::default();
         }
+        let mut extension_model_refusal = None;
+        let mut composed = false;
+        let (map, config) = match config {
+            Some(cfg) if extension_storage || extension_rows => {
+                match Self::compose_extensions(
+                    &raw,
+                    &cfg,
+                    &main_schema,
+                    extension_schema.as_ref(),
+                    &dbnames,
+                    composable,
+                ) {
+                    Ok((map, model)) => {
+                        composed = true;
+                        (map, Some(Arc::new(model)))
+                    }
+                    Err(why) => {
+                        extension_model_refusal = Some(why);
+                        (map, Some(cfg))
+                    }
+                }
+            }
+            config => (map, config),
+        };
         if legacy {
             warnings.push(Warning::ReadOnlyFormat("8.2.14 format".into()));
         }
@@ -498,9 +585,11 @@ impl Infobase {
         }
         let gate = WriterGate::new();
         let moved = match &extension_schema {
-            Some(extension) => extension_moved_tables(&map, map.schema(), extension)?,
+            Some(extension) => extension_moved_tables(&map, &main_schema, extension)?,
             None => Vec::new(),
         };
+        let (mut refused, unobserved) = moved_refusals(&map, &moved, composed);
+        refused.extend(unlisted_twins(raw.db(), &map, &moved));
         let store = Arc::new(
             Store1cd::new_with_extension_tables(
                 Arc::clone(raw.db_arc()),
@@ -509,6 +598,8 @@ impl Infobase {
                 write_refusal.clone(),
                 &moved,
             )?
+            .refusing_writes(&unobserved, EXTENSIONS_UNOBSERVED_WHY)
+            .refusing_writes(&refused, EXTENSIONS_WHY)
             .refusing_writes(&closed, PINNED_WHY),
         );
         let map = Arc::clone(store.map());
@@ -522,11 +613,31 @@ impl Infobase {
             warnings,
             write_refusal,
             pinned,
+            extension_logic,
+            extension_model_refusal,
             store,
             dbnames: MaybeCharged::Legacy(dbnames),
             schema: kept_schema,
             metadata: None,
         })
+    }
+
+    fn compose_extensions(
+        raw: &RawIb,
+        main: &Configuration,
+        schema: &LogicalSchema,
+        extension: Option<&LogicalSchema>,
+        dbnames: &DbNames,
+        composable: bool,
+    ) -> std::result::Result<(StorageMap, Configuration), String> {
+        if !composable {
+            return Err("the main model differs from the rules".into());
+        }
+        let base = present_service_tables(&seed().schema, dbnames);
+        let composed = crate::extensions::compose(raw, main, schema, extension, dbnames, &base)?;
+        let map = StorageMap::new(Arc::new(composed.schema), &composed.built)
+            .map_err(|e| format!("the storage map of the model with the extensions: {e}"))?;
+        Ok((map, composed.config))
     }
 
     fn open_metered(
@@ -592,8 +703,9 @@ impl Infobase {
         if extension_storage {
             warnings.push(Warning::Extensions);
         }
+        let mut extension_rows = false;
 
-        let mut write_refusal = extension_storage.then(|| "extensions".to_string());
+        let mut write_refusal = None;
         let plain_map = |grow: &dyn Fn(u64, bool) -> Result<()>| -> Result<StorageMap> {
             grow(model::PER_MAP_BYTE.saturating_mul(schema_len), true)?;
             Ok(StorageMap::from_schema(Arc::clone(&schema))?)
@@ -698,11 +810,9 @@ impl Infobase {
                     t.phys
                 )));
             }
-            if has_rows_in_budgeted(&txn, &t.phys, &budget)? {
-                if !extension_storage {
-                    warnings.push(Warning::Extensions);
-                }
-                write_refusal.get_or_insert_with(|| "extensions".to_string());
+            extension_rows = has_rows_in_budgeted(&txn, &t.phys, &budget)?;
+            if extension_rows && !extension_storage {
+                warnings.push(Warning::Extensions);
             }
         }
         if legacy {
@@ -719,13 +829,16 @@ impl Infobase {
             None => Vec::new(),
         };
         drop(extension_schema);
-        let store = Arc::new(Store1cd::new_with_extension_tables(
-            Arc::clone(&db),
-            Arc::new(map),
-            Arc::clone(&gate),
-            write_refusal.clone(),
-            &moved,
-        )?);
+        let store = Arc::new(
+            Store1cd::new_with_extension_tables(
+                Arc::clone(&db),
+                Arc::new(map),
+                Arc::clone(&gate),
+                write_refusal.clone(),
+                &moved,
+            )?
+            .refusing_writes(&moved, EXTENSIONS_WHY),
+        );
         let map = Arc::clone(store.map());
         lease.shrink(readers).map_err(memory)?;
         probe("open:done");
@@ -733,6 +846,8 @@ impl Infobase {
             Error::InconsistentStatic("metadata lease still shared after the configuration load")
         })?;
         db.keep_opened_files();
+        let extension_model_refusal = (config.is_some() && (extension_storage || extension_rows))
+            .then(|| METERED_EXTENSIONS_WHY.to_string());
         Ok(Infobase {
             path: file,
             mode: opts.mode,
@@ -743,6 +858,8 @@ impl Infobase {
             warnings,
             write_refusal,
             pinned: Vec::new(),
+            extension_logic: Default::default(),
+            extension_model_refusal,
             store,
             dbnames: MaybeCharged::Charged(dbnames),
             schema: MaybeCharged::Charged(schema),
@@ -781,6 +898,12 @@ impl Infobase {
     }
     pub fn store(&self) -> Arc<dyn Store> {
         Arc::clone(&self.store) as Arc<dyn Store>
+    }
+    pub fn extension_logic(&self) -> &crate::extensions::ExtensionLogic {
+        &self.extension_logic
+    }
+    pub fn extension_model_refusal(&self) -> Option<&str> {
+        self.extension_model_refusal.as_deref()
     }
     pub fn write_refusal(&self) -> Option<&str> {
         self.write_refusal.as_deref()

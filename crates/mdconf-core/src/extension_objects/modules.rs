@@ -60,7 +60,7 @@ impl ExtensionObject<'_> {
         &self,
     ) -> Result<impl Iterator<Item = Result<ExtensionModule<'_>, ModuleReadError>>, ObjectReadError>
     {
-        let header_id = self.header()?.id;
+        let header_id = self.loaded.header_id()?;
         let slots = self
             .loaded
             .reference
