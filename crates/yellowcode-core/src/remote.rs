@@ -2,20 +2,31 @@ use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
 mod info;
+mod list;
 mod metadata;
 mod modules;
+mod object;
+mod report;
 mod values;
 
+pub use object::{ObjectRef, ObjectRequest};
+pub use report::ReportFormat;
+
+pub use onec_client::Uuid;
 use onec_client::auth::printable;
+pub use onec_client::session::is_build;
 use onec_client::session::{Session, client_nm, login_query, new_cln_id};
 use onec_client::{
     Array, CallResult, Credentials, Date, Decimal, EnumPresentation, EnumPresentations, EnumRef,
     HttpTransport, InfoOptions, Map, MetadataOptions, ModuleId, Presentation, Presentations,
-    SessionError, Structure, Uuid, Value,
+    ReportOptions, SessionError, Structure, Value,
 };
 
 use crate::Result;
 use crate::output::Out;
+
+pub use list::{DEFAULT_LIMIT, DEFAULT_PAGE_SIZE, ListRequest};
+pub use onec_client::dlist::{Filter, ListError, Order};
 
 #[derive(Clone, PartialEq, Eq)]
 pub enum Password {
@@ -40,6 +51,7 @@ pub struct Login {
     pub user: Option<String>,
     pub password: Password,
     pub strong: bool,
+    pub server_version: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -90,6 +102,7 @@ pub struct InfoRequest {
 pub struct MetadataRequest {
     pub login: Login,
     pub enum_synonyms: bool,
+    pub attributes: bool,
     pub json: bool,
 }
 
@@ -102,11 +115,24 @@ pub struct ModulesRequest {
 }
 
 #[derive(Debug, Clone)]
+pub struct ReportRequest {
+    pub login: Login,
+    pub form: String,
+    pub call: Option<String>,
+    pub params: Vec<Param>,
+    pub attribute: Option<String>,
+    pub format: ReportFormat,
+}
+
+#[derive(Debug, Clone)]
 pub enum Request {
     Call(CallRequest),
     Info(InfoRequest),
     Metadata(MetadataRequest),
     Modules(ModulesRequest),
+    Object(ObjectRequest),
+    List(ListRequest),
+    Report(ReportRequest),
 }
 
 pub fn run(
@@ -120,7 +146,86 @@ pub fn run(
         Request::Info(r) => run_info(r, out, err, input),
         Request::Metadata(r) => run_metadata(r, out, err, input),
         Request::Modules(r) => modules::run(r, out, input),
+        Request::Object(r) => object::run(r, out, err, input),
+        Request::List(r) => list::run(r, out, err, input),
+        Request::Report(r) => run_report(r, out, err, input),
     }
+}
+
+fn run_report(
+    r: ReportRequest,
+    out: &mut Out,
+    err: &mut dyn Write,
+    input: &mut dyn BufRead,
+) -> Result<i32> {
+    let (session, login) = open_session(&r.login, input)?;
+    let params: Vec<Value> = r.params.into_iter().map(|Param(v)| v).collect();
+    let (form, call, attribute, format) = (r.form, r.call, r.attribute, r.format);
+    let (session, outcome) = on_value_stack(move || {
+        let mut session = session;
+        let outcome = login.and_then(|()| {
+            session.run_report(ReportOptions {
+                form: &form,
+                call: call.as_deref().map(|c| (c, params.as_slice())),
+                limits: onec_client::spreadsheet::DEFAULT_LIMITS,
+            })
+        });
+        let _ = session.logout();
+        (session, outcome)
+    })?;
+    match outcome {
+        Ok(view) => {
+            let lines = report::report_lines(&view, attribute.as_deref(), format, session.steps());
+            match lines {
+                Ok(lines) => {
+                    for line in lines {
+                        writeln!(out, "{line}")?;
+                    }
+                    if format == ReportFormat::Text {
+                        writeln!(out, "RESULT OK {}", steps_line(&session))?;
+                    }
+                    Ok(0)
+                }
+                Err(e) => {
+                    result_fail(format, &session, out, err)?;
+                    Err(e.into())
+                }
+            }
+        }
+        Err(e) => {
+            if format == ReportFormat::Text {
+                users_hint(&r.login.user, &e, out)?;
+            } else {
+                let mut buf = Vec::new();
+                users_hint(
+                    &r.login.user,
+                    &e,
+                    &mut Out {
+                        w: &mut buf,
+                        closed: false,
+                    },
+                )?;
+                err.write_all(&buf)?;
+            }
+            result_fail(format, &session, out, err)?;
+            Err(printable(&e.to_string()).into())
+        }
+    }
+}
+
+fn result_fail(
+    format: ReportFormat,
+    session: &Session,
+    out: &mut Out,
+    err: &mut dyn Write,
+) -> Result<()> {
+    let line = format!("RESULT FAIL {}", steps_line(session));
+    if format == ReportFormat::Text {
+        writeln!(out, "{line}")?;
+    } else {
+        writeln!(err, "{line}")?;
+    }
+    Ok(())
 }
 
 fn password_of(
@@ -229,6 +334,7 @@ fn run_metadata(
     let (mut session, login) = open_session(&r.login, input)?;
     let opts = MetadataOptions {
         enum_synonyms: r.enum_synonyms,
+        attributes: r.attributes,
     };
     let outcome = login.and_then(|()| session.run_metadata_with(opts));
     let _ = session.logout();
@@ -341,6 +447,9 @@ fn open_session(
     let password = password_of(login, |v| std::env::var(v), input)?;
     let tr = HttpTransport::new(&login.url)?;
     let mut session = Session::new(tr);
+    if let Some(build) = &login.server_version {
+        session.set_version(build);
+    }
     let query = login_query(std::process::id(), &new_cln_id(), &client_nm());
     let outcome = match (&login.user, &password) {
         (Some(u), Some(p)) => session.cred_login(

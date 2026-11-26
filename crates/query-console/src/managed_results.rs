@@ -1,5 +1,5 @@
 use crate::managed::{ManagedCell, ManagedColumn, try_columns};
-use crate::managed_rows::try_retain_scoped_row;
+use crate::managed_rows::try_retain_scoped_row_with_columns;
 use memory_budget::{BudgetError, BudgetedVec, Category, LimitReason, MemoryBudget, Reservation};
 use query_ir::managed_value::{ManagedNestedResult, row::ScopedRow};
 use query_syntax::Lang;
@@ -64,8 +64,13 @@ pub fn try_result(
             budget.try_scope(Category::Row, canonical_limit)?
         };
         let admitted = ScopedRow::try_from_shared(raw_row.clone(), &scope)?;
-        let Some(row) =
-            try_retain_scoped_row(&admitted, columns.len(), base, lang, canonical_limit)?
+        let Some(row) = try_retain_scoped_row_with_columns(
+            &admitted,
+            raw.columns.as_slice(),
+            base,
+            lang,
+            canonical_limit,
+        )?
         else {
             break;
         };

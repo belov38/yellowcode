@@ -37,10 +37,42 @@ pub struct AppOptions {
     pub uuid_node: Option<[u8; 6]>,
     pub extensions: Vec<ExtensionFacts>,
     pub query_mem_limit: u64,
+    pub memory_budget: Option<memory_budget::MemoryBudget>,
     pub locale: String,
     pub file_system: Option<Arc<dyn bsl_vm::FileSystem>>,
     pub connection_string: Option<String>,
     pub event_log_level: Option<u32>,
+    pub extension_model: ExtensionModel,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum ExtensionModel {
+    #[default]
+    Unknown,
+    None,
+    Composed,
+    NotComposed(String),
+}
+
+impl ExtensionModel {
+    pub fn of_open(raw: bool, refusal: Option<&str>, has_extensions: bool) -> ExtensionModel {
+        match (raw, refusal) {
+            (true, _) => ExtensionModel::Unknown,
+            (false, Some(why)) => ExtensionModel::NotComposed(why.to_string()),
+            (false, None) if has_extensions => ExtensionModel::Composed,
+            (false, None) => ExtensionModel::None,
+        }
+    }
+
+    pub fn refusal(&self) -> Option<String> {
+        match self {
+            ExtensionModel::None | ExtensionModel::Composed => None,
+            ExtensionModel::Unknown => {
+                Some("открыватель базы не сообщил, собрана ли модель с расширениями".to_string())
+            }
+            ExtensionModel::NotComposed(why) => Some(format!("модель без расширений: {why}")),
+        }
+    }
 }
 
 impl Default for AppOptions {
@@ -53,10 +85,12 @@ impl Default for AppOptions {
             uuid_node: None,
             extensions: Vec::new(),
             query_mem_limit: 1 << 30,
+            memory_budget: None,
             locale: "ru_RU".to_string(),
             file_system: None,
             connection_string: None,
             event_log_level: None,
+            extension_model: ExtensionModel::Unknown,
         }
     }
 }
@@ -104,7 +138,7 @@ impl InfoBaseUsers {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ExtensionFacts {
     pub name: String,
     pub intercepts: Vec<ExtensionIntercept>,
@@ -114,6 +148,50 @@ pub struct ExtensionFacts {
     pub info: std::result::Result<ExtensionInfo, String>,
     pub version: std::result::Result<String, String>,
     pub structure: std::result::Result<ExtensionStructure, String>,
+    pub managers: std::result::Result<Vec<ExtensionManagerModule>, String>,
+    pub data: std::result::Result<Arc<[u8]>, String>,
+}
+
+impl std::fmt::Debug for ExtensionFacts {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExtensionFacts")
+            .field("name", &self.name)
+            .field("intercepts", &self.intercepts)
+            .field("subscriptions", &self.subscriptions)
+            .field("unreadable", &self.unreadable)
+            .field("row", &self.row)
+            .field("info", &self.info)
+            .field("version", &self.version)
+            .field("structure", &self.structure)
+            .field("managers", &self.managers)
+            .field(
+                "data",
+                &self
+                    .data
+                    .as_ref()
+                    .map(|bytes| format!("{} bytes", bytes.len())),
+            )
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct ExtensionManagerModule {
+    pub kind: String,
+    pub object: String,
+    pub borrowed: bool,
+    pub text: Arc<str>,
+}
+
+impl std::fmt::Debug for ExtensionManagerModule {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExtensionManagerModule")
+            .field("kind", &self.kind)
+            .field("object", &self.object)
+            .field("borrowed", &self.borrowed)
+            .field("text", &format_args!("{} bytes", self.text.len()))
+            .finish()
+    }
 }
 
 impl Default for ExtensionFacts {
@@ -130,6 +208,8 @@ impl Default for ExtensionFacts {
             info: not_given(),
             version: not_given(),
             structure: not_given(),
+            managers: not_given(),
+            data: not_given(),
         }
     }
 }
@@ -207,6 +287,13 @@ pub(crate) struct QueryCtx {
     pub binding: query_ir::StorageBinding,
     pub map: Arc<ibschema::storage::StorageMap>,
     pub collation: Arc<dyn bsl_prim::Collation>,
+    _metadata: memory_budget::Reservation,
+}
+
+struct NoEviction;
+
+impl memory_budget::Evictor for NoEviction {
+    fn evict_clean(&self) {}
 }
 
 impl Application {
@@ -235,7 +322,8 @@ impl Application {
         let model = Arc::new(model);
         let names = Arc::new(AppNamesImpl::new(model.clone()));
         let cache = o.options.compile_cache.clone().unwrap_or_default();
-        let modules = Modules::new(names.clone(), cache, compat);
+        let modules = Modules::new(names.clone(), cache, compat)
+            .with_extensions(&model, &o.options.extensions);
         let uuid1 = Uuid1Gen::new(o.options.uuid_node, Arc::new(SystemClock));
         Ok(Arc::new_cyclic(|me| Application {
             model,
@@ -285,8 +373,25 @@ impl Application {
 
     pub(crate) fn query_ctx_text(&self) -> std::result::Result<&Arc<QueryCtx>, &str> {
         let built = self.query.get_or_init(|| {
-            let schema = query_ir::QuerySchema::build(&self.model.config, self.catalog)
-                .map_err(|e| format!("query schema: {e}"))?;
+            let budget = match &self.options.memory_budget {
+                Some(budget) => budget.clone(),
+                None => memory_budget::MemoryBudget::try_new(memory_budget::Limits::new(
+                    self.options.query_mem_limit,
+                ))
+                .map_err(|e| format!("query schema memory: {e}"))?,
+            };
+            let metadata = budget
+                .try_reserve(memory_budget::Category::Metadata, 0)
+                .map_err(|e| format!("query schema memory: {e}"))?;
+            let evictor: Weak<dyn memory_budget::Evictor + Send> = Weak::<NoEviction>::new();
+            let schema = query_ir::QuerySchema::build_admitted(
+                &self.model.config,
+                self.catalog,
+                &metadata,
+                evictor,
+            )
+            .map_err(|e| format!("query schema memory: {e}"))?
+            .map_err(|e| format!("query schema: {e}"))?;
             let map = self.store.storage();
             let binding = schema
                 .bind_storage(map)
@@ -296,6 +401,7 @@ impl Application {
                 binding,
                 map: Arc::new(map.clone()),
                 collation: Arc::new(bsl_prim::IcuCollation::new(&self.options.locale)),
+                _metadata: metadata,
             }))
         });
         built.as_ref().map_err(String::as_str)
@@ -433,6 +539,10 @@ impl Application {
 
     pub fn options(&self) -> &AppOptions {
         &self.options
+    }
+
+    pub fn extension_model(&self) -> &ExtensionModel {
+        &self.options.extension_model
     }
 
     pub fn register(self: &Arc<Self>, reg: &mut bsl_vm::Registry) -> Result<()> {

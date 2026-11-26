@@ -1,6 +1,8 @@
 use crate::Console;
 use crate::run::{ErrorOut, Phase, RunRequest, later_text};
-use query_testhost::{BatchMemory, RunMode, explain_text, explain_text_budgeted};
+use query_testhost::{
+    BatchMemory, RunMode, explain_text_budgeted_with_session, explain_text_with_session,
+};
 use serde::Serialize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -61,10 +63,16 @@ impl Console {
         if let Some(memory) = &memory {
             let bytes = self.parameter_bytes(req, cancel)?;
             memory
-                .params_stage(bytes, req.params.len())
+                .params_stage(
+                    bytes,
+                    req.params.len().saturating_add(req.session_params.len()),
+                )
                 .map_err(|error| ErrorOut::new(Phase::Runtime, error.public_text()))?;
         }
         let params = self.request_params(req, cancel).map_err(|(e, _)| e)?;
+        let session_params = self
+            .request_session_params(req, cancel)
+            .map_err(|(e, _)| e)?;
         let mode = RunMode {
             lang: req.lang.syn(),
             inter: req.mode == crate::Mode::Inter,
@@ -75,10 +83,23 @@ impl Console {
             return Err(crate::lifecycle::interrupted());
         }
         let run = match &memory {
-            Some(memory) => {
-                explain_text_budgeted(&self.base, &req.text, &params, mode, cancel, memory)
-            }
-            None => explain_text(&self.base, &req.text, &params, mode, cancel),
+            Some(memory) => explain_text_budgeted_with_session(
+                &self.base,
+                &req.text,
+                &params,
+                &session_params,
+                mode,
+                cancel,
+                memory,
+            ),
+            None => explain_text_with_session(
+                &self.base,
+                &req.text,
+                &params,
+                &session_params,
+                mode,
+                cancel,
+            ),
         }
         .map_err(|f| match f.later {
             Some(w) => ErrorOut::new(Phase::Later, later_text(w)),

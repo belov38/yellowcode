@@ -37,9 +37,6 @@ const EXTENSIONS_WHY: &str = "extensions";
 const EXTENSIONS_UNOBSERVED_WHY: &str =
     "extensions: writes of this kind of table to its X1 twin are not observed";
 
-const METERED_EXTENSIONS_WHY: &str =
-    "the open with a memory budget does not compose the model with the extensions";
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpenMode {
     ReadOnly,
@@ -688,22 +685,23 @@ impl Infobase {
             Some((_, extensions)) => extension_storage = extensions,
         }
         drop(schema_text);
-        let extension_schema = if extension_storage {
+        let (extension_schema, ext_schema_len) = if extension_storage {
             let text = schema_storage_extension_in_budgeted(&txn, &budget, METADATA_VALUE_LIMIT)?
                 .ok_or(Error::InconsistentStatic(
                 "SCHEMASTORAGE: the extension row disappeared",
             ))?;
-            Some(
-                LogicalSchema::from_text_budgeted(&text, &budget)
-                    .map_err(|e| extension_schema_error(e, text.len()))?,
-            )
+            let ext_len = u64::try_from(text.len()).unwrap_or(u64::MAX);
+            let parsed = LogicalSchema::from_text_budgeted(&text, &budget)
+                .map_err(|e| extension_schema_error(e, text.len()))?;
+            (Some(parsed), ext_len)
         } else {
-            None
+            (None, 0)
         };
         if extension_storage {
             warnings.push(Warning::Extensions);
         }
         let mut extension_rows = false;
+        let mut composable = false;
 
         let mut write_refusal = None;
         let plain_map = |grow: &dyn Fn(u64, bool) -> Result<()>| -> Result<StorageMap> {
@@ -759,6 +757,7 @@ impl Infobase {
                     } else {
                         return Err(Error::SchemaMismatch(diff));
                     };
+                    composable = diff.is_empty() && built.skipped.is_empty();
                     if !diff.is_empty() {
                         write_refusal
                             .get_or_insert_with(|| "schema differs from the rules".to_string());
@@ -815,19 +814,84 @@ impl Infobase {
                 warnings.push(Warning::Extensions);
             }
         }
+        let mut extension_model_refusal = None;
+        let mut effective_schema_len = schema_len;
+        let (map, config, schema, old_schema) = match config {
+            Some(cfg) if extension_storage || extension_rows => {
+                if !composable {
+                    extension_model_refusal = Some("the main model differs from the rules".into());
+                    (map, Some(cfg), schema, None)
+                } else {
+                    let seed =
+                        crate::seed::seed_with_memory(&budget).map_err(|error| match error {
+                            crate::seed::SeedMemoryError::Budget(error) => Error::Memory(error),
+                            error => Error::Seed(error),
+                        })?;
+                    let base = present_service_tables(&seed.schema, &dbnames);
+                    match crate::extensions::compose_metered(
+                        crate::extensions::MeteredComposeInput {
+                            txn: &txn,
+                            budget: &budget,
+                            lease: &lease,
+                            main: &cfg,
+                            schema: &schema,
+                            extension: extension_schema.as_deref(),
+                            dbnames: &dbnames,
+                            base: &base,
+                            names_len,
+                            schema_len,
+                            ext_schema_len,
+                        },
+                    ) {
+                        Ok(composed) => {
+                            drop(cfg);
+                            drop(map);
+                            drop(composed.guard);
+                            let old_map_bytes = model::PER_MAP_BYTE.saturating_mul(schema_len);
+                            let new_map_bytes =
+                                model::PER_MAP_BYTE.saturating_mul(composed.schema_len);
+                            let delta = new_map_bytes.saturating_sub(old_map_bytes);
+                            lease.grow(delta, true).map_err(memory)?;
+                            effective_schema_len = composed.schema_len;
+                            (
+                                composed.map,
+                                Some(Arc::new(composed.config)),
+                                composed.schema,
+                                Some(schema),
+                            )
+                        }
+                        Err(crate::extensions::ComposeError::Memory(e)) => {
+                            return Err(Error::Memory(e));
+                        }
+                        Err(crate::extensions::ComposeError::Refused(why)) => {
+                            extension_model_refusal = Some(why);
+                            (map, Some(cfg), schema, None)
+                        }
+                    }
+                }
+            }
+            config => (map, config, schema, None),
+        };
         if legacy {
             warnings.push(Warning::ReadOnlyFormat("8.2.14 format".into()));
         }
         drop(txn);
         probe("open:store");
-        grow(model::PER_PHYS_BYTE.saturating_mul(schema_len), true)?;
+        grow(
+            model::PER_PHYS_BYTE.saturating_mul(effective_schema_len),
+            true,
+        )?;
         let readers = model::PER_STORE_TABLE.saturating_mul(map.tables().len() as u64);
         grow(readers, false)?;
         let gate = WriterGate::new();
         let moved = match &extension_schema {
-            Some(extension) => extension_moved_tables(&map, map.schema(), extension)?,
+            Some(extension) => {
+                let main = old_schema.as_deref().unwrap_or(&schema);
+                extension_moved_tables(&map, main, extension)?
+            }
             None => Vec::new(),
         };
+        drop(old_schema);
         drop(extension_schema);
         let store = Arc::new(
             Store1cd::new_with_extension_tables(
@@ -846,8 +910,6 @@ impl Infobase {
             Error::InconsistentStatic("metadata lease still shared after the configuration load")
         })?;
         db.keep_opened_files();
-        let extension_model_refusal = (config.is_some() && (extension_storage || extension_rows))
-            .then(|| METERED_EXTENSIONS_WHY.to_string());
         Ok(Infobase {
             path: file,
             mode: opts.mode,

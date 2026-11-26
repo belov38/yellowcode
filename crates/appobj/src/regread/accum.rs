@@ -11,7 +11,7 @@ use crate::txn::{CallTxn, Commit};
 use crate::types::Category;
 use crate::values::field::{default_of, to_field};
 use crate::values::refs::{RefValue, as_ref};
-use bsl_prim::{BslDate, fold_name};
+use bsl_prim::{BslDate, Str, fold_name};
 use bsl_vm::{
     Arg, CallResult, Exception, Execution, HostError, HostObject, MemberId, MemberKind,
     RetainedMemory, TypeId, Value,
@@ -71,6 +71,7 @@ pub(crate) struct AccumRecord {
     cols: Rc<Vec<(usize, String)>>,
     cells: RefCell<Vec<Value>>,
     new: bool,
+    recorder: Option<RefValue>,
     state: Rc<SetState>,
 }
 
@@ -93,6 +94,11 @@ impl AccumRecord {
             cols: set.cols.clone(),
             cells: RefCell::new(values),
             new,
+            recorder: if set.doc.is_some() {
+                set.recorder.get()
+            } else {
+                as_ref(&set.filter.item.value.borrow()).filter(|r| !r.is_empty())
+            },
             state: set.state.clone(),
         }))
     }
@@ -186,7 +192,13 @@ impl AccumRecord {
         let (f, name) = self.field(col)?;
         let catalog = platform_catalog::catalog();
         let cast = match f.std {
-            Some(StdAttr::Recorder | StdAttr::LineNumber) => {
+            Some(StdAttr::Recorder) if self.recorder.is_some() && as_ref(&v) == self.recorder => v,
+            Some(StdAttr::Recorder) => {
+                return Err(self
+                    .refuse(&format!("{name}: значение не регистратор набора"))
+                    .into());
+            }
+            Some(StdAttr::LineNumber) => {
                 return Err(self.refuse(&format!("{name} (запись)")).into());
             }
             Some(StdAttr::RecordType) => {
@@ -263,10 +275,27 @@ impl HostObject for AccumRecord {
 
     fn member_kind(&self, m: MemberId) -> Option<MemberKind> {
         let i = usize::try_from(m.0.checked_sub(FIELD_BASE)?).ok()?;
-        (i < self.cols.len()).then_some(MemberKind::Property {
+        let (f, _) = self.field(i).ok()?;
+        Some(MemberKind::Property {
             readable: true,
-            writable: true,
+            writable: f.std != Some(StdAttr::LineNumber),
         })
+    }
+
+    fn property_names(&self, ex: &mut Execution, retained: u64) -> CallResult<Option<Vec<Str>>> {
+        let bytes = self
+            .cols
+            .iter()
+            .fold(budget::slots::<Str>(self.cols.len()), |n, (_, name)| {
+                n.saturating_add((name.len() as u64).saturating_mul(2).saturating_add(64))
+            });
+        budget::reserve(ex, retained.saturating_add(bytes))?;
+        Ok(Some(
+            self.cols
+                .iter()
+                .map(|(_, name)| Str::from(name.as_str()))
+                .collect(),
+        ))
     }
 }
 
@@ -529,7 +558,7 @@ fn replace(
     if crate::data_lock::lock_for_write(app, txn, def).is_err() {
         return Err(crate::data_lock::conflict().into());
     }
-    let written = txn.with_write(&**app, |w| -> StoreResult<Option<(Vec<Row>, usize)>> {
+    let written = txn.with_write(&**app, |w| -> StoreResult<Option<Rewrite>> {
         let found = w
             .range(
                 lay.table,
@@ -539,38 +568,52 @@ fn replace(
                 Direction::Forward,
             )?
             .collect::<StoreResult<Vec<(RowHandle, Row)>>>()?;
-        let prefix =
-            found.len() <= rows.len() && found.iter().zip(&rows).all(|((_, a), b)| same_row(a, b));
-        let keep = match kept {
-            Kept::Nothing => 0,
-            Kept::Prefix if prefix => found.len(),
-            Kept::Prefix => 0,
-            Kept::New if found.is_empty() => 0,
-            Kept::Repost if prefix && found.len() == rows.len() => found.len(),
-            Kept::New | Kept::Repost => return Ok(None),
-        };
-        let mut removed = Vec::with_capacity(found.len() - keep);
-        for (h, row) in found.into_iter().skip(keep) {
-            w.delete(lay.table, h)?;
-            removed.push(row);
+        if kept == Kept::New && !found.is_empty() {
+            return Ok(None);
         }
-        for row in rows.iter().skip(keep) {
-            w.insert(lay.table, row)?;
-        }
-        Ok(Some((removed, keep)))
+        let set: &[Row] = if kept == Kept::Nothing { &[] } else { &rows };
+        Ok(Some(rewrite(w, lay.table, found, set)?))
     });
-    let Some((removed, keep)) = written.map_err(|e| e.call_error(ex))? else {
-        return Err(refuse_write(if kept == Kept::Repost {
-            "перепроведение с другими движениями"
-        } else {
-            "проведение документа с записанными движениями"
-        })
-        .into());
+    let Some(done) = written.map_err(|e| e.call_error(ex))? else {
+        return Err(refuse_write("проведение документа с записанными движениями").into());
     };
-    let added = rows.get(keep..).unwrap_or_default();
-    totals(ex, app, txn, reg, &removed, added)?;
+    totals(ex, app, txn, reg, &done.removed, &done.added)?;
     crate::commit_guard::guard(app, txn, reg);
     Ok(())
+}
+
+struct Rewrite {
+    removed: Vec<Row>,
+    added: Vec<Row>,
+}
+
+fn rewrite(
+    w: &mut dyn ibschema::store::WriteTxn,
+    table: TableId,
+    found: Vec<(RowHandle, Row)>,
+    set: &[Row],
+) -> StoreResult<Rewrite> {
+    let mut out = Rewrite {
+        removed: Vec::new(),
+        added: Vec::new(),
+    };
+    let mut same = Vec::with_capacity(found.len());
+    for (i, (h, old)) in found.into_iter().enumerate() {
+        let kept = set.get(i).is_some_and(|new| same_row(&old, new));
+        same.push(kept);
+        if !kept {
+            w.delete(table, h)?;
+            out.removed.push(old);
+        }
+    }
+    for (i, new) in set.iter().enumerate() {
+        if same.get(i).copied().unwrap_or(false) {
+            continue;
+        }
+        w.insert(table, new)?;
+        out.added.push(new.clone());
+    }
+    Ok(out)
 }
 
 fn totals(
@@ -602,10 +645,7 @@ fn totals(
     Ok(())
 }
 
-pub(super) fn write_set(ex: &mut Execution, set: &AccumSet, args: &[Arg]) -> CallResult<()> {
-    if !args.is_empty() {
-        return Err(refuse_write("параметр Замещать").into());
-    }
+fn movements_recorder(set: &AccumSet) -> CallResult<RefValue> {
     if set.posting.get() {
         return Err(refuse_write("набор в ОбработкаПроведения").into());
     }
@@ -622,6 +662,38 @@ pub(super) fn write_set(ex: &mut Execution, set: &AccumSet, args: &[Arg]) -> Cal
     if set.read_for.get() != Some(r) {
         return Err(refuse_write("набор прочитан по другому отбору").into());
     }
+    Ok(r)
+}
+
+fn manager_recorder(ex: &mut Execution, set: &AccumSet) -> CallResult<RefValue> {
+    if !set.read.get() {
+        return Err(refuse_write("набор не прочитан").into());
+    }
+    let Some(r) = set.read_for.get() else {
+        return Err(refuse_write("отбор по Неопределено").into());
+    };
+    let item = &set.filter.item;
+    if !item.used.get() || as_ref(&item.value.borrow()) != Some(r) {
+        return Err(refuse_write("отбор изменён").into());
+    }
+    if !CallTxn::of_call(ex).is_some_and(|t| t.innermost_explicit()) {
+        return Err(refuse_write("вне транзакции программы").into());
+    }
+    if reposting(r) {
+        return Err(refuse_write("набор документа, который сейчас проводится").into());
+    }
+    Ok(r)
+}
+
+pub(super) fn write_set(ex: &mut Execution, set: &AccumSet, args: &[Arg]) -> CallResult<()> {
+    if !args.is_empty() {
+        return Err(refuse_write("параметр Замещать").into());
+    }
+    let r = if set.doc.is_some() {
+        movements_recorder(set)?
+    } else {
+        manager_recorder(ex, set)?
+    };
     let app = set.app.clone();
     let txn =
         CallTxn::of_call(ex).ok_or_else(|| internal("the write of a record set outside a call"))?;
@@ -637,6 +709,10 @@ pub(super) fn write_set(ex: &mut Execution, set: &AccumSet, args: &[Arg]) -> Cal
     };
     if matches!(ended, Ok(Commit::Committed | Commit::Inner)) {
         set.state.read();
+        if set.doc.is_none() {
+            let state = set.state.clone();
+            txn.on_rollback(move || state.after_rollback.set(AfterRollback::Refused));
+        }
     } else {
         set.state.modified.set(modified);
     }
@@ -867,12 +943,24 @@ fn movements_of(v: &Value) -> CallResult<&Movements> {
 }
 
 pub(crate) fn posting_begin(
-    app: &Application,
+    inst: &ObjectInstance,
     movements: &Value,
     r: RefValue,
     repost: bool,
 ) -> CallResult<()> {
+    let app = &*inst.app;
     let m = movements_of(movements)?;
+    if repost
+        && m.sets.borrow().iter().flatten().any(|v| {
+            set_of(v).is_some_and(|s| !s.state.by_document.get() && !s.records.borrow().is_empty())
+        })
+    {
+        return Err(HostError::not_implemented(
+            &inst.type_name(),
+            "Записать: перепроведение объекта с движениями в памяти",
+        )
+        .into());
+    }
     m.r.set(Some(r));
     if repost {
         REPOSTING.with(|v| v.borrow_mut().push(r));

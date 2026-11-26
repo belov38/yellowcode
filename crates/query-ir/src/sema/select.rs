@@ -4,7 +4,7 @@ use super::scope::{Level, SourceCols};
 use super::{Analyzer, R};
 use crate::CompileError;
 use crate::managed::{self as mem, CompileArena};
-use crate::schema::{FieldRole, QTableId, StdRole, TableKind};
+use crate::schema::{FieldRole, QFieldId, QTableId, QuerySchema, StdRole, TableKind, VtKind};
 use crate::tir::{
     self, ControlPoint, OrderKey, TExpr, TKind, Totals, TotalsField, TotalsHierarchy, TotalsPeriods,
 };
@@ -134,21 +134,148 @@ fn first_call(e: &TExpr, f: Func) -> Option<Span> {
     found
 }
 
+pub(crate) fn is_ref_deref(schema: &QuerySchema, step: &tir::Deref) -> bool {
+    !step.targets.is_empty()
+        && step.targets.iter().all(|(table, field)| {
+            matches!(schema.table(*table).kind, TableKind::Object(_))
+                && schema
+                    .field(*table, *field)
+                    .is_some_and(|f| f.role == FieldRole::Std(StdRole::Ref))
+        })
+}
+
+pub(crate) fn is_accum_balance(schema: &QuerySchema, table: QTableId) -> bool {
+    let qt = schema.table(table);
+    qt.kind == TableKind::Virtual(VtKind::Balance)
+        && qt.owner.is_some_and(|owner| {
+            schema.table(owner).kind == TableKind::Object(mdschema::MdKind::AccumulationRegister)
+        })
+}
+
+pub(crate) fn balance_dim_used(select: &tir::Select, extra: &[&TExpr], field: QFieldId) -> bool {
+    select
+        .items
+        .iter()
+        .any(|item| expr_uses_source0_field(&item.expr, 0, field))
+        || select
+            .where_
+            .as_ref()
+            .is_some_and(|w| expr_uses_source0_field(w, 0, field))
+        || select
+            .sources
+            .iter()
+            .any(|src| source_uses_source0_field(src, 0, field))
+        || extra.iter().any(|e| expr_uses_source0_field(e, 0, field))
+}
+
+fn source_uses_source0_field(src: &tir::Source, depth: u16, field: QFieldId) -> bool {
+    let from_hit = depth > 0
+        && match &src.from {
+            tir::From::Subquery(q) => query_uses_source0_field(q, depth, field),
+            _ => false,
+        };
+    from_hit
+        || src.joins.iter().any(|j| {
+            expr_uses_source0_field(&j.on, depth, field)
+                || source_uses_source0_field(&j.right, depth, field)
+        })
+}
+
+fn query_uses_source0_field(q: &tir::Query, depth: u16, field: QFieldId) -> bool {
+    q.parts.iter().any(|sel| {
+        sel.items
+            .iter()
+            .any(|i| expr_uses_source0_field(&i.expr, depth, field))
+            || sel
+                .where_
+                .as_ref()
+                .is_some_and(|w| expr_uses_source0_field(w, depth, field))
+            || sel
+                .having
+                .as_ref()
+                .is_some_and(|h| expr_uses_source0_field(h, depth, field))
+            || sel
+                .group
+                .iter()
+                .flatten()
+                .flatten()
+                .any(|g| expr_uses_source0_field(g, depth, field))
+            || sel
+                .sources
+                .iter()
+                .any(|s| source_uses_source0_field(s, depth, field))
+    }) || q
+        .order
+        .iter()
+        .any(|k| expr_uses_source0_field(&k.expr, depth, field))
+}
+
+fn expr_uses_source0_field(e: &TExpr, depth: u16, field: QFieldId) -> bool {
+    match &e.kind {
+        TKind::Field {
+            level,
+            source,
+            col: tir::Col::Field(f),
+            ..
+        } => *level == depth && *source == 0 && *f == field,
+        TKind::InQuery { l, q, .. } => {
+            l.iter().any(|x| expr_uses_source0_field(x, depth, field))
+                || depth
+                    .checked_add(1)
+                    .is_some_and(|next| query_uses_source0_field(q, next, field))
+        }
+        _ => {
+            let mut found = false;
+            each_child(e, &mut |child| {
+                if !found {
+                    found = expr_uses_source0_field(child, depth, field);
+                }
+            });
+            found
+        }
+    }
+}
+
 pub(crate) struct GroupCtx {
     keys: mem::Index<mem::NameKey, ()>,
+    ref_bases: mem::Index<mem::NameKey, ()>,
     tags: mem::Index<Discriminant<TKind>, ()>,
 }
 impl GroupCtx {
-    fn new(memory: Option<&CompileArena>, sets: &[Vec<TExpr>]) -> R<Self> {
+    fn new(memory: Option<&CompileArena>, schema: &QuerySchema, sets: &[Vec<TExpr>]) -> R<Self> {
         let mut group = Self {
             keys: mem::Index::new(),
+            ref_bases: mem::Index::new(),
             tags: mem::Index::new(),
         };
         for expression in sets.iter().flatten() {
             group
                 .keys
                 .insert(memory, key_name(memory, expression)?, ())?;
-            if !matches!(expression.kind, TKind::Field { .. }) {
+            if let TKind::Field {
+                level,
+                source,
+                col,
+                derefs,
+            } = &expression.kind
+            {
+                let mut len = derefs.len();
+                while len > 0
+                    && derefs
+                        .get(len - 1)
+                        .is_some_and(|step| is_ref_deref(schema, step))
+                {
+                    len -= 1;
+                    let base = field_key_name(
+                        memory,
+                        *level,
+                        *source,
+                        *col,
+                        derefs.get(..len).unwrap_or_default(),
+                    )?;
+                    group.ref_bases.insert(memory, base, ())?;
+                }
+            } else {
                 group
                     .tags
                     .insert(memory, std::mem::discriminant(&expression.kind), ())?;
@@ -159,6 +286,7 @@ impl GroupCtx {
 }
 pub(crate) fn grouping_of(
     memory: Option<&CompileArena>,
+    schema: &QuerySchema,
     items: &[tir::Item],
     group: Option<&[Vec<TExpr>]>,
     having: Option<&TExpr>,
@@ -167,7 +295,7 @@ pub(crate) fn grouping_of(
         || items.iter().any(|item| has_agg(&item.expr))
         || having.is_some_and(has_agg);
     grouped
-        .then(|| GroupCtx::new(memory, group.unwrap_or(&[])))
+        .then(|| GroupCtx::new(memory, schema, group.unwrap_or(&[])))
         .transpose()
 }
 
@@ -534,7 +662,12 @@ impl<'scope> Analyzer<'scope> {
             ctx.and_root = Some(c.span);
         }
         let e = self.expr_value(c, ctx)?;
-        if !bool_like(&e.ty) {
+        let ok = if clause == Clause::VtArg {
+            bool_like(&e.ty)
+        } else {
+            self.is_bool_operand(&e.ty)
+        };
+        if !ok {
             return Err(self.not_allowed(kw, at));
         }
         e.into_native_owned()
@@ -585,7 +718,16 @@ impl<'scope> Analyzer<'scope> {
                 col,
                 derefs,
             } => {
+                let col_is_tabular = *level == 0 && self.col_is_tabular(*source, *col);
                 for k in (0..=derefs.len()).rev() {
+                    if k < derefs.len()
+                        && ((k == 0 && col_is_tabular)
+                            || derefs
+                                .get(k..)
+                                .is_some_and(|tail| tail.iter().any(|d| self.deref_is_tabular(d))))
+                    {
+                        continue;
+                    }
                     let key = field_key_name(
                         self.memory,
                         *level,
@@ -593,11 +735,15 @@ impl<'scope> Analyzer<'scope> {
                         *col,
                         derefs.get(..k).unwrap_or_default(),
                     )?;
-                    if g.keys.get(key.as_str()).is_some() {
+                    if g.keys.get(key.as_str()).is_some()
+                        || (k < derefs.len() && g.ref_bases.get(key.as_str()).is_some())
+                    {
                         return Ok(());
                     }
                 }
-                if *level == 0 && self.ref_grouped(*source, g)? {
+                let crosses_tabular =
+                    col_is_tabular || derefs.iter().any(|d| self.deref_is_tabular(d));
+                if *level == 0 && !crosses_tabular && self.ref_grouped(*source, g)? {
                     return Ok(());
                 }
                 Err(self.quoted_text_error(
@@ -842,6 +988,7 @@ impl<'scope> Analyzer<'scope> {
         let group = if parts.len() == 1 {
             grouping_of(
                 self.memory,
+                self.schema,
                 &first.items,
                 first.group.as_deref(),
                 first.having.as_ref(),
@@ -944,6 +1091,7 @@ impl<'scope> Analyzer<'scope> {
         };
         let group = grouping_of(
             self.memory,
+            self.schema,
             &first.items,
             first.group.as_deref(),
             first.having.as_ref(),
@@ -1293,6 +1441,31 @@ impl Shown {
 }
 
 impl<'scope> Analyzer<'scope> {
+    fn col_is_tabular(&self, source: u16, col: tir::Col) -> bool {
+        let tir::Col::Field(field) = col else {
+            return false;
+        };
+        let Some(SourceCols::Table { id, .. }) = self
+            .levels
+            .last()
+            .and_then(|level| level.sources.get(usize::from(source)))
+            .map(|source| &source.cols)
+        else {
+            return false;
+        };
+        self.schema
+            .field(*id, field)
+            .is_some_and(|f| f.nested.is_some())
+    }
+
+    fn deref_is_tabular(&self, deref: &tir::Deref) -> bool {
+        deref.targets.iter().any(|&(table, field)| {
+            self.schema
+                .field(table, field)
+                .is_some_and(|f| f.nested.is_some())
+        })
+    }
+
     fn ref_grouped(&self, source: u16, group: &GroupCtx) -> R<bool> {
         let Some(SourceCols::Table { id, .. }) = self
             .levels
@@ -1302,7 +1475,11 @@ impl<'scope> Analyzer<'scope> {
         else {
             return Ok(false);
         };
-        for (index, field) in self.schema.table(*id).fields.iter().enumerate() {
+        let table = self.schema.table(*id);
+        if !matches!(table.kind, TableKind::Object(_)) {
+            return Ok(false);
+        }
+        for (index, field) in table.fields.iter().enumerate() {
             if field.role == FieldRole::Std(StdRole::Ref)
                 && let Ok(index) = u16::try_from(index)
             {

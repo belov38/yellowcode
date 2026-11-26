@@ -1,4 +1,4 @@
-use md_model::{Child, ChildTag};
+use md_model::Child;
 
 use super::Names;
 use super::ctx::{Ctx, Props};
@@ -14,11 +14,10 @@ pub(crate) enum Tok<'a> {
     Attr,
     AddOrder(&'a str),
     AddOrderAll,
+    AddOrderOther,
     Dims,
-    DimsInTotals,
     OtherDims,
     BaseDims,
-    Addressing,
     List(Vec<String>),
 }
 
@@ -38,6 +37,10 @@ pub(crate) fn indexed(c: &Child) -> bool {
         c.text("Indexing"),
         Some("Index" | "IndexWithAdditionalOrder")
     )
+}
+
+pub(crate) fn plain_indexed(c: &Child) -> bool {
+    c.text("Indexing") == Some("Index")
 }
 
 pub(crate) fn indexed_in(cx: &Ctx, c: &Child) -> bool {
@@ -102,19 +105,23 @@ pub(crate) fn fields(
                     out.push((*n).to_string());
                 }
             }
-            Tok::AddOrderAll => push_all(
-                &mut out,
-                cx.obj.attributes().filter(|a| add_order(a)),
-                names,
-            )?,
+            Tok::AddOrderAll => {
+                let mut attrs: Vec<&Child> = cx.obj.attributes().filter(|a| add_order(a)).collect();
+                attrs.sort_by_key(|a| *a.id.as_bytes());
+                push_all(&mut out, attrs.into_iter(), names)?;
+            }
+            Tok::AddOrderOther => {
+                if let Some(it) = item.filter(|c| add_order(c)) {
+                    let mut attrs: Vec<&Child> = cx
+                        .obj
+                        .attributes()
+                        .filter(|a| add_order(a) && a.id != it.id)
+                        .collect();
+                    attrs.sort_by_key(|a| *a.id.as_bytes());
+                    push_all(&mut out, attrs.into_iter(), names)?;
+                }
+            }
             Tok::Dims => push_all(&mut out, cx.obj.dimensions(), names)?,
-            Tok::DimsInTotals => push_all(
-                &mut out,
-                cx.obj
-                    .dimensions()
-                    .filter(|d| d.bool_or("UseInTotals", true)),
-                names,
-            )?,
             Tok::OtherDims => {
                 let id = need(item, "@other_dims")?.id;
                 push_all(&mut out, cx.obj.dimensions().filter(|d| d.id != id), names)?
@@ -122,14 +129,6 @@ pub(crate) fn fields(
             Tok::BaseDims => push_all(
                 &mut out,
                 cx.obj.dimensions().filter(|d| d.flag("BaseDimension")),
-                names,
-            )?,
-            Tok::Addressing => push_all(
-                &mut out,
-                cx.obj
-                    .children
-                    .iter()
-                    .filter(|c| c.tag == ChildTag::AddressingAttribute),
                 names,
             )?,
             Tok::List(v) => out.extend(v.iter().cloned()),

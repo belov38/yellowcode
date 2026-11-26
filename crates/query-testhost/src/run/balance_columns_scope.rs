@@ -11,9 +11,9 @@ fn field(schema: &QuerySchema, table: QTableId, id: QFieldId) -> bool {
         && table_info.owner.is_some_and(|owner| {
             schema.table(owner).kind == TableKind::Object(md_model::MdKind::AccountingRegister)
         })
-        && schema
-            .field(table, id)
-            .is_some_and(|field| field.role == FieldRole::Std(StdRole::ExtDimension(1)))
+        && schema.field(table, id).is_some_and(
+            |field| matches!(field.role, FieldRole::Std(StdRole::ExtDimension(n)) if n >= 1),
+        )
 }
 
 fn source_at(sources: &[Source], wanted: u16) -> Option<&Source> {

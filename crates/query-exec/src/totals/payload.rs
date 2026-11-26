@@ -259,7 +259,7 @@ impl<'m, 'a> PaidValue<'m, 'a> {
                 mem.check_value(bytes)?;
                 let admission = Admission::new(mem, bytes)?;
                 checkpoint(env)?;
-                let value = QValue::PointInTime(Box::new((**moment).clone()));
+                let value = QValue::PointInTime(Box::new(**moment));
                 Ok(Self {
                     value,
                     mem,
@@ -697,6 +697,40 @@ pub(super) struct PaidContext<'m, 'a> {
     payload: u64,
 }
 
+impl<'m, 'a> PaidContext<'m, 'a> {
+    pub(super) fn with_capacity(
+        capacity: usize,
+        mem: &'m MemBudget<'a>,
+        env: Option<&ExecEnv<'a>>,
+    ) -> Result<Self, ExecError> {
+        Ok(Self {
+            values: PaidVec::new(capacity, mem, env)?,
+            payload: 0,
+        })
+    }
+
+    pub(super) fn push_paid(
+        &mut self,
+        column: usize,
+        value: PaidValue<'m, 'a>,
+    ) -> Result<(), ExecError> {
+        self.payload = size_add(self.payload, value.bytes)?;
+        let (value, _) = value.into_parts();
+        self.values.push((column, value))
+    }
+
+    pub(super) fn push_copy(
+        &mut self,
+        column: usize,
+        value: &QValue,
+        mem: &'m MemBudget<'a>,
+        env: Option<&ExecEnv<'a>>,
+    ) -> Result<(), ExecError> {
+        let value = PaidValue::copy(value, mem, env)?;
+        self.push_paid(column, value)
+    }
+}
+
 impl Deref for PaidContext<'_, '_> {
     type Target = [(usize, QValue)];
     fn deref(&self) -> &Self::Target {
@@ -719,19 +753,13 @@ pub(super) fn context<'m, 'a>(
     env: Option<&ExecEnv<'a>>,
 ) -> Result<PaidContext<'m, 'a>, ExecError> {
     let capacity = ctx.len().checked_add(1).ok_or_else(invalid_size)?;
-    let mut result = PaidContext {
-        values: PaidVec::new(capacity, mem, env)?,
-        payload: 0,
-    };
+    let mut result = PaidContext::with_capacity(capacity, mem, env)?;
     for (column, value) in ctx
         .iter()
         .map(|(col, value)| (*col, value))
         .chain(std::iter::once((col, value)))
     {
-        let value = PaidValue::copy(value, mem, env)?;
-        result.payload = size_add(result.payload, value.bytes)?;
-        let (value, _) = value.into_parts();
-        result.values.push((column, value))?;
+        result.push_copy(column, value, mem, env)?;
     }
     Ok(result)
 }

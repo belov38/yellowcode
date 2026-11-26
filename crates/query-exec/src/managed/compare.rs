@@ -22,6 +22,7 @@ pub fn rank(value: ValueRef<'_>) -> u8 {
         ValueRef::Binary(_) => 10,
         ValueRef::Storage(_) => 11,
         ValueRef::Nested(_) => 12,
+        ValueRef::PointInTime(_) => 13,
     }
 }
 
@@ -36,6 +37,13 @@ pub fn try_cmp(
         (ValueRef::Bool(a), ValueRef::Bool(b)) => return Ok(a.cmp(&b)),
         (ValueRef::Number(a), ValueRef::Number(b)) => return Ok(a.cmp(b)),
         (ValueRef::Date(a), ValueRef::Date(b)) => return Ok(a.ticks().cmp(&b.ticks())),
+        (ValueRef::PointInTime(a), ValueRef::PointInTime(b)) => {
+            return Ok(a
+                .date
+                .ticks()
+                .cmp(&b.date.ticks())
+                .then_with(|| a.reference.cmp(&b.reference)));
+        }
         _ => {}
     }
     let left_rank = rank(left);

@@ -74,8 +74,16 @@ impl<'a> Plan<'a> {
         let refuse = |what: &str| {
             HostError::not_implemented(&inst.type_name(), &format!("Записать: {what}"))
         };
-        if !matches!(def.kind, ObjKind::Catalog | ObjKind::Document) {
+        if !matches!(
+            def.kind,
+            ObjKind::Catalog | ObjKind::Document | ObjKind::ExchangePlan
+        ) {
             return Err(refuse("вид объекта"));
+        }
+        if def.kind == ObjKind::ExchangePlan
+            && let Some(what) = node_refusal(app, inst)
+        {
+            return Err(refuse(what));
         }
         inst.refuse_group_without_hierarchy("Записать")?;
         if app.options().read_only_scope.is_some() {
@@ -130,10 +138,113 @@ impl<'a> Plan<'a> {
     }
 }
 
+fn node_refusal(app: &Application, inst: &ObjectInstance) -> Option<&'static str> {
+    let model = app.model();
+    let def = model.obj(inst.obj);
+    let flag = |name: &str| {
+        model.config.object(def.md).is_none_or(|md| {
+            !matches!(md.prop(name), Some(md_model::Value::Bool(false)))
+                && !matches!(md.prop(name), Some(md_model::Value::Text(t)) if t == "false")
+        })
+    };
+    if inst.loading() {
+        return Some("ОбменДанными.Загрузка узла");
+    }
+    if flag("DistributedInfoBase") {
+        return Some("план обмена распределённой базы");
+    }
+    if flag("IncludeConfigurationExtensions") {
+        return Some("план обмена с данными расширений");
+    }
+    if crate::history::kept(app, inst.obj) {
+        return Some("план обмена с историей данных");
+    }
+    if def.fields.iter().any(|f| f.std.is_none()) || !def.tabular.is_empty() {
+        return Some("план обмена со своими реквизитами или табличными частями");
+    }
+    let this_node = def
+        .fields
+        .iter()
+        .position(|f| f.std == Some(StdAttr::ThisNode))
+        .is_some_and(|i| {
+            let st = inst.state.borrow();
+            !st.is_new && matches!(st.row.fields.get(i), Some(Value::Bool(true)))
+        });
+    if this_node {
+        return Some("этот узел");
+    }
+    None
+}
+
 struct TabJob {
     table: TableId,
     key: Vec<FieldValue>,
     rows: Vec<Vec<FieldValue>>,
+    key_col: Option<usize>,
+    line_col: Option<usize>,
+}
+
+fn same_cell(a: &FieldValue, b: &FieldValue) -> bool {
+    match (a, b) {
+        (FieldValue::Number(x), FieldValue::Number(y)) => x.eq_value(y),
+        _ => a == b,
+    }
+}
+
+enum LineWrite {
+    Keep,
+    Update(RowHandle, Vec<FieldValue>),
+    Insert(Vec<FieldValue>),
+}
+
+impl TabJob {
+    fn grown(&self, stored: &[(RowHandle, Vec<FieldValue>)]) -> Option<Vec<LineWrite>> {
+        if stored.len() >= self.rows.len() {
+            return None;
+        }
+        let (line, key) = (self.line_col?, self.key_col?);
+        let int = |r: &[FieldValue], c: usize| match r.get(c) {
+            Some(FieldValue::Number(n)) => n.to_string().parse::<i64>().ok(),
+            _ => None,
+        };
+        let mut next = stored
+            .iter()
+            .map(|(_, r)| int(r, key))
+            .try_fold(0i64, |m, k| k.map(|k| m.max(k)))?;
+        let same = |a: &[FieldValue], b: &[FieldValue]| {
+            a.iter()
+                .zip(b)
+                .enumerate()
+                .all(|(i, (x, y))| i == key || same_cell(x, y))
+        };
+        let mut out = Vec::with_capacity(self.rows.len());
+        let mut matched = 0usize;
+        for row in &self.rows {
+            let old = stored
+                .iter()
+                .find(|(_, old)| int(old, line).is_some() && int(old, line) == int(row, line));
+            if let Some((_, old)) = old
+                && same(old, row)
+            {
+                matched += 1;
+                out.push(LineWrite::Keep);
+                continue;
+            }
+            next = next.saturating_add(1);
+            let mut row = row.clone();
+            if let Some(cell) = row.get_mut(key) {
+                *cell = FieldValue::Number(ibschema::Numeric::from_i64(next));
+            }
+            out.push(match old {
+                Some((h, _)) => {
+                    matched += 1;
+                    LineWrite::Update(*h, row)
+                }
+                None => LineWrite::Insert(row),
+            });
+        }
+        (matched == stored.len()).then_some(out)
+    }
 }
 
 struct Edits {
@@ -233,7 +344,7 @@ fn edits(
                 },
             );
             let key = FieldValue::Number(ibschema::Numeric::from_i64(
-                i64::try_from(j).unwrap_or(i64::MAX),
+                i64::try_from(if is_new { j } else { j + 1 }).unwrap_or(i64::MAX),
             ));
             set_std(&mut row, ti, StdField::KeyField, key);
             for ((c, f), fid) in td.fields.iter().enumerate().zip(ids) {
@@ -255,6 +366,15 @@ fn edits(
             table: *table,
             key: plan.key(ti, id)?,
             rows,
+            key_col: ti
+                .field_by_std(StdField::KeyField)
+                .map(|f| usize::from(f.0)),
+            line_col: td
+                .fields
+                .iter()
+                .zip(ids)
+                .find(|(f, _)| f.std == Some(StdAttr::LineNumber))
+                .and_then(|(_, fid)| fid.map(|f| usize::from(f.0))),
         });
     }
     Ok(Edits { main, tabs: jobs })
@@ -389,7 +509,9 @@ pub(crate) fn admit_insert(
     let md = app.model().obj(obj).md;
     match data_write(ex, app, md, &["Insert"])? {
         DataWrite::NoUsers | DataWrite::Privileged => Ok(()),
-        _ if method == "СоздатьГруппу" => Err(user_refusal("СоздатьГруппу").into()),
+        _ if method == "СоздатьГруппу" || method == "СоздатьУзел" => {
+            Err(user_refusal(method).into())
+        }
         DataWrite::Allowed => Ok(()),
         DataWrite::Denied => Err(crate::rights::access_violation().into()),
     }
@@ -411,6 +533,9 @@ fn admit_write(
         }
         asked => asked,
     };
+    if def.kind == ObjKind::ExchangePlan {
+        return Err(user_refusal("запись узла плана обмена").into());
+    }
     if is_new {
         return Err(user_refusal("запись нового объекта").into());
     }
@@ -661,12 +786,6 @@ pub(crate) fn write_document(
     } else if modes.post() {
         let marked = flag(ex, StdAttr::DeletionMark)?;
         crate::posting::check(inst, posted, marked)?;
-    } else if posted {
-        return Err(HostError::not_implemented(
-            &inst.type_name(),
-            "Записать: проведённый документ в режиме Запись",
-        )
-        .into());
     }
     write_with(ex, inst, Some(modes))
 }
@@ -862,7 +981,7 @@ fn steps(
         }
         for job in &edits.tabs {
             if !is_new {
-                let handles = w
+                let stored = w
                     .range(
                         job.table,
                         IndexId::Id,
@@ -870,9 +989,18 @@ fn steps(
                         Bound::Included(job.key.as_slice()),
                         Direction::Forward,
                     )?
-                    .map(|item| item.map(|(h, _)| h))
-                    .collect::<StoreResult<Vec<RowHandle>>>()?;
-                for h in handles {
+                    .collect::<StoreResult<Vec<(RowHandle, Vec<FieldValue>)>>>()?;
+                if let Some(writes) = job.grown(&stored) {
+                    for lw in writes {
+                        match lw {
+                            LineWrite::Keep => {}
+                            LineWrite::Update(h, row) => w.update(job.table, h, &row)?,
+                            LineWrite::Insert(row) => drop(w.insert(job.table, &row)?),
+                        }
+                    }
+                    continue;
+                }
+                for (h, _) in stored {
                     w.delete(job.table, h)?;
                 }
             }

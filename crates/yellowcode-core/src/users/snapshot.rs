@@ -199,8 +199,7 @@ pub(super) fn load(base: &Path) -> Result<UserWriteSnapshot, UserWriteError> {
     #[cfg(unix)]
     let db = source.database(onecd::Mode::ReadOnly)?;
     #[cfg(not(unix))]
-    let db = Database::open(&path, OpenOptions::read_only())
-        .map_err(|_| UserWriteError::StorageBeforeCommit)?;
+    let db = Database::open(&path, OpenOptions::read_only()).map_err(super::mutation::storage)?;
     #[cfg(unix)]
     let before = source.witness()?;
     #[cfg(not(unix))]

@@ -1,4 +1,4 @@
-use query_console::{Console, Lang, Mode, ParamIn, RunRequest};
+use query_console::{Console, Mode, ParamIn, RunRequest};
 use std::{
     fs::File,
     io::{Read, Write},
@@ -20,6 +20,35 @@ pub enum Format {
     Csv,
 }
 
+/// Session language for query execution (`PRESENTATION`, type names, error messages).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
+pub enum Lang {
+    Ru,
+    En,
+}
+
+impl Lang {
+    pub fn parse(value: &str) -> Option<Self> {
+        if value.eq_ignore_ascii_case("ru") {
+            Some(Self::Ru)
+        } else if value.eq_ignore_ascii_case("en") {
+            Some(Self::En)
+        } else {
+            None
+        }
+    }
+}
+
+pub fn resolve_lang(requested: Option<Lang>, base_lang: &str) -> query_console::Lang {
+    match requested {
+        Some(Lang::Ru) => query_console::Lang::Ru,
+        Some(Lang::En) => query_console::Lang::En,
+        None if base_lang.eq_ignore_ascii_case("en") => query_console::Lang::En,
+        None => query_console::Lang::Ru,
+    }
+}
+
 pub enum Source {
     Text(String),
     File(PathBuf),
@@ -36,6 +65,7 @@ pub struct Request {
     pub params: Vec<String>,
     pub params_file: Option<PathBuf>,
     pub format: Option<Format>,
+    pub lang: Option<Lang>,
     pub timeout: Duration,
     pub max_rows: usize,
     pub schema_notes: bool,
@@ -235,11 +265,13 @@ fn run_with_memory(
     let console = memory.open(&args.base)?;
     super::control::trim_heap();
     super::schema_notes::write(err, &console.info().notes, args.schema_notes);
+    let lang = resolve_lang(args.lang, &console.info().lang);
     let req = text.try_zip(params)?.map(|(text, params)| RunRequest {
         text,
         params,
+        session_params: Vec::new(),
         mode: Mode::Batch,
-        lang: Lang::En,
+        lang,
     });
     let (report, timed_out) = match execute_on_worker(&console, &req, args.timeout)? {
         Ok(result) => result,

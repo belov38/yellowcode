@@ -428,7 +428,7 @@ pub(super) fn balance_ext1_pending(
                 .and_then(|(source, _)| {
                     schema.field(source.table, *field).map(|field| {
                         !(crate::lower::is_accounting_balance(schema, source.table)
-                            && field.role == FieldRole::Std(crate::StdRole::ExtDimension(1)))
+                            && matches!(field.role, FieldRole::Std(role) if crate::lower::is_balance_ext_dimension(role)))
                     })
                 })
                 .unwrap_or(false),
@@ -436,7 +436,7 @@ pub(super) fn balance_ext1_pending(
                 .and_then(|owner| accesses.get(owner))
                 .is_some_and(|(source, _)| {
                     !(crate::lower::is_accounting_balance(schema, source.table)
-                        && *role == crate::StdRole::ExtDimension(1))
+                        && crate::lower::is_balance_ext_dimension(*role))
                 }),
             Root::Column(_, crate::ir::ColSel::Column(_)) => {
                 legacy_permitted

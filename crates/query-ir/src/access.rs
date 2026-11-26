@@ -65,6 +65,7 @@ impl AccessPredicate {
                             complement: None,
                             span: None,
                             breakdown: Vec::new(),
+                            base: None,
                         },
                         joins: Vec::new(),
                     }];

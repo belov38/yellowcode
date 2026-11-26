@@ -109,6 +109,11 @@ impl From<appobj::SessionError> for ProcessError {
     }
 }
 
+enum Outcome {
+    Answer(Vec<u8>),
+    Fault(String),
+}
+
 struct Slot {
     user: SessionUser,
     number: u32,
@@ -495,17 +500,47 @@ impl RuntimeProcess {
         if !request.query.is_empty() {
             return Err(Unimplemented("a query in the target of a SOAP call").into());
         }
-        ws::soap::check_content_type(&request.headers)?;
-        let content_type = || vec![("Content-Type".to_owned(), ws::soap::CONTENT_TYPE.to_owned())];
-        let (op, params) = match ws::soap::bind(service, ws::soap::parse(&request.body)?)? {
-            ws::soap::Bound::Call(op, params) => (op, params),
-            ws::soap::Bound::Fault(text) => {
-                return Ok(crate::service::ResponseData {
-                    status: 500,
-                    headers: content_type(),
-                    body: ws::soap::fault(text)?,
-                });
+        let version = ws::soap::check_content_type(&request.headers)?;
+        let v11 = version == ws::soap::Version::V11;
+        let answer = |status: u16, body: Vec<u8>| crate::service::ResponseData {
+            status,
+            headers: vec![(
+                "Content-Type".to_owned(),
+                ws::soap::content_type(version).to_owned(),
+            )],
+            body,
+        };
+        let envelope = match ws::soap::parse(&request.body)? {
+            Ok(envelope) => envelope,
+            Err((envelope_version, text)) => {
+                if envelope_version != version {
+                    return Err(Unimplemented(
+                        "a SOAP envelope of another version than the Content-Type of the request",
+                    )
+                    .into());
+                }
+                if !v11 {
+                    return Err(Unimplemented(
+                        "the SOAP 1.2 Fault of a request body that is not well-formed XML",
+                    )
+                    .into());
+                }
+                crate::service::wire::russian(crate::service::wire::Call::of(
+                    &request.method,
+                    &request.headers,
+                ))?;
+                return Ok(answer(500, ws::soap::fault(&text)?));
             }
+        };
+        if envelope.version != version {
+            return Err(Unimplemented(
+                "a SOAP envelope of another version than the Content-Type of the request",
+            )
+            .into());
+        }
+        let (op, params) = match ws::soap::bind(service, envelope)? {
+            ws::soap::Bound::Call(op, params) => (op, params),
+            ws::soap::Bound::Fault(text) => return Ok(answer(500, ws::soap::fault(text)?)),
             ws::soap::Bound::TooFew(op) => {
                 return match self.call_as(
                     context,
@@ -515,11 +550,10 @@ impl RuntimeProcess {
                     reuse,
                     |_, _| Ok(()),
                 ) {
-                    Ok(()) => Ok(crate::service::ResponseData {
-                        status: 500,
-                        headers: content_type(),
-                        body: ws::soap::fault(ws::soap::TOO_FEW_PARAMETERS)?,
-                    }),
+                    Ok(()) => Ok(answer(
+                        500,
+                        ws::soap::fault(&ws::soap::too_few_parameters())?,
+                    )),
                     Err(ProcessError::Forbidden) => Err(Unimplemented(
                         "missing SOAP parameters of an operation without Use",
                     )
@@ -528,6 +562,10 @@ impl RuntimeProcess {
                 };
             }
         };
+        crate::service::wire::russian(crate::service::wire::Call::of(
+            &request.method,
+            &request.headers,
+        ))?;
         let result = self.call_as(
             context,
             handle,
@@ -550,30 +588,32 @@ impl RuntimeProcess {
                 let value = match ex.call(&instance, &op.procedure, &mut args) {
                     Ok(value) => value,
                     Err(error @ bsl_vm::Exception::Fatal(_)) => return Err(error.into()),
-                    Err(_) => {
-                        return Ok(Err(Unimplemented(
-                            "the SOAP Fault of an error in the procedure of an operation",
-                        )));
+                    Err(bsl_vm::Exception::Catchable(info)) => {
+                        if let Err(refusal) = ws::soap::admit_exception(&info) {
+                            return Ok(Err(refusal));
+                        }
+                        return Ok(Ok(Outcome::Fault(ws::soap::exception_text(&info))));
                     }
                 };
                 Ok(match ws::values::answer(ex, &op.returns, &value)? {
-                    Ok(text) => ws::soap::response(service, op, &text),
+                    Ok(text) => ws::soap::response(service, op, &text).map(Outcome::Answer),
                     Err(refusal) => Err(refusal),
                 })
             },
         );
         match result {
-            Ok(Ok(body)) => Ok(crate::service::ResponseData {
-                status: 200,
-                headers: content_type(),
-                body,
-            }),
+            Ok(Ok(Outcome::Answer(_))) if !v11 => {
+                Err(Unimplemented("a SOAP 1.2 answer other than the Fault of an exception").into())
+            }
+            Ok(Ok(Outcome::Answer(body))) => Ok(answer(200, body)),
+            Ok(Ok(Outcome::Fault(text))) => {
+                Ok(answer(500, ws::soap::exception_fault(version, &text)?))
+            }
             Ok(Err(refusal)) => Err(refusal.into()),
-            Err(ProcessError::Forbidden) => Ok(crate::service::ResponseData {
-                status: 500,
-                headers: content_type(),
-                body: ws::soap::rights_fault(service, op)?,
-            }),
+            Err(ProcessError::Forbidden) if !v11 => {
+                Err(Unimplemented("the SOAP 1.2 Fault of an operation without Use").into())
+            }
+            Err(ProcessError::Forbidden) => Ok(answer(500, ws::soap::rights_fault(service, op)?)),
             Err(error) => Err(error.into()),
         }
     }

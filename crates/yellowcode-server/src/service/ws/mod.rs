@@ -13,6 +13,7 @@ pub enum XdtoType {
     Boolean,
     DateTime,
     ValueStorage,
+    SubscriberId,
     Other(String),
 }
 impl XdtoType {
@@ -21,7 +22,15 @@ impl XdtoType {
             Some(Value::Xml(e)) if e.attrs.is_empty() && e.children.is_empty() => {
                 e.text.clone().unwrap_or_default()
             }
-            Some(Value::Xml(e)) => return Self::Other(e.text.clone().unwrap_or_default()),
+            Some(Value::Xml(e)) => {
+                let text = e.text.clone().unwrap_or_default();
+                return if e.children.is_empty() && declared(e, &text) == Some((EXT, SUBSCRIBER_ID))
+                {
+                    Self::SubscriberId
+                } else {
+                    Self::Other(text)
+                };
+            }
             Some(Value::Text(t)) => return Self::Other(t.clone()),
             _ => return Self::Other(String::new()),
         };
@@ -34,6 +43,17 @@ impl XdtoType {
             _ => Self::Other(text),
         }
     }
+}
+
+const EXT: &str = "http://v8.1c.ru/8.3/data/ext";
+const SUBSCRIBER_ID: &str = "DeliverableNotificationSubscriberID";
+
+fn declared<'a>(e: &'a md_model::XmlElem, text: &'a str) -> Option<(&'a str, &'a str)> {
+    let (prefix, local) = text.split_once(':')?;
+    let [(name, ns)] = e.attrs.as_slice() else {
+        return None;
+    };
+    (name.strip_prefix("xmlns:")? == prefix).then_some((ns.as_str(), local))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -206,7 +226,7 @@ pub fn admit_operation(op: &WsOperation) -> Result<(), Unimplemented> {
             "a web service operation without ProcedureName",
         ));
     }
-    if matches!(op.returns, XdtoType::Other(_)) {
+    if matches!(op.returns, XdtoType::Other(_) | XdtoType::SubscriberId) {
         return Err(Unimplemented(
             "an XDTO return type other than xs:string, xs:decimal, xs:boolean, xs:dateTime and v8:ValueStorage",
         ));
@@ -215,11 +235,6 @@ pub fn admit_operation(op: &WsOperation) -> Result<(), Unimplemented> {
         if p.direction != "In" {
             return Err(Unimplemented(
                 "a web service parameter with TransferDirection Out or InOut",
-            ));
-        }
-        if matches!(p.xdto, XdtoType::Other(_)) {
-            return Err(Unimplemented(
-                "an XDTO parameter type other than xs:string, xs:decimal, xs:boolean, xs:dateTime and v8:ValueStorage",
             ));
         }
     }

@@ -32,8 +32,9 @@ pub enum RecordType {
 }
 
 pub use query_ir::totals::{
-    AggArg, AggFunc, AggSpec, ArithOp, HierTableSpec, HierarchyMode, KeySource, OrderKey,
-    PeriodsSpec, PointSpec, TotalsExpr, TotalsSpec,
+    AggArg, AggFunc, AggSpec, ArithOp, DependentSpec, HierDepSpec, HierDepStep, HierFieldRead,
+    HierFieldTransform, HierTableSpec, HierarchyMode, KeySource, OrderKey, PeriodsSpec, PointSpec,
+    TotalsExpr, TotalsSpec,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -733,7 +734,8 @@ impl<'b, 'e> Builder<'b, 'e> {
                 let groups = self.group(rows, |b, r| b.cell(r, col))?;
                 let mut made = group_stage(groups.len(), self.mem, self.env)?;
                 for g in groups {
-                    let inner = payload::context(ctx, col, &g.value, self.mem, Some(self.env))?;
+                    let src_row = g.rows.first().copied();
+                    let inner = self.point_context(i, col, &g.value, src_row, ctx)?;
                     let row = self.total_row(&g.rows, &inner)?;
                     made.push((g, row), self.env)?;
                 }
@@ -756,7 +758,11 @@ impl<'b, 'e> Builder<'b, 'e> {
                 }
                 let mut out = group_output_ids(made.len(), self.mem, self.env)?;
                 for (g, row) in made {
-                    out.push(self.group_record(i, col, &g, row, ctx, level)?, self.env)?;
+                    let src_row = g.rows.first().copied();
+                    out.push(
+                        self.group_record(i, col, &g, row, ctx, level, src_row)?,
+                        self.env,
+                    )?;
                 }
                 Ok(out)
             }
@@ -764,6 +770,166 @@ impl<'b, 'e> Builder<'b, 'e> {
         }
     }
 
+    fn point_context(
+        &mut self,
+        i: usize,
+        col: usize,
+        value: &QValue,
+        src_row: Option<u32>,
+        ctx: &[(usize, QValue)],
+    ) -> Result<payload::PaidContext<'b, 'e>, ExecError> {
+        let deps = self
+            .spec
+            .points
+            .get(i)
+            .map_or(&[][..], |point| point.dependent.as_slice());
+        if deps.is_empty() {
+            return payload::context(ctx, col, value, self.mem, Some(self.env));
+        }
+        let capacity = ctx
+            .len()
+            .checked_add(1)
+            .and_then(|n| n.checked_add(deps.len()))
+            .ok_or_else(crate::model::invalid_size)?;
+        let mut inner = payload::PaidContext::with_capacity(capacity, self.mem, Some(self.env))?;
+        for (column, val) in ctx {
+            inner.push_copy(*column, val, self.mem, Some(self.env))?;
+        }
+        inner.push_copy(col, value, self.mem, Some(self.env))?;
+        for dep in deps {
+            let val = match src_row {
+                Some(r) => PaidValue::copy(
+                    cell_of(self.rows, r, dep.column).unwrap_or(&QValue::Null),
+                    self.mem,
+                    Some(self.env),
+                )?,
+                None => self.resolve_hier_dep(value, dep)?,
+            };
+            inner.push_paid(dep.column, val)?;
+        }
+        Ok(inner)
+    }
+
+    fn matching_row(
+        &mut self,
+        i: usize,
+        col: usize,
+        only: bool,
+        group: Option<usize>,
+        groups: &[Group<'b, 'e>],
+    ) -> Result<Option<u32>, ExecError> {
+        let has_deps = self
+            .spec
+            .points
+            .get(i)
+            .is_some_and(|point| !point.dependent.is_empty());
+        if !has_deps {
+            return Ok(None);
+        }
+        let Some(g) = group.and_then(|gi| groups.get(gi)) else {
+            return Ok(None);
+        };
+        if !only {
+            return Ok(g.rows.first().copied());
+        }
+        for &r in g.rows.as_slice() {
+            self.tick()?;
+            let cell = cell_of(self.rows, r, col).unwrap_or(&QValue::Null);
+            if try_compare_totals(cell, &g.value, self.coll)? == Ordering::Equal {
+                return Ok(Some(r));
+            }
+        }
+        Ok(None)
+    }
+
+    fn resolve_hier_dep(
+        &mut self,
+        value: &QValue,
+        dep: &DependentSpec,
+    ) -> Result<PaidValue<'b, 'e>, ExecError> {
+        let Some(hier) = &dep.hier else {
+            return Ok(PaidValue::null(self.mem));
+        };
+        match hier {
+            HierDepSpec::SelfRef => PaidValue::copy(value, self.mem, Some(self.env)),
+            HierDepSpec::Chain(steps) => {
+                let Some(source) = self.src else {
+                    return Ok(PaidValue::null(self.mem));
+                };
+                let mut current = PaidValue::copy(value, self.mem, Some(self.env))?;
+                for step in steps {
+                    self.tick()?;
+                    let QValue::Ref { table: number, id } = &*current else {
+                        return Ok(PaidValue::null(self.mem));
+                    };
+                    if id.iter().all(|b| *b == 0) {
+                        return Ok(PaidValue::null(self.mem));
+                    }
+                    let Some(branch) = step.branches.iter().find(|b| b.number == *number) else {
+                        return Ok(PaidValue::null(self.mem));
+                    };
+                    let fields: [FieldId; 2];
+                    let wanted: &[FieldId] = match branch.only {
+                        Some((folder, _)) => {
+                            fields = [branch.field, folder];
+                            &fields
+                        }
+                        None => std::slice::from_ref(&branch.field),
+                    };
+                    let Some(row) = source.get_by_id_fields(branch.table, &current, wanted)? else {
+                        return Ok(PaidValue::null(self.mem));
+                    };
+                    if let Some((folder_field, folder_only)) = branch.only {
+                        let is_folder = row
+                            .get(usize::from(folder_field.0))
+                            .is_some_and(|v| *v == QValue::Bool(false));
+                        if is_folder != folder_only {
+                            return Ok(PaidValue::null(self.mem));
+                        }
+                    }
+                    let next = match branch.transform {
+                        HierFieldTransform::Identity => {
+                            let raw = row
+                                .get(usize::from(branch.field.0))
+                                .unwrap_or(&QValue::Null);
+                            PaidValue::copy(raw, self.mem, Some(self.env))?
+                        }
+                        HierFieldTransform::InvertBool => {
+                            let raw = row
+                                .get(usize::from(branch.field.0))
+                                .unwrap_or(&QValue::Null);
+                            let val = match raw {
+                                QValue::Bool(b) => QValue::Bool(!*b),
+                                _ => QValue::Null,
+                            };
+                            PaidValue::copy(&val, self.mem, Some(self.env))?
+                        }
+                        HierFieldTransform::NonZeroUuid => {
+                            let raw = row
+                                .get(usize::from(branch.field.0))
+                                .unwrap_or(&QValue::Null);
+                            let val = match raw {
+                                QValue::Null => QValue::Null,
+                                QValue::Binary(bytes) => {
+                                    QValue::Bool(bytes.as_ref() != [0u8; 16].as_slice())
+                                }
+                                QValue::Uuid(bytes) => QValue::Bool(*bytes != [0u8; 16]),
+                                _ => QValue::Bool(true),
+                            };
+                            PaidValue::copy(&val, self.mem, Some(self.env))?
+                        }
+                        HierFieldTransform::RefSelf => {
+                            PaidValue::copy(&current, self.mem, Some(self.env))?
+                        }
+                    };
+                    current = next;
+                }
+                Ok(current)
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn group_record(
         &mut self,
         i: usize,
@@ -772,8 +938,9 @@ impl<'b, 'e> Builder<'b, 'e> {
         row: PaidRow<'b, 'e>,
         ctx: &[(usize, QValue)],
         level: u32,
+        src_row: Option<u32>,
     ) -> Result<u32, ExecError> {
-        let inner = payload::context(ctx, col, &g.value, self.mem, Some(self.env))?;
+        let inner = self.point_context(i, col, &g.value, src_row, ctx)?;
         let children = self.level(i + 1, &g.rows, &inner, level + 1)?;
         let row = self.push_total(row)?;
         self.push_record(RecordType::GroupTotal, Some(i), level, row, &children)
@@ -1038,7 +1205,8 @@ impl<'b, 'e> Builder<'b, 'e> {
             hierarchy_slots(groups.len(), self.mem, self.env)?;
         for k in 0..nodes.len() {
             let Some(node) = nodes.get(k) else { continue };
-            let inner = payload::context(ctx, col, &node.value, self.mem, Some(self.env))?;
+            let src_row = self.matching_row(i, col, only, node.group, &groups)?;
+            let inner = self.point_context(i, col, &node.value, src_row, ctx)?;
             if !node.children.is_empty() {
                 let rows = hierarchy_total_rows(&under, k, self.mem, self.env)?;
                 let row = self.total_row(&rows, &inner)?;
@@ -1121,7 +1289,8 @@ impl<'b, 'e> Builder<'b, 'e> {
                     .get_mut(gi)
                     .and_then(Option::take)
                     .ok_or_else(|| fatal("missing total row"))?;
-                self.group_record(i, col, g, row, ctx, lvl)?
+                let src_row = self.matching_row(i, col, only, Some(gi), &groups)?;
+                self.group_record(i, col, g, row, ctx, lvl, src_row)?
             } else {
                 let children = hierarchy_child_ids(
                     kids_of.get(k).map_or(&[], |kids| kids.as_slice()),
@@ -1134,7 +1303,10 @@ impl<'b, 'e> Builder<'b, 'e> {
                                     .get_mut(gi)
                                     .and_then(Option::take)
                                     .ok_or_else(|| fatal("missing total row"))?;
-                                return self.group_record(i, col, g, row, ctx, lvl + 1).map(Some);
+                                let src_row = self.matching_row(i, col, only, Some(gi), &groups)?;
+                                return self
+                                    .group_record(i, col, g, row, ctx, lvl + 1, src_row)
+                                    .map(Some);
                             }
                             Ok(None)
                         }

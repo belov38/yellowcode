@@ -12,9 +12,9 @@ use query_syntax::Func;
 use query_syntax::ast::JoinKind;
 
 use crate::ops::{
-    BoxOp, Distinct, Empty, Filter, HashAggregate, HashJoin, HierarchyClosure, HierarchyOrder,
-    IndexJoin, IndexLookup, IndexRange, Limit, NestedLoopJoin, Project, Scan, SemiJoin, Sort,
-    TempRange, TempScan, TopN, ValuesScan, union,
+    BoxOp, DefaultIfEmpty, Distinct, Empty, Filter, HashAggregate, HashJoin, HierarchyClosure,
+    HierarchyOrder, IndexJoin, IndexLookup, IndexRange, Limit, NestedLoopJoin, Project, Scan,
+    SemiJoin, Sort, TempRange, TempScan, TopN, ValuesScan, union,
 };
 use crate::source::DataSource;
 use crate::temp::{TempTableId, TempTables};
@@ -60,6 +60,10 @@ pub enum Plan {
         table: TableId,
         name: String,
         fields: Vec<FieldId>,
+    },
+    DefaultIfEmpty {
+        input: Box<Plan>,
+        row: Arc<[query_ir::QValue]>,
     },
     IdLookup {
         table: TableId,
@@ -325,6 +329,13 @@ impl Planner<'_> {
         Ok(match r {
             R::Empty => wrap(Plan::Empty, pending),
             R::Scan { table, fields } => self.access(*table, fields, rep, pending)?,
+            R::DefaultIfEmpty { input, row } => wrap(
+                Plan::DefaultIfEmpty {
+                    input: Box::new(self.rel(input, rep, Vec::new())?),
+                    row: row.clone(),
+                },
+                pending,
+            ),
             R::TempScan { name, .. } => self.temp_access(name, pending)?,
             R::Values { rows } => wrap(Plan::Values { rows: rows.clone() }, pending),
             R::Slice {
@@ -564,6 +575,10 @@ pub(crate) fn walk(e: &PExpr, f: &mut dyn FnMut(&PExpr)) {
             go(l);
             go(pat);
         }
+        PExpr::PointInTime { date, reference } => {
+            go(date);
+            go(reference);
+        }
         PExpr::Case {
             operand,
             whens,
@@ -580,7 +595,10 @@ pub(crate) fn walk(e: &PExpr, f: &mut dyn FnMut(&PExpr)) {
                 go(x);
             }
         }
-        PExpr::Cast { x, .. } | PExpr::TypeOf { x, .. } | PExpr::StoredSize { x, .. } => go(x),
+        PExpr::Cast { x, .. }
+        | PExpr::TypeOf { x, .. }
+        | PExpr::PredefName { x, .. }
+        | PExpr::StoredSize { x, .. } => go(x),
         PExpr::Func { args, .. } => args.iter().for_each(go),
     }
 }
@@ -606,6 +624,7 @@ pub(crate) fn width(r: &query_ir::RelL) -> usize {
         R::Values { rows } => rows.width,
         R::Join { l, r, .. } => width(l) + width(r),
         R::CheckAccess { input, .. }
+        | R::DefaultIfEmpty { input, .. }
         | R::Filter { input, .. }
         | R::Sort { input, .. }
         | R::Top { input, .. }
@@ -634,6 +653,9 @@ pub fn build<'a>(p: &Plan) -> BoxOp<'a> {
     match p {
         Plan::Empty => Box::new(Empty::new()),
         Plan::Scan { table, fields, .. } => Box::new(Scan::new(*table, fields.clone())),
+        Plan::DefaultIfEmpty { input, row } => {
+            Box::new(DefaultIfEmpty::new(build(input), row.clone()))
+        }
         Plan::TempScan { table, .. } => Box::new(TempScan::new(*table)),
         Plan::Values { rows } => Box::new(ValuesScan::new(rows.clone())),
         Plan::Slice {
@@ -898,6 +920,10 @@ impl Plan {
             Plan::Scan { name, .. } => {
                 kids = vec![];
                 format!("scan {name}")
+            }
+            Plan::DefaultIfEmpty { input, .. } => {
+                kids = vec![input];
+                "default-if-empty".to_string()
             }
             Plan::TempScan { name, .. } => {
                 kids = vec![];

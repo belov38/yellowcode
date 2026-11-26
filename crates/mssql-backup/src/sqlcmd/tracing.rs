@@ -22,6 +22,8 @@ pub(super) fn step_for(script: &str) -> &'static str {
         ("MIN(CONVERT(int,[Offset]))", "year_offset"),
         ("FROM dbo.CONFIG ORDER BY", "config_read"),
         ("FROM dbo.CONFIG FOR JSON", "config_read"),
+        ("FROM dbo.[SchemaStorage] ORDER BY", "schema_storage"),
+        ("AS [ngs_nonempty]", "extensions_ngs"),
         ("AS [schema_unstable]", "support"),
         ("DATALENGTH(Email)>0", "users_email"),
         ("AS [nonempty]", "extra_table"),
@@ -410,6 +412,26 @@ pub fn failure_kind(message: &str) -> (&'static str, &'static str) {
             "unsupported: the base has extension storage",
             "extension_storage",
             "inventory",
+        ),
+        (
+            "unsupported extension storage",
+            "extension_storage",
+            "schema_storage",
+        ),
+        (
+            "SQL schema storage",
+            "schema_storage_failed",
+            "schema_storage",
+        ),
+        (
+            "unsupported: unexpected 1C extension tables",
+            "extension_storage",
+            "inventory",
+        ),
+        (
+            "SQL extension state check failed",
+            "support_check_failed",
+            "support",
         ),
         (
             "SQL system data check failed",

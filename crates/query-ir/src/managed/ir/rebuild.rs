@@ -7,11 +7,13 @@ pub(super) struct Rebuild<'c, 'a, 'r, 'w, 'k> {
     pub(super) ctx: &'c BuildCtx<'a, 'r, 'w>,
     pub(super) keys: &'k ScratchVec<NativeOwned<'a, Expr>>,
     pub(super) index: &'k Index<u64, ScratchVec<u16>>,
+    pub(super) ref_index: &'k Index<u64, ScratchVec<(u16, usize)>>,
     pub(super) own: &'k [ir::SrcId],
     pub(super) anchor: Option<ir::SrcId>,
     pub(super) in_sub: bool,
     pub(super) replace: bool,
     pub(super) allow_prefix: bool,
+    pub(super) explicit_keys: usize,
 }
 impl<'a> Rebuild<'_, 'a, '_, '_, '_> {
     pub(super) fn find(&self, e: &Expr) -> Option<u16> {
@@ -31,8 +33,33 @@ impl<'a> Rebuild<'_, 'a, '_, '_, '_> {
         let E::Deref { base, steps } = &e.kind else {
             return None;
         };
+        if steps.is_empty() {
+            return None;
+        }
         let mut found = None;
+        if let Some(base_hash) = hash::deref_prefix(e, 0)
+            && self.find(base).is_none()
+            && let Some(bucket) = self.ref_index.get(&base_hash)
+        {
+            for &(i, key_len) in bucket.iter() {
+                if key_len != 0 {
+                    continue;
+                }
+                let Some(key) = self.keys.get(usize::from(i)) else {
+                    continue;
+                };
+                let key = key.trusted_borrow();
+                if let E::Deref { base: key_base, .. } = &key.kind
+                    && !key.ty.refs.is_empty()
+                    && key_base == base
+                {
+                    found = Some((i, 0));
+                    break;
+                }
+            }
+        }
         hash::deref_prefixes(e, |len, hash| {
+            let mut matched = None;
             if let Some(bucket) = self.index.get(&hash) {
                 for &i in bucket.iter() {
                     let Some(key) = self.keys.get(usize::from(i)) else {
@@ -47,10 +74,39 @@ impl<'a> Rebuild<'_, 'a, '_, '_, '_> {
                         && key_base == base
                         && key_steps.as_slice().iter().eq(steps.iter().take(len))
                     {
-                        found = Some((i, len));
+                        matched = Some((i, len));
                         break;
                     }
                 }
+            }
+            if matched.is_none()
+                && let Some(bucket) = self.ref_index.get(&hash)
+            {
+                for &(i, key_len) in bucket.iter() {
+                    if key_len != len {
+                        continue;
+                    }
+                    let Some(key) = self.keys.get(usize::from(i)) else {
+                        continue;
+                    };
+                    let key = key.trusted_borrow();
+                    if let E::Deref {
+                        base: key_base,
+                        steps: key_steps,
+                    } = &key.kind
+                        && !key.ty.refs.is_empty()
+                        && key_base == base
+                        && key_steps
+                            .get(..len)
+                            .is_some_and(|prefix| prefix.iter().eq(steps.iter().take(len)))
+                    {
+                        matched = Some((i, len));
+                        break;
+                    }
+                }
+            }
+            if let Some(m) = matched {
+                found = Some(m);
             }
         });
         found
@@ -91,6 +147,14 @@ impl<'a> Rebuild<'_, 'a, '_, '_, '_> {
             && let Some(key) = self.find(e)
         {
             if !self.in_sub {
+                if usize::from(key) >= self.explicit_keys {
+                    let copier = Self {
+                        replace: false,
+                        ..*self
+                    };
+                    let orig = copier.bx(e)?;
+                    return c.expr(orig.map(|orig| E::LocalKey { key, orig }), c.copy(&e.ty)?);
+                }
                 return c.expr(c.scalar(key).map(E::KeyRef), c.copy(&e.ty)?);
             }
             if let Some(src) = self.anchor
@@ -140,24 +204,42 @@ impl<'a> Rebuild<'_, 'a, '_, '_, '_> {
                     && let Some(prefix) = self.keys.get(usize::from(key))
                 {
                     let prefix = prefix.trusted_borrow();
+                    let copier = Self {
+                        replace: false,
+                        ..*self
+                    };
+                    let build_orig = || -> BuildResult<NativeOwned<'a, Box<Expr>>> {
+                        if len == 0 {
+                            copier.bx(base)
+                        } else if let E::Deref {
+                            steps: key_steps, ..
+                        } = &prefix.kind
+                            && key_steps.len() == len
+                        {
+                            copier.bx(prefix)
+                        } else {
+                            let orig_base = copier.bx(base)?;
+                            let prefix_steps = steps.get(..len).ok_or(BuildProblem::Internal(
+                                "a grouping prefix beyond its dereference chain",
+                            ))?;
+                            let mut copied = c.vector(prefix_steps.len())?;
+                            for step in prefix_steps {
+                                c.push(&mut copied, c.copy(step)?)?;
+                            }
+                            let orig_kind = c
+                                .allocated(orig_base.zip(copied.finish()))?
+                                .map(|(base, steps)| E::Deref { base, steps });
+                            let orig_expr = c.expr(orig_kind, c.copy(&prefix.ty)?)?;
+                            c.parent_depth(std::iter::once(orig_expr.depth()))?;
+                            c.boxed(orig_expr)
+                        }
+                    };
                     let kind = if !self.in_sub {
-                        let copier = Self {
-                            replace: false,
-                            ..*self
-                        };
-                        Some(copier.bx(prefix)?.map(|orig| E::LocalKey { key, orig }))
+                        Some(build_orig()?.map(|orig| E::LocalKey { key, orig }))
                     } else if let Some(src) = self.anchor
                         && self.reads_own(prefix)
                     {
-                        let copier = Self {
-                            replace: false,
-                            ..*self
-                        };
-                        Some(
-                            copier
-                                .bx(prefix)?
-                                .map(|orig| E::OuterKey { src, key, orig }),
-                        )
+                        Some(build_orig()?.map(|orig| E::OuterKey { src, key, orig }))
                     } else {
                         None
                     };
@@ -170,6 +252,7 @@ impl<'a> Rebuild<'_, 'a, '_, '_, '_> {
                         for step in suffix {
                             c.push(&mut copied, c.copy(step)?)?;
                         }
+                        c.parent_depth(std::iter::once(prefix.depth()))?;
                         let base = c.boxed(prefix)?;
                         let kind = c
                             .allocated(base.zip(copied.finish()))?
@@ -465,6 +548,7 @@ impl<'a> Rebuild<'_, 'a, '_, '_, '_> {
                 v.bounds.iter().flatten().any(reads)
                     || v.cond
                         .iter()
+                        .chain(v.ext_dims_arg.iter())
                         .chain(v.area.iter().map(|a| &a.pred))
                         .chain(v.access.iter())
                         .chain(v.order.iter().map(|k| &k.expr))

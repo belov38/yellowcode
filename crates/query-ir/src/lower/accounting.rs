@@ -2,18 +2,18 @@ use super::layout::{R, Row, p16};
 use super::rel::Lower;
 use super::vt::DrCrAreaL;
 use super::{
-    AccountingRowsL, AggL, Dec, DrCrAccountL, DrCrInputsL, DrCrResourceL, DrCrSideL, PExpr,
-    RegisterRowsKindL, RegisterRowsL, RelL,
+    AccountingRowsL, AggL, Dec, DrCrAccountL, DrCrExtDimL, DrCrInputsL, DrCrResourceL, DrCrSideL,
+    PExpr, RegisterRowsKindL, RegisterRowsL, RelL,
 };
 use crate::ir::{RegisterVtS, raw_layout as raw};
 use crate::schema::{
     FieldRole, QFieldId, QTableId, QuerySchema, Side, StdRole, StorageBinding, TableKind, VtKind,
 };
-use crate::{ExecError, QValue};
+use crate::{ExecError, QType, QValue};
 use brace::Guid;
-use ibschema::logical::{LType, TypeCode};
+use ibschema::logical::{LType, TypeCode, VAR};
 use ibschema::names::{Side as StorageSide, StdField, role};
-use ibschema::storage::{FieldId, StorageMap, TableId, TableInfo};
+use ibschema::storage::{FieldId, FieldInfo, StorageMap, TableId, TableInfo};
 use mdschema::MdKind;
 use query_syntax::{Func, ast::CmpOp};
 
@@ -84,6 +84,121 @@ fn typed_standard(info: &TableInfo, role: StdField, code: TypeCode) -> R<FieldId
         )));
     }
     Ok(field)
+}
+
+fn validate_ext_dim_shape(
+    semantic: &QType,
+    physical: &FieldInfo,
+    storage: &StorageBinding,
+    map: &StorageMap,
+) -> R<()> {
+    if !physical.nullable {
+        return Err(fatal("non-nullable ext dimension storage field"));
+    }
+    if semantic
+        .number
+        .is_some_and(|q| q.digits == 0 || q.digits > 38 || q.scale > q.digits)
+        || semantic.string.is_some_and(|q| q.len >= VAR)
+        || semantic
+            .others
+            .iter()
+            .any(|other| *other != crate::Other::Uuid)
+    {
+        return Err(later("Q6b-DrCrTurnoversStorageShape"));
+    }
+    let uuid = semantic.others.contains(&crate::Other::Uuid);
+    for (index, atom) in semantic.refs.iter().enumerate() {
+        let tag = storage
+            .ref_number(*atom)
+            .ok_or_else(|| fatal("unbound ext dimension reference"))?;
+        if semantic
+            .refs
+            .iter()
+            .take(index)
+            .any(|other| storage.ref_number(*other) == Some(tag))
+        {
+            return Err(fatal("aliased ext dimension reference tags"));
+        }
+    }
+    let tag_count = semantic.refs.len();
+    let first_tag = semantic
+        .refs
+        .first()
+        .and_then(|atom| storage.ref_number(*atom));
+    let carrier = physical
+        .types
+        .first()
+        .is_some_and(|ty| ty.code == TypeCode::E);
+    let atoms = usize::from(semantic.boolean)
+        + usize::from(semantic.number.is_some())
+        + usize::from(semantic.string.is_some())
+        + usize::from(semantic.date.is_some())
+        + usize::from(uuid)
+        + usize::from(tag_count != 0);
+    if atoms == 0 || (carrier != (atoms > 1 || tag_count > 1)) {
+        return Err(fatal("contradictory ext dimension composite carrier"));
+    }
+    let (mut seen_e, mut seen_l, mut seen_n, mut seen_s, mut seen_t, mut seen_r, mut seen_b) =
+        (false, false, false, false, false, false, false);
+    for ty in &physical.types {
+        let seen = match ty.code {
+            TypeCode::E => &mut seen_e,
+            TypeCode::L => &mut seen_l,
+            TypeCode::N => &mut seen_n,
+            TypeCode::S => &mut seen_s,
+            TypeCode::T => &mut seen_t,
+            TypeCode::R => &mut seen_r,
+            TypeCode::B => &mut seen_b,
+            TypeCode::V => return Err(later("Q6b-DrCrTurnoversStorageShape")),
+        };
+        if *seen {
+            return Err(fatal("duplicate ext dimension physical atom"));
+        }
+        *seen = true;
+        let valid = match ty.code {
+            TypeCode::E => carrier && ty.length == 0 && ty.precision == 0,
+            TypeCode::L => semantic.boolean && ty.length == 0 && ty.precision == 0,
+            TypeCode::N => semantic.number.is_some_and(|q| {
+                ty.length == u32::from(q.digits) && ty.precision == u32::from(q.scale)
+            }),
+            TypeCode::S => semantic.string.is_some_and(|q| {
+                let length = if q.len == 0 {
+                    VAR
+                } else if q.fixed {
+                    q.len
+                } else {
+                    VAR | q.len
+                };
+                ty.length == length && ty.precision == 0
+            }),
+            TypeCode::T => semantic.date.is_some() && ty.length == 0 && ty.precision == 0,
+            TypeCode::B => uuid && ty.length == 16 && ty.precision == 0,
+            TypeCode::R if tag_count == 1 => {
+                ty.ref_kind == 3
+                    && map
+                        .table_by_name(&ty.ref_table)
+                        .and_then(|id| map.ref_number(id))
+                        == first_tag
+            }
+            TypeCode::R => tag_count > 1 && ty.ref_kind == 4 && ty.ref_table.is_empty(),
+            TypeCode::V => false,
+        };
+        if !valid {
+            return Err(fatal(
+                "ext dimension physical atom contradicts semantic type",
+            ));
+        }
+    }
+    if seen_l != semantic.boolean
+        || seen_n != semantic.number.is_some()
+        || seen_s != semantic.string.is_some()
+        || seen_t != semantic.date.is_some()
+        || seen_r == (tag_count == 0)
+        || seen_b != uuid
+    {
+        return Err(fatal("incomplete ext dimension physical union"));
+    }
+    Ok(())
 }
 
 impl DrCrInputs<'_> {
@@ -469,6 +584,73 @@ impl DrCrInputs<'_> {
         })
     }
 
+    pub(crate) fn ext_dim(
+        &self,
+        inputs: &DrCrInputsL,
+        side: DrCrSideL,
+        index: u8,
+        output: QFieldId,
+    ) -> R<DrCrExtDimL> {
+        let (owner, _) = self.owner()?;
+        let meta = self
+            .schema
+            .meta(owner)
+            .ok_or_else(|| fatal("missing ext dimension metadata"))?;
+        if index == 0 || index > meta.ext_dims {
+            return Err(fatal(format_args!(
+                "ext dimension index {index} out of range 1..={}",
+                meta.ext_dims
+            )));
+        }
+        let catalog = self
+            .schema
+            .field(self.table, output)
+            .ok_or_else(|| fatal("missing ext dimension catalog output"))?;
+        let (expected_role, expected_side, std) = match side {
+            DrCrSideL::Dr => (StdRole::ExtDimensionDr(index), Side::Dr, StdField::ValueDt),
+            DrCrSideL::Cr => (StdRole::ExtDimensionCr(index), Side::Cr, StdField::ValueCt),
+        };
+        if catalog.role != FieldRole::Std(expected_role)
+            || catalog.md.is_some()
+            || catalog.side != Some(expected_side)
+        {
+            return Err(fatal("ext dimension catalog role/side mismatch"));
+        }
+        let info = self
+            .map
+            .try_table(inputs.main)
+            .ok_or_else(|| fatal("missing main ext dimension table"))?;
+        let expected_name = std.numbered(u32::from(index));
+        let mut matches = info
+            .fields
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| f.name == expected_name);
+        let (field_index, physical) = matches
+            .next()
+            .ok_or_else(|| fatal(format_args!("missing {expected_name} in {}", info.logical)))?;
+        if matches.next().is_some()
+            || physical.std != Some(std)
+            || physical.side.is_some()
+            || physical.md.is_some()
+        {
+            return Err(fatal(format_args!(
+                "contradictory {expected_name} identity in {}",
+                info.logical
+            )));
+        }
+        validate_ext_dim_shape(&catalog.ty, physical, self.storage, self.map)?;
+        let main = FieldId(
+            u16::try_from(field_index).map_err(|_| fatal("ext dimension field index overflow"))?,
+        );
+        Ok(DrCrExtDimL {
+            side,
+            index,
+            output,
+            main,
+        })
+    }
+
     pub(crate) fn form_refusal(&self, used: &[QFieldId], all: bool) -> Option<&'static str> {
         if all {
             return Some("Q6b-DrCrTurnoversStar");
@@ -484,7 +666,12 @@ impl DrCrInputs<'_> {
         {
             if matches!(
                 field.role,
-                FieldRole::Std(StdRole::AccountDr | StdRole::AccountCr)
+                FieldRole::Std(
+                    StdRole::AccountDr
+                        | StdRole::AccountCr
+                        | StdRole::ExtDimensionDr(_)
+                        | StdRole::ExtDimensionCr(_)
+                )
             ) {
                 continue;
             }
@@ -506,12 +693,7 @@ impl DrCrInputs<'_> {
                 || field.md.is_some()
                 || matches!(
                     field.role,
-                    FieldRole::Std(
-                        StdRole::ExtDimensionDr(_)
-                            | StdRole::ExtDimensionCr(_)
-                            | StdRole::ExtDimensionTypeDr(_)
-                            | StdRole::ExtDimensionTypeCr(_)
-                    )
+                    FieldRole::Std(StdRole::ExtDimensionTypeDr(_) | StdRole::ExtDimensionTypeCr(_))
                 )
             {
                 rank = rank.min(1);
@@ -594,6 +776,32 @@ impl Lower<'_> {
                 keys.push(side);
             }
         }
+        let selected_ext = self
+            .schema
+            .table(v.table)
+            .fields
+            .iter()
+            .enumerate()
+            .filter(|(i, f)| {
+                matches!(
+                    f.role,
+                    FieldRole::Std(StdRole::ExtDimensionDr(_) | StdRole::ExtDimensionCr(_))
+                ) && u16::try_from(*i).is_ok_and(|i| used.contains(&QFieldId(i)))
+            })
+            .count();
+        let mut ext_dims = Vec::with_capacity(selected_ext);
+        for (index, field) in self.schema.table(v.table).fields.iter().enumerate() {
+            let (side, ext_index) = match field.role {
+                FieldRole::Std(StdRole::ExtDimensionDr(n)) => (DrCrSideL::Dr, n),
+                FieldRole::Std(StdRole::ExtDimensionCr(n)) => (DrCrSideL::Cr, n),
+                _ => continue,
+            };
+            let output =
+                QFieldId(u16::try_from(index).map_err(|_| fatal("ext dimension output index"))?);
+            if used.contains(&output) {
+                ext_dims.push(resolver.ext_dim(&inputs, side, ext_index, output)?);
+            }
+        }
         let selected = self
             .schema
             .table(v.table)
@@ -614,10 +822,13 @@ impl Lower<'_> {
             }
         }
         let nk = keys.len();
+        let n_dims = nk
+            .checked_add(ext_dims.len())
+            .ok_or_else(|| fatal("raw key count overflow"))?;
         let nr = resources.len();
         let width = nr
             .checked_mul(raw::PER_RESOURCE)
-            .and_then(|n| n.checked_add(nk))
+            .and_then(|n| n.checked_add(n_dims))
             .and_then(|n| n.checked_add(raw::DIMS))
             .ok_or_else(|| fatal("raw width overflow"))?;
         p16(width as i64)?;
@@ -632,18 +843,24 @@ impl Lower<'_> {
                 .get_mut(usize::from(account.output.0))
                 .ok_or_else(|| fatal("account output offset"))? = PExpr::Col(p16(i as i64)?);
         }
+        for (i, ext) in ext_dims.iter().enumerate() {
+            *projection
+                .get_mut(usize::from(ext.output.0))
+                .ok_or_else(|| fatal("ext dimension output offset"))? =
+                PExpr::Col(p16((nk + i) as i64)?);
+        }
         let mut aggs = Vec::with_capacity(nr);
         for (i, resource) in resources.iter().enumerate() {
             *projection
                 .get_mut(usize::from(resource.output.0))
                 .ok_or_else(|| fatal("resource output offset"))? =
-                PExpr::Col(p16((nk + i) as i64)?);
+                PExpr::Col(p16((n_dims + i) as i64)?);
             aggs.push(AggL {
                 f: Func::Sum,
                 distinct: false,
-                arg: Some(PExpr::Col(
-                    p16(raw::component(nk, i, raw::TURNOVER) as i64)?,
-                )),
+                arg: Some(PExpr::Col(p16(
+                    raw::component(n_dims, i, raw::TURNOVER) as i64
+                )?)),
                 ty: self
                     .schema
                     .field(v.table, resource.output)
@@ -666,6 +883,7 @@ impl Lower<'_> {
             rows: RegisterRowsKindL::Accounting(AccountingRowsL {
                 inputs,
                 keys,
+                ext_dims,
                 resources,
                 date_bounds,
                 area,
@@ -674,7 +892,7 @@ impl Lower<'_> {
         let raw = RelL::RegisterRows(Box::new(step));
         let grouped = RelL::Aggregate {
             input: Box::new(raw),
-            keys: (0..nk)
+            keys: (0..n_dims)
                 .map(|i| p16((raw::DIMS + i) as i64).map(PExpr::Col))
                 .collect::<R<Vec<_>>>()?,
             sets: None,
@@ -685,7 +903,7 @@ impl Lower<'_> {
                 .map(|i| {
                     Ok(PExpr::Compare(
                         CmpOp::Ne,
-                        Box::new(PExpr::Col(p16((nk + i) as i64)?)),
+                        Box::new(PExpr::Col(p16((n_dims + i) as i64)?)),
                         Box::new(PExpr::Lit(QValue::Number(bsl_prim::Number::zero()))),
                     ))
                 })

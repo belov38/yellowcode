@@ -343,6 +343,7 @@ impl Console {
             &RunRequest {
                 text: "SELECT PRESENTATION(1)".to_string(),
                 params: Vec::new(),
+                session_params: Vec::new(),
                 mode: Mode::Batch,
                 lang: Lang::En,
             },
@@ -426,6 +427,7 @@ impl Console {
                         name: "P".to_string(),
                         repr: format!("Массив[{}]", texts.join(", ")),
                     }],
+                    session_params: Vec::new(),
                     mode: Mode::Batch,
                     lang: Lang::En,
                 },

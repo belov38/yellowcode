@@ -363,7 +363,8 @@ impl QuerySchema {
                 TableKind::Virtual(
                     VtKind::RecordsWithExtDimensions
                     | VtKind::ActualActionPeriod
-                    | VtKind::ScheduleData,
+                    | VtKind::ScheduleData
+                    | VtKind::Base,
                 ),
                 None,
             ) => map.main_table(owner_object()?),
@@ -472,6 +473,7 @@ fn has_storage(k: TableKind) -> bool {
                 | VtKind::RecordsWithExtDimensions
                 | VtKind::ActualActionPeriod
                 | VtKind::ScheduleData
+                | VtKind::Base
                 | VtKind::BusinessProcessPoints
                 | VtKind::SequenceBoundaries
         ),

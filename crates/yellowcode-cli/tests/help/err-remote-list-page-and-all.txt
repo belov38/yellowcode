@@ -1,0 +1,8 @@
+exit 2
+--- stdout
+--- stderr
+error: the argument '--page <N>' cannot be used with '--all'
+
+Usage: yellowcode remote list --object <ВИД.ИМЯ> --page <N> <URL>
+
+For more information, try '--help'.

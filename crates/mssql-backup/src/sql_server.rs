@@ -402,6 +402,88 @@ GO
         ))
     }
 
+    pub fn schema_storage_script(
+        &self,
+        actual: &[crate::sql_catalog::SqlColumn],
+    ) -> Result<String, Error> {
+        let ordered = crate::sql_schema_storage::validate_catalog(actual)
+            .map_err(|_| Error::InvalidTable("unsupported SchemaStorage catalog"))?;
+        let [id, status, current, created, dropped] = ordered.as_slice() else {
+            return Err(Error::InvalidTable("unsupported SchemaStorage catalog"));
+        };
+        let quote = |name: &str| format!("[{}]", name.replace(']', "]]"));
+        let id_col = quote(&id.name);
+        let projections = [
+            format!("CONVERT(varchar(100),{id_col}) AS [SCHEMAID]"),
+            format!("CONVERT(varchar(100),{}) AS [STATUS]", quote(&status.name)),
+            format!(
+                "'0x'+CONVERT(varchar(max),CONVERT(varbinary(max),{}),2) AS [CURRENTSCHEMA]",
+                quote(&current.name)
+            ),
+            format!(
+                "'0x'+CONVERT(varchar(max),CONVERT(varbinary(max),{}),2) AS [NEWGENCREATED]",
+                quote(&created.name)
+            ),
+            format!(
+                "'0x'+CONVERT(varchar(max),CONVERT(varbinary(max),{}),2) AS [NEWGENDROPPED]",
+                quote(&dropped.name)
+            ),
+        ]
+        .join(",\n");
+        let query = format!(
+            "IF EXISTS (SELECT 1 FROM dbo.[SchemaStorage]) SELECT {projections} FROM dbo.[SchemaStorage] ORDER BY {id_col} FOR JSON PATH, INCLUDE_NULL_VALUES ELSE SELECT N'[]'"
+        )
+        .replace('\'', "''");
+        Ok(checked(format!(
+            r#"{}IF DB_ID(@db) IS NULL THROW 51000,'temporary database missing',1;
+{}
+IF DATABASEPROPERTYEX(@db,'Updateability')<>'READ_ONLY' THROW 51000,'temporary database is not read-only',1;
+DECLARE @query nvarchar(max)=CONVERT(nvarchar(max),N'USE ')+QUOTENAME(@db)+N'; {}';
+EXEC(@query);
+GO
+"#,
+            self.declarations(),
+            CHECK_OWNERSHIP,
+            query
+        )))
+    }
+
+    pub fn extensions_ngs_script(&self, tables: &[&str]) -> Result<String, Error> {
+        if tables.is_empty()
+            || tables.len() > 2
+            || tables.iter().any(|table| !valid_table_name(table))
+        {
+            return Err(Error::InvalidTable("invalid extension state table list"));
+        }
+        let parts: Vec<String> = tables
+            .iter()
+            .map(|table| {
+                let literal = table.replace('\'', "''");
+                let quoted = format!("[{}]", table.replace(']', "]]"));
+                format!(
+                    "SELECT N'{literal}' AS [name], CASE WHEN EXISTS(SELECT 1 FROM dbo.{quoted}) THEN 1 ELSE 0 END AS [ngs_nonempty]"
+                )
+            })
+            .collect();
+        let query = format!(
+            "SELECT [name],[ngs_nonempty] FROM (\n{}\n) AS t FOR JSON PATH, INCLUDE_NULL_VALUES",
+            parts.join("\nUNION ALL\n")
+        )
+        .replace('\'', "''");
+        Ok(checked(format!(
+            r#"{}IF DB_ID(@db) IS NULL THROW 51000,'temporary database missing',1;
+{}
+IF DATABASEPROPERTYEX(@db,'Updateability')<>'READ_ONLY' THROW 51000,'temporary database is not read-only',1;
+DECLARE @query nvarchar(max)=CONVERT(nvarchar(max),N'USE ')+QUOTENAME(@db)+N'; {}';
+EXEC(@query);
+GO
+"#,
+            self.declarations(),
+            CHECK_OWNERSHIP,
+            query
+        )))
+    }
+
     pub fn support_script(&self) -> String {
         checked(format!(
             r#"{}IF DB_ID(@db) IS NULL THROW 51000,'temporary database missing',1;

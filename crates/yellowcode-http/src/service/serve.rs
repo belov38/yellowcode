@@ -6,13 +6,102 @@ use std::{
     io::Write,
     net::{SocketAddr, TcpListener, TcpStream},
     path::PathBuf,
-    sync::Arc,
+    sync::{Arc, Condvar, Mutex},
     thread::JoinHandle,
     time::{Duration, Instant},
 };
 
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
 const REFUSAL_TIMEOUT: Duration = Duration::from_millis(20);
+const STARTUP_PROBE_WAIT: Duration = Duration::from_millis(200);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WorkerPhase {
+    Idle,
+    Starting(Instant),
+    Active,
+    Draining,
+}
+
+struct WorkerSlot {
+    phase: Mutex<WorkerPhase>,
+    changed: Condvar,
+}
+
+impl WorkerSlot {
+    fn new() -> Self {
+        Self {
+            phase: Mutex::new(WorkerPhase::Idle),
+            changed: Condvar::new(),
+        }
+    }
+
+    fn set(&self, next: WorkerPhase) {
+        let mut phase = self.phase.lock().unwrap_or_else(|e| e.into_inner());
+        *phase = next;
+        self.changed.notify_all();
+    }
+
+    fn wait_for_handover(&self) -> bool {
+        let mut phase = self.phase.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            match *phase {
+                WorkerPhase::Idle => return true,
+                WorkerPhase::Active => return false,
+                WorkerPhase::Draining => {
+                    phase = self.changed.wait(phase).unwrap_or_else(|e| e.into_inner());
+                }
+                WorkerPhase::Starting(deadline) => {
+                    let wait = deadline.saturating_duration_since(Instant::now());
+                    if wait.is_zero() {
+                        return false;
+                    }
+                    let (next, _) = self
+                        .changed
+                        .wait_timeout(phase, wait)
+                        .unwrap_or_else(|e| e.into_inner());
+                    phase = next;
+                }
+            }
+        }
+    }
+}
+
+struct SlotGuard<'a>(&'a WorkerSlot);
+impl Drop for SlotGuard<'_> {
+    fn drop(&mut self) {
+        self.0.set(WorkerPhase::Idle);
+    }
+}
+
+struct FirstByteNotifier<'a, R> {
+    inner: R,
+    slot: &'a WorkerSlot,
+    notified: bool,
+}
+impl<R: std::io::Read> std::io::Read for FirstByteNotifier<'_, R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let result = self.inner.read(buf);
+        if !self.notified {
+            self.notified = true;
+            match result {
+                Ok(n) if n > 0 => self.slot.set(WorkerPhase::Active),
+                _ => self.slot.set(WorkerPhase::Draining),
+            }
+        }
+        result
+    }
+}
+
+fn admit_or_refuse(memory: &super::memory::Context, slot: &WorkerSlot) -> Option<Refusal> {
+    memory.admission().or_else(|| {
+        if slot.wait_for_handover() {
+            memory.admission()
+        } else {
+            Some(Refusal::BUSY)
+        }
+    })
+}
 
 fn close_refused(stream: &TcpStream) {
     let _ = stream.shutdown(std::net::Shutdown::Write);
@@ -64,6 +153,7 @@ pub fn run(args: Config, err: &mut dyn Write) -> yellowcode_core::Result<()> {
     )?;
     err.flush()?;
     yellowcode_core::service::schema_notes::write(err, &console.info().notes, schema_notes);
+    let slot = Arc::new(WorkerSlot::new());
     let mut worker: Option<JoinHandle<()>> = None;
     loop {
         let (stream, _) = match listener.accept() {
@@ -71,13 +161,7 @@ pub fn run(args: Config, err: &mut dyn Write) -> yellowcode_core::Result<()> {
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(e) => return Err(e.into()),
         };
-        let refused = memory.admission().or_else(|| {
-            worker
-                .as_ref()
-                .is_some_and(|h| !h.is_finished())
-                .then_some(Refusal::BUSY)
-        });
-        if let Some(refusal) = refused {
+        if let Some(refusal) = admit_or_refuse(memory, &slot) {
             let mut diagnostic = RequestDiagnostic::new(console, memory);
             diagnostic.status = refusal.status;
             diagnostic.reason = refusal.reason();
@@ -96,24 +180,39 @@ pub fn run(args: Config, err: &mut dyn Write) -> yellowcode_core::Result<()> {
         if let Some(done) = worker.take() {
             done.join().map_err(|_| "HTTP query worker panicked")?;
         }
+        slot.set(WorkerPhase::Starting(Instant::now() + STARTUP_PROBE_WAIT));
         let console = Arc::clone(console);
         let memory = Arc::clone(memory);
-        worker = Some(
-            std::thread::Builder::new()
-                .name("yellowcode-http-query".into())
-                .stack_size(memory_budget::OWNER_WORKER_STACK_BYTES)
-                .spawn(move || connection(&console, &stream, &memory))?,
-        );
+        let worker_slot = Arc::clone(&slot);
+        let spawned = std::thread::Builder::new()
+            .name("yellowcode-http-query".into())
+            .stack_size(memory_budget::OWNER_WORKER_STACK_BYTES)
+            .spawn(move || {
+                let _guard = SlotGuard(&worker_slot);
+                connection(&console, stream, &memory, &worker_slot);
+            });
+        match spawned {
+            Ok(handle) => worker = Some(handle),
+            Err(error) => {
+                slot.set(WorkerPhase::Idle);
+                return Err(error.into());
+            }
+        }
     }
 }
 
-fn connection(console: &Console, stream: &TcpStream, memory: &super::memory::Context) {
+fn connection(
+    console: &Console,
+    stream: TcpStream,
+    memory: &super::memory::Context,
+    slot: &WorkerSlot,
+) {
     let mut diagnostic = RequestDiagnostic::new(console, memory);
     if let Some(refusal) = memory.admission() {
         diagnostic.status = refusal.status;
         diagnostic.reason = refusal.reason();
         let result = send_response_counted(
-            stream,
+            &stream,
             &refusal_response(refusal),
             false,
             IO_TIMEOUT,
@@ -121,12 +220,17 @@ fn connection(console: &Console, stream: &TcpStream, memory: &super::memory::Con
             &mut diagnostic.wire_bytes,
         );
         diagnostic.transport = transport_status(&result);
-        close_gracefully(stream);
+        slot.set(WorkerPhase::Draining);
+        close_gracefully(&stream);
         return;
     }
-    let mut reader = DeadlineReader {
-        stream,
-        deadline: Instant::now() + IO_TIMEOUT,
+    let mut reader = FirstByteNotifier {
+        inner: DeadlineReader {
+            stream: &stream,
+            deadline: Instant::now() + IO_TIMEOUT,
+        },
+        slot,
+        notified: false,
     };
     let request = super::input::read_http_request(&mut reader, memory.ledger());
     let (response, head_only, allow) = match request {
@@ -157,7 +261,7 @@ fn connection(console: &Console, stream: &TcpStream, memory: &super::memory::Con
     diagnostic.status = response.status;
     diagnostic.reason = response.body.reason();
     let result = send_response_counted(
-        stream,
+        &stream,
         &response,
         head_only,
         IO_TIMEOUT,
@@ -165,8 +269,9 @@ fn connection(console: &Console, stream: &TcpStream, memory: &super::memory::Con
         &mut diagnostic.wire_bytes,
     );
     diagnostic.transport = transport_status(&result);
+    slot.set(WorkerPhase::Draining);
     drop(response);
-    close_gracefully(stream);
+    close_gracefully(&stream);
 }
 
 fn handle(
@@ -193,10 +298,16 @@ fn handle(
     let parsed = match super::input::parse_query(&req.body, memory.ledger()) {
         Ok(parsed) => parsed,
         Err(super::input::InputError::Malformed) => return error(400, "invalid query JSON"),
+        Err(super::input::InputError::InvalidLang) => {
+            return error(400, "invalid lang: expected \"ru\" or \"en\"");
+        }
         Err(super::input::InputError::Limit) => return refusal_response(Refusal::INPUT),
         Err(super::input::InputError::Memory(reason)) => return resource_error(reason),
     };
     if let Err(e) = query::validate_parameters(&parsed.request.params) {
+        return error(400, &e.to_string());
+    }
+    if let Err(e) = query::validate_parameters(&parsed.request.session_params) {
         return error(400, &e.to_string());
     }
     if !(1..=query_console::MAX_ROWS).contains(&parsed.max_rows) {
@@ -206,7 +317,9 @@ fn handle(
         Ok(value) if !value.is_zero() => value,
         _ => return error(400, "timeout must be positive finite seconds"),
     };
-    let request = parsed.request;
+    let request = parsed
+        .request
+        .map(|req| req.into_run_request(&console.info().lang));
     let (report, timed_out) = match query::execute(console, &request, timeout) {
         Ok(Ok(result)) => result,
         Ok(Err(refusal)) => return refusal_response(Refusal::run(&refusal)),
@@ -313,7 +426,9 @@ fn table_page(
         let request =
             match super::input::index_request(index, eq, range, order_value, memory.ledger()) {
                 Ok(request) => request,
-                Err(super::input::InputError::Malformed) => {
+                Err(
+                    super::input::InputError::Malformed | super::input::InputError::InvalidLang,
+                ) => {
                     return error(400, "invalid eq or range JSON");
                 }
                 Err(super::input::InputError::Limit) => return refusal_response(Refusal::INPUT),

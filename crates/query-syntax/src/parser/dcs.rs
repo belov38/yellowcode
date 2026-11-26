@@ -25,14 +25,6 @@ impl<'t> Parser<'t> {
         Ok(())
     }
 
-    pub fn skip_query_characteristics(&mut self) -> PResult<bool> {
-        if self.dcs() || !self.at_punct(Punct::LBrace) || !self.nth_kw(1, Kw::Characteristics) {
-            return Ok(false);
-        }
-        self.dcs_block()?;
-        Ok(true)
-    }
-
     pub fn query_dcs_block(&mut self) -> PResult<Option<DcsBlock>> {
         if !self.dcs() {
             return Ok(None);

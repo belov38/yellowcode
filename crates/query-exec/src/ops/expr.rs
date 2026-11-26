@@ -4,8 +4,8 @@ use query_syntax::ast::{BinOp, CmpOp};
 
 use super::{Cx, fatal};
 use crate::eval::{
-    and3, case_truth, cast, func_with, like_cost, load_cast_with_budget, not3, rank, to_value,
-    truth, try_compare, try_eq3, try_like, type_of_value, unit_arg,
+    and3, case_truth, cast, func_with, like_cost, load_cast_with_budget, not3, predef_name_value,
+    rank, to_value, truth, try_compare, try_eq3, try_like, type_of_value, unit_arg,
 };
 use crate::model::{key_sizes_charged, walk_bytes};
 use crate::num::{
@@ -221,6 +221,25 @@ pub fn eval<'a>(e: &PExpr, row: &[QValue], cx: &Cx<'a>) -> R<QValue> {
                 type_of_value(&v, refs)?
             }
         }
+        PExpr::PredefName { x, names } => {
+            let v = eval(x, row, cx)?;
+            predef_name_value(&v, names, &cx.mem)?
+        }
+        PExpr::PointInTime { date, reference } => {
+            match (eval(date, row, cx)?, eval(reference, row, cx)?) {
+                (QValue::Date(date), QValue::Ref { table, id }) => {
+                    let bytes =
+                        crate::model::block(std::mem::size_of::<query_ir::value::Moment>() as u64);
+                    cx.mem.check_value(bytes)?;
+                    cx.mem.grow_scratch(bytes)?;
+                    QValue::PointInTime(Box::new(query_ir::value::Moment {
+                        date,
+                        reference: Some((table, id)),
+                    }))
+                }
+                _ => QValue::Null,
+            }
+        }
         PExpr::StoredSize { x, kind } => {
             let v = eval(x, row, cx)?;
             let chars = |v: &QValue| match v {
@@ -416,6 +435,10 @@ fn call(
         Func::Sum | Func::Min | Func::Max | Func::Avg | Func::Count => {
             Err(fatal("an aggregate outside an aggregation"))
         }
+        Func::Presentation | Func::RefPresentation => match a.as_slice() {
+            [v] => super::present::eval_inline(v, cx),
+            _ => Err(fatal("ПРЕДСТАВЛЕНИЕ takes one argument")),
+        },
         Func::BeginOfPeriod | Func::EndOfPeriod | Func::Week => match cx.week_start {
             Some(ws) => match crate::eval::week_call(f, &a, ws) {
                 Some(v) => v,

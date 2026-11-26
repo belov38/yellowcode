@@ -3,6 +3,7 @@ mod job;
 mod present;
 mod schedule;
 mod store;
+mod write;
 
 use crate::Application;
 use crate::errors::{self, keys};
@@ -78,7 +79,7 @@ struct Filter {
     predefined: Option<bool>,
     id: Option<Uuid16>,
     key: Option<String>,
-    empty_description: bool,
+    description: Option<String>,
 }
 
 impl Filter {
@@ -88,6 +89,10 @@ impl Filter {
             && self.predefined.is_none_or(|p| p == r.predefined)
             && self.id.is_none_or(|i| i == r.id)
             && self.key.as_ref().is_none_or(|k| *k == r.key)
+            && self
+                .description
+                .as_ref()
+                .is_none_or(|d| *d == r.description)
     }
 }
 
@@ -163,9 +168,11 @@ impl Manager {
         }
     }
 
-    fn rows(&self, member: &str) -> CallResult<Vec<JobRow>> {
-        let rows =
-            store::read_all(&self.app).map_err(|why| self.refuse(&format!("{member}: {why}")))?;
+    fn rows(&self, ex: &mut Execution, member: &str) -> CallResult<Vec<JobRow>> {
+        let rows = read_rows(ex, &self.app).map_err(|e| match e {
+            Read::Call(e) => e,
+            Read::Refused(why) => self.refuse(&format!("{member}: {why}")).into(),
+        })?;
         let cfg = &self.app.model().config;
         if let Some(r) = rows.iter().find(|r| {
             !cfg.objects
@@ -223,9 +230,7 @@ impl Manager {
                     _ => return Err(bad().into()),
                 },
                 "наименование" => match value {
-                    Value::String(s) if s.to_string_lossy().is_empty() => {
-                        f.empty_description = true
-                    }
+                    Value::String(s) => f.description = Some(s.to_string_lossy()),
                     _ => return Err(bad().into()),
                 },
                 _ => {}
@@ -237,25 +242,25 @@ impl Manager {
     fn get_jobs(&self, ex: &mut Execution, args: &[Arg], member: &str) -> CallResult<Value> {
         let v = arg_value(ex, args, 0)?;
         let f = self.filter(&v, member)?;
-        let all = self.rows(member)?;
-        if f.empty_description && all.iter().any(|r| !r.description.is_empty()) {
+        let all = self.rows(ex, member)?;
+        if let Some(d) = &f.description
+            && all
+                .iter()
+                .any(|r| (r.description == *d) != r.description.contains(d.as_str()))
+        {
             return Err(self
                 .refuse(&format!(
-                    "{member}: Отбор.Наименование при непустом наименовании"
+                    "{member}: Отбор.Наименование: равенство и вхождение различаются"
                 ))
                 .into());
         }
         let mut rows: Vec<JobRow> = all.into_iter().filter(|r| f.keeps(r)).collect();
         if rows.len() > 1 {
-            if rows.iter().any(|r| !r.predefined) {
-                return Err(self
-                    .refuse(&format!(
-                        "{member}: порядок с непредопределенными заданиями"
-                    ))
-                    .into());
+            if let Some(why) = unseen_place(&rows) {
+                return Err(self.refuse(&format!("{member}: {why}")).into());
             }
             let cfg = &self.app.model().config;
-            let at = |r: &JobRow| cfg.objects.iter().position(|o| o.id == r.md);
+            let at = |r: &JobRow| (cfg.objects.iter().position(|o| o.id == r.md), !r.predefined);
             rows.sort_by_key(at);
         }
         Ok(bsl_stdlib::new_array(
@@ -283,7 +288,7 @@ impl Manager {
         };
         let md = self.app.model().config.objects.get(i).map(|o| o.id);
         let mut found = self
-            .rows(member)?
+            .rows(ex, member)?
             .into_iter()
             .filter(|r| r.predefined && Some(r.md) == md);
         match (found.next(), found.next()) {
@@ -309,7 +314,7 @@ impl Manager {
         })?;
         let id = Uuid16::from_bytes(b);
         Ok(self
-            .rows(member)?
+            .rows(ex, member)?
             .into_iter()
             .find(|r| r.id == id)
             .map_or(Value::Undefined, |r| self.value(r)))
@@ -337,6 +342,34 @@ impl Manager {
         };
         Ok(Job::new_value(&self.app, self.job, self.sched, origin))
     }
+}
+
+fn unseen_place(rows: &[JobRow]) -> Option<&'static str> {
+    for r in rows.iter().filter(|r| !r.predefined) {
+        let same = |p: bool| {
+            rows.iter()
+                .filter(|o| o.md == r.md && o.predefined == p)
+                .count()
+        };
+        if same(false) > 1 {
+            return Some("порядок двух непредопределенных заданий одного объекта");
+        }
+        if same(true) != 1 {
+            return Some("порядок непредопределенного задания без предопределенного");
+        }
+    }
+    None
+}
+
+pub(crate) enum Read {
+    Call(bsl_vm::CallError),
+    Refused(String),
+}
+
+pub(crate) fn read_rows(ex: &mut Execution, app: &Arc<Application>) -> Result<Vec<JobRow>, Read> {
+    let txn = crate::txn::CallTxn::of_call(ex);
+    let mut view = crate::read::read_view(ex, txn.as_deref(), app).map_err(Read::Call)?;
+    store::read_all(app, view.txn()).map_err(Read::Refused)
 }
 
 impl HostObject for Manager {

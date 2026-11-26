@@ -1,4 +1,5 @@
 use super::cas::CasSource;
+use super::cfe::{self, CfeEntry};
 use super::zipped::{ZippedInfo, zipped_info};
 use brace::{Guid, Node};
 use mdconf::EntrySource;
@@ -8,17 +9,20 @@ use mdconf::extension_reader::ExtensionRoot;
 use memory_budget::{Category, Limits, MemoryBudget};
 use onecd::{BlobVal, Value};
 use std::path::Path;
+use std::sync::Arc;
 
 const BUDGET: u64 = 512 << 20;
 const MAX_EXTENSIONS: usize = super::MAX_ITEMS;
 const MAX_INTERCEPTS: usize = 65_536;
+const MAX_MANAGER_BYTES: usize = 64 << 20;
+const MAX_MANAGERS: usize = 65_536;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ExtensionLogic {
     pub extensions: Vec<ExtensionFacts>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ExtensionFacts {
     pub name: String,
     pub intercepts: Vec<Intercept>,
@@ -28,6 +32,56 @@ pub struct ExtensionFacts {
     pub info: Result<ZippedInfo, String>,
     pub version: Result<String, String>,
     pub structure: Result<ExtensionStructure, String>,
+    pub managers: Result<Vec<ManagerSource>, String>,
+    pub data: Result<Arc<[u8]>, String>,
+}
+
+impl std::fmt::Debug for ExtensionFacts {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExtensionFacts")
+            .field("name", &self.name)
+            .field("intercepts", &self.intercepts)
+            .field("subscriptions", &self.subscriptions)
+            .field("unreadable", &self.unreadable)
+            .field("row", &self.row)
+            .field("info", &self.info)
+            .field("version", &self.version)
+            .field("structure", &self.structure)
+            .field("managers", &self.managers)
+            .field(
+                "data",
+                &self
+                    .data
+                    .as_ref()
+                    .map(|bytes| format!("{} bytes", bytes.len())),
+            )
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct ManagerSource {
+    pub kind: String,
+    pub object: String,
+    pub borrowed: bool,
+    pub text: String,
+}
+
+impl std::fmt::Debug for ManagerSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use sha2::{Digest, Sha256};
+        let digest: [u8; 32] = Sha256::digest(self.text.as_bytes()).into();
+        let short: String = digest.iter().take(4).map(|b| format!("{b:02x}")).collect();
+        f.debug_struct("ManagerSource")
+            .field("kind", &self.kind)
+            .field("object", &self.object)
+            .field("borrowed", &self.borrowed)
+            .field(
+                "text",
+                &format_args!("{} bytes, sha256 {short}…", self.text.len()),
+            )
+            .finish()
+    }
 }
 
 impl Default for ExtensionFacts {
@@ -44,6 +98,8 @@ impl Default for ExtensionFacts {
             info: not_read(),
             version: not_read(),
             structure: not_read(),
+            managers: not_read(),
+            data: not_read(),
         }
     }
 }
@@ -77,7 +133,7 @@ impl ExtensionLogic {
     }
 
     pub fn read(path: &Path) -> ExtensionLogic {
-        match read_all(path) {
+        match read_all(path, cfe::MAX_KEPT_BYTES) {
             Ok(logic) => logic,
             Err(why) => ExtensionLogic {
                 extensions: vec![ExtensionFacts {
@@ -89,7 +145,7 @@ impl ExtensionLogic {
     }
 }
 
-fn read_all(path: &Path) -> Result<ExtensionLogic, String> {
+fn read_all(path: &Path, kept_limit: u64) -> Result<ExtensionLogic, String> {
     let budget = MemoryBudget::new(Limits::new(BUDGET));
     let db = onecd::Database::open(
         path,
@@ -121,12 +177,14 @@ fn read_all(path: &Path) -> Result<ExtensionLogic, String> {
         rows.push((row_columns(&row), row_facts(&info, &row, &budget)));
     }
     let mut extensions = Vec::with_capacity(rows.len());
+    let mut kept = 0u64;
     for row in rows {
         let (columns, row) = row;
         let mut facts = match row {
             Ok((name, info, Some(generation))) => {
                 let mut facts = extension(&txn, &budget, name, generation);
                 facts.info = info;
+                facts.data = cfe::keep(&mut kept, facts.data, kept_limit);
                 facts
             }
             Ok((name, info, None)) => ExtensionFacts {
@@ -249,7 +307,10 @@ fn collect(
     .map_err(|e| format!("the root of the extension: {e}"))?
     .ok_or("the applied copy has no configinfo")?;
     facts.version = version(&source, budget, root.manifest().root_id);
+    facts.data = data(&source, budget, &root.manifest().entries);
     let mut tops = Vec::new();
+    let mut managers: Result<Vec<ManagerSource>, String> = Ok(Vec::new());
+    let mut manager_bytes = 0usize;
     let mut objects = root
         .objects(&source)
         .map_err(|e| format!("the objects of the extension: {e}"))?;
@@ -287,6 +348,19 @@ fn collect(
             let text = std::str::from_utf8(text.as_ref())
                 .map_err(|_| format!("{path}: the module text is not UTF-8"))?;
             let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+            if module.name() == "ManagerModule" {
+                keep_manager(
+                    &mut managers,
+                    &mut manager_bytes,
+                    ManagerSource {
+                        kind: kind.to_string(),
+                        object: name.clone(),
+                        borrowed: matches!(header.belonging(), ObjectBelonging::Adopted),
+                        text: text.to_string(),
+                    },
+                    (MAX_MANAGERS, MAX_MANAGER_BYTES),
+                );
+            }
             for (annotation, method, target) in
                 scan_intercepts(text).map_err(|why| format!("{path}: {why}"))?
             {
@@ -311,7 +385,71 @@ fn collect(
         .collect();
     let read = |name: &str| entry(&source, budget, name);
     facts.structure = structure(&read, budget, root.manifest().root_id, &names, &tops);
+    facts.managers = managers;
     Ok(())
+}
+
+fn data(
+    source: &CasSource<'_>,
+    budget: &MemoryBudget,
+    entries: &[mdconf::configinfo::ConfigInfoEntry],
+) -> Result<Arc<[u8]>, String> {
+    cfe::check_names(entries.iter().map(|e| e.name.as_str()))?;
+    let names = std::iter::once("configinfo").chain(entries.iter().map(|e| e.name.as_str()));
+    let mut stored = Vec::with_capacity(entries.len() + 1);
+    let mut total = 0u64;
+    for name in names {
+        let (ctime, mtime, attrs) = source
+            .meta(name)
+            .ok_or_else(|| format!("{name}: no row in ConfigCAS"))?;
+        let len = source
+            .stored_len(name)
+            .map_err(|e| format!("{name}: {e}"))?
+            .ok_or_else(|| format!("{name}: no row in ConfigCAS"))?;
+        let next = cfe::within(total, len, cfe::MAX_BYTES)
+            .ok_or_else(|| format!("more than {} bytes", cfe::MAX_BYTES))?;
+        let bytes = source
+            .stored_owned_bounded(name, len as usize)
+            .map_err(|e| format!("{name}: {e}"))?
+            .ok_or_else(|| format!("{name}: no row in ConfigCAS"))?;
+        total = next;
+        stored.push((name, ctime, mtime, attrs, bytes));
+    }
+    let list: Vec<CfeEntry<'_>> = stored
+        .iter()
+        .map(|(name, ctime, mtime, attrs, bytes)| CfeEntry {
+            name,
+            ctime: *ctime,
+            mtime: *mtime,
+            attrs: *attrs,
+            data: bytes,
+        })
+        .collect();
+    let (configinfo, manifest) = list.split_first().ok_or("no configinfo")?;
+    let size = cfe::size(configinfo, manifest).map_or(cfe::MAX_BYTES, |s| s.min(cfe::MAX_BYTES));
+    let _working = budget
+        .try_reserve(Category::ReaderWorking, size.saturating_mul(2))
+        .map_err(|e| format!("the CFE: {e}"))?;
+    cfe::container(configinfo, manifest, cfe::MAX_BYTES).map(Arc::from)
+}
+
+fn keep_manager(
+    managers: &mut Result<Vec<ManagerSource>, String>,
+    bytes: &mut usize,
+    source: ManagerSource,
+    (max_modules, max_bytes): (usize, usize),
+) {
+    let Ok(list) = managers else {
+        return;
+    };
+    *bytes = bytes.saturating_add(source.text.len());
+    if *bytes > max_bytes || list.len() == max_modules {
+        *managers = Err(format!(
+            "more than {max_modules} manager modules or {max_bytes} bytes of their texts"
+        ));
+    } else {
+        list.push(source);
+    }
 }
 
 struct Top {

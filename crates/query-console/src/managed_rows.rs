@@ -2,9 +2,9 @@ use crate::managed::ManagedCell;
 use memory_budget::{
     BudgetError, BudgetedVec, Category, Charged, LimitReason, MemoryBudget, MemoryLimit, TextCount,
 };
-use query_ir::managed_value::{ManagedValue, ValueRef, row::ScopedRow};
+use query_ir::managed_value::{ManagedColumn, ManagedValue, ValueRef, row::ScopedRow};
 use query_syntax::Lang;
-use query_testhost::{TestBase, measure_managed_repr};
+use query_testhost::{TestBase, measure_managed_column_repr};
 use std::fmt::Write;
 
 fn checked_add(first: u64, second: u64) -> Result<u64, BudgetError> {
@@ -30,11 +30,34 @@ pub fn try_retain_scoped_row(
 ) -> Result<Option<BudgetedVec<ManagedCell>>, BudgetError> {
     let count = row.values().len().min(visible_columns);
     let values = row.values().get(..count).ok_or(BudgetError::Overflow)?;
-    try_retain_row(values, base, lang, row.budget(), canonical_limit)
+    try_retain_row_with_columns(values, &[], base, lang, row.budget(), canonical_limit)
+}
+
+pub fn try_retain_scoped_row_with_columns(
+    row: &ScopedRow,
+    columns: &[ManagedColumn],
+    base: &TestBase,
+    lang: Lang,
+    canonical_limit: u64,
+) -> Result<Option<BudgetedVec<ManagedCell>>, BudgetError> {
+    let count = row.values().len().min(columns.len());
+    let values = row.values().get(..count).ok_or(BudgetError::Overflow)?;
+    try_retain_row_with_columns(values, columns, base, lang, row.budget(), canonical_limit)
 }
 
 pub fn try_retain_row(
     values: &[ManagedValue],
+    base: &TestBase,
+    lang: Lang,
+    budget: &MemoryBudget,
+    canonical_limit: u64,
+) -> Result<Option<BudgetedVec<ManagedCell>>, BudgetError> {
+    try_retain_row_with_columns(values, &[], base, lang, budget, canonical_limit)
+}
+
+pub fn try_retain_row_with_columns(
+    values: &[ManagedValue],
+    columns: &[ManagedColumn],
     base: &TestBase,
     lang: Lang,
     budget: &MemoryBudget,
@@ -46,8 +69,9 @@ pub fn try_retain_row(
         .and_then(|bytes| bytes.checked_add(std::mem::size_of::<BudgetedVec<ManagedCell>>()))
         .ok_or(BudgetError::Overflow)?;
     let mut required = u64::try_from(descriptors).map_err(|_| BudgetError::Overflow)?;
-    for value in values {
-        let len = measure_managed_repr(value, base, lang, budget, canonical_limit)?;
+    for (index, value) in values.iter().enumerate() {
+        let col_ty = columns.get(index).map(|column| &*column.ty);
+        let len = measure_managed_column_repr(value, col_ty, base, lang, budget, canonical_limit)?;
         required = checked_add(required, len)?;
         required = checked_add(required, std::mem::size_of::<Charged<String>>() as u64)?;
         if let ValueRef::Ref { table, .. } = value.view() {
@@ -71,9 +95,11 @@ pub fn try_retain_row(
     }
     let create = || {
         let mut row = BudgetedVec::try_with_capacity(budget, Category::Result, values.len())?;
-        for value in values {
-            row.try_push(ManagedCell::try_new(
+        for (index, value) in values.iter().enumerate() {
+            let col_ty = columns.get(index).map(|column| &*column.ty);
+            row.try_push(ManagedCell::try_new_in_column(
                 value,
+                col_ty,
                 base,
                 lang,
                 budget,

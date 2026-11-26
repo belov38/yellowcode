@@ -126,7 +126,7 @@ fn journals(
         }
         let used: Vec<&Common> = commons.iter().filter(|c| c.used_by(o)).collect();
         for c in &used {
-            f.push(common_field(c), true);
+            f.push(common_field(c), !c.separator);
         }
         f.virt(StdRole::Presentation, string(0, false));
         flush(b, table, f)?;
@@ -162,7 +162,7 @@ fn constants(b: &mut Builder<'_>, commons: &[Common]) -> Result<(), SchemaError>
             .filter(|c| c.separator && c.used_by(o))
             .collect();
         for c in &used {
-            f.push(common_field(c), true);
+            f.push(common_field(c), false);
         }
         flush(b, table, f)?;
         let mut meta = ObjMeta::new(o.kind);
@@ -200,6 +200,7 @@ fn constants(b: &mut Builder<'_>, commons: &[Common]) -> Result<(), SchemaError>
         star: Vec::new(),
         params: Vec::new(),
         reference: None,
+        auto_order_by_code: false,
     };
     let id = b.add_table(t, &[])?;
     flush(b, id, all)
@@ -233,7 +234,7 @@ fn sequences(b: &mut Builder<'_>, commons: &[Common]) -> Result<(), SchemaError>
                 f.item(d, FieldRole::Dimension);
             }
             for c in &used {
-                f.push(common_field(c), true);
+                f.push(common_field(c), !c.separator);
             }
             f.virt(StdRole::PointInTime, QType::other(Other::PointInTime));
         };

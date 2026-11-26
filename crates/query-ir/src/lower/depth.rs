@@ -8,6 +8,7 @@ fn expr(e: &E) -> u32 {
         | E::Refs { l: x, .. }
         | E::Cast { x, .. }
         | E::TypeOf { x, .. }
+        | E::PredefName { x, .. }
         | E::StoredSize { x, .. } => expr(x),
         E::Compare(_, a, b) | E::Like { l: a, pat: b, .. } => expr(a).max(expr(b)),
         E::And(xs) | E::Or(xs) | E::Func { args: xs, .. } => es(xs),
@@ -32,6 +33,7 @@ fn expr(e: &E) -> u32 {
         E::RecordInInterval {
             period, recorder, ..
         } => expr(period).max(expr(recorder)),
+        E::PointInTime { date, reference } => expr(date).max(expr(reference)),
         _ => 0,
     };
     depth.saturating_add(1)
@@ -74,7 +76,10 @@ pub(super) fn relation(r: &R) -> u32 {
         R::Sort { input, keys } | R::HierarchyOrder { input, keys, .. } => {
             relation(input).max(keys.iter().map(|(e, _)| expr(e)).max().unwrap_or(0))
         }
-        R::CheckAccess { input, .. } | R::Top { input, .. } | R::Distinct(input) => relation(input),
+        R::CheckAccess { input, .. }
+        | R::DefaultIfEmpty { input, .. }
+        | R::Top { input, .. }
+        | R::Distinct(input) => relation(input),
         R::Union { parts, .. } => parts.iter().map(relation).max().unwrap_or(0),
         R::SemiJoin { input, l, q, .. } => relation(input).max(relation(q)).max(es(l)),
         R::HierarchyClosure { seeds, .. } => match seeds {

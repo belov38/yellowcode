@@ -1,10 +1,12 @@
+use super::query::Lang;
 use memory_budget::{BudgetError, BudgetedVec, Category, Charged, MemoryBudget};
-use query_console::{Lang, Mode, ParamIn, RunRequest};
+use query_console::{Mode, ParamIn, RunRequest};
 use std::io::Read;
 
 #[derive(Debug)]
 pub enum InputError {
     Malformed,
+    InvalidLang,
     Limit,
     Memory(BudgetError),
 }
@@ -13,8 +15,29 @@ impl From<BudgetError> for InputError {
         Self::Memory(error)
     }
 }
+
+pub struct QueryRequest {
+    pub text: String,
+    pub params: Vec<ParamIn>,
+    pub session_params: Vec<ParamIn>,
+    pub mode: Mode,
+    pub lang: Option<Lang>,
+}
+
+impl QueryRequest {
+    pub fn into_run_request(self, base_lang: &str) -> RunRequest {
+        RunRequest {
+            text: self.text,
+            params: self.params,
+            session_params: self.session_params,
+            mode: self.mode,
+            lang: super::query::resolve_lang(self.lang, base_lang),
+        }
+    }
+}
+
 pub struct ParsedQuery {
-    pub request: Charged<RunRequest>,
+    pub request: Charged<QueryRequest>,
     pub timeout: f64,
     pub max_rows: usize,
 }
@@ -347,7 +370,8 @@ pub fn parse_query(source: &[u8], budget: &MemoryBudget) -> Result<ParsedQuery> 
         budget,
     };
     parser.take(b'{')?;
-    let (mut text, mut params, mut timeout, mut max_rows) = (None, None, None, None);
+    let (mut text, mut params, mut session_params, mut timeout, mut max_rows, mut lang) =
+        (None, None, None, None, None, None);
     if !parser.consume(b'}') {
         loop {
             let key = parser.string()?;
@@ -355,6 +379,9 @@ pub fn parse_query(source: &[u8], budget: &MemoryBudget) -> Result<ParsedQuery> 
             match key.as_str() {
                 "text" if text.is_none() => text = Some(parser.string()?),
                 "params" if params.is_none() => params = Some(parser.params()?),
+                "sessionParams" if session_params.is_none() => {
+                    session_params = Some(parser.params()?)
+                }
                 "timeout" if timeout.is_none() => {
                     let value = parser
                         .number()?
@@ -373,6 +400,10 @@ pub fn parse_query(source: &[u8], budget: &MemoryBudget) -> Result<ParsedQuery> 
                             .map_err(|_| InputError::Malformed)?,
                     )
                 }
+                "lang" if lang.is_none() => {
+                    let value = parser.string()?;
+                    lang = Some(Lang::parse(value.as_str()).ok_or(InputError::InvalidLang)?);
+                }
                 _ => return Err(InputError::Malformed),
             }
             if parser.consume(b'}') {
@@ -387,17 +418,24 @@ pub fn parse_query(source: &[u8], budget: &MemoryBudget) -> Result<ParsedQuery> 
         Some(p) => p,
         None => BudgetedVec::new(budget, Category::Input)?.into_charged_vec(),
     };
-    let request = text.try_zip(params)?.map(|(mut text, params)| {
-        if text.starts_with('\u{feff}') {
-            text.drain(..3);
-        }
-        RunRequest {
-            text,
-            params,
-            mode: Mode::Batch,
-            lang: Lang::En,
-        }
-    });
+    let session_params = match session_params {
+        Some(p) => p,
+        None => BudgetedVec::new(budget, Category::Input)?.into_charged_vec(),
+    };
+    let request = text.try_zip(params)?.try_zip(session_params)?.map(
+        |((mut text, params), session_params)| {
+            if text.starts_with('\u{feff}') {
+                text.drain(..3);
+            }
+            QueryRequest {
+                text,
+                params,
+                session_params,
+                mode: Mode::Batch,
+                lang,
+            }
+        },
+    );
     Ok(ParsedQuery {
         request,
         timeout: timeout.unwrap_or(60.0),
@@ -409,6 +447,7 @@ impl std::fmt::Display for InputError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Malformed => f.write_str("invalid query/parameter JSON or UTF-8"),
+            Self::InvalidLang => f.write_str("invalid lang: expected \"ru\" or \"en\""),
             Self::Limit => f.write_str("MEMORY_LIMIT: input"),
             Self::Memory(error) => error.fmt(f),
         }

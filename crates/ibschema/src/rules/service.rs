@@ -354,6 +354,12 @@ pub(crate) fn latest_versions(
     };
     let mut seen: Vec<&[Vec<Vec<String>>; 2]> = Vec::new();
     for t in objects {
+        if matches!(
+            index::table_purpose(&t.name),
+            purpose::NODE | purpose::ACCUM_RG_ST
+        ) {
+            continue;
+        }
         if t.splitters[0].is_empty() || seen.contains(&&t.splitters) {
             continue;
         }

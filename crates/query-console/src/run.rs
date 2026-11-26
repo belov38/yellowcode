@@ -1,13 +1,14 @@
 use crate::Console;
 use crate::cell::{
-    Cell, CellKind, Column, RowSizes, cell, cell_write, column_kind, column_model, row_bytes,
+    Cell, CellKind, Column, RowSizes, cell_in_column, cell_write_in_column, column_kind,
+    column_model, row_bytes,
 };
 use memory_budget::{BudgetError, Category, Evictor, LimitReason, Reservation};
 use query_ir::QValue;
 use query_syntax::Lang as SynLang;
 use query_testhost::{
-    BatchMemory, CaseOutcome, RunFailure, RunMode, StmtRun, TestBase, run_text_cancel,
-    run_text_cancel_budgeted,
+    BatchMemory, CaseOutcome, RunFailure, RunMode, StmtRun, TestBase,
+    run_text_cancel_budgeted_with_session, run_text_cancel_with_session,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -95,6 +96,12 @@ pub struct RunRequest {
     pub text: String,
     #[serde(default)]
     pub params: Vec<ParamIn>,
+    #[serde(
+        default,
+        alias = "sessionParams",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub session_params: Vec<ParamIn>,
     pub mode: Mode,
     pub lang: Lang,
 }
@@ -180,11 +187,17 @@ pub enum Stmt {
 }
 
 #[derive(Debug)]
+pub(crate) struct StoredNested {
+    pub out: crate::refs::NestedOut,
+    pub total: u64,
+}
+
+#[derive(Debug)]
 pub(crate) struct StmtRows {
     pub columns: Vec<Column>,
     pub ordered: bool,
     pub rows: Vec<Vec<Cell>>,
-    pub nested: std::collections::HashMap<(usize, usize), crate::refs::NestedOut>,
+    pub nested: std::collections::HashMap<(usize, usize), StoredNested>,
 }
 
 #[derive(Debug, Default)]
@@ -220,7 +233,19 @@ impl Rows {
     }
 
     pub fn nested(&self, stmt: usize, row: usize, col: usize) -> Option<&crate::refs::NestedOut> {
-        self.stmts.get(stmt)?.nested.get(&(row, col))
+        self.stmts
+            .get(stmt)?
+            .nested
+            .get(&(row, col))
+            .map(|stored| &stored.out)
+    }
+
+    pub fn nested_total(&self, stmt: usize, row: usize, col: usize) -> Option<u64> {
+        self.stmts
+            .get(stmt)?
+            .nested
+            .get(&(row, col))
+            .map(|stored| stored.total)
     }
 
     pub fn columns(&self, stmt: usize) -> &[Column] {
@@ -352,6 +377,43 @@ impl Console {
         Ok(params)
     }
 
+    pub(crate) fn request_session_params(
+        &self,
+        req: &RunRequest,
+        cancel: &AtomicBool,
+    ) -> Result<query_testhost::SessionParams, (ErrorOut, Option<&'static str>)> {
+        let mut params = query_testhost::SessionParams::default();
+        for parameter in &req.session_params {
+            if cancel.load(Ordering::Acquire) {
+                return Err((crate::lifecycle::interrupted(), None));
+            }
+            let (name, repr) = (parameter.name.as_str(), parameter.repr.as_str());
+            if repr.trim_start().starts_with("ТаблицаЗначений<") {
+                return Err((
+                    self.parameter_error(
+                        name,
+                        repr,
+                        &query_testhost::ParamError::Unsupported("value table"),
+                    ),
+                    Some("value table"),
+                ));
+            }
+            if let Err(error) = params.insert_repr(&self.base, name, repr) {
+                let later = match &error {
+                    query_testhost::ParamError::Unsupported(what) => Some(*what),
+                    _ => None,
+                };
+                return Err((self.parameter_error(name, repr, &error), later));
+            }
+            #[cfg(test)]
+            self.query_checkpoint("parameter-parsed", cancel);
+        }
+        if !req.session_params.is_empty() && cancel.load(Ordering::Acquire) {
+            return Err((crate::lifecycle::interrupted(), None));
+        }
+        Ok(params)
+    }
+
     fn parameter_error(
         &self,
         name: &str,
@@ -387,7 +449,7 @@ impl Console {
         cancel: &AtomicBool,
     ) -> Result<u64, ErrorOut> {
         let mut bytes = 0u64;
-        for parameter in &req.params {
+        for parameter in req.params.iter().chain(&req.session_params) {
             if cancel.load(Ordering::Acquire) {
                 return Err(crate::lifecycle::interrupted());
             }
@@ -395,7 +457,9 @@ impl Console {
                 .saturating_add(parameter.name.len() as u64)
                 .saturating_add(parameter.repr.len() as u64);
         }
-        if !req.params.is_empty() && cancel.load(Ordering::Acquire) {
+        if (!req.params.is_empty() || !req.session_params.is_empty())
+            && cancel.load(Ordering::Acquire)
+        {
             return Err(crate::lifecycle::interrupted());
         }
         Ok(bytes)
@@ -465,7 +529,10 @@ impl Console {
                 return Ok(report);
             }
         };
-        if let Err(m) = memory.params_stage(bytes, req.params.len()) {
+        if let Err(m) = memory.params_stage(
+            bytes,
+            req.params.len().saturating_add(req.session_params.len()),
+        ) {
             return Ok(Report::failed(
                 started,
                 ErrorOut::new(Phase::Runtime, m.public_text()),
@@ -476,23 +543,35 @@ impl Console {
             Ok(p) => p,
             Err((err, later)) => return Ok(Report::failed(started, err, later)),
         };
+        let session_params = match self.request_session_params(req, cancel) {
+            Ok(p) => p,
+            Err((err, later)) => return Ok(Report::failed(started, err, later)),
+        };
         let mode = RunMode {
             lang: req.lang.syn(),
             inter: req.mode == Mode::Inter,
         };
         #[cfg(test)]
         self.query_checkpoint("run", cancel);
-        let mut runs =
-            match run_text_cancel_budgeted(&self.base, &req.text, &params, mode, cancel, &memory) {
-                Ok(r) => r,
-                Err(f) => return Ok(self.failure(started, f, cancel)),
-            };
+        let mut runs = match run_text_cancel_budgeted_with_session(
+            &self.base,
+            &req.text,
+            &params,
+            &session_params,
+            mode,
+            cancel,
+            &memory,
+        ) {
+            Ok(r) => r,
+            Err(f) => return Ok(self.failure(started, f, cancel)),
+        };
         if req.mode == Mode::One {
             let last = runs.pop();
             runs = last.into_iter().collect();
         }
         let report = self.report_budgeted(started, &runs, req.lang, &memory, cancel);
         drop(runs);
+        drop(session_params);
         drop(params);
         drop(memory);
         match report {
@@ -527,11 +606,22 @@ impl Console {
             Ok(p) => p,
             Err((err, later)) => return Report::failed(started, err, later),
         };
+        let session_params = match self.request_session_params(req, cancel) {
+            Ok(p) => p,
+            Err((err, later)) => return Report::failed(started, err, later),
+        };
         let mode = RunMode {
             lang: req.lang.syn(),
             inter: req.mode == Mode::Inter,
         };
-        let mut runs = match run_text_cancel(&self.base, &req.text, &params, mode, cancel) {
+        let mut runs = match run_text_cancel_with_session(
+            &self.base,
+            &req.text,
+            &params,
+            &session_params,
+            mode,
+            cancel,
+        ) {
             Ok(r) => r,
             Err(f) => return self.failure(started, f, cancel),
         };
@@ -569,6 +659,22 @@ impl Console {
         Report::failed(started, err, None)
     }
 
+    fn walk_failure(
+        &self,
+        started: Instant,
+        error: &query_exec::walk::WalkError,
+        lang: Lang,
+    ) -> Report {
+        let chain = query_testhost::FailureChain::render(self.base.memory_budget(), 4096, || {
+            query_testhost::walk_error(error, "Выбрать", lang.syn())
+        });
+        Report::failed(
+            started,
+            ErrorOut::from_chain(Phase::Runtime, chain, None),
+            None,
+        )
+    }
+
     fn report(&self, started: Instant, runs: &[StmtRun], lang: Lang) -> Report {
         let base = &*self.base;
         let mut statements = Vec::with_capacity(runs.len());
@@ -577,11 +683,15 @@ impl Console {
         for run in runs {
             let columns = columns_of(&run.result.columns, base, lang);
             let n = columns.len();
-            let total = run.result.rows.len();
+            let source = match LinearRows::from_result(&run.result) {
+                Ok(source) => source,
+                Err(error) => return self.walk_failure(started, &error, lang),
+            };
+            let total = source.len();
             let mut rows: Vec<Vec<Cell>> = Vec::new();
             let mut truncated = false;
             let mut nested = std::collections::HashMap::new();
-            for r in &run.result.rows {
+            for r in source.iter() {
                 if rows.len() >= MAX_ROWS || budget == 0 {
                     truncated = true;
                     break;
@@ -589,15 +699,23 @@ impl Console {
                 let row: Vec<Cell> = r
                     .iter()
                     .take(n)
-                    .map(|v| cell(v, base, lang.syn()))
+                    .enumerate()
+                    .map(|(j, v)| {
+                        cell_in_column(
+                            v,
+                            run.result.columns.get(j).map(|c| &c.ty),
+                            base,
+                            lang.syn(),
+                        )
+                    })
                     .collect();
                 budget = budget.saturating_sub(row_bytes(&row));
                 for (j, v) in r.iter().take(n).enumerate() {
                     if let QValue::Nested(t) = v {
-                        let out = nested_out(t, base, lang.syn());
-                        let bytes: usize = out.rows.iter().map(|x| row_bytes(x)).sum();
+                        let stored = nested_out(t, base, lang.syn());
+                        let bytes: usize = stored.out.rows.iter().map(|x| row_bytes(x)).sum();
                         budget = budget.saturating_sub(bytes);
-                        nested.insert((rows.len(), j), out);
+                        nested.insert((rows.len(), j), stored);
                     }
                 }
                 rows.push(row);
@@ -693,11 +811,22 @@ impl Console {
         for (run, columns) in runs.iter().zip(columns) {
             conversion_cancel(cancel)?;
             let n = columns.len();
-            let total = run.result.rows.len();
+            let source = match LinearRows::from_result(&run.result) {
+                Ok(source) => source,
+                Err(error) => {
+                    drop(data);
+                    drop(statements);
+                    drop(sizes);
+                    drop(nested_sizes);
+                    drop(lease);
+                    return Ok(self.walk_failure(started, &error, lang));
+                }
+            };
+            let total = source.len();
             let mut rows: Vec<Vec<Cell>> = Vec::new();
             let mut truncated = false;
             let mut nested = std::collections::HashMap::new();
-            for r in &run.result.rows {
+            for r in source.iter() {
                 conversion_cancel(cancel)?;
                 #[cfg(test)]
                 self.query_checkpoint("conversion-row", cancel);
@@ -708,6 +837,7 @@ impl Console {
                 }
                 let kept = match row_budgeted(
                     r,
+                    &run.result.columns,
                     n,
                     &rows,
                     base,
@@ -770,6 +900,91 @@ impl Console {
             cancelled: false,
             retained: Some(retained),
         })
+    }
+}
+
+enum LinearRows<'a> {
+    Plain(&'a [Vec<QValue>]),
+    Totals {
+        result: &'a query_exec::QueryResult,
+        tree: &'a query_exec::totals::TotalsTree,
+        order: Vec<query_exec::totals::RowRef>,
+    },
+}
+
+impl<'a> LinearRows<'a> {
+    fn from_result(
+        result: &'a query_exec::QueryResult,
+    ) -> Result<Self, query_exec::walk::WalkError> {
+        let Some(tree) = &result.totals else {
+            return Ok(Self::Plain(&result.rows));
+        };
+        let order = match query_exec::walk::unload(result, query_exec::walk::Walk::Direct)? {
+            query_exec::walk::Unloaded::Table(refs) => refs,
+            query_exec::walk::Unloaded::Tree(_) => Vec::new(),
+        };
+        Ok(Self::Totals {
+            result,
+            tree,
+            order,
+        })
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::Plain(rows) => rows.len(),
+            Self::Totals { order, .. } => order.len(),
+        }
+    }
+
+    fn iter(&self) -> LinearRowsIter<'_> {
+        match self {
+            Self::Plain(rows) => LinearRowsIter::Plain(rows.iter()),
+            Self::Totals {
+                result,
+                tree,
+                order,
+            } => LinearRowsIter::Totals {
+                result,
+                tree,
+                order: order.iter(),
+            },
+        }
+    }
+}
+
+enum LinearRowsIter<'a> {
+    Plain(std::slice::Iter<'a, Vec<QValue>>),
+    Totals {
+        result: &'a query_exec::QueryResult,
+        tree: &'a query_exec::totals::TotalsTree,
+        order: std::slice::Iter<'a, query_exec::totals::RowRef>,
+    },
+}
+
+impl<'a> Iterator for LinearRowsIter<'a> {
+    type Item = &'a [QValue];
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Plain(iter) => iter.next().map(Vec::as_slice),
+            Self::Totals {
+                result,
+                tree,
+                order,
+            } => {
+                let row_ref = *order.next()?;
+                let row = match row_ref {
+                    query_exec::totals::RowRef::Detail(i) => {
+                        result.rows.get(i as usize).map_or(&[][..], Vec::as_slice)
+                    }
+                    query_exec::totals::RowRef::Total(i) => {
+                        tree.totals.get(i as usize).map_or(&[][..], Vec::as_slice)
+                    }
+                };
+                Some(row)
+            }
+        }
     }
 }
 
@@ -923,6 +1138,7 @@ fn push_growth<T>(
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn row_budgeted(
     r: &[QValue],
+    columns: &[query_ir::ColumnInfo],
     n: usize,
     rows: &[Vec<Cell>],
     base: &TestBase,
@@ -932,17 +1148,22 @@ fn row_budgeted(
     sizes: &mut RowSizes,
     nested_sizes: &mut RowSizes,
     cancel: &AtomicBool,
-) -> Result<(Vec<Cell>, Vec<(usize, crate::refs::NestedOut)>), ConversionRefusal> {
+) -> Result<(Vec<Cell>, Vec<(usize, StoredNested)>), ConversionRefusal> {
     #[cfg(test)]
     if crate::cell::reference::per_cell() {
-        return row_budgeted_per_cell(r, n, rows, base, lang, lease, evictor, cancel);
+        return row_budgeted_per_cell(r, columns, n, rows, base, lang, lease, evictor, cancel);
     }
     conversion_cancel(cancel)?;
     push_growth(rows, lease, evictor)?;
     let values = r.get(..n).unwrap_or(r);
     let row_block = block((n as u64).saturating_mul(std::mem::size_of::<Cell>() as u64));
-    let charge = row_block
-        .saturating_add(sizes.measure_checked(values, base, lang, || conversion_cancel(cancel))?);
+    let charge = row_block.saturating_add(sizes.measure_columns_checked(
+        values,
+        columns,
+        base,
+        lang,
+        || conversion_cancel(cancel),
+    )?);
     let before = lease.bytes();
     conversion_cancel(cancel)?;
     lease.try_grow_or_evict(charge, evictor)?;
@@ -952,7 +1173,8 @@ fn row_budgeted(
         let budget = lease.budget();
         for (j, (v, &len)) in values.iter().zip(sizes.get()).enumerate() {
             conversion_cancel(cancel)?;
-            row.push(cell_write(v, base, lang, budget, len)?);
+            let col_ty = columns.get(j).map(|c| &c.ty);
+            row.push(cell_write_in_column(v, col_ty, base, lang, budget, len)?);
             if let QValue::Nested(t) = v {
                 tables.push((
                     j,
@@ -981,34 +1203,52 @@ fn nested_out_budgeted(
     evictor: &dyn Evictor,
     sizes: &mut RowSizes,
     cancel: &AtomicBool,
-) -> Result<crate::refs::NestedOut, ConversionRefusal> {
+) -> Result<StoredNested, ConversionRefusal> {
     conversion_cancel(cancel)?;
     let output_lang = if lang == SynLang::En {
         Lang::En
     } else {
         Lang::Ru
     };
-    let bytes = schema_bytes_checked(&t.columns, base, output_lang, lease.budget(), cancel)? / 2;
+    let bytes = (schema_bytes_checked(&t.columns, base, output_lang, lease.budget(), cancel)? / 2)
+        .saturating_add(block(std::mem::size_of::<StoredNested>() as u64));
     conversion_cancel(cancel)?;
     lease.try_grow_or_evict(bytes, evictor)?;
     let columns = columns_checked(&t.columns, base, output_lang, cancel)?;
+    let total = u64::try_from(t.rows.len()).unwrap_or(u64::MAX);
     let mut rows: Vec<Vec<Cell>> = Vec::new();
     for r in t.rows.iter().take(MAX_NESTED_ROWS) {
         conversion_cancel(cancel)?;
         push_growth(&rows, lease, evictor)?;
         let row_block = block((r.len() as u64).saturating_mul(std::mem::size_of::<Cell>() as u64));
-        let bytes = row_block
-            .saturating_add(sizes.measure_checked(r, base, lang, || conversion_cancel(cancel))?);
+        let bytes = row_block.saturating_add(sizes.measure_columns_checked(
+            r,
+            &t.columns,
+            base,
+            lang,
+            || conversion_cancel(cancel),
+        )?);
         conversion_cancel(cancel)?;
         lease.try_grow_or_evict(bytes, evictor)?;
         let mut row = Vec::with_capacity(r.len());
-        for (value, &len) in r.iter().zip(sizes.get()) {
+        for (j, (value, &len)) in r.iter().zip(sizes.get()).enumerate() {
             conversion_cancel(cancel)?;
-            row.push(cell_write(value, base, lang, lease.budget(), len)?);
+            let col_ty = t.columns.get(j).map(|c| &c.ty);
+            row.push(cell_write_in_column(
+                value,
+                col_ty,
+                base,
+                lang,
+                lease.budget(),
+                len,
+            )?);
         }
         rows.push(row);
     }
-    Ok(crate::refs::NestedOut { columns, rows })
+    Ok(StoredNested {
+        out: crate::refs::NestedOut { columns, rows },
+        total,
+    })
 }
 
 fn nested_columns(t: &query_ir::NestedResult, base: &TestBase, lang: SynLang) -> Vec<Column> {
@@ -1028,19 +1268,24 @@ fn nested_columns(t: &query_ir::NestedResult, base: &TestBase, lang: SynLang) ->
         .collect()
 }
 
-fn nested_out(
-    t: &query_ir::NestedResult,
-    base: &TestBase,
-    lang: SynLang,
-) -> crate::refs::NestedOut {
+fn nested_out(t: &query_ir::NestedResult, base: &TestBase, lang: SynLang) -> StoredNested {
     let columns = nested_columns(t, base, lang);
+    let total = u64::try_from(t.rows.len()).unwrap_or(u64::MAX);
     let rows = t
         .rows
         .iter()
         .take(MAX_NESTED_ROWS)
-        .map(|r| r.iter().map(|v| cell(v, base, lang)).collect())
+        .map(|r| {
+            r.iter()
+                .enumerate()
+                .map(|(j, v)| cell_in_column(v, t.columns.get(j).map(|c| &c.ty), base, lang))
+                .collect()
+        })
         .collect();
-    crate::refs::NestedOut { columns, rows }
+    StoredNested {
+        out: crate::refs::NestedOut { columns, rows },
+        total,
+    }
 }
 
 pub(crate) fn param_error_text(name: &str, e: &query_testhost::ParamError) -> String {

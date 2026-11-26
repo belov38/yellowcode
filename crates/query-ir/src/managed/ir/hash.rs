@@ -7,6 +7,24 @@ pub(super) fn shallow(e: &Expr, h: &mut impl Hasher) {
 
 const SHALLOW_DEPTH: u8 = 3;
 
+pub(super) fn deref_prefix(e: &Expr, len: usize) -> Option<u64> {
+    let ExprKind::Deref { base, steps } = &e.kind else {
+        return None;
+    };
+    let prefix = steps.get(..len)?;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    if prefix.is_empty() {
+        shallow_d(base, &mut h, SHALLOW_DEPTH);
+    } else {
+        std::mem::discriminant(&e.kind).hash(&mut h);
+        shallow_d(base, &mut h, SHALLOW_DEPTH);
+        for step in prefix {
+            step.name.hash(&mut h);
+        }
+    }
+    Some(h.finish())
+}
+
 pub(super) fn deref_prefixes(e: &Expr, mut visit: impl FnMut(usize, u64)) {
     let ExprKind::Deref { base, steps } = &e.kind else {
         return;

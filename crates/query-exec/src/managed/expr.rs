@@ -287,6 +287,42 @@ fn eval_context(
                 type_info::try_type_of(&source, 0, refs)?
             }
         }
+        PExpr::PredefName { x, names } => {
+            let source = eval(x)?;
+            match value(&source)?.view() {
+                ValueRef::Null => ManagedValue::scalar(ScalarValue::Null),
+                ValueRef::Binary(bytes) => {
+                    let Ok(raw) = <[u8; 16]>::try_from(bytes) else {
+                        return one(
+                            ManagedValue::try_utf16(&[], input.budget())?,
+                            input.budget(),
+                        );
+                    };
+                    if raw == [0u8; 16] {
+                        ManagedValue::try_utf16(&[], input.budget())?
+                    } else if let Some((_, name)) = names.iter().find(|(id, _)| *id == raw) {
+                        ManagedValue::try_utf16(&name.0, input.budget())?
+                    } else {
+                        let formatted = crate::eval::format_orphaned_predef_id(&raw);
+                        ManagedValue::try_utf16(&formatted, input.budget())?
+                    }
+                }
+                _ => ManagedValue::try_utf16(&[], input.budget())?,
+            }
+        }
+        PExpr::PointInTime { date, reference } => {
+            let date = eval(date)?;
+            let reference = eval(reference)?;
+            match (value(&date)?.view(), value(&reference)?.view()) {
+                (ValueRef::Date(date), ValueRef::Ref { table, id }) => {
+                    ManagedValue::scalar(ScalarValue::PointInTime(query_ir::value::Moment {
+                        date,
+                        reference: Some((table, *id)),
+                    }))
+                }
+                _ => ManagedValue::scalar(ScalarValue::Null),
+            }
+        }
         PExpr::Func {
             f,
             args,

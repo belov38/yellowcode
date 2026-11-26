@@ -82,8 +82,65 @@ pub struct UsersPresence {
     pub legacy_users_present: bool,
 }
 
+pub struct PublicSupportPresence {
+    pub users_present: bool,
+    pub legacy_users_present: bool,
+    pub config_cas_present: bool,
+}
+
 pub fn read_support_findings(input: impl Read) -> Result<Result<UsersPresence, Error>, Error> {
     found_as_value(read_support_for_separated_users(input))
+}
+
+pub fn read_support_findings_public(
+    input: impl Read,
+    has_extension_storage: bool,
+) -> Result<Result<PublicSupportPresence, Error>, Error> {
+    found_as_value(read_support_public(input, has_extension_storage))
+}
+
+pub fn read_extensions_ngs(
+    input: impl Read,
+    expected_tables: &[&str],
+) -> Result<Vec<String>, Error> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Row {
+        name: String,
+        ngs_nonempty: u8,
+    }
+    let mut bytes = Vec::new();
+    input.take(8193).read_to_end(&mut bytes)?;
+    if bytes.len() > 8192 {
+        return Err(Error::Unsupported(
+            "extension state check output limit exceeded",
+        ));
+    }
+    bytes.retain(|&b| b != b'\r' && b != b'\n');
+    let rows: Vec<Row> = serde_json::from_slice(&bytes)?;
+    if rows.len() != expected_tables.len() {
+        return Err(Error::Unsupported("unexpected extension state row count"));
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut nonempty = Vec::new();
+    for row in rows {
+        if row.ngs_nonempty > 1 {
+            return Err(Error::Unsupported("invalid extension state flag"));
+        }
+        let folded = row.name.to_ascii_lowercase();
+        if !expected_tables
+            .iter()
+            .any(|expected| expected.eq_ignore_ascii_case(&row.name))
+            || !seen.insert(folded)
+        {
+            return Err(Error::Unsupported("unexpected extension state table"));
+        }
+        if row.ngs_nonempty != 0 {
+            nonempty.push(row.name);
+        }
+    }
+    nonempty.sort_unstable_by_key(|s| s.to_ascii_lowercase());
+    Ok(nonempty)
 }
 
 fn found_as_value<T>(result: Result<T, Error>) -> Result<Result<T, Error>, Error> {
@@ -110,7 +167,7 @@ pub fn read_user_email_count(input: impl Read) -> Result<u64, Error> {
     Ok(email.addresses)
 }
 
-pub fn read_support_for_separated_users(input: impl Read) -> Result<UsersPresence, Error> {
+fn read_flags(input: impl Read) -> Result<Flags, Error> {
     let mut bytes = Vec::new();
     input.take(8193).read_to_end(&mut bytes)?;
     if bytes.len() > 8192 {
@@ -121,6 +178,10 @@ pub fn read_support_for_separated_users(input: impl Read) -> Result<UsersPresenc
     if flags.users > 1 || flags.legacy_users > 1 {
         return Err(Error::Unsupported("invalid user presence flags"));
     }
+    Ok(flags)
+}
+
+fn common_findings(flags: &Flags) -> Vec<String> {
     let mut found = Vec::new();
     for (text, flag) in [
         (
@@ -156,6 +217,54 @@ pub fn read_support_for_separated_users(input: impl Read) -> Result<UsersPresenc
             found.push(text.to_owned());
         }
     }
+    found
+}
+
+fn read_support_public(
+    input: impl Read,
+    has_extension_storage: bool,
+) -> Result<PublicSupportPresence, Error> {
+    let flags = read_flags(input)?;
+    if flags.config_cas > 1 || flags.config_cas_save > 1 {
+        return Err(Error::Unsupported("invalid extension presence flags"));
+    }
+    let mut found = common_findings(&flags);
+    if flags.config_cas_save != 0 {
+        found.push(
+            "в базе есть неприменённые изменения расширений конфигурации (таблица ConfigCASSave не пуста)"
+                .to_owned(),
+        );
+    }
+    if has_extension_storage && flags.config_cas == 0 {
+        found.push(
+            "в базе есть схема хранения расширений (SchemaStorage SchemaID 1), но таблица ConfigCAS пуста"
+                .to_owned(),
+        );
+    }
+    if !has_extension_storage && flags.schema_unstable != 0 {
+        found.push(
+            "служебная схема базы не в том состоянии, что у проверенных копий (там в SchemaStorage одна строка \
+с SchemaID 0 и Status 100, её схема равна единственной строке DBSchema, списки нового поколения пусты)"
+                .to_owned(),
+        );
+    }
+    if flags.version_unverified != 0 {
+        found.push(version_text(&flags));
+    }
+    if let Some(last) = found.last_mut() {
+        last.push_str("; DT для такой базы пока не поддерживается");
+        return Err(Error::Found(found));
+    }
+    Ok(PublicSupportPresence {
+        users_present: flags.users != 0,
+        legacy_users_present: flags.legacy_users != 0,
+        config_cas_present: flags.config_cas != 0,
+    })
+}
+
+pub fn read_support_for_separated_users(input: impl Read) -> Result<UsersPresence, Error> {
+    let flags = read_flags(input)?;
+    let mut found = common_findings(&flags);
     match (flags.config_cas != 0, flags.config_cas_save != 0) {
         (false, false) => {}
         (cas, save) => found.push(format!(

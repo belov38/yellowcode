@@ -34,16 +34,18 @@ pub enum Error {
 pub struct SnapshotSchema {
     pub schema: LogicalSchema,
     pub year_offset: i32,
+    pub raw_bytes: Vec<u8>,
 }
 
 pub fn read_schema_with_legacy_indexes(
     input: impl Read,
     limits: Limits,
 ) -> Result<SnapshotSchema, Error> {
-    let (schema, year_offset) = read_wire(input, limits)?;
+    let (raw_bytes, year_offset) = read_wire(input, limits)?;
     Ok(SnapshotSchema {
-        schema: LogicalSchema::from_text_legacy_indexes(&schema)?,
+        schema: LogicalSchema::from_text_legacy_indexes(&raw_bytes)?,
         year_offset,
+        raw_bytes,
     })
 }
 
@@ -55,10 +57,11 @@ struct Wire {
 }
 
 pub fn read_schema(input: impl Read, limits: Limits) -> Result<SnapshotSchema, Error> {
-    let (schema, year_offset) = read_wire(input, limits)?;
+    let (raw_bytes, year_offset) = read_wire(input, limits)?;
     Ok(SnapshotSchema {
-        schema: LogicalSchema::from_text(&schema)?,
+        schema: LogicalSchema::from_text(&raw_bytes)?,
         year_offset,
+        raw_bytes,
     })
 }
 

@@ -147,18 +147,35 @@ pub(crate) fn catalog(cx: &Ctx, names: &mut Names) -> Result<Vec<(Table, TableRo
     Ok(out)
 }
 
+pub(super) fn presentation_field(cx: &Ctx) -> Option<&'static str> {
+    let as_code = cx.obj.text("DefaultPresentation") == Some("AsCode");
+    let (first, second) = if as_code {
+        ((cx.code_len, f::CODE), (cx.descr_len, f::DESCRIPTION))
+    } else {
+        ((cx.descr_len, f::DESCRIPTION), (cx.code_len, f::CODE))
+    };
+    if first.0 > 0 {
+        Some(first.1)
+    } else if second.0 > 0 {
+        Some(second.1)
+    } else {
+        None
+    }
+}
+
 fn field_indexes(b: &mut TableBuilder, cx: &Ctx, names: &mut Names, numbered: bool) -> Result<()> {
-    let ao_attrs: Vec<(String, String)> = indexed_attributes(cx)
+    let mut ao_attrs: Vec<(Uuid16, String)> = indexed_attributes(cx)
         .into_iter()
         .filter(|a| add_order(a))
-        .map(|a| Ok((a.name.clone(), fields::item_name(a, names)?)))
+        .map(|a| Ok((a.id, fields::item_name(a, names)?)))
         .collect::<Result<_>>()?;
-    let mut items: Vec<(String, bool, Option<String>, Uuid16, bool)> = Vec::new();
+    ao_attrs.sort_by_key(|(id, _)| *id.as_bytes());
+    let mut items: Vec<(String, bool, Option<Uuid16>, Uuid16, bool)> = Vec::new();
     for a in indexed_attributes(cx) {
         items.push((
             fields::item_name(a, names)?,
             add_order(a),
-            Some(a.name.clone()),
+            Some(a.id),
             a.id,
             indexed(a),
         ));
@@ -178,21 +195,17 @@ fn field_indexes(b: &mut TableBuilder, cx: &Ctx, names: &mut Names, numbered: bo
             ));
         }
     }
-    let present = if cx.descr_len > 0 {
-        Some(f::DESCRIPTION)
-    } else if cx.code_len > 0 {
-        Some(f::CODE)
-    } else {
-        None
-    };
+    let present = presentation_field(cx);
     let owner = (!cx.owners.is_empty()).then(|| f::OWNER_ID.to_string());
-    for (field, ao, own_name, id, own_indexing) in items {
+    for (field, ao, own_id, id, own_indexing) in items {
         let mut name = |pre: &str| -> Result<String> {
-            Ok(if numbered {
-                format!("{pre}{}", names.number(id, pre)?)
-            } else {
-                format!("{pre}{field}")
-            })
+            Ok(
+                if numbered || (own_id.is_some() && names.get(id, pre).is_some()) {
+                    format!("{pre}{}", names.number(id, pre)?)
+                } else {
+                    format!("{pre}{field}")
+                },
+            )
         };
         let mut tail = vec![field.clone()];
         if ao {
@@ -201,8 +214,8 @@ fn field_indexes(b: &mut TableBuilder, cx: &Ctx, names: &mut Names, numbered: bo
         tail.push(f::ID.to_string());
         if ao {
             tail.push(f::MARKED.to_string());
-            for (name, fld) in &ao_attrs {
-                if own_name.as_deref() != Some(name.as_str()) {
+            for (ao_id, fld) in &ao_attrs {
+                if own_id != Some(*ao_id) {
                     tail.push(fld.clone());
                 }
             }
@@ -363,14 +376,12 @@ fn sections(cx: &Ctx, names: &mut Names, owner: &str) -> Result<Vec<(Table, Tabl
             b.item(fl, a.id, at);
         }
         for a in attrs.iter().filter(|a| indexed_in(cx, a)) {
-            b.rule(
-                cx,
-                names,
-                "ByField{F}",
-                false,
-                &[Tok::Attr, Tok::Owner],
-                Some(a),
-            )?;
+            let tmpl = if names.get(a.id, "ByField").is_some() {
+                "ByField{n}"
+            } else {
+                "ByField{F}"
+            };
+            b.rule(cx, names, tmpl, false, &[Tok::Attr, Tok::Owner], Some(a))?;
         }
         out.push(b.finish());
     }

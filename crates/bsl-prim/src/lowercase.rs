@@ -13,20 +13,32 @@ fn contains(ranges: &[(u32, u32)], ch: char) -> bool {
         })
         .is_ok()
 }
+
+#[inline]
+fn is_case_ignorable(unicode_major: u8, ch: char) -> bool {
+    contains(CASE_IGNORABLE, ch) || (unicode_major >= 18 && contains(CASE_IGNORABLE_18, ch))
+}
+
+#[inline]
+fn is_cased(unicode_major: u8, ch: char) -> bool {
+    contains(CASED, ch) || (unicode_major >= 18 && contains(CASED_18, ch))
+}
+
 pub fn lowercase(text: &str) -> impl Iterator<Item = char> + '_ {
+    let unicode_major = char::UNICODE_VERSION.0;
     let mut preceded = false;
     text.char_indices().flat_map(move |(position, ch)| {
-        let ignorable = contains(CASE_IGNORABLE, ch);
+        let ignorable = is_case_ignorable(unicode_major, ch);
         let final_sigma = ch == 'Σ'
             && preceded
             && !text
                 .get(position + ch.len_utf8()..)
                 .unwrap_or("")
                 .chars()
-                .find(|&next| !contains(CASE_IGNORABLE, next))
-                .is_some_and(|next| contains(CASED, next));
+                .find(|&next| !is_case_ignorable(unicode_major, next))
+                .is_some_and(|next| is_cased(unicode_major, next));
         if !ignorable {
-            preceded = contains(CASED, ch);
+            preceded = is_cased(unicode_major, ch);
         }
         if final_sigma {
             'ς'.to_lowercase()
@@ -731,4 +743,32 @@ const CASED: &[(u32, u32)] = &[
     (0x1f130, 0x1f149),
     (0x1f150, 0x1f169),
     (0x1f170, 0x1f189),
+];
+
+const CASE_IGNORABLE_18: &[(u32, u32)] = &[
+    (0x558, 0x558),
+    (0x58b, 0x58c),
+    (0x5c8, 0x5c9),
+    (0xb53, 0xb54),
+    (0x1ade, 0x1adf),
+    (0x1aec, 0x1af0),
+    (0x208f, 0x208f),
+    (0x209d, 0x209f),
+    (0x107bb, 0x107bf),
+    (0x10ec9, 0x10ecf),
+    (0x10ef0, 0x10ef9),
+    (0x11df0, 0x11df0),
+    (0x1d127, 0x1d128),
+    (0x1d25b, 0x1d25c),
+    (0x1dfcd, 0x1dfff),
+];
+
+const CASED_18: &[(u32, u32)] = &[
+    (0xa7dd, 0xa7dd),
+    (0xa7e2, 0xa7e2),
+    (0xab6c, 0xab6d),
+    (0x1d6a6, 0x1d6a6),
+    (0x1df1f, 0x1df24),
+    (0x1df2b, 0x1df7f),
+    (0x1df90, 0x1df96),
 ];

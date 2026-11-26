@@ -1,14 +1,16 @@
-use std::io::Write;
+use std::collections::{HashMap, HashSet};
+use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 
 use mdconf::templates::{Template, TemplateType};
 use mdconf::{Configuration, MdKind, SubKind};
+use serde::Serialize;
 use serde_json::json;
 
 use super::metadata::Format;
 use super::module::write_json;
 use super::scope::{Scope, ScopeArgs};
-use crate::viewer::names::{fold_path_name, sub_kind_en};
+use crate::viewer::names::{fold_path_name, kind_from_name, sub_kind_en};
 use crate::viewer::path::{self, Target};
 use crate::viewer::source;
 use crate::viewer::template_view::{
@@ -403,6 +405,71 @@ pub fn render_text(view: &TemplateView, out: &mut dyn Write) -> crate::Result<()
     }
 }
 
+#[derive(Serialize)]
+struct TemplateRow<'a> {
+    path: &'a str,
+    #[serde(rename = "type")]
+    kind: &'static str,
+}
+
+#[derive(Serialize)]
+struct TemplateListOutput<'a> {
+    #[serde(rename = "schemaVersion")]
+    schema_version: u32,
+    templates: Vec<TemplateRow<'a>>,
+}
+
+fn listed_kind(
+    template: Option<&Template>,
+    props: &[mdconf::Prop],
+    sub_hdr_non_empty: bool,
+) -> Option<Option<TemplateType>> {
+    if let Some(t) = template {
+        return Some(t.kind);
+    }
+    if !sub_hdr_non_empty {
+        return None;
+    }
+    let name = props
+        .iter()
+        .find_map(|p| match (&p.value, p.name.as_str()) {
+            (mdconf::Value::Text(s), "TemplateType") => Some(s.as_str()),
+            _ => None,
+        })?;
+    TemplateType::from_name(name).map(Some)
+}
+
+fn write_template_list(
+    rows: &[(String, Option<TemplateType>)],
+    format: Format,
+    out: &mut dyn Write,
+) -> crate::Result<()> {
+    let mut w = BufWriter::with_capacity(64 * 1024, out);
+    match format {
+        Format::Text => {
+            for (path, kind) in rows {
+                writeln!(w, "{path}\t{}", kind_name(*kind))?;
+            }
+        }
+        Format::Json => {
+            let payload = TemplateListOutput {
+                schema_version: 1,
+                templates: rows
+                    .iter()
+                    .map(|(path, kind)| TemplateRow {
+                        path: path.as_str(),
+                        kind: kind_name(*kind),
+                    })
+                    .collect(),
+            };
+            serde_json::to_writer_pretty(&mut w, &payload)?;
+            writeln!(w)?;
+        }
+    }
+    w.flush()?;
+    Ok(())
+}
+
 fn list_templates(
     cfg: &Configuration,
     scope: &ScopeArgs,
@@ -411,25 +478,270 @@ fn list_templates(
     out: &mut dyn Write,
 ) -> crate::Result<()> {
     let scope = Scope::resolve(cfg, scope)?;
-    let refs: Vec<TemplateRef<'_>> = templates(cfg, &scope)
-        .into_iter()
-        .filter(|t| types.is_empty() || types.iter().any(|f| f.matches(t.kind)))
-        .collect();
-    match format {
-        Format::Text => {
-            for r in &refs {
-                writeln!(out, "{}\t{}", r.path, kind_name(r.kind))?;
+    let mut rows = Vec::new();
+    let mut add = |path: String, kind: Option<TemplateType>| {
+        if scope.contains(&path) && (types.is_empty() || types.iter().any(|f| f.matches(kind))) {
+            rows.push((path, kind));
+        }
+    };
+    for o in &cfg.objects {
+        let path = format!("{}.{}", o.kind.as_str(), o.name);
+        if o.kind == MdKind::CommonTemplate
+            && let Some(kind) = listed_kind(o.template.as_ref(), &o.props, true)
+        {
+            add(path.clone(), kind);
+        }
+        for s in o.templates.iter().filter(|s| s.kind == SubKind::Template) {
+            let hdr_ok = cfg.index.sub_hdr.get(&s.id).is_none_or(|h| !h.is_empty());
+            if let Some(kind) = listed_kind(s.template.as_ref(), &s.props, hdr_ok) {
+                add(format!("{path}.{}.{}", sub_kind_en(s.kind), s.name), kind);
             }
         }
-        Format::Json => {
-            let rows: Vec<_> = refs
-                .iter()
-                .map(|r| json!({"path": r.path, "type": kind_name(r.kind)}))
-                .collect();
-            write_json(out, &json!({"schemaVersion": 1, "templates": rows}))?;
+    }
+    write_template_list(&rows, format, out)
+}
+
+fn find_collection<'n>(node: &'n brace::Node, class: &str) -> Option<&'n [brace::Node]> {
+    for e in node.as_list()? {
+        let Some(l) = e.as_list() else { continue };
+        let (Some(head), Some(cnt)) = (l.first(), l.get(1)) else {
+            continue;
+        };
+        if head.text() != Some(class) || cnt.is_list() {
+            continue;
+        }
+        let Some(n) = cnt.text().and_then(|t| t.trim().parse::<usize>().ok()) else {
+            continue;
+        };
+        let items = l.get(2..)?;
+        return Some(items.get(..n.min(items.len())).unwrap_or(items));
+    }
+    None
+}
+
+fn find_header(tree: &brace::Node, uuid: &str) -> Option<Vec<usize>> {
+    let is_header = |n: &brace::Node| {
+        n.as_list().is_some_and(|l| {
+            l.len() >= 5
+                && matches!(l.get(2), Some(brace::Node::Str(_)))
+                && l.get(1).and_then(brace::Node::as_list).is_some_and(|h| {
+                    h.len() == 3 && h.get(2).and_then(brace::Node::text) == Some(uuid)
+                })
+        })
+    };
+    if is_header(tree) {
+        return Some(Vec::new());
+    }
+    let mut stack: Vec<(&[brace::Node], usize)> = vec![(tree.as_list()?, 0)];
+    while let Some((l, i)) = stack.last_mut() {
+        let Some(c) = l.get(*i) else {
+            stack.pop();
+            if let Some((_, j)) = stack.last_mut() {
+                *j += 1;
+            }
+            continue;
+        };
+        if is_header(c) {
+            return Some(stack.iter().map(|(_, j)| *j).collect());
+        }
+        match c.as_list() {
+            Some(cl) => stack.push((cl, 0)),
+            None => *i += 1,
         }
     }
-    Ok(())
+    None
+}
+
+fn name_at(t: &brace::Node, header: &[usize]) -> String {
+    let mut p = Vec::with_capacity(header.len() + 1);
+    p.extend_from_slice(header);
+    p.push(2);
+    t.get(&p)
+        .and_then(brace::Node::text)
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn kind_has_templates(kind: MdKind) -> bool {
+    kind == MdKind::CommonTemplate
+        || mdconf::startup::kind_spec(kind.as_str())
+            .and_then(|spec| spec.field("subobjects"))
+            .and_then(|subs| subs.get("Template"))
+            .and_then(|v| v.as_str())
+            .is_some()
+}
+
+fn parse_kind_filter(raw: &[String]) -> crate::Result<Vec<MdKind>> {
+    let mut kinds = Vec::new();
+    for item in raw.iter().flat_map(|a| a.split(',')) {
+        let item = item.trim();
+        if item.is_empty() {
+            continue;
+        }
+        kinds.push(kind_from_name(item).ok_or_else(|| format!("unknown metadata kind: {item}"))?);
+    }
+    Ok(kinds)
+}
+
+fn decode_brace(
+    src: &dyn mdconf::EntrySource,
+    present: &HashSet<String>,
+    name: &str,
+) -> Option<brace::Doc> {
+    if !present.contains(name) {
+        return None;
+    }
+    let stored = src.stored_owned(name).ok().flatten()?;
+    match mdconf::decode_stored(&stored).ok()? {
+        mdconf::EntryData::Brace(doc) => Some(doc),
+        _ => None,
+    }
+}
+
+fn list_templates_direct(
+    source_kind: source::SourceKind,
+    src: &dyn mdconf::EntrySource,
+    kinds_filter: &[MdKind],
+    types: &[TypeFilter],
+) -> crate::Result<Vec<(String, Option<TemplateType>)>> {
+    let list = src.list()?;
+    if source_kind == source::SourceKind::Infobase && list.is_empty() {
+        return Ok(Vec::new());
+    }
+    let root_cfg = mdconf::root_facts::configuration_root(src)?;
+    let present: HashSet<String> = list.into_iter().map(|m| m.name).collect();
+    let cfg_entry = root_cfg.id.to_string();
+    let Some(cfg_doc) = decode_brace(src, &present, &cfg_entry) else {
+        return Err(format!("{cfg_entry}: not a brace document").into());
+    };
+    let mut class_to_kind: HashMap<&'static str, MdKind> = HashMap::new();
+    for &kind in MdKind::all() {
+        if let Some(cls) = mdconf::startup::kind_spec(kind.as_str()).and_then(|s| s.class()) {
+            class_to_kind.insert(cls, kind);
+        }
+    }
+    let common_type_map = mdconf::startup::kind_spec("CommonTemplate")
+        .and_then(|spec| spec.props().find(|(n, _)| *n == "TemplateType"))
+        .and_then(|(_, prop)| prop.field("map"));
+    let sub_type_map = mdconf::startup::kind_spec("Template")
+        .and_then(|spec| spec.props().find(|(n, _)| *n == "TemplateType"))
+        .and_then(|(_, prop)| prop.field("map"));
+
+    let mut class_lists: Vec<(MdKind, Vec<brace::Guid>)> = Vec::new();
+    let mut stack = vec![&cfg_doc.root];
+    while let Some(node) = stack.pop() {
+        let Some(l) = node.as_list() else { continue };
+        if let (Some(head), Some(cnt)) = (l.first(), l.get(1))
+            && let Some(kind) = head.text().and_then(|c| class_to_kind.get(c).copied())
+            && !cnt.is_list()
+            && let Some(c) = cnt.text().and_then(|t| t.trim().parse::<usize>().ok())
+        {
+            let items = l.get(2..).unwrap_or_default();
+            let items = items.get(..c.min(items.len())).unwrap_or(items);
+            class_lists.push((
+                kind,
+                items.iter().filter_map(brace::Node::as_guid).collect(),
+            ));
+            continue;
+        }
+        stack.extend(l.iter().rev());
+    }
+
+    let mut rows = Vec::new();
+    let mut push_if = |path: String, kind: TemplateType| {
+        let k = Some(kind);
+        if types.is_empty() || types.iter().any(|f| f.matches(k)) {
+            rows.push((path, k));
+        }
+    };
+
+    for (kind, uuids) in class_lists {
+        if !kinds_filter.is_empty() && !kinds_filter.contains(&kind) {
+            continue;
+        }
+        let Some(spec) = mdconf::startup::kind_spec(kind.as_str()) else {
+            continue;
+        };
+        let Some(header_path) = spec.header() else {
+            continue;
+        };
+        let tpl_class = spec
+            .field("subobjects")
+            .and_then(|subs| subs.get("Template"))
+            .and_then(|v| v.as_str());
+        if kind != MdKind::CommonTemplate && tpl_class.is_none() {
+            continue;
+        }
+        let header: Vec<usize> = header_path.iter().collect();
+        for u in uuids {
+            let entry = u.to_string();
+            let Some(doc) = decode_brace(src, &present, &entry) else {
+                continue;
+            };
+            let normalized;
+            let tree: &brace::Node = if kind == MdKind::AccountingRegister
+                && doc.root.get(&[1, 0]).and_then(brace::Node::as_i64) == Some(22)
+            {
+                let mut t = doc.root.clone();
+                if let Some(body) = t.get_mut(&[1]).and_then(brace::Node::as_list_mut)
+                    && body.len() > 1
+                {
+                    body.remove(1);
+                }
+                normalized = t;
+                &normalized
+            } else {
+                &doc.root
+            };
+            let obj_name = name_at(tree, &header);
+            if kind == MdKind::CommonTemplate
+                && let Some(key) = doc.root.get(&[1, 2]).and_then(brace::Node::text)
+                && let Some(tt) = common_type_map
+                    .and_then(|m| m.get(key))
+                    .and_then(|v| v.as_str())
+                    .and_then(TemplateType::from_name)
+            {
+                push_if(format!("CommonTemplate.{obj_name}"), tt);
+            }
+            if let Some(tpl_class) = tpl_class {
+                for su in find_collection(tree, tpl_class)
+                    .unwrap_or_default()
+                    .iter()
+                    .filter_map(brace::Node::as_guid)
+                {
+                    let sub_entry = su.to_string();
+                    let Some(sdoc) = decode_brace(src, &present, &sub_entry) else {
+                        continue;
+                    };
+                    let Some(h) = find_header(&sdoc.root, &sub_entry) else {
+                        continue;
+                    };
+                    let sub_name = name_at(&sdoc.root, &h);
+                    let Some(prefix_len) = h.len().checked_sub(1) else {
+                        continue;
+                    };
+                    let Some(prefix) = h.get(..prefix_len) else {
+                        continue;
+                    };
+                    let mut type_path = Vec::with_capacity(prefix.len() + 1);
+                    type_path.extend_from_slice(prefix);
+                    type_path.push(1);
+                    if let Some(key) = sdoc.root.get(&type_path).and_then(brace::Node::text)
+                        && let Some(tt) = sub_type_map
+                            .and_then(|m| m.get(key))
+                            .and_then(|v| v.as_str())
+                            .and_then(TemplateType::from_name)
+                    {
+                        push_if(
+                            format!("{}.{obj_name}.Template.{sub_name}", kind.as_str()),
+                            tt,
+                        );
+                    }
+                }
+            }
+        }
+    }
+    Ok(rows)
 }
 
 fn show_query(
@@ -525,33 +837,105 @@ pub fn run_with_memory_limit(
     err: &mut dyn Write,
 ) -> crate::Result<()> {
     let memory = source::OpenMemory::resolve(limit)?;
-    let open = |path: &PathBuf| {
-        source::open_with_memory(
-            path,
-            &super::load_options(super::Reads::Templates),
-            &memory,
-            &mut |_| Ok(()),
-        )
-    };
     match command {
         Command::List {
             source,
             scope,
             types,
             format,
-        } => list_templates(&open(&source)?, &scope, &types, format, out),
+        } => {
+            let detected = source::detect(&source::resolve(&source));
+            if scope.paths.is_empty()
+                && scope.subsystems.is_empty()
+                && let Ok(
+                    kind @ (source::SourceKind::Cf
+                    | source::SourceKind::Dt
+                    | source::SourceKind::Infobase),
+                ) = detected
+            {
+                let kinds_filter = parse_kind_filter(&scope.kinds)?;
+                let rows = source::with_config_entries_with_memory(&source, &memory, |src| {
+                    list_templates_direct(kind, src, &kinds_filter, &types)
+                })?;
+                return write_template_list(&rows, format, out);
+            }
+            if detected.is_ok() {
+                let _ = parse_kind_filter(&scope.kinds)?;
+            }
+            let opts = super::load_options(super::Reads::TemplateList);
+            let cfg = if scope.subsystems.is_empty() && !scope.paths.is_empty() {
+                let paths: Vec<&str> = scope.paths.iter().map(String::as_str).collect();
+                super::load_objects(
+                    &paths,
+                    true,
+                    &opts,
+                    &|cfg| Scope::resolve(cfg, &scope).is_ok(),
+                    &mut |o| {
+                        source::open_with_memory_bounded(&source, o, super::BOUNDED_CACHE, &memory)
+                    },
+                )?
+            } else if !scope.subsystems.is_empty() {
+                let path_kinds: Vec<MdKind> = scope
+                    .paths
+                    .iter()
+                    .filter_map(|p| p.split('.').next().and_then(|k| kind_from_name(k.trim())))
+                    .collect();
+                let filter = mdconf::ObjectFilter {
+                    index_kinds: None,
+                    keep: std::sync::Arc::new(move |kind, _| {
+                        kind == MdKind::Subsystem
+                            || kind_has_templates(kind)
+                            || path_kinds.contains(&kind)
+                    }),
+                };
+                let filtered = source::open_with_memory_bounded(
+                    &source,
+                    &mdconf::LoadOptions {
+                        objects: Some(filter),
+                        ..opts.clone()
+                    },
+                    super::BOUNDED_CACHE,
+                    &memory,
+                )?;
+                if Scope::resolve(&filtered, &scope).is_ok() {
+                    filtered
+                } else {
+                    source::open_with_memory_bounded(&source, &opts, super::BOUNDED_CACHE, &memory)?
+                }
+            } else {
+                source::open_with_memory_bounded(&source, &opts, super::BOUNDED_CACHE, &memory)?
+            };
+            list_templates(&cfg, &scope, &types, format, out)
+        }
         Command::Show {
             source,
             template,
             query_of,
             format,
-        } => show_template(
-            &open(&source)?,
-            &template,
-            query_of.as_deref(),
-            format,
-            out,
-            err,
-        ),
+        } => {
+            let cfg = open_for_show(&source, &template, &memory)?;
+            show_template(&cfg, &template, query_of.as_deref(), format, out, err)
+        }
     }
+}
+
+fn open_for_show(
+    source: &std::path::Path,
+    template: &str,
+    memory: &source::OpenMemory,
+) -> crate::Result<Configuration> {
+    if let Some(filter) = super::objects_of(&[template], true) {
+        let mut opts = super::load_options(super::Reads::Templates);
+        opts.objects = Some(filter);
+        let cfg = source::open_with_memory_bounded(source, &opts, super::BOUNDED_CACHE, memory)?;
+        if path::resolve(&cfg, template).is_ok() {
+            return Ok(cfg);
+        }
+    }
+    source::open_with_memory_bounded(
+        source,
+        &super::load_options(super::Reads::TemplateList),
+        super::BOUNDED_CACHE,
+        memory,
+    )
 }

@@ -5,7 +5,7 @@ use std::{
 };
 use yellowcode_core::service::{
     memory,
-    query::{self, Format, Request, Source},
+    query::{self, Format, Lang, Request, Source},
 };
 
 #[derive(clap::Args)]
@@ -68,6 +68,12 @@ pub(crate) struct Args {
     format: Option<Format>,
     #[arg(
         long,
+        value_enum,
+        help = "Язык сеанса запроса (представления, имена типов, сообщения); по умолчанию язык базы"
+    )]
+    lang: Option<Lang>,
+    #[arg(
+        long,
         default_value = query::DEFAULT_TIMEOUT,
         value_parser = query::timeout,
         help = "Предел времени выполнения запроса в секундах; открытие базы в него не входит"
@@ -100,6 +106,7 @@ impl From<Args> for Request {
             params: a.params,
             params_file: a.params_file,
             format: a.format,
+            lang: a.lang,
             timeout: a.timeout,
             max_rows: a.max_rows,
             schema_notes: a.schema_notes,

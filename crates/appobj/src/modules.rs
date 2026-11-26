@@ -1,8 +1,11 @@
 use crate::model::{AppModel, KINDS, ObjId, ObjKind};
 use crate::names::AppNamesImpl;
-use bsl_compiler::{CompileError, CompileOptions, CompiledModule, ModuleKind, compile};
+use bsl_compiler::{
+    AppGlobal, AppMethodSig, AppNames, ApplicationVariable, CatalogBuiltins, CompileError,
+    CompileOptions, CompiledModule, ContextValue, ModuleKind, compile,
+};
 use bsl_prim::{CompatMode, fold_name};
-use bsl_syntax::{ExecContext, SourceText};
+use bsl_syntax::{ExecContext, ParseMode, ParseOptions, SourceText};
 use bsl_vm::{Exception, Execution, ModuleContext, ModuleInstanceRef, ModuleRef};
 use platform_catalog::messages::Lang;
 use sha2::{Digest, Sha256};
@@ -86,8 +89,96 @@ impl CompileCache {
     }
 }
 
+enum Source {
+    Config(usize),
+    Extension(Box<ExtSource>),
+}
+
+struct ExtSource {
+    facts: usize,
+    extension: String,
+    base: String,
+    text: Arc<str>,
+    methods: OnceLock<std::result::Result<Arc<[ExtMethod]>, String>>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ExtMethod {
+    pub folded: String,
+    pub export: bool,
+    pub intercept: bool,
+}
+
+const INTERCEPTS: [&str; 8] = [
+    "перед",
+    "после",
+    "вместо",
+    "изменениеиконтроль",
+    "before",
+    "after",
+    "around",
+    "changeandvalidate",
+];
+
+fn list_methods(module: &str, text: &str) -> std::result::Result<Arc<[ExtMethod]>, String> {
+    let src = SourceText::from_utf8(module, text.as_bytes());
+    let builtins = CatalogBuiltins(platform_catalog::catalog());
+    let out = bsl_syntax::parse(
+        &src,
+        &ParseOptions {
+            mode: ParseMode::Module,
+            context: ExecContext::Server,
+            methods_only: true,
+            extension: true,
+            builtins: &builtins,
+        },
+    );
+    if let Some(e) = &out.error {
+        return Err(format!(
+            "модуль {module} не разобран (строка {})",
+            e.pos.line
+        ));
+    }
+    Ok(out
+        .module
+        .methods
+        .iter()
+        .map(|m| ExtMethod {
+            folded: fold_name(&m.name.name),
+            export: m.export,
+            intercept: m
+                .annotations
+                .iter()
+                .any(|a| INTERCEPTS.contains(&fold_name(&a.name.name).as_str())),
+        })
+        .collect())
+}
+
+struct Unprefixed<'a> {
+    names: &'a AppNamesImpl,
+    base: &'a str,
+}
+
+impl AppNames for Unprefixed<'_> {
+    fn global_value(&self, name: &str, ctx: ExecContext) -> Option<AppGlobal> {
+        self.names.global_value(name, ctx)
+    }
+    fn application_variable(&self, name: &str, ctx: ExecContext) -> Option<ApplicationVariable> {
+        self.names.application_variable(name, ctx)
+    }
+    fn global_method(&self, name: &str, ctx: ExecContext) -> Option<AppMethodSig> {
+        self.names.global_method(name, ctx)
+    }
+    fn context_value(&self, _module: &str, name: &str) -> Option<ContextValue> {
+        self.names.context_value(self.base, name)
+    }
+    fn context_method(&self, _module: &str, name: &str) -> bool {
+        self.names.context_method(self.base, name)
+    }
+}
+
 struct Entry {
-    at: usize,
+    source: Source,
     name: String,
     kind: ModuleKind,
     owner: Option<ObjId>,
@@ -100,6 +191,7 @@ pub struct Modules {
     compat: CompatMode,
     entries: Vec<Entry>,
     by_name: HashMap<String, u32>,
+    ext_by_obj: HashMap<ObjId, Vec<ModuleRef>>,
     managers_ok: [OnceLock<()>; KINDS.len()],
 }
 
@@ -176,7 +268,7 @@ impl Modules {
                 .collect();
             by_name.entry(fold_name(&en.join("."))).or_insert(idx);
             entries.push(Entry {
-                at: i,
+                source: Source::Config(i),
                 name: m.name,
                 kind: m.kind,
                 owner: m.owner,
@@ -189,8 +281,93 @@ impl Modules {
             compat,
             entries,
             by_name,
+            ext_by_obj: HashMap::new(),
             managers_ok: std::array::from_fn(|_| OnceLock::new()),
         }
+    }
+
+    pub fn with_extensions(mut self, model: &AppModel, facts: &[crate::ExtensionFacts]) -> Modules {
+        let mut order: Vec<usize> = (0..facts.len()).collect();
+        order.sort_by_key(|&i| match facts.get(i).map(|e| &e.row) {
+            Some(Ok(row)) => (false, row.order, Some(row.id), i),
+            _ => (true, 0, None, i),
+        });
+        for i in order {
+            let Some(e) = facts.get(i) else {
+                continue;
+            };
+            let Ok(managers) = &e.managers else {
+                continue;
+            };
+            for m in managers.iter().filter(|m| m.borrowed) {
+                let Some(kind) =
+                    ObjKind::from_en(&m.kind).filter(|k| k.md_kind().as_str() == m.kind)
+                else {
+                    continue;
+                };
+                let Some(obj) = model.find(kind, &m.object) else {
+                    continue;
+                };
+                let base = format!(
+                    "{}.{}.МодульМенеджера",
+                    kind.name(Lang::Ru),
+                    model.obj(obj).name
+                );
+                let at = ModuleRef(self.entries.len() as u32);
+                self.entries.push(Entry {
+                    source: Source::Extension(Box::new(ExtSource {
+                        facts: i,
+                        extension: e.name.clone(),
+                        base: base.clone(),
+                        text: m.text.clone(),
+                        methods: OnceLock::new(),
+                    })),
+                    name: format!("{} {base}", e.name),
+                    kind: ModuleKind::Manager,
+                    owner: Some(obj),
+                    compiled: OnceLock::new(),
+                });
+                self.ext_by_obj.entry(obj).or_default().push(at);
+            }
+        }
+        self
+    }
+
+    pub(crate) fn extension_modules(&self) -> impl Iterator<Item = ModuleRef> + '_ {
+        self.entries
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| matches!(e.source, Source::Extension(_)))
+            .map(|(i, _)| ModuleRef(i as u32))
+    }
+
+    pub(crate) fn extension_managers(&self, obj: ObjId) -> &[ModuleRef] {
+        self.ext_by_obj.get(&obj).map_or(&[], Vec::as_slice)
+    }
+
+    pub(crate) fn extension_of(&self, m: ModuleRef) -> Option<(usize, &str)> {
+        match &self.entry(m)?.source {
+            Source::Extension(x) => Some((x.facts, x.extension.as_str())),
+            Source::Config(_) => None,
+        }
+    }
+
+    pub(crate) fn extension_methods(
+        &self,
+        m: ModuleRef,
+    ) -> std::result::Result<Arc<[ExtMethod]>, String> {
+        let e = self
+            .entry(m)
+            .ok_or_else(|| format!("internal: invalid module reference {}", m.0))?;
+        let Source::Extension(x) = &e.source else {
+            return Err(format!(
+                "internal: {} is not a module of an extension",
+                e.name
+            ));
+        };
+        x.methods
+            .get_or_init(|| list_methods(&e.name, &x.text))
+            .clone()
     }
 
     pub fn compat(&self) -> CompatMode {
@@ -226,7 +403,10 @@ impl Modules {
     }
 
     fn compile_entry(&self, e: &Entry) -> Compiled {
-        let text = self.names.module_at(e.at).map_or(&[][..], |s| s.text);
+        let (text, extension) = match &e.source {
+            Source::Config(at) => (self.names.module_at(*at).map_or(&[][..], |s| s.text), None),
+            Source::Extension(x) => (x.text.as_bytes(), Some(&**x)),
+        };
         let hash: [u8; 32] = Sha256::digest(text).into();
         let ctx = ExecContext::Server;
         let key = Key {
@@ -238,14 +418,22 @@ impl Modules {
             compat: self.compat,
         };
         self.cache.get_or_compile(key, || {
+            let unprefixed = extension.map(|x| Unprefixed {
+                names: &self.names,
+                base: &x.base,
+            });
+            let app: &dyn AppNames = match &unprefixed {
+                Some(u) => u,
+                None => &*self.names,
+            };
             let o = CompileOptions {
                 module_name: &e.name,
                 kind: e.kind,
                 context: ctx,
                 compat: self.compat,
                 catalog: platform_catalog::catalog(),
-                app: &*self.names,
-                extension: None,
+                app,
+                extension: extension.map(|x| x.extension.as_str()),
             };
             let src = SourceText::from_utf8(&e.name, text);
             compile(&src, &o)
@@ -303,7 +491,7 @@ impl Modules {
         }
         for (i, e) in self.entries.iter().enumerate() {
             let of_kind = e.owner.is_some_and(|o| model.obj(o).kind == kind);
-            if e.kind == ModuleKind::Manager && of_kind {
+            if e.kind == ModuleKind::Manager && of_kind && matches!(e.source, Source::Config(_)) {
                 self.compiled_or_fatal(ModuleRef(i as u32), lang)?;
             }
         }
@@ -353,7 +541,9 @@ impl Modules {
         let want = md_kind(kind)?;
         self.entries
             .iter()
-            .position(|e| e.owner == Some(obj) && e.kind == want)
+            .position(|e| {
+                e.owner == Some(obj) && e.kind == want && matches!(e.source, Source::Config(_))
+            })
             .map(|i| ModuleRef(i as u32))
     }
 }

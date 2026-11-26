@@ -3,8 +3,9 @@ use std::path::PathBuf;
 
 use yellowcode_core::output::Out;
 use yellowcode_core::remote::{
-    CallRequest, InfoRequest, Login, MetadataRequest, ModuleUrn, ModulesRequest, Param, Password,
-    Request,
+    CallRequest, DEFAULT_LIMIT, DEFAULT_PAGE_SIZE, Filter, InfoRequest, ListRequest, Login,
+    MetadataRequest, ModuleUrn, ModulesRequest, ObjectRef, ObjectRequest, Order, Param, Password,
+    ReportFormat, ReportRequest, Request, Uuid,
 };
 
 macro_rules! after_help {
@@ -36,7 +37,15 @@ macro_rules! after_help {
   yellowcode remote call http://server/base --call МойМодуль.МояФункция --param n:10 --param s:текст
 
   # Записать тексты клиентских модулей в каталог
-  yellowcode remote modules http://server/base --out client-modules"
+  yellowcode remote modules http://server/base --out client-modules
+
+  # Вторая страница списка документов, по убыванию даты
+  yellowcode remote list http://server/base --object Документ.ПриходнаяНакладная --order 'Дата desc' --page 2
+
+  # Реквизиты формы отчёта, затем отчёт: серверная процедура формы с параметрами и её табличный документ
+  yellowcode remote report http://server/base --form Отчет.Остатки.Форма.ФормаОтчета
+  yellowcode remote report http://server/base --form Отчет.Остатки.Форма.ФормаОтчета \
+    --call СформироватьНаСервере --param d:2026-11-30T23:59:59 --format csv > report.csv"
     };
 }
 
@@ -68,6 +77,24 @@ pub(crate) struct LoginArgs {
         help = "Пользователь со стойким паролем: пароль передаётся как набран (по умолчанию — как у прежних версий, в верхнем регистре)"
     )]
     strong_password: bool,
+    #[arg(
+        long,
+        value_name = "ВЕРСИЯ",
+        value_parser = server_version,
+        help = "Версия платформы, которую клиент сообщает серверу (например 8.3.27.2214); без неё — 8.5.1.1529, \
+                а вход, отклонённый из-за версии, повторяется один раз с версией сервера из ответа"
+    )]
+    server_version: Option<String>,
+}
+
+fn server_version(v: &str) -> Result<String, String> {
+    if yellowcode_core::remote::is_build(v) {
+        Ok(v.to_string())
+    } else {
+        Err(format!(
+            "not a platform build: {v:?} (for example 8.3.27.2214)"
+        ))
+    }
 }
 
 impl LoginArgs {
@@ -82,6 +109,7 @@ impl LoginArgs {
             user: self.user,
             password,
             strong: self.strong_password,
+            server_version: self.server_version,
         })
     }
 }
@@ -123,7 +151,7 @@ about, как это делает тонкий клиент. Они вспомо
         no_auth_settings: bool,
         #[arg(
             long,
-            conflicts_with_all = ["user", "password_env", "strong_password", "no_members", "no_sections", "no_auth_settings"],
+            conflicts_with_all = ["user", "password_env", "strong_password", "server_version", "no_members", "no_sections", "no_auth_settings"],
             help = "Не входить: запросить и вывести только параметры входа. Сервер отдаёт их без сеанса, поэтому \
 политика входа базы с пользователями (восстановление пароля, сохранение аутентификации, виды аутентификации) \
 видна без пароля. Их ошибка — ошибка команды; с --json выводится строка RESULT FAIL steps=… в stdout и ошибка \
@@ -138,7 +166,10 @@ about, как это делает тонкий клиент. Они вспомо
         after_help = concat!(
             "Войти на сервер и показать метаданные, которые он отдаёт тонкому клиенту: объекты конфигурации \
 по видам (имя, представление, id типа, значения перечислений, реквизиты регистров, доступ) и командный \
-интерфейс (разделы и их команды навигации), как их видит пользователь. Формы не открываются, модули не вызываются\n\n",
+интерфейс (разделы и подразделы, их команды навигации и команды панели функций — в ней отчёты раздела, такие \
+команды помечены `function panel`), как их видит пользователь. Объекты, которых нет в types (отчёты, обработки, \
+журналы документов, общие команды и другие объекты без типа значения), называют только команды: они показаны в \
+[objects] (в --json — objects) со своими командами и разделами. Формы не открываются, модули не вызываются\n\n",
             after_help!()
         )
     )]
@@ -154,6 +185,19 @@ about, как это делает тонкий клиент. Они вспомо
 enum_synonyms_error), код выхода 0"
         )]
         enum_synonyms: bool,
+        #[arg(
+            long,
+            help = "Показать реквизиты и табличные части каждого объекта из types, который называет команда навигации: \
+описание данных его основной формы (logForm?cmd=dataDescrWMethods), один запрос на объект, поэтому по умолчанию \
+выключено. \
+Форма при этом не открывается и код конфигурации не выполняется. Объект без команды навигации (нет в командном \
+интерфейсе пользователя) показывается без реквизитов; ошибка сервера показывается у объекта, код выхода 0. Для \
+отчёта и обработки из [objects] — реквизиты и табличные части самого объекта по id его стандартной команды \
+(Открыть; у отчёта она бывает только в панели функций): реквизиты собственной формы отчёта так не видны. Для \
+журнала документов — колонки его основной формы списка (logForm?cmd=elements): графы и стандартные поля, которые \
+форма показывает. Объект без стандартной команды (только свои команды) показывается без реквизитов"
+        )]
+        attributes: bool,
         #[arg(long, help = JSON_HELP)]
         json: bool,
     },
@@ -256,6 +300,216 @@ NULL, {\"n\":\"1.5\"} Число (голое число JSON не принима
         #[arg(long, help = JSON_HELP)]
         json: bool,
     },
+    #[command(
+        about = "Прочитать объект по ссылке так, как его получает форма объекта: реквизиты и табличные части",
+        after_help = concat!(
+            "Войти на сервер, открыть форму объекта по ссылке, прочитать реквизиты и табличные части и закрыть \
+форму, как это делает тонкий клиент (logForm?cmd=query, dataDescrWMethods, processFormsClose). Открытие формы \
+выполняет код формы и объекта на сервере, как у пользователя; запись не выполняется, объект не блокируется\n\n",
+            after_help!()
+        )
+    )]
+    Object {
+        #[command(flatten)]
+        login: LoginArgs,
+        #[arg(
+            long = "ref",
+            value_name = "ССЫЛКА",
+            value_parser = ObjectRef::parse,
+            help = "Ссылка на объект: cfg:<Вид>Ref.<Имя>(<uuid>), как её выводит call, или <Вид>.<Имя>(<uuid>) \
+с русским названием вида, например Документ.Счет(<uuid>). Виды: Справочник, Документ, \
+ПланВидовХарактеристик, ПланСчетов, ПланВидовРасчета, ПланОбмена, БизнесПроцесс, Задача; на сервере проверены \
+справочники и документы"
+        )]
+        reference: ObjectRef,
+        #[arg(
+            long,
+            help = "Вывести один объект JSON: реквизиты и строки табличных частей в типизированном JSON \
+--param-json; значение типа, который клиент не разбирает, — {\"raw\": текст}. Представления ссылок — отдельный \
+ключ presentations"
+        )]
+        json: bool,
+        #[arg(
+            long,
+            help = "Не запрашивать представления ссылок и значений перечислений объекта. По умолчанию они \
+запрашиваются после закрытия формы, как в call"
+        )]
+        no_presentations: bool,
+    },
+    #[command(
+        about = "Строки динамического списка: справочника, журнала документов, записей регистра",
+        after_help = concat!(
+            "Войти на сервер, открыть форму списка объекта, как её открывает пользователь, вывести строки \
+страницы в колонках формы и закрыть форму. Открытие формы выполняет её серверный код (как у пользователя); \
+команда ничего не записывает. Ссылки и значения перечислений выводятся представлениями. Строки листаются с \
+начала списка порциями сервера (dlist?cmd=query), поэтому дальняя страница стоит нескольких запросов\n\n",
+            after_help!()
+        )
+    )]
+    List {
+        #[command(flatten)]
+        login: LoginArgs,
+        #[arg(
+            long,
+            value_name = "ВИД.ИМЯ",
+            help = "Объект списка: <Вид>.<Имя>, например Справочник.Имя, Документ.Имя, РегистрСведений.Имя"
+        )]
+        object: String,
+        #[arg(
+            long,
+            value_name = "ФОРМА",
+            help = "Форма списка объекта (по умолчанию ФормаСписка)"
+        )]
+        form: Option<String>,
+        #[arg(
+            long,
+            value_name = "UUID",
+            value_parser = parse_uuid,
+            help = "Строки группы иерархического списка с этой ссылкой (по умолчанию — корень)"
+        )]
+        parent: Option<Uuid>,
+        #[arg(
+            long = "filter",
+            value_name = "ПОЛЕ ОП ЗНАЧЕНИЕ",
+            value_parser = parse_filter,
+            help = "Отбор: поле, операция (= <> < <= > >= ~ содержит, !~ не содержит) и значение, например \
+'Наименование~Ф05', 'Цена>=10', 'Вид=Товар', 'Дата>=2026-11-01'. Значение ссылки — её uuid, значения \
+перечисления — имя. Строка сравнивается как дана, с пробелами; у других значений пробелы вокруг отбрасываются. \
+Для нескольких отборов (все сразу) повторите флаг"
+        )]
+        filters: Vec<Filter>,
+        #[arg(
+            long = "order",
+            value_name = "ПОЛЕ [asc|desc]",
+            value_parser = parse_order,
+            help = "Порядок строк вместо порядка формы: поле и направление, например 'Дата desc'; для нескольких \
+полей повторите флаг"
+        )]
+        orders: Vec<Order>,
+        #[arg(
+            long,
+            value_name = "N",
+            default_value_t = 1,
+            conflicts_with = "all",
+            help = "Номер страницы, с 1"
+        )]
+        page: usize,
+        #[arg(
+            long,
+            value_name = "K",
+            default_value_t = DEFAULT_PAGE_SIZE,
+            conflicts_with = "all",
+            help = "Строк на странице"
+        )]
+        page_size: usize,
+        #[arg(long, help = "Все строки списка вместо страницы, не больше --limit")]
+        all: bool,
+        #[arg(
+            long,
+            value_name = "N",
+            default_value_t = DEFAULT_LIMIT,
+            help = "Наибольшее число строк, которое команда читает: у --all в списке больше строк — ошибка, у \
+страницы, которая кончается дальше этой строки, — ошибка до открытия формы; ничего не выводится"
+        )]
+        limit: usize,
+        #[arg(
+            long,
+            help = "Не запрашивать представления ссылок, которых нет в ответе списка, и синонимы значений \
+перечислений: они выводятся своими id"
+        )]
+        no_presentations: bool,
+        #[arg(long, help = JSON_HELP)]
+        json: bool,
+    },
+    #[command(
+        about = "Открыть форму (отчёта) и показать её реквизиты; с --call — вызвать серверную процедуру формы и вывести табличный документ",
+        after_help = concat!(
+            "Войти на сервер, открыть форму по её имени (logForm?cmd=query) и показать её реквизиты с типами; \
+реквизит-табличный документ помечен (spreadsheet). С --call вызвать серверную процедуру этой формы \
+(&НаСервере, как её зовёт клиентский обработчик команды «Сформировать») с параметрами --param/--param-json и \
+вывести каждый табличный документ, который она изменила: строки документа, тексты ячеек через ` | `. Документ без \
+содержимого дочитывается по строкам (moxel?cmd=getRowContents). Форма закрывается в конце (processFormsClose). \
+Какую процедуру и с какими параметрами зовёт команда формы, видно в тексте модуля формы \
+(remote modules --out, contextModuleId формы).\n\n\
+ВНИМАНИЕ: --call выполняет код конфигурации на сервере, как remote call: процедура формы может записывать данные \
+базы. Вызывайте только процедуры, про которые известно, что они только читают.\n\n\
+Пределы: 100000 строк, 10000 колонок и 20000000 клеток (строки × колонки) на документ, 2000000 ячеек с \
+текстом на отчёт; больший отчёт — ошибка без вывода.\n\n",
+            after_help!()
+        )
+    )]
+    Report {
+        #[command(flatten)]
+        login: LoginArgs,
+        #[arg(
+            long,
+            value_name = "ИМЯ_ФОРМЫ",
+            help = "Полное имя формы, например Отчет.Остатки.Форма.ФормаОтчета"
+        )]
+        form: String,
+        #[arg(
+            long,
+            value_name = "ПРОЦЕДУРА",
+            help = "Серверная процедура этой формы (&НаСервере), которую вызвать; без флага форма только \
+открывается и показываются её реквизиты. Выполняет код конфигурации и может менять данные"
+        )]
+        call: Option<String>,
+        #[arg(
+            long = "param",
+            value_name = "ЗНАЧЕНИЕ",
+            value_parser = Param::parse,
+            requires = "call",
+            help = "Параметр процедуры, как у remote call --param; для нескольких повторите флаг, по порядку"
+        )]
+        params: Vec<Param>,
+        #[arg(
+            long = "param-json",
+            value_name = "JSON",
+            value_parser = Param::parse_json,
+            conflicts_with = "params",
+            requires = "call",
+            help = "Параметр процедуры в типизированном JSON, как у remote call --param-json (пустой список \
+значений: {\"vl\":{}}); не вместе с --param"
+        )]
+        params_json: Vec<Param>,
+        #[arg(
+            long,
+            value_name = "РЕКВИЗИТ",
+            requires = "call",
+            help = "Вывести только табличный документ этого реквизита формы"
+        )]
+        attribute: Option<String>,
+        #[arg(
+            long,
+            value_enum,
+            default_value = "text",
+            requires_if("csv", "call"),
+            help = "text — реквизиты и строки документов; csv — один документ в CSV по RFC 4180 (все строки и \
+колонки, строки через CRLF; строка RESULT при ошибке — в stderr), нужен --call; json — один объект JSON с \
+ячейками, расшифровками и объединениями (строка RESULT при ошибке — в stderr)"
+        )]
+        format: ReportFormatArg,
+    },
+}
+
+fn parse_uuid(s: &str) -> Result<Uuid, String> {
+    Uuid::parse(s).map_err(|e| e.to_string())
+}
+
+fn parse_filter(s: &str) -> Result<Filter, String> {
+    Filter::parse(s).map_err(|e| e.to_string())
+}
+
+fn parse_order(s: &str) -> Result<Order, String> {
+    Order::parse(s).map_err(|e| e.to_string())
+}
+
+/// The output form of `report`.
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub(crate) enum ReportFormatArg {
+    Text,
+    Csv,
+    Json,
 }
 
 fn request(command: Command, stdin_terminal: bool) -> Result<Request, String> {
@@ -278,10 +532,12 @@ fn request(command: Command, stdin_terminal: bool) -> Result<Request, String> {
         Command::Metadata {
             login,
             enum_synonyms,
+            attributes,
             json,
         } => Request::Metadata(MetadataRequest {
             login: login.login(stdin_terminal)?,
             enum_synonyms,
+            attributes,
             json,
         }),
         Command::Call {
@@ -310,6 +566,64 @@ fn request(command: Command, stdin_terminal: bool) -> Result<Request, String> {
             out,
             ids,
             json,
+        }),
+        Command::Object {
+            login,
+            reference,
+            json,
+            no_presentations,
+        } => Request::Object(ObjectRequest {
+            login: login.login(stdin_terminal)?,
+            reference,
+            json,
+            presentations: !no_presentations,
+        }),
+        Command::List {
+            login,
+            object,
+            form,
+            parent,
+            filters,
+            orders,
+            page,
+            page_size,
+            all,
+            limit,
+            no_presentations,
+            json,
+        } => Request::List(ListRequest {
+            login: login.login(stdin_terminal)?,
+            object,
+            form,
+            parent,
+            filters,
+            orders,
+            page,
+            page_size,
+            all,
+            limit,
+            presentations: !no_presentations,
+            json,
+        }),
+        Command::Report {
+            login,
+            form,
+            call,
+            params,
+            params_json,
+            attribute,
+            format,
+        } => Request::Report(ReportRequest {
+            login: login.login(stdin_terminal)?,
+            form,
+            call,
+            params: params.into_iter().chain(params_json).collect(),
+            attribute,
+            format: match format {
+                ReportFormatArg::Text => ReportFormat::Text,
+                ReportFormatArg::Csv => ReportFormat::Csv,
+                ReportFormatArg::Json => ReportFormat::Json,
+            },
         }),
     })
 }

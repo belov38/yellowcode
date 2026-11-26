@@ -129,6 +129,14 @@ pub(crate) fn has_handler(ex: &mut Execution, app: &Application, obj: ObjId) -> 
 }
 
 fn handler_of(ex: &mut Execution, app: &Application, obj: ObjId) -> CallResult<Option<Handler>> {
+    if let Err(why) = extension_handler(app, obj) {
+        let type_name = format!("{}Ссылка", app.model().obj(obj).kind.name(bsl_vm::Lang::Ru));
+        return Err(bsl_vm::HostError::not_implemented(
+            &type_name,
+            &format!("представление: {why}"),
+        )
+        .into());
+    }
     let Some(module) = app
         .modules()
         .of_object(obj, md_model::ModuleKind::ManagerModule)
@@ -154,6 +162,44 @@ fn handler_of(ex: &mut Execution, app: &Application, obj: ObjId) -> CallResult<O
         present,
         fields,
     }))
+}
+
+fn extension_handler(app: &Application, obj: ObjId) -> std::result::Result<(), String> {
+    let mods = app.modules();
+    let handlers = [
+        PRESENT_HANDLER,
+        PRESENT_HANDLER_EN,
+        FIELDS_HANDLER,
+        FIELDS_HANDLER_EN,
+    ]
+    .map(bsl_prim::fold_name);
+    let def = app.model().obj(obj);
+    let module = bsl_prim::fold_name(&format!(
+        "{}.{}.ManagerModule",
+        def.kind.md_kind().as_str(),
+        def.name
+    ));
+    for e in &app.options().extensions {
+        if let Some(x) = e.intercepts.iter().find(|x| {
+            bsl_prim::fold_name(&x.module) == module
+                && handlers.contains(&bsl_prim::fold_name(&x.target))
+        }) {
+            return Err(format!(
+                "расширение «{}» перехватывает обработчик представления ({})",
+                e.name, x.annotation
+            ));
+        }
+    }
+    for &m in mods.extension_managers(obj) {
+        let methods = mods.extension_methods(m)?;
+        if methods.iter().any(|x| handlers.contains(&x.folded)) {
+            let extension = mods.extension_of(m).map_or("", |(_, n)| n);
+            return Err(format!(
+                "обработчик представления в модуле менеджера расширения «{extension}»"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn run_handler(

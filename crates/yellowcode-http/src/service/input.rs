@@ -67,11 +67,17 @@ fn stack_line(
     reader: &mut dyn BufRead,
     line: &mut [u8],
     status: u16,
+    eof_empty_is_io: bool,
 ) -> std::result::Result<usize, HttpInputError> {
     let mut length = 0usize;
     loop {
         let source = reader.fill_buf()?;
         if source.is_empty() {
+            if eof_empty_is_io && length == 0 {
+                return Err(HttpInputError::Io(io::Error::from(
+                    io::ErrorKind::UnexpectedEof,
+                )));
+            }
             return Err(HttpInputError::Status(400));
         }
         let newline = source.iter().position(|b| *b == b'\n');
@@ -154,7 +160,7 @@ pub fn read_http_request(
 ) -> std::result::Result<Charged<http::Request>, HttpInputError> {
     let mut reader = StackReader::new(reader);
     let mut first = [0; 8192];
-    let n = stack_line(&mut reader, &mut first, 414)?;
+    let n = stack_line(&mut reader, &mut first, 414, true)?;
     let first = std::str::from_utf8(first.get(..n).ok_or(HttpInputError::Status(400))?)
         .map_err(|_| HttpInputError::Status(400))?;
     let mut fields = first.split(' ');
@@ -177,7 +183,7 @@ pub fn read_http_request(
         mut chunked,
     ) = (0usize, 0usize, 0usize, false, false, false, false);
     loop {
-        let n = stack_line(&mut reader, &mut line, 431)?;
+        let n = stack_line(&mut reader, &mut line, 431, false)?;
         if n == 0 {
             break;
         }

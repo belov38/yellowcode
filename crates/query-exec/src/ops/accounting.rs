@@ -28,6 +28,7 @@ pub(crate) fn check_cancel(env: &ExecEnv<'_>) -> Result<(), ExecError> {
 pub(crate) fn check_drcr_settings_shape(
     s: &RegisterSettings,
     has_dates: bool,
+    has_extdims: bool,
 ) -> Result<(), ExecError> {
     let sentinel = BslDate::from_parts(3999, 11, 1, 0, 0, 0)
         .ok_or_else(|| fatal("invalid totals sentinel"))?;
@@ -35,7 +36,9 @@ pub(crate) fn check_drcr_settings_shape(
         what: "Q6b-DrCrTurnoversSettingsShape",
         stage: "Q6b",
     };
-    if s.min_period != sentinel || s.min_calculated.is_some() || has_dates && s.calculated.is_some()
+    if s.min_period != sentinel
+        || s.min_calculated.is_some()
+        || (!has_extdims && has_dates && s.calculated.is_some())
     {
         return Err(refused());
     }
@@ -48,11 +51,19 @@ pub(crate) fn check_drcr_settings_shape(
     Ok(())
 }
 
-pub(super) fn selection(s: &RegisterSettings, has_dates: bool) -> Result<DrCrSelection, ExecError> {
-    check_drcr_settings_shape(s, has_dates)?;
-    Ok(match s.calculated {
-        None => DrCrSelection::Main,
-        Some(point) => DrCrSelection::CtAndMain { point },
+pub(super) fn selection(
+    s: &RegisterSettings,
+    has_dates: bool,
+    has_extdims: bool,
+) -> Result<DrCrSelection, ExecError> {
+    check_drcr_settings_shape(s, has_dates, has_extdims)?;
+    Ok(if has_extdims {
+        DrCrSelection::Main
+    } else {
+        match s.calculated {
+            None => DrCrSelection::Main,
+            Some(point) => DrCrSelection::CtAndMain { point },
+        }
     })
 }
 
@@ -66,16 +77,25 @@ pub(super) struct Cursor<'a> {
 
 impl<'a> Cursor<'a> {
     pub(super) fn new(step: &AccountingRowsL, cx: &Cx<'_>) -> Result<Self, ExecError> {
+        let has_extdims = !step.ext_dims.is_empty();
         let main = step
             .keys
             .len()
-            .checked_add(step.resources.len())
+            .checked_add(step.ext_dims.len())
+            .and_then(|n| n.checked_add(step.resources.len()))
             .and_then(|n| n.checked_add(2))
             .and_then(|n| n.checked_add(usize::from(step.area.is_some())))
             .ok_or_else(|| fatal("main field count overflow"))?;
-        let ct = main
-            .checked_sub(1)
-            .ok_or_else(|| fatal("CT field count overflow"))?;
+        let ct = if has_extdims {
+            0
+        } else {
+            step.keys
+                .len()
+                .checked_add(step.resources.len())
+                .and_then(|n| n.checked_add(1))
+                .and_then(|n| n.checked_add(usize::from(step.area.is_some())))
+                .ok_or_else(|| fatal("CT field count overflow"))?
+        };
         let bytes = main
             .checked_add(ct)
             .and_then(|n| n.checked_mul(std::mem::size_of::<FieldId>()))
@@ -85,7 +105,9 @@ impl<'a> Cursor<'a> {
         let mut main_fields = Vec::with_capacity(main);
         let mut ct_fields = Vec::with_capacity(ct);
         main_fields.extend([step.inputs.main_period, step.inputs.main_active]);
-        ct_fields.push(step.inputs.ct_period);
+        if !has_extdims {
+            ct_fields.push(step.inputs.ct_period);
+        }
         for side in &step.keys {
             let account = match side {
                 DrCrSideL::Dr => &step.inputs.accounts[0],
@@ -94,15 +116,20 @@ impl<'a> Cursor<'a> {
             if !main_fields.contains(&account.main) {
                 main_fields.push(account.main);
             }
-            if !ct_fields.contains(&account.ct) {
+            if !has_extdims && !ct_fields.contains(&account.ct) {
                 ct_fields.push(account.ct);
+            }
+        }
+        for ext in &step.ext_dims {
+            if !main_fields.contains(&ext.main) {
+                main_fields.push(ext.main);
             }
         }
         for resource in &step.resources {
             if !main_fields.contains(&resource.main) {
                 main_fields.push(resource.main);
             }
-            if !ct_fields.contains(&resource.ct) {
+            if !has_extdims && !ct_fields.contains(&resource.ct) {
                 ct_fields.push(resource.ct);
             }
         }
@@ -110,7 +137,7 @@ impl<'a> Cursor<'a> {
             if !main_fields.contains(&area.main) {
                 main_fields.push(area.main);
             }
-            if !ct_fields.contains(&area.ct) {
+            if !has_extdims && !ct_fields.contains(&area.ct) {
                 ct_fields.push(area.ct);
             }
         }
@@ -189,6 +216,9 @@ impl<'a> Cursor<'a> {
             {
                 continue;
             }
+            if is_ct && !step.ext_dims.is_empty() {
+                return Err(fatal("CT branch cannot supply ext dimensions"));
+            }
             if is_ct {
                 let mut nonzero = false;
                 for resource in &step.resources {
@@ -202,11 +232,16 @@ impl<'a> Cursor<'a> {
                     continue;
                 }
             }
+            let n_dims = step
+                .keys
+                .len()
+                .checked_add(step.ext_dims.len())
+                .ok_or_else(|| fatal("raw key count overflow"))?;
             let width = step
                 .resources
                 .len()
                 .checked_mul(raw::PER_RESOURCE)
-                .and_then(|n| n.checked_add(step.keys.len()))
+                .and_then(|n| n.checked_add(n_dims))
                 .and_then(|n| n.checked_add(raw::DIMS))
                 .ok_or_else(|| fatal("raw row width overflow"))?;
             let bytes = width
@@ -218,6 +253,11 @@ impl<'a> Cursor<'a> {
             charge = charge
                 .checked_add(row_cap_bytes(&row))
                 .ok_or_else(|| fatal("source row model overflow"))?;
+            for ext in &step.ext_dims {
+                charge = charge
+                    .checked_add(crate::model::value_model(value(&row, ext.main)?))
+                    .ok_or_else(|| fatal("ext dimension model overflow"))?;
+            }
             for resource in &step.resources {
                 let field = if is_ct { resource.ct } else { resource.main };
                 charge = charge
@@ -248,6 +288,22 @@ impl<'a> Cursor<'a> {
                 *out.get_mut(raw::DIMS + index)
                     .ok_or_else(|| fatal("account raw offset"))? = key.clone();
             }
+            for (index, ext) in step.ext_dims.iter().enumerate() {
+                let ext_val = value(&row, ext.main)?;
+                match ext_val {
+                    QValue::Null
+                    | QValue::Undefined
+                    | QValue::Bool(_)
+                    | QValue::String(_)
+                    | QValue::Date(_)
+                    | QValue::Uuid(_)
+                    | QValue::Ref { .. } => {}
+                    QValue::Number(n) => crate::num::guard(cx.env, n)?,
+                    _ => return Err(fatal("ext dimension value is not a valid scalar")),
+                }
+                *out.get_mut(raw::DIMS + step.keys.len() + index)
+                    .ok_or_else(|| fatal("ext dimension raw offset"))? = ext_val.clone();
+            }
             for (index, resource) in step.resources.iter().enumerate() {
                 let field = if is_ct { resource.ct } else { resource.main };
                 let resource_value = match value(&row, field)? {
@@ -262,7 +318,7 @@ impl<'a> Cursor<'a> {
                     }
                     _ => return Err(fatal("resource is not Number or Null")),
                 };
-                *out.get_mut(raw::component(step.keys.len(), index, raw::TURNOVER))
+                *out.get_mut(raw::component(n_dims, index, raw::TURNOVER))
                     .ok_or_else(|| fatal("resource raw offset"))? = resource_value;
             }
             return Ok(Some(out));

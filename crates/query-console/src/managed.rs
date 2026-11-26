@@ -5,9 +5,12 @@ use memory_budget::{
     MemoryLimit, TextCount, TextOutput,
 };
 use query_ir::managed_value::{ManagedColumn as RawColumn, ManagedValue, ValueRef};
-use query_ir::uuid_of;
+use query_ir::{QType, uuid_of};
 use query_syntax::Lang;
-use query_testhost::{TestBase, measure_managed_repr, write_managed_repr};
+use query_testhost::{
+    TestBase, column_may_be_type_description, measure_managed_repr, try_decode_value_type_blob,
+    write_managed_repr,
+};
 use query_testkit::repr::write_type_repr_budgeted;
 use serde::ser::{Serialize, SerializeStruct, Serializer};
 use std::fmt::Write;
@@ -82,6 +85,48 @@ impl ManagedCell {
         budget: &MemoryBudget,
         content_limit: u64,
     ) -> Result<Self, BudgetError> {
+        Self::try_new_in_column(value, None, base, lang, budget, content_limit)
+    }
+
+    pub fn try_new_in_column(
+        value: &ManagedValue,
+        col_ty: Option<&QType>,
+        base: &TestBase,
+        lang: Lang,
+        budget: &MemoryBudget,
+        content_limit: u64,
+    ) -> Result<Self, BudgetError> {
+        if let ValueRef::Binary(bytes) = value.view()
+            && col_ty.is_some_and(column_may_be_type_description)
+            && let Some(td) = try_decode_value_type_blob(bytes, base.schema(), budget)?
+        {
+            let mut measured = TextCount::new(Category::Row, content_limit);
+            write_type_repr_budgeted(
+                base.schema(),
+                &td,
+                lang,
+                budget,
+                Category::Execution,
+                &mut measured,
+                true,
+            )?;
+            let text = text(budget, measured.len(), |output| {
+                write_type_repr_budgeted(
+                    base.schema(),
+                    &td,
+                    lang,
+                    budget,
+                    Category::Execution,
+                    output,
+                    true,
+                )
+            })?;
+            return Ok(Self {
+                kind: CellKind::Other,
+                text,
+                reference: None,
+            });
+        }
         let len = measure_managed_repr(value, base, lang, budget, content_limit)?;
         let (kind, reference) = match value.view() {
             ValueRef::Null => (CellKind::Null, None),
@@ -93,9 +138,10 @@ impl ManagedCell {
             ValueRef::Type(_) => (CellKind::Type, None),
             ValueRef::Binary(_) => (CellKind::Binary, None),
             ValueRef::Nested(_) => (CellKind::Nested, None),
-            ValueRef::Uuid(_) | ValueRef::Storage(_) | ValueRef::SysEnum(..) => {
-                (CellKind::Other, None)
-            }
+            ValueRef::Uuid(_)
+            | ValueRef::Storage(_)
+            | ValueRef::SysEnum(..)
+            | ValueRef::PointInTime(_) => (CellKind::Other, None),
             ValueRef::Ref { table, id } => {
                 let kind = base
                     .ref_xml_name(table)

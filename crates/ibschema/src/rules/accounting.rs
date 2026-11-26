@@ -375,8 +375,8 @@ fn totals_by_accounts(
             b.std_of(s, f, cx.child_name(r));
         }
     }
-    splitter(&mut b, cx);
     separators_group(&mut b, cx, names)?;
+    splitter(&mut b, cx);
     let toks = [
         F(f::ACCOUNT),
         F(f::PERIOD),
@@ -418,8 +418,8 @@ fn totals_between_accounts(cx: &Ctx, names: &mut Names) -> Result<(Table, TableR
         sided: &sided,
     };
     item_columns(&mut b, cx, names, &res, &res_cols)?;
-    splitter(&mut b, cx);
     separators_group(&mut b, cx, names)?;
+    splitter(&mut b, cx);
     let (p, dt, ct, sp) = (
         F(f::PERIOD),
         F(f::ACCOUNT_DT),
@@ -462,6 +462,7 @@ fn ext_dimension_values(
     }
     b.std(StdField::Kind, kind_field(cx, names, f::KIND, false)?);
     b.std(StdField::Value, ed_value_field(cx, f::VALUE, classes)?);
+    separators_group(&mut b, cx, names)?;
     let (p, rec, ln) = (F(f::PERIOD), F(f::RECORDER), F(f::LINE_NO));
     let (kind, corr) = (F(f::KIND), F(f::CORRESPOND));
     let toks = [

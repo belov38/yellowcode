@@ -78,14 +78,18 @@ pub(crate) enum Command {
   Пользователи переносятся. Адреса почты пользователей не переносятся, как и в выгрузке платформы: результат пишется, \
 в stderr — предупреждение с числом пользователей с адресом, в ответе — usersWithEmail. В 1CD пользователи конфигурации \
 без разделения пользователей пересобираются при загрузке DT; вход таких пользователей платформой ещё не принят.
+  Расширения конфигурации (ConfigCAS и блок хранения SchemaStorage SchemaID 1 с таблицами X1) переносятся в DT (число \
+таблиц расширений — extensionTables в ответе); в 1CD блок расширений загружается в рамках поддерживаемого профиля восстановления.
 
 Что отклоняется (сообщение называет причину; у отказов DT и 1CD по профилю конфигурации — ещё и код в квадратных \
 скобках, например [compatibility_unverified]):
   - разностные, журнальные, шифрованные (в том числе TDE), составные и повреждённые копии — до восстановления, временная \
 база не создаётся;
   - без --server: сжатые и зашифрованные копии и копии SQL Server старше 2014;
-  - DT и 1CD: расширения конфигурации (ConfigCAS), только старый список пользователей (users.usr) при пустой V8USERS, \
-политики паролей и другие служебные данные, которые команда не переносит (сообщение перечисляет найденное);
+  - DT и 1CD: неприменённые расширения (ConfigCASSave, незавершённая реструктуризация NGS, схемы расширений кроме SchemaID 1), \
+сторонние таблицы SQL (если не задан --ignore-extra-tables; не-dbo схемы и двойники X<N> отклоняются всегда), только старый \
+список пользователей (users.usr) при пустой V8USERS, политики паролей и другие служебные данные, которые команда не переносит \
+(сообщение перечисляет найденное);
   - DT и 1CD: режим блокировок не управляемый, режим совместимости 8.2.14 и ниже у любой конфигурации \
 ([compatibility_old]) и вне 8.3.14–8.5.1 у конфигурации с общими реквизитами;
   - 1CD: режим совместимости ниже 8.3.11 (загрузка в 1CD принимает 8.3.11–8.5.1); этот отказ приходит уже после \
@@ -162,6 +166,11 @@ yellowcode-bak-failure-<время UTC>.log: имена в нём заменен
             help = "Только без --server: отказать, если CF нельзя доказать равным восстановленному SQL Server (журнал не применён, ADR, другая версия SQL Server), вместо предупреждения"
         )]
         strict: bool,
+        #[arg(
+            long,
+            help = "Только для DT и 1CD с --server: пропустить сторонние не-1С таблицы в схеме dbo (отсутствующие таблицы 1С и двойники расширений X<N> не пропускаются)"
+        )]
+        ignore_extra_tables: bool,
     },
 }
 
@@ -178,6 +187,7 @@ fn direct_conflicts(command: &Command, trace_variable: Option<&std::ffi::OsStr>)
         trust_server_certificate,
         trace,
         memory_limit,
+        ignore_extra_tables,
         ..
     } = command
     else {
@@ -201,6 +211,7 @@ fn direct_conflicts(command: &Command, trace_variable: Option<&std::ffi::OsStr>)
         ),
         (*trust_server_certificate, "--trust-server-certificate"),
         (memory_limit.is_some(), "--memory-limit"),
+        (*ignore_extra_tables, "--ignore-extra-tables"),
         (trace.is_some(), "--trace"),
         (
             trace_variable.is_some_and(|value| !value.is_empty()),
@@ -224,6 +235,7 @@ impl Command {
             raw,
             to,
             strict,
+            ignore_extra_tables,
             server,
             ..
         } = self
@@ -240,6 +252,8 @@ impl Command {
             )
         } else if *strict && server.is_some() {
             "--strict только без --server: через SQL Server журнал копии применяется, и предупреждать не о чем".to_owned()
+        } else if *ignore_extra_tables && server.is_some() && matches!(to, Format::Cf) {
+            "--ignore-extra-tables только для --to dt и --to 1cd: для CF таблицы данных SQL не проверяются".to_owned()
         } else {
             let conflicts = direct_conflicts(self, trace_variable);
             if conflicts.is_empty() {
@@ -288,6 +302,7 @@ pub(crate) fn run(
             memory_limit,
             raw,
             strict,
+            ignore_extra_tables,
         } => {
             if memory_limit.is_some() && !matches!(to, Format::Onecd) {
                 return Err("--memory-limit is only for 1CD conversion".into());
@@ -318,6 +333,9 @@ pub(crate) fn run(
                 lifecycle_timeout: sqlcmd_lifecycle_timeout.map(std::time::Duration::from_secs),
                 trust_server_certificate,
             };
+            let dt_options = yellowcode_core::plain::bak::DtOptions {
+                ignore_extra_tables,
+            };
             match to {
                 Format::Cf => yellowcode_core::plain::bak::convert_with_options(
                     request,
@@ -326,18 +344,17 @@ pub(crate) fn run(
                     out,
                     err,
                 ),
-                Format::Dt => yellowcode_core::plain::bak::convert_dt_with_backup_set(
-                    request, backup_set, out, err,
+                Format::Dt => yellowcode_core::plain::bak::convert_dt_with_options(
+                    request, backup_set, dt_options, out, err,
                 ),
-                Format::Onecd => {
-                    yellowcode_core::plain::bak::convert_onecd_with_memory_and_backup_set(
-                        request,
-                        memory_limit,
-                        backup_set,
-                        out,
-                        err,
-                    )
-                }
+                Format::Onecd => yellowcode_core::plain::bak::convert_onecd_with_options(
+                    request,
+                    memory_limit,
+                    backup_set,
+                    dt_options,
+                    out,
+                    err,
+                ),
             }
         }
     }

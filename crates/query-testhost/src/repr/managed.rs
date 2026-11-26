@@ -1,3 +1,4 @@
+use super::type_desc::{column_may_be_type_description, try_decode_value_type_blob};
 use super::xml_type_name;
 use crate::TestBase;
 use memory_budget::{
@@ -34,7 +35,7 @@ pub fn repr_lang_budgeted(
         budget,
         category,
     }
-    .write(Input::Native(value), &mut output, 0)?;
+    .write(Input::Native(value), None, &mut output, 0)?;
     output.into_string()
 }
 
@@ -69,17 +70,40 @@ pub fn write_managed_repr(
     category: Category,
     output: &mut impl TextOutput,
 ) -> Result<(), BudgetError> {
+    write_managed_column_repr(value, None, base, lang, budget, category, output)
+}
+
+pub fn write_managed_column_repr(
+    value: &ManagedValue,
+    col_ty: Option<&QType>,
+    base: &TestBase,
+    lang: Lang,
+    budget: &MemoryBudget,
+    category: Category,
+    output: &mut impl TextOutput,
+) -> Result<(), BudgetError> {
     ValueWriter {
         base,
         lang,
         budget,
         category,
     }
-    .write(Input::Managed(value), output, 0)
+    .write(Input::Managed(value), col_ty, output, 0)
 }
 
 pub fn measure_managed_repr(
     value: &ManagedValue,
+    base: &TestBase,
+    lang: Lang,
+    budget: &MemoryBudget,
+    limit: u64,
+) -> Result<u64, BudgetError> {
+    measure_managed_column_repr(value, None, base, lang, budget, limit)
+}
+
+pub fn measure_managed_column_repr(
+    value: &ManagedValue,
+    col_ty: Option<&QType>,
     base: &TestBase,
     lang: Lang,
     budget: &MemoryBudget,
@@ -92,7 +116,7 @@ pub fn measure_managed_repr(
         budget,
         category: Category::Execution,
     }
-    .write(Input::Managed(value), &mut output, 0)?;
+    .write(Input::Managed(value), col_ty, &mut output, 0)?;
     Ok(output.len())
 }
 
@@ -103,6 +127,17 @@ pub fn measure_native_repr(
     budget: &MemoryBudget,
     limit: u64,
 ) -> Result<u64, BudgetError> {
+    measure_native_column_repr(value, None, base, lang, budget, limit)
+}
+
+pub fn measure_native_column_repr(
+    value: &QValue,
+    col_ty: Option<&QType>,
+    base: &TestBase,
+    lang: Lang,
+    budget: &MemoryBudget,
+    limit: u64,
+) -> Result<u64, BudgetError> {
     let mut output = TextCount::new(Category::Row, limit);
     ValueWriter {
         base,
@@ -110,12 +145,23 @@ pub fn measure_native_repr(
         budget,
         category: Category::Execution,
     }
-    .write(Input::Native(value), &mut output, 0)?;
+    .write(Input::Native(value), col_ty, &mut output, 0)?;
     Ok(output.len())
 }
 
 pub fn write_native_repr(
     value: &QValue,
+    base: &TestBase,
+    lang: Lang,
+    budget: &MemoryBudget,
+    output: &mut impl TextOutput,
+) -> Result<(), BudgetError> {
+    write_native_column_repr(value, None, base, lang, budget, output)
+}
+
+pub fn write_native_column_repr(
+    value: &QValue,
+    col_ty: Option<&QType>,
     base: &TestBase,
     lang: Lang,
     budget: &MemoryBudget,
@@ -127,7 +173,7 @@ pub fn write_native_repr(
         budget,
         category: Category::Execution,
     }
-    .write(Input::Native(value), output, 0)
+    .write(Input::Native(value), col_ty, output, 0)
 }
 
 #[derive(Clone, Copy)]
@@ -146,6 +192,7 @@ impl ValueWriter<'_> {
     fn write(
         &self,
         value: Input<'_>,
+        col_ty: Option<&QType>,
         output: &mut impl TextOutput,
         depth: usize,
     ) -> Result<(), BudgetError> {
@@ -177,8 +224,9 @@ impl ValueWriter<'_> {
                 QValue::Binary(value) => ValueRef::Binary(value),
                 QValue::Storage(value) => ValueRef::Storage(value),
                 QValue::SysEnum(ty, index) => ValueRef::SysEnum(*ty, *index),
+                QValue::PointInTime(moment) => ValueRef::PointInTime(moment),
                 QValue::Nested(_) => return Err(BudgetError::Overflow),
-                QValue::PointInTime(_) | QValue::Boundary(_) => return Err(BudgetError::Overflow),
+                QValue::Boundary(_) => return Err(BudgetError::Overflow),
             },
             Input::Managed(value) => value.view(),
         };
@@ -191,6 +239,20 @@ impl ValueWriter<'_> {
                 nested.rows.iter().map(|row| row.iter().map(Input::Managed)),
                 output,
                 depth,
+            );
+        }
+        if let ValueRef::Binary(bytes) = value
+            && col_ty.is_some_and(column_may_be_type_description)
+            && let Some(td) = try_decode_value_type_blob(bytes, &self.base.schema, self.budget)?
+        {
+            return write_type_repr_budgeted(
+                &self.base.schema,
+                &td,
+                self.lang,
+                self.budget,
+                Category::Execution,
+                output,
+                true,
             );
         }
         if let ValueRef::Type(ty) = value {
@@ -210,12 +272,12 @@ impl ValueWriter<'_> {
         depth: usize,
     ) -> Result<(), BudgetError>
     where
-        C: IntoIterator<Item = (&'a str, &'a QType)>,
+        C: IntoIterator<Item = (&'a str, &'a QType)> + Clone,
         R: IntoIterator<Item = I>,
         I: IntoIterator<Item = Input<'a>>,
     {
         output.try_push_str("РезультатЗапроса<")?;
-        for (index, (name, ty)) in columns.into_iter().enumerate() {
+        for (index, (name, ty)) in columns.clone().into_iter().enumerate() {
             if index != 0 {
                 output.try_push_str("; ")?;
             }
@@ -237,11 +299,13 @@ impl ValueWriter<'_> {
                 output.try_push_str(", ")?;
             }
             output.try_push('(')?;
+            let mut col_iter = columns.clone().into_iter();
             for (index, cell) in row.into_iter().enumerate() {
                 if index != 0 {
                     output.try_push_str(", ")?;
                 }
-                self.write(cell, output, depth + 1)?;
+                let col_ty = col_iter.next().map(|(_, ty)| ty);
+                self.write(cell, col_ty, output, depth + 1)?;
             }
             output.try_push(')')?;
         }
@@ -300,14 +364,7 @@ impl ValueWriter<'_> {
                 }
                 output.write_char('"')
             }
-            ValueRef::Date(value) => {
-                let parts = value.parts();
-                write!(
-                    output,
-                    "'{:04}-{:02}-{:02}T{:02}:{:02}:{:02}'",
-                    parts.year, parts.month, parts.day, parts.hour, parts.minute, parts.second
-                )
-            }
+            ValueRef::Date(value) => self.write_date(value, output),
             ValueRef::Uuid(bytes) => {
                 output.write_str("УникальныйИдентификатор(")?;
                 for (index, byte) in bytes.iter().enumerate() {
@@ -334,24 +391,45 @@ impl ValueWriter<'_> {
                     .map_or("?", |value| value.name_en.as_str());
                 write!(output, "{}({value})", xml_type_name(&info.name_en))
             }
-            ValueRef::Ref { table, id } => {
-                let Some(atom) = self.base.by_number.get(&table) else {
-                    return write!(output, "Ref#{table}({})", uuid_of(id));
-                };
-                let info = self.base.schema.ref_info(*atom);
-                output.write_str(&info.xml_name)?;
-                output.write_char('(')?;
-                if let Some(name) = self.base.predefined_names.get(&(table, *id)) {
-                    output.write_char('@')?;
-                    output.write_str(name)?;
-                } else if let Some(name) = self.base.enum_names.get(&(table, *id)) {
-                    output.write_str(name)?;
-                } else if *id != [0; 16] || info.kind != md_model::MdKind::Enum {
-                    write!(output, "{}", uuid_of(id))?;
+            ValueRef::Ref { table, id } => self.write_ref(table, id, output),
+            ValueRef::PointInTime(moment) => {
+                output.write_str("МоментВремени(")?;
+                self.write_date(moment.date, output)?;
+                output.write_str(", ")?;
+                match &moment.reference {
+                    Some((table, id)) => self.write_ref(*table, id, output)?,
+                    None => output.write_str("Неопределено")?,
                 }
                 output.write_char(')')
             }
             ValueRef::Nested(_) | ValueRef::Type(_) => Err(fmt::Error),
         }
+    }
+
+    fn write_date(&self, value: bsl_prim::BslDate, output: &mut impl TextOutput) -> fmt::Result {
+        let parts = value.parts();
+        write!(
+            output,
+            "'{:04}-{:02}-{:02}T{:02}:{:02}:{:02}'",
+            parts.year, parts.month, parts.day, parts.hour, parts.minute, parts.second
+        )
+    }
+
+    fn write_ref(&self, table: u32, id: &[u8; 16], output: &mut impl TextOutput) -> fmt::Result {
+        let Some(atom) = self.base.by_number.get(&table) else {
+            return write!(output, "Ref#{table}({})", uuid_of(id));
+        };
+        let info = self.base.schema.ref_info(*atom);
+        output.write_str(&info.xml_name)?;
+        output.write_char('(')?;
+        if let Some(name) = self.base.predefined_names.get(&(table, *id)) {
+            output.write_char('@')?;
+            output.write_str(name)?;
+        } else if let Some(name) = self.base.enum_names.get(&(table, *id)) {
+            output.write_str(name)?;
+        } else if *id != [0; 16] || info.kind != md_model::MdKind::Enum {
+            write!(output, "{}", uuid_of(id))?;
+        }
+        output.write_char(')')
     }
 }

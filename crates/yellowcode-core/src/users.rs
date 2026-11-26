@@ -1,5 +1,5 @@
 use mdconf::{Configuration, ConfigurationExt, LoadOptions, LoadProfile, MdKind};
-use onecd::{BlobVal, Database, OpenOptions, Value};
+use onecd::{BlobVal, Database, Locking, OpenOptions, Value};
 use std::{collections::BTreeMap, io::Write, ops::ControlFlow, path::Path};
 use unicode_normalization::UnicodeNormalization;
 pub use v8users::card::{Authentication, Card, Role, Separation};
@@ -344,9 +344,11 @@ pub fn find<'a>(cards: &'a [Card], identity: &str) -> Result<&'a Card, Error> {
 }
 
 fn open(base: &Path) -> Result<Database, Error> {
+    let mut options = OpenOptions::read_only();
+    options.locking = Locking::None;
     Ok(Database::open(
         &crate::viewer::source::resolve(base),
-        OpenOptions::read_only(),
+        options,
     )?)
 }
 

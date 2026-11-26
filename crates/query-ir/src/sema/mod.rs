@@ -787,6 +787,7 @@ impl<'a> Analyzer<'a> {
             self.join_conditions(f)?;
         }
         let mut names = columns::Names::default();
+        names.reserve_aliases(self.memory, &s.items)?;
         let mut items = crate::managed::SelectItems::new(self.memory, s.items.len())?;
         for item in &s.items {
             self.item_owned(item, &mut items, &mut names)?;
@@ -819,6 +820,7 @@ impl<'a> Analyzer<'a> {
         };
         if let Some(g) = select::grouping_of(
             self.memory,
+            self.schema,
             items.items(),
             group.trusted_borrow().as_deref(),
             having.trusted_borrow().as_ref(),

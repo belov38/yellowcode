@@ -1,7 +1,13 @@
 mod managed;
+mod type_desc;
 pub use managed::{
-    measure_managed_repr, measure_native_repr, repr_budgeted, repr_lang_budgeted,
-    repr_managed_budgeted, repr_managed_lang_budgeted, write_managed_repr, write_native_repr,
+    measure_managed_column_repr, measure_managed_repr, measure_native_column_repr,
+    measure_native_repr, repr_budgeted, repr_lang_budgeted, repr_managed_budgeted,
+    repr_managed_lang_budgeted, write_managed_column_repr, write_managed_repr,
+    write_native_column_repr, write_native_repr,
+};
+pub use type_desc::{
+    column_may_be_type_description, decode_value_type_blob, try_decode_value_type_blob,
 };
 
 use crate::host::TestBase;
@@ -20,6 +26,16 @@ pub fn repr(v: &QValue, base: &TestBase) -> String {
 }
 
 pub fn repr_lang(v: &QValue, base: &TestBase, lang: Lang) -> String {
+    repr_column_lang(v, None, base, lang)
+}
+
+pub fn repr_column_lang(v: &QValue, col_ty: Option<&QType>, base: &TestBase, lang: Lang) -> String {
+    if let QValue::Binary(b) = v
+        && col_ty.is_some_and(column_may_be_type_description)
+        && let Some(td) = decode_value_type_blob(b, &base.schema)
+    {
+        return query_testkit::repr::type_repr(&base.schema, &td, lang);
+    }
     match v {
         QValue::Undefined => "Неопределено".to_string(),
         QValue::Null => "NULL".to_string(),
@@ -57,7 +73,13 @@ pub fn repr_lang(v: &QValue, base: &TestBase, lang: Lang) -> String {
                 .rows
                 .iter()
                 .map(|r| {
-                    let vals: Vec<String> = r.iter().map(|v| repr_lang(v, base, lang)).collect();
+                    let vals: Vec<String> = r
+                        .iter()
+                        .enumerate()
+                        .map(|(i, v)| {
+                            repr_column_lang(v, n.columns.get(i).map(|c| &c.ty), base, lang)
+                        })
+                        .collect();
                     format!("({})", vals.join(", "))
                 })
                 .collect();

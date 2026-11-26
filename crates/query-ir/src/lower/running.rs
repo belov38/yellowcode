@@ -19,6 +19,7 @@ pub struct RunningBalanceL {
     pub bounds: [Option<PExpr>; 2],
     pub boundaries: bool,
     pub wanted: Vec<(usize, usize)>,
+    pub accounting: bool,
 }
 impl RunningBalanceL {
     pub fn width(&self) -> usize {
@@ -257,6 +258,7 @@ impl Lower<'_> {
             bounds,
             boundaries: v.complement != Some(Complement::Movements),
             wanted,
+            accounting: false,
         };
         input.width = step.width();
         input.rel = RelL::RunningBalance {

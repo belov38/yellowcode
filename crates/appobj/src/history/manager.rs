@@ -1,10 +1,14 @@
+use super::content::{Field, Tab, Val};
+use super::dataid::KeyValue;
+use super::decode::{self, Form, State, Stored};
 use super::versions::{HistTables, Version};
 use crate::Application;
 use crate::errors::{self, keys};
 use crate::meta::{MdKey, MdPath, arg_value, key_with_app, member_name, no_field, type_mismatch};
-use crate::model::{ObjId, ObjKind};
+use crate::model::{FieldDef, FieldRole, ObjId, ObjKind, Periodicity, StdAttr};
 use crate::session::call_ctx;
 use crate::txn::CallTxn;
+use crate::types::Category;
 use crate::values::refs::{RefValue, as_ref, ref_value};
 use bsl_prim::BslDate;
 use bsl_vm::{
@@ -244,7 +248,7 @@ impl Text {
 #[derive(Default)]
 struct Filter {
     md: Option<ObjId>,
-    data: Option<RefValue>,
+    data: Option<(ObjId, [u8; 20])>,
     number: Option<i64>,
     changes: Option<Vec<i64>>,
     users: Option<Vec<[u8; 16]>>,
@@ -367,7 +371,7 @@ impl Manager {
         Ok(Value::Undefined)
     }
 
-    fn filter(&self, v: &Value, member: &str) -> CallResult<Filter> {
+    fn filter(&self, ex: &mut Execution, v: &Value, member: &str) -> CallResult<Filter> {
         if bsl_stdlib::array_items(v).is_some() {
             return Err(type_mismatch(1).into());
         }
@@ -378,15 +382,7 @@ impl Manager {
             let bad = || refusal(&format!("{member}: Отбор.{key}: значение"));
             match key.as_str() {
                 "Метаданные" => f.md = Some(self.object_of(&value, member)?),
-                "Данные" => {
-                    let r = as_ref(&value).filter(|r| !r.is_empty()).ok_or_else(|| {
-                        refusal(&format!(
-                            "{member}: Отбор.Данные: не ссылка (ключ записи регистра не читается)"
-                        ))
-                    })?;
-                    self.kept(r.obj, member)?;
-                    f.data = Some(r);
-                }
+                "Данные" => f.data = Some(self.data_of(ex, &value, member)?),
                 "НомерВерсии" => match value {
                     Value::Number(n) => f.number = Some(n.to_i64().ok_or_else(bad)?),
                     _ => return Err(bad().into()),
@@ -452,8 +448,8 @@ impl Manager {
                 _ => {}
             }
         }
-        if let (Some(md), Some(data)) = (f.md, f.data)
-            && md != data.obj
+        if let (Some(md), Some((obj, _))) = (f.md, f.data)
+            && md != obj
         {
             return Err(refusal(&format!("{member}: Метаданные и Данные разных объектов")).into());
         }
@@ -525,16 +521,17 @@ impl Manager {
     }
 
     fn select_versions(&self, ex: &mut Execution, args: &[Arg], member: &str) -> CallResult<Value> {
-        let f = self.filter(&arg_value(ex, args, 0)?, member)?;
+        let first = arg_value(ex, args, 0)?;
+        let f = self.filter(ex, &first, member)?;
         let cols = self.columns(&arg_value(ex, args, 1)?, member)?;
         let order = arg_value(ex, args, 2)?;
         let limit = arg_value(ex, args, 3)?;
         let obj =
-            f.md.or(f.data.map(|d| d.obj))
+            f.md.or(f.data.map(|(o, _)| o))
                 .ok_or_else(|| refusal(member))?;
         let def = self.app.model().obj(obj);
         let md = def.md;
-        let data = f.data.map(|d| super::dataid::object_id(d.id));
+        let data = f.data.map(|(_, d)| d);
         let mut rows = 0u64;
         let all = self.read(ex, member, |t, r| {
             t.versions(r, md, data, &mut || {
@@ -582,15 +579,29 @@ impl Manager {
                 return Err(refusal(&format!("{member}: МаксимальноеКоличество: значение")).into());
             }
         }
-        if !picked.is_empty() {
-            let empty = self.read(ex, member, |t, r| {
-                t.queues_empty(r).map_err(|e| e.to_string())
-            })?;
-            if !empty {
-                return Err(refusal(&format!("{member}: версии при непустой очереди")).into());
-            }
-        }
+        self.queues_checked(member, !picked.is_empty())?;
         self.table(ex, obj, &cols, &picked, member)
+    }
+
+    fn queues_checked(&self, member: &str, any: bool) -> CallResult<()> {
+        if !any {
+            return Ok(());
+        }
+        let empty = self
+            .app
+            .store()
+            .read()
+            .map_err(|e| e.to_string())
+            .and_then(|r| {
+                HistTables::of(&self.app)?
+                    .queues_empty(&*r)
+                    .map_err(|e| e.to_string())
+            })
+            .map_err(|e| refusal(&format!("{member}: {e}")))?;
+        if !empty {
+            return Err(refusal(&format!("{member}: версии при непустой очереди")).into());
+        }
+        Ok(())
     }
 
     fn order(
@@ -768,6 +779,514 @@ impl Manager {
     }
 }
 
+impl Manager {
+    fn datum(
+        &self,
+        ex: &mut Execution,
+        args: &[Arg],
+        member: &str,
+    ) -> CallResult<(ObjId, [u8; 20])> {
+        let v = arg_value(ex, args, 0)?;
+        if matches!(v, Value::String(_)) {
+            return Err(type_mismatch(1).into());
+        }
+        self.data_of(ex, &v, member)
+    }
+
+    fn data_of(
+        &self,
+        ex: &mut Execution,
+        v: &Value,
+        member: &str,
+    ) -> CallResult<(ObjId, [u8; 20])> {
+        if let Some(r) = as_ref(v) {
+            if r.is_empty() {
+                return Err(
+                    refusal(&format!("{member}: Данные: не ссылка (пустая ссылка)")).into(),
+                );
+            }
+            self.kept(r.obj, member)?;
+            return Ok((r.obj, super::dataid::object_id(r.id)));
+        }
+        if let Value::Object(o) = v
+            && let Some((obj, Category::RecordKey)) = self
+                .app
+                .types()
+                .and_then(|t| t.describe(HostObject::type_id(&**o)))
+        {
+            self.kept(obj, member)?;
+            let key = self.record_key(ex, v, obj, member)?;
+            return Ok((obj, super::dataid::record_id(&key)));
+        }
+        Err(refusal(&format!("{member}: Данные: значение")).into())
+    }
+
+    fn record_key(
+        &self,
+        ex: &mut Execution,
+        key: &Value,
+        obj: ObjId,
+        member: &str,
+    ) -> CallResult<Vec<KeyValue>> {
+        let model = self.app.model();
+        let def = model.obj(obj);
+        let bad = |what: &str| -> CallError {
+            refusal(&format!("{member}: ключ записи: {what}")).into()
+        };
+        let mut names = Vec::new();
+        if !matches!(
+            def.behavior.periodicity,
+            None | Some(Periodicity::Nonperiodical)
+        ) {
+            let period = def
+                .fields
+                .iter()
+                .find(|f| f.std == Some(StdAttr::Period))
+                .ok_or_else(|| bad("период"))?;
+            names.push((period.name.clone(), true));
+        }
+        for f in &def.fields {
+            if f.role == FieldRole::Dimension {
+                names.push((f.name.clone(), false));
+            }
+        }
+        let mut out = Vec::with_capacity(names.len());
+        for (name, period) in names {
+            let v = ex.get_member(key, &name)?;
+            if period {
+                let Value::Date(d) = v else {
+                    return Err(bad("период"));
+                };
+                out.push(KeyValue::Date(
+                    u64::try_from(d.ticks()).map_err(|_| bad("период"))?,
+                ));
+                continue;
+            }
+            if let Value::String(s) = &v {
+                out.push(KeyValue::Str(s.to_string_lossy().to_string()));
+                continue;
+            }
+            let r = as_ref(&v)
+                .filter(|r| !r.is_empty())
+                .ok_or_else(|| bad(&name))?;
+            let table = model
+                .storage_of(r.obj)
+                .and_then(|st| st.ref_number)
+                .ok_or_else(|| bad("таблица ссылки"))?;
+            let type_id = model
+                .obj(r.obj)
+                .generated
+                .iter()
+                .find(|g| g.category == "Ref")
+                .map(|g| g.type_id)
+                .ok_or_else(|| bad("тип ссылки"))?;
+            out.push(KeyValue::Ref {
+                type_id,
+                table,
+                id: r.id,
+            });
+        }
+        Ok(out)
+    }
+
+    fn number_arg(
+        ex: &mut Execution,
+        args: &[Arg],
+        i: usize,
+        string: bool,
+        member: &str,
+    ) -> CallResult<i64> {
+        match arg_value(ex, args, i)? {
+            Value::Number(n) if n.is_zero() => Err(bad_parameter(i + 1, None).into()),
+            Value::Number(n) => n
+                .to_i64()
+                .filter(|k| k.is_positive() && Number::from_i64(*k) == n)
+                .ok_or_else(|| refusal(&format!("{member}: номер версии {n}")).into()),
+            Value::String(_) if string => Err(type_mismatch(i + 1).into()),
+            _ => Err(refusal(&format!("{member}: номер версии: значение")).into()),
+        }
+    }
+
+    fn stored(
+        &self,
+        ex: &mut Execution,
+        obj: ObjId,
+        data: [u8; 20],
+        member: &str,
+    ) -> CallResult<Vec<(Version, Stored)>> {
+        let md = self.app.model().obj(obj).md;
+        let mut rows = 0u64;
+        let mut all = self.read(ex, member, |t, rt| {
+            t.contents(rt, md, data, &mut || {
+                rows += 1;
+                Ok(())
+            })
+            .map_err(|e| e.to_string())?
+        })?;
+        ex.charge(rows)?;
+        crate::read_budget::reserve(ex, crate::read_budget::slots::<Version>(all.len()))?;
+        self.queues_checked(member, !all.is_empty())?;
+        all.sort_by_key(|(v, _)| v.number);
+        all.into_iter()
+            .map(|(v, content)| {
+                let s = decode::decode(&content).map_err(|e| refusal(&format!("{member}: {e}")))?;
+                Ok((v, s))
+            })
+            .collect()
+    }
+
+    fn data_at(
+        list: &[(Version, Stored)],
+        n: i64,
+        member: &str,
+    ) -> CallResult<Option<Option<State>>> {
+        let Some(at) = list.iter().position(|(v, _)| v.number == n) else {
+            return Ok(None);
+        };
+        let chain: Vec<(i64, &Stored)> = list
+            .iter()
+            .take(at + 1)
+            .map(|(v, s)| (v.number, s))
+            .collect();
+        let state = decode::assemble(&chain).map_err(|e| refusal(&format!("{member}: {e}")))?;
+        let deleted = list.get(at).is_some_and(|(v, _)| v.change == 2);
+        let whole_deletion = list
+            .get(at)
+            .is_some_and(|(_, s)| s.form == Form::Whole && s.change == 2);
+        if deleted != whole_deletion {
+            return Err(refusal(&format!(
+                "{member}: вид изменения версии {n} и её содержимое"
+            ))
+            .into());
+        }
+        Ok(Some(state))
+    }
+
+    fn field_name(
+        &self,
+        fields: &[FieldDef],
+        kind: ObjKind,
+        f: &Field,
+        member: &str,
+    ) -> CallResult<String> {
+        let found = match f {
+            Field::Std(n) => {
+                let attr = match (kind, *n) {
+                    (ObjKind::Catalog, -13) => Some(StdAttr::PredefinedDataName),
+                    (ObjKind::Catalog, -7) | (ObjKind::Document, -4) => Some(StdAttr::DeletionMark),
+                    (ObjKind::Catalog, -3) => Some(StdAttr::Description),
+                    (ObjKind::Catalog, -2) => Some(StdAttr::Code),
+                    (ObjKind::Document, -7) => Some(StdAttr::Posted),
+                    (ObjKind::Document, -3) => Some(StdAttr::Date),
+                    (ObjKind::Document, -2) => Some(StdAttr::Number),
+                    (ObjKind::InformationRegister, -2) => Some(StdAttr::Period),
+                    _ => None,
+                };
+                let Some(attr) = attr else {
+                    return Err(refusal(&match super::std_field(kind, *n) {
+                        Some(s) => format!("{member}: имя стандартного поля версии {s:?}"),
+                        None => format!("{member}: стандартное поле версии {n}"),
+                    })
+                    .into());
+                };
+                return Ok(attr.name(self.app.model().script).to_string());
+            }
+            Field::Item(u) => {
+                let md = RefId(*u).to_uuid();
+                fields.iter().find(|d| d.md == Some(md) && d.std.is_none())
+            }
+        };
+        found
+            .map(|d| d.name.clone())
+            .ok_or_else(|| refusal(&format!("{member}: поле версии вне метаданных")).into())
+    }
+
+    fn value_of(&self, ex: &mut Execution, v: &Val, member: &str) -> CallResult<Value> {
+        let refused = |what: &str| -> CallError { refusal(&format!("{member}: {what}")).into() };
+        Ok(match v {
+            Val::Bool(b) => Value::Bool(*b),
+            Val::Int(n) => Value::Number(Number::from_i64(
+                i64::try_from(*n).map_err(|_| refused("целое версии"))?,
+            )),
+            Val::Decimal(t) => {
+                Value::Number(Number::parse(t).ok_or_else(|| refused("число версии"))?)
+            }
+            Val::Str(s) => Value::from(s.as_str()),
+            Val::Date(t) => Value::Date(
+                i64::try_from(*t)
+                    .ok()
+                    .and_then(BslDate::from_ticks)
+                    .ok_or_else(|| refused("дата версии"))?,
+            ),
+            Val::Uuid(u) => bsl_stdlib::values::new_uuid(*RefId(*u).to_uuid().as_bytes()),
+            Val::Ref { id, table } => {
+                let obj = self
+                    .app
+                    .model()
+                    .obj_of_ref_number(*table)
+                    .ok_or_else(|| refused("ссылка неизвестной таблицы"))?;
+                let r = RefValue {
+                    obj,
+                    id: RefId(*id),
+                };
+                if self.app.model().obj(obj).kind != ObjKind::Enum
+                    && !crate::read::read_object_row(ex, &self.app, r)?.found
+                {
+                    return Err(refused("ссылка на данные, которых нет"));
+                }
+                let reference = ref_value(&self.app, r)?;
+                let presentation = Value::String(ex.present(&reference)?);
+                fixed(
+                    ex,
+                    vec![("Ссылка", reference), ("Представление", presentation)],
+                )?
+            }
+            Val::EmptyRef { table } => {
+                let obj = self
+                    .app
+                    .model()
+                    .obj_of_ref_number(*table)
+                    .ok_or_else(|| refused("ссылка неизвестной таблицы"))?;
+                let reference = ref_value(
+                    &self.app,
+                    RefValue {
+                        obj,
+                        id: RefId([0; 16]),
+                    },
+                )?;
+                fixed(ex, vec![("Ссылка", reference)])?
+            }
+            Val::Storage(b) => crate::values::field::storage_of(&self.app, b)?,
+            Val::Null => return Err(refused("Null в версии")),
+        })
+    }
+
+    fn section(&self, obj: ObjId, tab: &Tab, member: &str) -> CallResult<(String, Vec<String>)> {
+        let model = self.app.model();
+        let def = model.obj(obj);
+        let md = RefId(tab.md).to_uuid();
+        let t =
+            def.tabular.iter().find(|t| t.md == md).ok_or_else(|| {
+                refusal(&format!("{member}: табличная часть версии вне метаданных"))
+            })?;
+        let mut cols = Vec::with_capacity(tab.fields.len());
+        for f in &tab.fields {
+            if matches!(f, Field::Std(_)) {
+                return Err(refusal(&format!(
+                    "{member}: стандартное поле табличной части версии"
+                ))
+                .into());
+            }
+            cols.push(self.field_name(&t.fields, def.kind, f, member)?);
+        }
+        Ok((t.name.clone(), cols))
+    }
+
+    fn named_fields(
+        &self,
+        ex: &mut Execution,
+        obj: ObjId,
+        state: &State,
+        member: &str,
+    ) -> CallResult<Vec<(String, Value)>> {
+        let (kind, fields) = {
+            let model = self.app.model();
+            let def = model.obj(obj);
+            (def.kind, def.fields.clone())
+        };
+        let mut out = Vec::with_capacity(state.fields.len() + state.tabs.len());
+        for (f, v) in state.fields.iter().zip(&state.values) {
+            ex.charge(1)?;
+            let name = self.field_name(&fields, kind, f, member)?;
+            out.push((name, self.value_of(ex, v, member)?));
+        }
+        Ok(out)
+    }
+
+    fn version_data(&self, ex: &mut Execution, args: &[Arg], member: &str) -> CallResult<Value> {
+        let (obj, data) = self.datum(ex, args, member)?;
+        let n = Self::number_arg(ex, args, 1, true, member)?;
+        let list = self.stored(ex, obj, data, member)?;
+        if list.is_empty() {
+            return Err(self.no_latest_version(obj, member).into());
+        }
+        let Some(state) = Self::data_at(&list, n, member)? else {
+            return Err(
+                HostError::text("Данные истории не найдены", "History data not found").into(),
+            );
+        };
+        let Some(state) = state else {
+            return Ok(Value::Undefined);
+        };
+        let mut fields = self.named_fields(ex, obj, &state, member)?;
+        for (tab, lines) in state.tabs.iter().zip(&state.lines) {
+            let (name, cols) = self.section(obj, tab, member)?;
+            let table = ex.construct_by_name("ТаблицаЗначений", &mut [])?;
+            let list = ex.get_member(&table, "Колонки")?;
+            for c in &cols {
+                ex.call_method(
+                    &list,
+                    "Добавить",
+                    &mut [Arg::Val(Value::from(c.as_str()))],
+                    true,
+                )?;
+            }
+            for line in lines {
+                let row = ex.call_method(&table, "Добавить", &mut [], true)?;
+                for (c, v) in cols.iter().zip(line) {
+                    ex.charge(1)?;
+                    let cell = self.value_of(ex, v, member)?;
+                    ex.set_member(&row, c, cell)?;
+                }
+            }
+            fields.push((name, table));
+        }
+        fixed(
+            ex,
+            fields
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.clone()))
+                .collect(),
+        )
+    }
+
+    fn no_latest_version(&self, obj: ObjId, member: &str) -> HostError {
+        let def = self.app.model().obj(obj);
+        if def.kind != ObjKind::Catalog {
+            return refusal(&format!("{member}: версий данных нет"));
+        }
+        HostError::text(
+            &format!(
+                "Последняя версия данных не найдена: Справочник.{}",
+                def.name
+            ),
+            &format!("The latest data version is not found: Catalog.{}", def.name),
+        )
+    }
+
+    fn version_diff(&self, ex: &mut Execution, args: &[Arg], member: &str) -> CallResult<Value> {
+        let (obj, data) = self.datum(ex, args, member)?;
+        let after = match arg_value(ex, args, 1)? {
+            Value::Number(n) if !n.is_zero() => Self::number_arg(ex, args, 1, false, member)?,
+            _ => return Err(refusal(&format!("{member}: номер версии после изменения")).into()),
+        };
+        let before = match arg_value(ex, args, 2)? {
+            Value::Undefined => None,
+            _ => Some(Self::number_arg(ex, args, 2, false, member)?),
+        };
+        let list = self.stored(ex, obj, data, member)?;
+        if list.is_empty() {
+            return Err(refusal(&format!("{member}: версий данных нет")).into());
+        }
+        let Some(Some(a)) = Self::data_at(&list, after, member)? else {
+            return Ok(Value::Undefined);
+        };
+        let before_n = before.unwrap_or(after - 1);
+        if before.is_none() && before_n < 1 {
+            return self.first_version(ex, obj, &a, member);
+        }
+        let b = match Self::data_at(&list, before_n, member)? {
+            Some(Some(b)) => b,
+            Some(None) => {
+                return Err(refusal(&format!("{member}: версия до изменения — удаление")).into());
+            }
+            None => return Err(refusal(&format!("{member}: версии {before_n} нет")).into()),
+        };
+        if a.fields != b.fields || a.tabs != b.tabs {
+            return Err(refusal(&format!("{member}: поля версий различаются")).into());
+        }
+        if a.lines != b.lines {
+            return Err(refusal(&format!("{member}: различия табличных частей")).into());
+        }
+        let (kind, fields) = {
+            let model = self.app.model();
+            let def = model.obj(obj);
+            (def.kind, def.fields.clone())
+        };
+        let mut changed = Vec::new();
+        for ((f, x), y) in a.fields.iter().zip(&a.values).zip(&b.values) {
+            ex.charge(1)?;
+            if x == y {
+                continue;
+            }
+            let name = self.field_name(&fields, kind, f, member)?;
+            let after_value = self.value_of(ex, x, member)?;
+            let before_value = self.value_of(ex, y, member)?;
+            let pair = fixed(
+                ex,
+                vec![
+                    ("ЗначениеПослеИзменения", after_value),
+                    ("ЗначениеДоИзменения", before_value),
+                ],
+            )?;
+            changed.push((name, pair));
+        }
+        fixed(
+            ex,
+            changed
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.clone()))
+                .collect(),
+        )
+    }
+
+    fn first_version(
+        &self,
+        ex: &mut Execution,
+        obj: ObjId,
+        a: &State,
+        member: &str,
+    ) -> CallResult<Value> {
+        let mut out = Vec::new();
+        for (name, v) in self.named_fields(ex, obj, a, member)? {
+            out.push((name, fixed(ex, vec![("ЗначениеПослеИзменения", v)])?));
+        }
+        for (tab, lines) in a.tabs.iter().zip(&a.lines) {
+            let (name, cols) = self.section(obj, tab, member)?;
+            if lines.len() > 1 {
+                return Err(refusal(&format!(
+                    "{member}: первая версия с несколькими строками табличной части"
+                ))
+                .into());
+            }
+            let mut rows = Vec::with_capacity(lines.len());
+            for (i, line) in lines.iter().enumerate() {
+                let mut cells = Vec::with_capacity(cols.len());
+                for (c, v) in cols.iter().zip(line) {
+                    ex.charge(1)?;
+                    cells.push((c.as_str(), self.value_of(ex, v, member)?));
+                }
+                let number =
+                    Value::Number(Number::from_i64(i64::try_from(i + 1).unwrap_or(i64::MAX)));
+                let kind =
+                    bsl_stdlib::api::system_enum_value("ВидИзмененияСтрокиДанных", "Добавление")
+                        .ok_or_else(|| refusal(&format!("{member}: ВидИзмененияСтрокиДанных")))?;
+                let fields = fixed(ex, cells)?;
+                rows.push(fixed(
+                    ex,
+                    vec![
+                        ("НомерСтрокиВВерсииДоИзменения", number.clone()),
+                        ("НомерСтрокиВВерсииПослеИзменения", number),
+                        ("ВидИзмененияСтроки", kind),
+                        ("Поля", fields),
+                    ],
+                )?);
+            }
+            let array = bsl_stdlib::new_array(rows);
+            out.push((name, bsl_stdlib::api::new_fixed_array(ex, &array)?));
+        }
+        fixed(
+            ex,
+            out.iter().map(|(k, v)| (k.as_str(), v.clone())).collect(),
+        )
+    }
+}
+
+fn fixed(ex: &mut Execution, pairs: Vec<(&str, Value)>) -> CallResult<Value> {
+    let s = bsl_stdlib::new_structure(pairs);
+    Ok(bsl_stdlib::api::new_fixed_structure(ex, &s)?)
+}
+
 impl HostObject for Manager {
     fn type_id(&self) -> TypeId {
         TypeId::of_catalog(self.ty)
@@ -794,6 +1313,8 @@ impl HostObject for Manager {
             "GetSettings" => self.get_settings(ex, args, ru),
             "SelectVersions" => self.select_versions(ex, args, ru),
             "UpdateHistory" => self.update_history(ex, args, ru),
+            "GetVersionData" => self.version_data(ex, args, ru),
+            "GetVersionDiff" => self.version_diff(ex, args, ru),
             _ => Err(refusal(ru).into()),
         }
     }

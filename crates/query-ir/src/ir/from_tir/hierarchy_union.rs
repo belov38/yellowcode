@@ -1,10 +1,20 @@
-use super::{Builder, R, internal, out};
+use super::{Builder, R, autoorder, internal, later, out};
 use crate::QuerySchema;
-use crate::ir::{ColSel, Expr, ExprKind, Rel, SortKey, SrcId, SrcKind};
-use crate::schema::{FieldRole, QTableId, StdRole, TableKind};
+use crate::ir::{ColSel, Expr, ExprKind, Rel, SortKey, SourceS, SrcId, SrcKind};
+use crate::schema::{FieldRole, QFieldId, QTableId, StdRole, TableKind};
 use crate::tir::{self, Col, From, TExpr, TKind};
+use crate::types::{Other, QType};
+use crate::value::QValue;
 use mdschema::MdKind;
 use query_syntax::ast::OrderDir;
+
+pub(crate) fn union_autoorder_col_orderable(ty: &QType) -> bool {
+    !ty.has_unlimited_string()
+        && !ty
+            .others
+            .iter()
+            .any(|o| matches!(o, Other::Binary | Other::Storage | Other::QueryResult))
+}
 
 #[derive(Clone, Copy)]
 pub(crate) struct HierarchyUnion {
@@ -227,5 +237,290 @@ impl Builder<'_> {
             },
             true,
         ))
+    }
+
+    pub(super) fn order_union(
+        &mut self,
+        query: &tir::Query,
+        first: &tir::Select,
+        mut rel: Rel,
+        types: &[QType],
+    ) -> R<Rel> {
+        let hier_count = query
+            .order
+            .iter()
+            .filter(|k| matches!(k.dir, OrderDir::Hierarchy | OrderDir::HierarchyDesc))
+            .count();
+        if hier_count > 1 {
+            return later("ИЕРАРХИЯ с несколькими ключами или группировкой", "Q3");
+        }
+        let mut order_items: Vec<(usize, OrderDir)> = Vec::new();
+        if !query.order.is_empty() {
+            order_items.reserve(query.order.len());
+            for k in &query.order {
+                let Some(col) = k.col else {
+                    return internal("an order key of a union outside the select list");
+                };
+                if first
+                    .items
+                    .get(col)
+                    .is_some_and(|item| item.nested.is_some())
+                {
+                    return later("сортировка по вложенной таблице", "Q3");
+                }
+                if u16::try_from(col).is_ok_and(|c| self.present.contains(&c)) {
+                    return later("сортировка по представлению", "Q3");
+                }
+                order_items.push((col, k.dir));
+            }
+        } else if query.autoorder {
+            for (col, ty) in types.iter().enumerate() {
+                if first
+                    .items
+                    .get(col)
+                    .is_some_and(|item| item.nested.is_some())
+                    || u16::try_from(col).is_ok_and(|c| self.present.contains(&c))
+                    || !union_autoorder_col_orderable(ty)
+                {
+                    continue;
+                }
+                order_items.push((col, OrderDir::Asc));
+            }
+            if order_items.is_empty() {
+                return Ok(rel);
+            }
+        }
+        let hier_col = order_items.iter().find_map(|(col, dir)| {
+            matches!(dir, OrderDir::Hierarchy | OrderDir::HierarchyDesc).then_some(*col)
+        });
+        let mut hier_targets: Vec<(QTableId, QFieldId)> = Vec::new();
+        if let Some(h_col) = hier_col
+            && let Some(ty) = types.get(h_col)
+        {
+            for &atom in &ty.refs {
+                if let Some(table) = self.schema.hierarchical_table(atom)
+                    && let Some(parent_field) = self.role_field(table, StdRole::Parent)
+                    && !hier_targets.contains(&(table, parent_field))
+                {
+                    hier_targets.push((table, parent_field));
+                }
+            }
+        }
+        let source_hier = if let Some(h_col) = hier_col
+            && hier_targets.is_empty()
+            && query.unions.iter().all(|all| *all)
+        {
+            self.attach_union_source_hierarchy(&mut rel, h_col, types.len())?
+        } else {
+            None
+        };
+        let needs_auto_refs = query.autoorder
+            && order_items
+                .iter()
+                .any(|(col, _)| types.get(*col).is_some_and(|ty| !ty.refs.is_empty()));
+        if hier_targets.is_empty() && !needs_auto_refs {
+            let mut keys = Vec::with_capacity(order_items.len());
+            for (col, dir) in order_items {
+                let desc = matches!(dir, OrderDir::Desc | OrderDir::HierarchyDesc);
+                let ty = types.get(col).cloned().unwrap_or_default();
+                keys.push(SortKey {
+                    expr: out(col, ty)?,
+                    desc,
+                });
+            }
+            return Ok(match source_hier {
+                Some((id, parent)) => Rel::Hierarchy {
+                    input: Box::new(rel),
+                    id,
+                    parent,
+                    keys,
+                },
+                None => Rel::Sort {
+                    input: Box::new(rel),
+                    keys,
+                },
+            });
+        }
+        let mut union_types = types.to_vec();
+        if source_hier.is_some() {
+            union_types.push(QType::default());
+            union_types.push(QType::default());
+        }
+        let union_width = union_types.len();
+        let Ok(src_idx) = u32::try_from(self.sources.len()) else {
+            return internal("too many sources");
+        };
+        let union_src = SrcId(src_idx);
+        self.sources.push(SourceS {
+            id: union_src,
+            all_fields: false,
+            kind: SrcKind::Subquery {
+                columns: union_types.clone(),
+            },
+        });
+        let subq = Rel::Subquery {
+            src: union_src,
+            input: Box::new(rel),
+        };
+        let mut project_exprs = Vec::with_capacity(union_width + 2);
+        for (i, ty) in union_types.iter().enumerate() {
+            let Ok(col_idx) = u16::try_from(i) else {
+                return internal("too many columns");
+            };
+            project_exprs.push(Expr {
+                kind: ExprKind::Col {
+                    src: union_src,
+                    col: ColSel::Column(col_idx),
+                },
+                ty: ty.clone(),
+            });
+        }
+        let mut hier = source_hier;
+        if !hier_targets.is_empty()
+            && let Some(h_col) = hier_col
+        {
+            for &(table, _) in &hier_targets {
+                self.touch(table);
+            }
+            let Ok(h_col_u16) = u16::try_from(h_col) else {
+                return internal("too many columns");
+            };
+            let base = Expr {
+                kind: ExprKind::Col {
+                    src: union_src,
+                    col: ColSel::Column(h_col_u16),
+                },
+                ty: types.get(h_col).cloned().unwrap_or_default(),
+            };
+            let parent_expr = Expr {
+                kind: ExprKind::Deref {
+                    base: Box::new(base),
+                    steps: vec![tir::Deref {
+                        name: "\u{0}hier".to_string(),
+                        targets: hier_targets,
+                    }],
+                },
+                ty: QType::default(),
+            };
+            let Ok(parent_slot) = u16::try_from(project_exprs.len()) else {
+                return internal("too many columns");
+            };
+            project_exprs.push(parent_expr);
+            hier = Some((h_col_u16, parent_slot));
+        }
+        let mut sort_keys = Vec::with_capacity(order_items.len());
+        for (col, dir) in order_items {
+            let desc = matches!(dir, OrderDir::Desc | OrderDir::HierarchyDesc);
+            let ty = types.get(col).cloned().unwrap_or_default();
+            if query.autoorder && !ty.refs.is_empty() {
+                let Ok(col_u16) = u16::try_from(col) else {
+                    return internal("too many columns");
+                };
+                let base = Expr {
+                    kind: ExprKind::Col {
+                        src: union_src,
+                        col: ColSel::Column(col_u16),
+                    },
+                    ty,
+                };
+                for key in self.auto_keys(&base)? {
+                    let key_ty = key.ty.clone();
+                    let slot = project_exprs.len();
+                    project_exprs.push(key);
+                    sort_keys.push(SortKey {
+                        expr: out(slot, key_ty)?,
+                        desc,
+                    });
+                }
+            } else {
+                sort_keys.push(SortKey {
+                    expr: out(col, ty)?,
+                    desc,
+                });
+            }
+        }
+        let proj = Rel::Project {
+            input: Box::new(subq),
+            exprs: project_exprs,
+        };
+        Ok(match hier {
+            Some((id, parent)) => Rel::Hierarchy {
+                input: Box::new(proj),
+                id,
+                parent,
+                keys: sort_keys,
+            },
+            None => Rel::Sort {
+                input: Box::new(proj),
+                keys: sort_keys,
+            },
+        })
+    }
+
+    fn attach_union_source_hierarchy(
+        &self,
+        rel: &mut Rel,
+        col: usize,
+        visible: usize,
+    ) -> R<Option<(u16, u16)>> {
+        let Rel::Union { parts, .. } = rel else {
+            return Ok(None);
+        };
+        let mut any_hier = false;
+        for part in parts.iter() {
+            let Some(exprs) = projection(part).filter(|exprs| exprs.len() == visible) else {
+                return Ok(None);
+            };
+            let Some(base) = exprs.get(col) else {
+                return Ok(None);
+            };
+            if autoorder::first_src(base)
+                .and_then(|src| self.hierarchy_of(src))
+                .is_some()
+            {
+                any_hier = true;
+            }
+        }
+        if !any_hier {
+            return Ok(None);
+        }
+        let (Ok(id_slot), Ok(parent_slot)) = (
+            u16::try_from(visible),
+            visible
+                .checked_add(1)
+                .ok_or(())
+                .and_then(|n| u16::try_from(n).map_err(|_| ())),
+        ) else {
+            return internal("too many columns");
+        };
+        for part in parts.iter_mut() {
+            let project = match part {
+                Rel::Top { input, .. } => input.as_mut(),
+                other => other,
+            };
+            let Rel::Project { exprs, .. } = project else {
+                return internal("a qualified hierarchy union arm without projection");
+            };
+            let pair = exprs
+                .get(col)
+                .and_then(autoorder::first_src)
+                .and_then(|src| self.hierarchy_of(src));
+            let (id_expr, parent_expr) = match pair {
+                Some(p) => p,
+                None => (
+                    Expr {
+                        kind: ExprKind::Lit(QValue::Null),
+                        ty: QType::default(),
+                    },
+                    Expr {
+                        kind: ExprKind::Lit(QValue::Null),
+                        ty: QType::default(),
+                    },
+                ),
+            };
+            exprs.push(id_expr);
+            exprs.push(parent_expr);
+        }
+        Ok(Some((id_slot, parent_slot)))
     }
 }

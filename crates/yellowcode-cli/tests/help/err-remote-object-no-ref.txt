@@ -1,0 +1,9 @@
+exit 2
+--- stdout
+--- stderr
+error: the following required arguments were not provided:
+  --ref <ССЫЛКА>
+
+Usage: yellowcode remote object --ref <ССЫЛКА> <URL>
+
+For more information, try '--help'.

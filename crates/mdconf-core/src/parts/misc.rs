@@ -46,6 +46,10 @@ fn typed_schedule(p: &Parsed, source: &Node) -> Schedule {
 }
 
 pub(crate) fn parse_content(cfg: &Configuration, t: &Node) -> R<Vec<ContentItem>> {
+    parse_content_stream(cfg, t).map(|(items, _)| items)
+}
+
+fn parse_content_stream(cfg: &Configuration, t: &Node) -> R<(Vec<ContentItem>, Vec<u32>)> {
     let l = t.as_list().ok_or("shape")?;
     if atext(l, 0)? != "2" {
         return Err("version");
@@ -57,11 +61,13 @@ pub(crate) fn parse_content(cfg: &Configuration, t: &Node) -> R<Vec<ContentItem>
             .checked_mul(2)
             .and_then(|i| i.checked_add(2))
             .ok_or("number")?;
-        raw.push((atext(l, i)?, atext(l, i + 1)?));
+        raw.push((atext(l, i)?, atext(l, i + 1)?, k));
     }
     raw.sort();
+    let mut stream = vec![0u32; n];
     let mut items = Vec::new();
-    for (u, ar) in raw {
+    for (pos, (u, ar, k)) in raw.into_iter().enumerate() {
+        *stream.get_mut(k).ok_or("number")? = u32::try_from(pos).map_err(|_| "number")?;
         let id = Guid::parse(u).ok_or("object")?;
         let name = cfg.full_name(id).ok_or("object")?;
         let auto_record = match ar {
@@ -83,7 +89,7 @@ pub(crate) fn parse_content(cfg: &Configuration, t: &Node) -> R<Vec<ContentItem>
         [x] if x.text() == Some("0") => {}
         _ => return Err("tail"),
     }
-    Ok(items)
+    Ok((items, stream))
 }
 
 fn plain_bytes(cx: &LoadCtx, name: &str) -> Result<Option<R<Vec<u8>>>> {
@@ -123,10 +129,11 @@ pub(crate) fn load(cx: &LoadCtx, cfg: &mut Configuration) -> Result<()> {
         let Some(node) = fetch_brace(cx, cfg, &format!("{id}.1"), &["misc", "content"])? else {
             continue;
         };
-        match parse_content(cfg, &node) {
-            Ok(items) => {
+        match parse_content_stream(cfg, &node) {
+            Ok((items, stream)) => {
                 if let Some(o) = find_mut(&mut cfg.objects, id) {
                     o.parts.exchange_content = Some(items);
+                    o.parts.exchange_content_stream = Some(stream);
                 }
             }
             Err(why) => miss(cfg, &["misc", "content", why]),

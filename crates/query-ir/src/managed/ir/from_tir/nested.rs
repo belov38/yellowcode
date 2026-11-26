@@ -1,6 +1,16 @@
 use super::*;
 use crate::schema::{FieldRole, QFieldId, QTableId, StdRole};
 
+#[derive(Clone, Copy)]
+pub(super) struct NestedOwner {
+    owner_src: ir::SrcId,
+    owner_table: Option<QTableId>,
+    owner_field: QFieldId,
+    section_table: QTableId,
+    section_ref_field: QFieldId,
+    section_depth: usize,
+}
+
 impl<'c, 'a, 'r, 'w, 't> Builder<'c, 'a, 'r, 'w, 't> {
     pub(super) fn forward_nested(
         &mut self,
@@ -78,6 +88,9 @@ impl<'c, 'a, 'r, 'w, 't> Builder<'c, 'a, 'r, 'w, 't> {
         let mut ids = ctx.scratch(1)?;
         ctx.scratch_push(&mut ids, src)?;
         ctx.scratch_push(&mut self.levels, ids)?;
+        let next_nested_owner =
+            self.nested_owner_context(owner_ref.trusted_borrow(), owner.trusted_borrow(), tab);
+        let prev_nested_owner = std::mem::replace(&mut self.nested_owner, next_nested_owner);
         let result = (|| {
             let items = item.nested.as_deref().unwrap_or_default();
             let mut output = ctx.vector(items.len())?;
@@ -88,19 +101,13 @@ impl<'c, 'a, 'r, 'w, 't> Builder<'c, 'a, 'r, 'w, 't> {
                         stage: "Q3",
                     });
                 }
-                let e = match self.nested_owner_field(
-                    &item.expr,
-                    owner_ref.trusted_borrow(),
-                    owner.trusted_borrow(),
-                )? {
-                    Some(field) => field,
-                    None => self.expr(&item.expr)?,
-                };
+                let e = self.expr(&item.expr)?;
                 ctx.parent_depth(std::iter::once(e.depth()))?;
                 ctx.push(&mut output, e)?;
             }
             Ok(output.finish())
         })();
+        self.nested_owner = prev_nested_owner;
         self.levels.pop();
         let had_aggs = !self.aggs.is_empty();
         self.aggs = outer_aggs;
@@ -158,66 +165,273 @@ impl<'c, 'a, 'r, 'w, 't> Builder<'c, 'a, 'r, 'w, 't> {
         Ok(owner_ref)
     }
 
-    fn nested_owner_field(
-        &mut self,
-        expr: &'t tir::TExpr,
+    fn nested_owner_context(
+        &self,
         owner_ref: &ir::Expr,
         section_owner: &ir::Expr,
-    ) -> BuildResult<Option<NativeOwned<'a, ir::Expr>>> {
+        section_table: QTableId,
+    ) -> Option<NestedOwner> {
         let (
-            tir::TKind::Field {
-                level,
-                source,
-                col: tir::Col::Field(field),
-                derefs,
-            },
             ir::ExprKind::Col {
                 src: owner_src,
                 col: ir::ColSel::Field(owner_field),
             },
             ir::ExprKind::Col {
-                col: ir::ColSel::Field(section_field),
+                col: ir::ColSel::Field(section_ref_field),
                 ..
             },
-        ) = (&expr.kind, &owner_ref.kind, &section_owner.kind)
+        ) = (&owner_ref.kind, &section_owner.kind)
         else {
-            return Ok(None);
+            return None;
         };
-        let source = self
-            .levels
-            .len()
-            .checked_sub(1 + usize::from(*level))
-            .and_then(|index| self.levels.get(index))
-            .and_then(|ids| ids.get(usize::from(*source)))
-            .copied();
-        if source != Some(*owner_src) || field != owner_field || derefs.len() > 1 {
-            return Ok(None);
-        }
-        let Some(ir::SrcKind::Table(table)) = self
+        let owner_table = match self
             .sources
             .get(owner_src.0 as usize)
             .map(|source| &source.trusted_borrow().kind)
+        {
+            Some(ir::SrcKind::Table(table))
+                if self
+                    .schema
+                    .field(*table, *owner_field)
+                    .is_some_and(|field| field.role == FieldRole::Std(StdRole::Ref)) =>
+            {
+                Some(*table)
+            }
+            _ => None,
+        };
+        Some(NestedOwner {
+            owner_src: *owner_src,
+            owner_table,
+            owner_field: *owner_field,
+            section_table,
+            section_ref_field: *section_ref_field,
+            section_depth: self.levels.len(),
+        })
+    }
+
+    pub(super) fn rewrite_nested_owner_field(
+        &mut self,
+        ty: &crate::QType,
+        level: u16,
+        source: u16,
+        col: tir::Col,
+        derefs: &[tir::Deref],
+    ) -> BuildResult<Option<NativeOwned<'a, ir::Expr>>> {
+        let Some(no) = self.nested_owner else {
+            return Ok(None);
+        };
+        let tir::Col::Field(field) = col else {
+            return Ok(None);
+        };
+        let resolved_src = self
+            .levels
+            .len()
+            .checked_sub(1 + usize::from(level))
+            .and_then(|index| self.levels.get(index))
+            .and_then(|ids| ids.get(usize::from(source)))
+            .copied();
+        if resolved_src != Some(no.owner_src) {
+            return Ok(None);
+        }
+        let Some(section_level) = self
+            .levels
+            .len()
+            .checked_sub(no.section_depth)
+            .and_then(|delta| u16::try_from(delta).ok())
         else {
             return Ok(None);
         };
-        if !self
-            .schema
-            .field(*table, *owner_field)
-            .is_some_and(|field| field.role == FieldRole::Std(StdRole::Ref))
-            || derefs
-                .iter()
-                .flat_map(|step| &step.targets)
-                .any(|(table, field)| {
+        let has_nested_deref = |steps: &[tir::Deref]| {
+            steps.iter().flat_map(|step| &step.targets).any(|(t, f)| {
+                self.schema
+                    .field(*t, *f)
+                    .is_none_or(|field| field.nested.is_some())
+            })
+        };
+        if field == no.owner_field {
+            if let Some((tab_step, after_tab)) = derefs.split_first()
+                && !tab_step.targets.is_empty()
+                && tab_step.targets.iter().all(|(t, f)| {
                     self.schema
-                        .field(*table, *field)
-                        .is_none_or(|field| field.nested.is_some())
-                        || self.schema.is_presentation_field(*table, *field)
+                        .field(*t, *f)
+                        .is_some_and(|fi| fi.nested == Some(no.section_table))
                 })
-        {
+            {
+                let Some((sec_step, rest)) = after_tab.split_first() else {
+                    return Ok(None);
+                };
+                let &[(t, sec_field)] = sec_step.targets.as_slice() else {
+                    return Ok(None);
+                };
+                if t != no.section_table || has_nested_deref(rest) {
+                    return Ok(None);
+                }
+                let saved = self.nested_owner.take();
+                let result = self.field(ty, section_level, 0, tir::Col::Field(sec_field), rest);
+                self.nested_owner = saved;
+                return result.map(Some);
+            }
+            if has_nested_deref(derefs) {
+                return Ok(None);
+            }
+            let saved = self.nested_owner.take();
+            let result = self.field(
+                ty,
+                section_level,
+                0,
+                tir::Col::Field(no.section_ref_field),
+                derefs,
+            );
+            self.nested_owner = saved;
+            return result.map(Some);
+        }
+        if has_nested_deref(derefs) {
             return Ok(None);
         }
-        self.field(&expr.ty, 0, 0, tir::Col::Field(*section_field), derefs)
-            .map(Some)
+        let Some(owner_table) = no.owner_table else {
+            return Ok(None);
+        };
+        let Some(field_info) = self.schema.field(owner_table, field) else {
+            return Ok(None);
+        };
+        if field_info.nested == Some(no.section_table) {
+            let Some((first, rest)) = derefs.split_first() else {
+                return Ok(None);
+            };
+            let &[(t, sec_field)] = first.targets.as_slice() else {
+                return Ok(None);
+            };
+            if t != no.section_table {
+                return Ok(None);
+            }
+            let saved = self.nested_owner.take();
+            let result = self.field(ty, section_level, 0, tir::Col::Field(sec_field), rest);
+            self.nested_owner = saved;
+            return result.map(Some);
+        }
+        if field_info.nested.is_some() {
+            return Ok(None);
+        }
+        let ctx = self.ctx;
+        let empty_ty = crate::QType::default();
+        let owner_ref_ty = self
+            .schema
+            .field(owner_table, no.owner_field)
+            .map_or(&empty_ty, |f| &f.ty);
+        if derefs.is_empty() && self.schema.is_presentation_field(owner_table, field) {
+            if !self.in_select_item {
+                return Ok(None);
+            }
+            let saved = self.nested_owner.take();
+            let ref_expr = self.field(
+                owner_ref_ty,
+                section_level,
+                0,
+                tir::Col::Field(no.section_ref_field),
+                &[],
+            );
+            self.nested_owner = saved;
+            let ref_expr = ref_expr?;
+            let mut args = ctx.vector(1)?;
+            ctx.parent_depth(std::iter::once(ref_expr.depth()))?;
+            ctx.push(&mut args, ref_expr)?;
+            let kind = args.finish().map(|args| ir::ExprKind::Func {
+                f: query_syntax::Func::Presentation,
+                args,
+            });
+            return ctx.expr(kind, ctx.copy(ty)?).map(Some);
+        }
+        let step_name = if !field_info.name_en.is_empty() {
+            field_info.name_en.as_str()
+        } else {
+            field_info.name_ru.as_str()
+        };
+        let trailing_presentation = self.in_select_item
+            && derefs.last().is_some_and(|last| {
+                !last.targets.is_empty()
+                    && last
+                        .targets
+                        .iter()
+                        .all(|(t, f)| self.schema.is_presentation_field(*t, *f))
+            });
+        let saved = self.nested_owner.take();
+        let base = self.field(
+            owner_ref_ty,
+            section_level,
+            0,
+            tir::Col::Field(no.section_ref_field),
+            &[],
+        );
+        self.nested_owner = saved;
+        let base = base?;
+        let make_first_step = |this: &mut Self| -> BuildResult<NativeOwned<'a, tir::Deref>> {
+            this.touch(owner_table)?;
+            let name = ctx.string(step_name)?;
+            let mut targets = ctx.vector(1)?;
+            ctx.push(&mut targets, ctx.scalar((owner_table, field)))?;
+            ctx.allocated(name.zip(targets.finish()))
+                .map(|pair| pair.map(|(name, targets)| tir::Deref { name, targets }))
+        };
+        if trailing_presentation {
+            let Some((last, head)) = derefs.split_last() else {
+                return Ok(None);
+            };
+            let mut pres_ty = ctx.copy(&crate::QType::default())?;
+            for &(table, _) in &last.targets {
+                if let Some(atom) = self.schema.table(table).reference {
+                    let mut refs = ctx.vector(1)?;
+                    ctx.push(&mut refs, ctx.scalar(atom))?;
+                    let reference = refs.finish().map(|refs| crate::QType {
+                        refs,
+                        ..crate::QType::default()
+                    });
+                    pres_ty =
+                        ctx.merge_type(pres_ty.trusted_borrow(), reference.trusted_borrow())?;
+                }
+            }
+            let cap = 1usize
+                .checked_add(head.len())
+                .ok_or_else(|| ctx.refuse(memory_budget::BudgetError::Overflow))?;
+            let mut steps = ctx.vector(cap)?;
+            ctx.push(&mut steps, make_first_step(self)?)?;
+            for deref in head {
+                for &(table, _) in &deref.targets {
+                    self.touch(table)?;
+                }
+                ctx.push(&mut steps, ctx.copy(deref)?)?;
+            }
+            ctx.parent_depth(std::iter::once(base.depth()))?;
+            let base = ctx.boxed(base)?;
+            let ref_kind = ctx
+                .allocated(base.zip(steps.finish()))?
+                .map(|(base, steps)| ir::ExprKind::Deref { base, steps });
+            let ref_expr = ctx.expr(ref_kind, pres_ty)?;
+            let mut args = ctx.vector(1)?;
+            ctx.parent_depth(std::iter::once(ref_expr.depth()))?;
+            ctx.push(&mut args, ref_expr)?;
+            let kind = args.finish().map(|args| ir::ExprKind::Func {
+                f: query_syntax::Func::Presentation,
+                args,
+            });
+            return ctx.expr(kind, ctx.copy(ty)?).map(Some);
+        }
+        let cap = 1usize
+            .checked_add(derefs.len())
+            .ok_or_else(|| ctx.refuse(memory_budget::BudgetError::Overflow))?;
+        let mut steps = ctx.vector(cap)?;
+        ctx.push(&mut steps, make_first_step(self)?)?;
+        for deref in derefs {
+            for &(table, _) in &deref.targets {
+                self.touch(table)?;
+            }
+            ctx.push(&mut steps, ctx.copy(deref)?)?;
+        }
+        ctx.parent_depth(std::iter::once(base.depth()))?;
+        let base = ctx.boxed(base)?;
+        let kind = ctx
+            .allocated(base.zip(steps.finish()))?
+            .map(|(base, steps)| ir::ExprKind::Deref { base, steps });
+        ctx.expr(kind, ctx.copy(ty)?).map(Some)
     }
 
     fn owner_of(
@@ -352,7 +566,11 @@ impl<'c, 'a, 'r, 'w, 't> Builder<'c, 'a, 'r, 'w, 't> {
             "a nested table step without a section",
         ))
     }
-    fn section_source(&mut self, table: QTableId, all_fields: bool) -> BuildResult<ir::SrcId> {
+    pub(super) fn section_source(
+        &mut self,
+        table: QTableId,
+        all_fields: bool,
+    ) -> BuildResult<ir::SrcId> {
         let ctx = self.ctx;
         let id = ir::SrcId(
             u32::try_from(self.sources.len())
@@ -370,7 +588,7 @@ impl<'c, 'a, 'r, 'w, 't> Builder<'c, 'a, 'r, 'w, 't> {
         self.touch(table)?;
         Ok(id)
     }
-    fn section_col(
+    pub(super) fn section_col(
         &self,
         src: ir::SrcId,
         table: QTableId,
@@ -414,15 +632,18 @@ fn copy_forwarded_recipe<'a>(
     };
     let keys = ctx.scratch(0)?;
     let index = Index::new();
+    let ref_index = Index::new();
     let copier = super::super::rebuild::Rebuild {
         ctx,
         keys: &keys,
         index: &index,
+        ref_index: &ref_index,
         own: &[],
         anchor: None,
         in_sub: false,
         replace: false,
         allow_prefix: false,
+        explicit_keys: 0,
     };
     let scan = copier.rel(&rows.scan)?;
     let owner = copier.expr(&rows.owner)?;

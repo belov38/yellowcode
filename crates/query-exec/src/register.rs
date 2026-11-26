@@ -181,12 +181,16 @@ fn accounting_options(map: &StorageMap, md: Uuid16) -> Result<TableId, ExecError
     Ok(t)
 }
 
-fn validate_accounting_layout(info: &TableInfo) -> Result<(), ExecError> {
-    if !info.separators.is_empty() {
+fn validate_accounting_fields(info: &TableInfo, allow_separators: bool) -> Result<(), ExecError> {
+    if !allow_separators && !info.separators.is_empty() {
         return Err(fatal(
             "register settings: AccRgOpt physical separators require accounting area selection (stage Q7)",
         ));
     }
+    validate_accounting_standard_fields(info)
+}
+
+fn validate_accounting_standard_fields(info: &TableInfo) -> Result<(), ExecError> {
     for std in [
         StdField::RegId,
         StdField::Period,
@@ -213,6 +217,169 @@ fn validate_accounting_layout(info: &TableInfo) -> Result<(), ExecError> {
         }
     }
     Ok(())
+}
+
+fn balance_areas_later() -> ExecError {
+    ExecError::Later {
+        what: "Q6a-AccountingBalanceAreas",
+        stage: "Q7c",
+    }
+}
+
+pub(crate) fn area_value_compatible(actual: &QValue, expected: &QValue) -> bool {
+    match (actual, expected) {
+        (QValue::Number(_), QValue::Number(_))
+        | (QValue::String(_), QValue::String(_))
+        | (QValue::Bool(_), QValue::Bool(_))
+        | (QValue::Date(_), QValue::Date(_)) => true,
+        (QValue::Ref { table: a, .. }, QValue::Ref { table: b, .. }) => a == b,
+        _ => false,
+    }
+}
+
+pub(crate) fn read_accounting_balance_settings(
+    src: &dyn DataSource,
+    md: Uuid16,
+    areas: &query_ir::lower::BalanceAreasL,
+    observation: Option<&crate::observe::ObservationSession>,
+) -> Result<(RegisterSettings, Vec<(Uuid16, QValue)>), ExecError> {
+    use query_ir::lower::BalanceAreasL;
+    if matches!(areas, BalanceAreasL::None) {
+        let settings = read_register_settings_with_observation(
+            src,
+            md,
+            RegisterKind::Accounting,
+            observation,
+        )?;
+        return Ok((settings, Vec::new()));
+    }
+    let map = src.map();
+    if map.object(md).is_none() {
+        return Err(fatal(format!(
+            "register settings: register {md} is not in the storage map"
+        )));
+    }
+    let t = accounting_options(map, md)?;
+    let info = map
+        .try_table(t)
+        .ok_or_else(|| fatal("register settings: unknown AccRgOpt table"))?;
+    validate_accounting_standard_fields(info)?;
+    match areas {
+        BalanceAreasL::None => {
+            return Err(fatal("register settings: unexpected empty Balance areas"));
+        }
+        BalanceAreasL::Exact(table_areas) => {
+            if info.separators.len() != table_areas.options.len() {
+                return Err(balance_areas_later());
+            }
+            for entry in &table_areas.options {
+                if info.field(entry.field).is_none() {
+                    return Err(fatal("register settings: missing AccRgOpt area field"));
+                }
+            }
+        }
+        BalanceAreasL::Unseparated(table_areas) => {
+            if info.separators.len() != table_areas.options.len() {
+                return Err(balance_areas_later());
+            }
+            for entry in &table_areas.options {
+                if info.field(entry.field).is_none() {
+                    return Err(fatal("register settings: missing AccRgOpt area field"));
+                }
+            }
+        }
+    }
+    if let Some(obs) = observation {
+        obs.table(t);
+    }
+    let want = reg_id(md);
+    let mut found: Option<Row> = None;
+    let mut duplicate = false;
+    let mut malformed = false;
+    let mut malformed_area = false;
+    for row in src.scan(t)? {
+        let row = row?;
+        let id = match get(info, &row, StdField::RegId) {
+            Some(QValue::Binary(id)) if id.len() == 16 => id,
+            _ => {
+                malformed = true;
+                continue;
+            }
+        };
+        if id.as_ref() != want.as_slice() {
+            continue;
+        }
+        if let BalanceAreasL::Exact(table_areas) = areas {
+            let mut matched = true;
+            for entry in &table_areas.options {
+                let Some(cell) = row.get(usize::from(entry.field.0)) else {
+                    malformed_area = true;
+                    matched = false;
+                    break;
+                };
+                if !area_value_compatible(cell, &entry.value) {
+                    malformed_area = true;
+                    matched = false;
+                    break;
+                }
+                if cell != &entry.value {
+                    matched = false;
+                    break;
+                }
+            }
+            if !matched {
+                continue;
+            }
+        }
+        if found.is_some() {
+            duplicate = true;
+        } else {
+            found = Some(row);
+        }
+    }
+    if malformed {
+        return Err(fatal(
+            "register settings: AccRgOpt RegID must be 16-byte Binary",
+        ));
+    }
+    if malformed_area {
+        return Err(fatal(
+            "register settings: AccRgOpt area separator type mismatch",
+        ));
+    }
+    if duplicate {
+        return Err(match areas {
+            BalanceAreasL::Unseparated(_) => balance_areas_later(),
+            BalanceAreasL::Exact(_) | BalanceAreasL::None => {
+                fatal("register settings: duplicate AccRgOpt RegID")
+            }
+        });
+    }
+    let mut s = RegisterSettings::defaults();
+    let mut observed = Vec::new();
+    if let Some(row) = found {
+        validate_accounting_row(info, &row)?;
+        apply_accumulation_row(info, &row, &mut s);
+        if let BalanceAreasL::Unseparated(table_areas) = areas {
+            observed.reserve_exact(table_areas.options.len());
+            for entry in &table_areas.options {
+                let cell = row
+                    .get(usize::from(entry.field.0))
+                    .ok_or_else(|| fatal("register settings: missing AccRgOpt area value"))?;
+                if matches!(cell, QValue::Null | QValue::Undefined) {
+                    return Err(fatal(
+                        "register settings: AccRgOpt area separator is NULL or Undefined",
+                    ));
+                }
+                observed.push((entry.common_attribute, cell.clone()));
+            }
+        }
+    }
+    Ok((s, observed))
+}
+
+fn validate_accounting_layout(info: &TableInfo) -> Result<(), ExecError> {
+    validate_accounting_fields(info, false)
 }
 
 fn accounting_row(
@@ -281,6 +448,160 @@ fn validate_accounting_row(info: &TableInfo, row: &[QValue]) -> Result<(), ExecE
         }
     }
     Ok(())
+}
+
+pub(crate) type InitialAreaSlots = Option<Vec<Option<QValue>>>;
+
+pub(crate) fn read_accounting_turnovers_settings(
+    src: &dyn DataSource,
+    md: Uuid16,
+    areas: Option<&query_ir::lower::TurnoversAreasL>,
+    observation: Option<&crate::observe::ObservationSession>,
+) -> Result<(RegisterSettings, InitialAreaSlots), ExecError> {
+    let Some(areas) = areas else {
+        let settings = read_register_settings_with_observation(
+            src,
+            md,
+            RegisterKind::Accounting,
+            observation,
+        )?;
+        return Ok((settings, None));
+    };
+    let map = src.map();
+    if map.object(md).is_none() {
+        return Err(fatal(format!(
+            "register settings: register {md} is not in the storage map"
+        )));
+    }
+    let t = accounting_options(map, md)?;
+    let info = map
+        .try_table(t)
+        .ok_or_else(|| fatal("register settings: unknown AccRgOpt table"))?;
+    validate_accounting_fields(info, true)?;
+    let mut s = RegisterSettings::defaults();
+    let want = reg_id(md);
+    match areas {
+        query_ir::lower::TurnoversAreasL::Exact { options, .. } => {
+            for (field, _) in options {
+                if info.field(*field).is_none() {
+                    return Err(fatal(
+                        "register settings: AccRgOpt separator field out of range",
+                    ));
+                }
+            }
+            if let Some(obs) = observation {
+                obs.table(t);
+            }
+            let rows = src.scan(t)?;
+            let mut found = None;
+            let mut duplicate = false;
+            let mut malformed = false;
+            for row in rows {
+                let row = row?;
+                let mut matched = true;
+                for (field, expected) in options {
+                    let actual = row.get(usize::from(field.0)).ok_or_else(|| {
+                        fatal("register settings: missing AccRgOpt separator field")
+                    })?;
+                    if actual != expected {
+                        matched = false;
+                        break;
+                    }
+                }
+                if !matched {
+                    continue;
+                }
+                let id = match get(info, &row, StdField::RegId) {
+                    Some(QValue::Binary(id)) if id.len() == 16 => id,
+                    _ => {
+                        malformed = true;
+                        continue;
+                    }
+                };
+                if id.as_ref() == want.as_slice() {
+                    if found.is_some() {
+                        duplicate = true;
+                    } else {
+                        found = Some(row);
+                    }
+                }
+            }
+            if malformed {
+                return Err(fatal(
+                    "register settings: AccRgOpt RegID must be 16-byte Binary",
+                ));
+            }
+            if duplicate {
+                return Err(fatal("register settings: duplicate AccRgOpt RegID"));
+            }
+            if let Some(row) = found {
+                validate_accounting_row(info, &row)?;
+                apply_accumulation_row(info, &row, &mut s);
+            }
+            Ok((s, None))
+        }
+        query_ir::lower::TurnoversAreasL::Unseparated { slots, options, .. } => {
+            for (slot, field) in options {
+                if *slot >= *slots || info.field(*field).is_none() {
+                    return Err(fatal(
+                        "register settings: AccRgOpt separator slot out of range",
+                    ));
+                }
+            }
+            if let Some(obs) = observation {
+                obs.table(t);
+            }
+            let rows = src.scan(t)?;
+            let mut found = None;
+            let mut multiple = false;
+            let mut malformed = false;
+            for row in rows {
+                let row = row?;
+                let id = match get(info, &row, StdField::RegId) {
+                    Some(QValue::Binary(id)) if id.len() == 16 => id,
+                    _ => {
+                        malformed = true;
+                        continue;
+                    }
+                };
+                if id.as_ref() == want.as_slice() {
+                    if found.is_some() {
+                        multiple = true;
+                    } else {
+                        found = Some(row);
+                    }
+                }
+            }
+            if malformed {
+                return Err(fatal(
+                    "register settings: AccRgOpt RegID must be 16-byte Binary",
+                ));
+            }
+            if multiple {
+                if !options.is_empty() {
+                    return Err(ExecError::Later {
+                        what: "Q6b-TurnoversAreas",
+                        stage: "Q7c",
+                    });
+                }
+                return Err(fatal("register settings: duplicate AccRgOpt RegID"));
+            }
+            let mut seen = vec![None; usize::from(*slots)];
+            if let Some(row) = found {
+                validate_accounting_row(info, &row)?;
+                apply_accumulation_row(info, &row, &mut s);
+                for (slot, field) in options {
+                    let val = row.get(usize::from(field.0)).ok_or_else(|| {
+                        fatal("register settings: missing AccRgOpt separator field")
+                    })?;
+                    if let Some(entry) = seen.get_mut(usize::from(*slot)) {
+                        *entry = Some(val.clone());
+                    }
+                }
+            }
+            Ok((s, Some(seen)))
+        }
+    }
 }
 
 pub fn read_register_settings(
@@ -605,6 +926,9 @@ struct TotalsUseStep {
     vt_kind: Option<query_ir::VtKind>,
     view: Option<query_syntax::Span>,
     has_dates: bool,
+    has_extdims: bool,
+    balance_areas: Option<query_ir::lower::BalanceAreasL>,
+    turnovers_areas: Option<query_ir::lower::TurnoversAreasL>,
 }
 
 fn steps_of(r: &query_ir::RelL, out: &mut Vec<TotalsUseStep>) {
@@ -630,7 +954,8 @@ fn steps_of(r: &query_ir::RelL, out: &mut Vec<TotalsUseStep>) {
                     }
                     query_ir::lower::RegisterRowsKindL::Accounting(_) => RegisterKind::Accounting,
                     query_ir::lower::RegisterRowsKindL::AccountingTurnovers(_)
-                    | query_ir::lower::RegisterRowsKindL::AccountingBalance(_) => {
+                    | query_ir::lower::RegisterRowsKindL::AccountingBalance(_)
+                    | query_ir::lower::RegisterRowsKindL::AccountingBalanceAndTurnovers(_) => {
                         RegisterKind::Accounting
                     }
                 },
@@ -642,7 +967,28 @@ fn steps_of(r: &query_ir::RelL, out: &mut Vec<TotalsUseStep>) {
                     }
                     query_ir::lower::RegisterRowsKindL::Accumulation(_)
                     | query_ir::lower::RegisterRowsKindL::AccountingTurnovers(_)
-                    | query_ir::lower::RegisterRowsKindL::AccountingBalance(_) => false,
+                    | query_ir::lower::RegisterRowsKindL::AccountingBalance(_)
+                    | query_ir::lower::RegisterRowsKindL::AccountingBalanceAndTurnovers(_) => false,
+                },
+                has_extdims: match &s.rows {
+                    query_ir::lower::RegisterRowsKindL::Accounting(a) => !a.ext_dims.is_empty(),
+                    query_ir::lower::RegisterRowsKindL::Accumulation(_)
+                    | query_ir::lower::RegisterRowsKindL::AccountingTurnovers(_)
+                    | query_ir::lower::RegisterRowsKindL::AccountingBalance(_)
+                    | query_ir::lower::RegisterRowsKindL::AccountingBalanceAndTurnovers(_) => false,
+                },
+                balance_areas: match &s.rows {
+                    query_ir::lower::RegisterRowsKindL::AccountingBalance(a) => {
+                        Some(a.areas.clone())
+                    }
+                    query_ir::lower::RegisterRowsKindL::AccountingBalanceAndTurnovers(a) => {
+                        Some(a.areas.clone())
+                    }
+                    _ => None,
+                },
+                turnovers_areas: match &s.rows {
+                    query_ir::lower::RegisterRowsKindL::AccountingTurnovers(a) => a.areas.clone(),
+                    _ => None,
                 },
             });
             if let Some(child) = s.chart_input() {
@@ -660,6 +1006,9 @@ fn steps_of(r: &query_ir::RelL, out: &mut Vec<TotalsUseStep>) {
                 vt_kind: None,
                 view: step.view,
                 has_dates: false,
+                has_extdims: false,
+                balance_areas: None,
+                turnovers_areas: None,
             });
             steps_of(input, out);
             if let Some(t) = totals {
@@ -710,9 +1059,10 @@ fn steps_of(r: &query_ir::RelL, out: &mut Vec<TotalsUseStep>) {
                 expr(e, out);
             }
         }
-        RelL::CheckAccess { input, .. } | RelL::Distinct(input) | RelL::Top { input, .. } => {
-            steps_of(input, out)
-        }
+        RelL::CheckAccess { input, .. }
+        | RelL::DefaultIfEmpty { input, .. }
+        | RelL::Distinct(input)
+        | RelL::Top { input, .. } => steps_of(input, out),
         RelL::SemiJoin { input, q, l, .. } => {
             l.iter().for_each(|e| expr(e, out));
             steps_of(input, out);
@@ -751,21 +1101,23 @@ fn check_totals_use_impl(
         {
             crate::ops::check_accounting_cancel(env)?;
         }
-        let settings =
-            read_register_settings_with_observation(src, s.register, s.kind, observation)?;
+        let settings = if let Some(areas) = &s.balance_areas {
+            read_accounting_balance_settings(src, s.register, areas, observation)?.0
+        } else if let Some(areas) = s.turnovers_areas.as_ref() {
+            read_accounting_turnovers_settings(src, s.register, Some(areas), observation)?.0
+        } else {
+            read_register_settings_with_observation(src, s.register, s.kind, observation)?
+        };
         if s.kind == RegisterKind::Accounting
             && let Some(env) = env
         {
             crate::ops::check_accounting_cancel(env)?;
         }
         if settings.use_totals {
-            if s.kind == RegisterKind::Accounting && s.vt_kind == Some(query_ir::VtKind::Balance) {
-                crate::ops::check_balance_settings_shape(&settings)?;
-            }
             if s.kind == RegisterKind::Accounting
                 && s.vt_kind == Some(query_ir::VtKind::DrCrTurnovers)
             {
-                crate::ops::check_drcr_settings_shape(&settings, s.has_dates)?;
+                crate::ops::check_drcr_settings_shape(&settings, s.has_dates, s.has_extdims)?;
             }
             continue;
         }

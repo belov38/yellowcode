@@ -4,8 +4,11 @@ use ibschema::storage::StorageMap;
 use crate::bind::{Bound, PBound};
 use crate::exec_error::ExecError;
 use crate::ir::{Expr, ExprKind};
-use crate::schema::{FieldRole, StdRole};
-use crate::totals::{HierTableSpec, PeriodsSpec, PointSpec, TotalsExpr, TotalsS, TotalsSpec};
+use crate::schema::{FieldRole, Only, StdRole};
+use crate::totals::{
+    DependentS, DependentSpec, HierDepS, HierDepSpec, HierDepStep, HierFieldRead,
+    HierFieldTransform, HierTableSpec, PeriodsSpec, PointSpec, TotalsExpr, TotalsS, TotalsSpec,
+};
 use crate::value::QValue;
 use crate::{QuerySchema, StorageBinding};
 
@@ -70,6 +73,87 @@ fn expr(b: &Bound<'_>, e: &TotalsExpr) -> Result<TotalsExpr, ExecError> {
     }
     drop(pending);
     Ok(result)
+}
+
+fn lower_dependent(
+    deps: &[DependentS],
+    schema: &QuerySchema,
+    storage: &StorageBinding,
+    map: &StorageMap,
+) -> Vec<DependentSpec> {
+    let mut out = Vec::with_capacity(deps.len());
+    for dep in deps {
+        let hier = match &dep.hier {
+            None => None,
+            Some(HierDepS::SelfRef) => Some(HierDepSpec::SelfRef),
+            Some(HierDepS::Chain(steps)) => {
+                let mut lowered_steps = Vec::with_capacity(steps.len());
+                for step in steps {
+                    let mut branches = Vec::with_capacity(step.len());
+                    for &(qt, qf) in step {
+                        let Some(atom) = schema.table(qt).reference else {
+                            continue;
+                        };
+                        let (Some(number), Some(table)) =
+                            (storage.ref_number(atom), storage.table(qt))
+                        else {
+                            continue;
+                        };
+                        if schema.is_unstored(qt) {
+                            continue;
+                        }
+                        let Some(info) = map.try_table(table) else {
+                            continue;
+                        };
+                        let Some(fld) = schema.field(qt, qf) else {
+                            continue;
+                        };
+                        let Some(field) = storage.field(qt, qf) else {
+                            continue;
+                        };
+                        let std = info.field(field).and_then(|x| x.std);
+                        let transform = match (fld.role, std) {
+                            (FieldRole::Std(StdRole::IsFolder), Some(StdField::Folder)) => {
+                                HierFieldTransform::InvertBool
+                            }
+                            (
+                                FieldRole::Std(StdRole::Predefined | StdRole::ThisNode),
+                                Some(StdField::PredefinedId),
+                            ) => HierFieldTransform::NonZeroUuid,
+                            (FieldRole::Std(StdRole::Ref), _) => HierFieldTransform::RefSelf,
+                            (
+                                FieldRole::Std(StdRole::PredefinedDataName | StdRole::RecordKind),
+                                _,
+                            ) => continue,
+                            _ => HierFieldTransform::Identity,
+                        };
+                        let only = match fld.only {
+                            Only::Any => None,
+                            Only::Folders => match info.field_by_std(StdField::Folder) {
+                                Some(folder) => Some((folder, true)),
+                                None => continue,
+                            },
+                            Only::Items => info.field_by_std(StdField::Folder).map(|f| (f, false)),
+                        };
+                        branches.push(HierFieldRead {
+                            number,
+                            table,
+                            field,
+                            only,
+                            transform,
+                        });
+                    }
+                    lowered_steps.push(HierDepStep { branches });
+                }
+                Some(HierDepSpec::Chain(lowered_steps))
+            }
+        };
+        out.push(DependentSpec {
+            column: dep.column,
+            hier,
+        });
+    }
+    out
 }
 
 pub(super) fn lower_totals(
@@ -142,12 +226,14 @@ pub(super) fn lower_totals(
             }),
             None => None,
         };
+        let dependent = lower_dependent(&p.dependent, schema, storage, map);
         points.push(PointSpec {
             name: p.name.clone(),
             column: p.column,
             hierarchy: p.hierarchy,
             periods,
             hier,
+            dependent,
         });
     }
     let items = t

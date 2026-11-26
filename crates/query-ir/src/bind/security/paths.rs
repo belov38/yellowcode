@@ -293,6 +293,9 @@ impl<'a> Walk<'a> {
                 if let Some(area) = &view.area {
                     self.push_expr(&area.pred);
                 }
+                if let Some(expr) = &view.ext_dims_arg {
+                    self.push_expr(expr);
+                }
                 if let Some(expr) = &view.cond {
                     self.push_expr(expr);
                 }

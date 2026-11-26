@@ -146,6 +146,7 @@ pub(super) fn sub_table(
         star: Vec::new(),
         params: Vec::new(),
         reference: None,
+        auto_order_by_code: false,
     };
     let extra = vec![
         format!("{}.{en}", owner.name_ru),
@@ -223,6 +224,8 @@ fn declare<'a>(b: &mut Builder<'a>) -> Result<Vec<Declared<'a>>, SchemaError> {
             star: Vec::new(),
             params: Vec::new(),
             reference: Some(reference),
+            auto_order_by_code: o.kind == MdKind::ChartOfAccounts
+                && bool_prop(o, "AutoOrderByCode"),
         };
         let got = b.add_table(t, &[])?;
         b.add_object(o.kind, &o.name, o.id, got);
@@ -448,7 +451,7 @@ fn fill(
         children(b, &mut fs, o, ChildTag::AddressingAttribute, false, &owner);
     }
     for c in commons.iter().filter(|c| c.used_by(o)) {
-        fs.push(common_field(c), true);
+        fs.push(common_field(c), !c.separator);
     }
     tabular_sections(b, &mut fs, d, &owner)?;
     match kind {

@@ -2,7 +2,7 @@ use crate::Result;
 use std::{fs::File, io::Write, path::Path};
 
 pub use mssql_backup::config_cf::{CfOptions, CfView};
-pub use mssql_backup::sqlcmd::{Interrupt, Request as SqlConvertRequest};
+pub use mssql_backup::sqlcmd::{DtOptions, Interrupt, Request as SqlConvertRequest};
 pub use mssql_backup::sqlcmd::{failure_kind, failure_refusal};
 
 fn watch_interrupts(err: &mut dyn Write) -> Option<mssql_backup::sqlcmd::InterruptWatch> {
@@ -63,6 +63,48 @@ fn note_users_email(count: u64, status: &mut serde_json::Value, err: &mut dyn Wr
     let _ = writeln!(err, "{}", users_email_notice(count));
     if let Some(fields) = status.as_object_mut() {
         fields.insert("usersWithEmail".into(), count.into());
+    }
+}
+
+pub fn extra_tables_notice(tables: &[String]) -> String {
+    let shown: Vec<&str> = tables
+        .iter()
+        .take(mssql_backup::sql_inventory::SHOWN_NAMES)
+        .map(String::as_str)
+        .collect();
+    let more = tables.len().saturating_sub(shown.len());
+    let suffix = if more > 0 {
+        format!(" (и ещё {more})")
+    } else {
+        String::new()
+    };
+    format!(
+        "сторонние таблицы SQL в схеме dbo пропущены (--ignore-extra-tables): {} ({}{suffix})",
+        tables.len(),
+        shown.join(", ")
+    )
+}
+
+fn note_extension_tables(count: usize, status: &mut serde_json::Value) {
+    if count == 0 {
+        return;
+    }
+    if let Some(fields) = status.as_object_mut() {
+        fields.insert("extensionTables".into(), count.into());
+    }
+}
+
+fn note_ignored_extra_tables(
+    tables: &[String],
+    status: &mut serde_json::Value,
+    err: &mut dyn Write,
+) {
+    if tables.is_empty() {
+        return;
+    }
+    let _ = writeln!(err, "{}", extra_tables_notice(tables));
+    if let Some(fields) = status.as_object_mut() {
+        fields.insert("ignoredExtraTables".into(), tables.len().into());
     }
 }
 
@@ -318,10 +360,22 @@ pub fn convert_dt_with_backup_set(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Result<()> {
+    convert_dt_with_options(request, backup_set, DtOptions::default(), out, err)
+}
+
+pub fn convert_dt_with_options(
+    request: SqlConvertRequest,
+    backup_set: u32,
+    options: DtOptions,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> Result<()> {
     let _watch = watch_interrupts(err);
-    let report = mssql_backup::sqlcmd::convert_dt_with_backup_set(&request, backup_set, err)?;
+    let report = mssql_backup::sqlcmd::convert_dt_with_options(&request, backup_set, options, err)?;
     let mut status = serde_json::json!({"schemaVersion": 1, "output": request.output, "format": "dt", "tables": report.tables, "rows": report.rows, "files": report.files, "complete": true, "experimental": true});
     note_users_email(report.users_with_email, &mut status, err);
+    note_extension_tables(report.extension_tables, &mut status);
+    note_ignored_extra_tables(&report.ignored_extra_tables, &mut status, err);
     if let Err(error) = serde_json::to_writer(&mut *out, &status) {
         return if error.io_error_kind() == Some(std::io::ErrorKind::BrokenPipe) {
             Ok(())
@@ -353,9 +407,27 @@ pub fn convert_onecd_with_memory(
 }
 
 pub fn convert_onecd_with_memory_and_backup_set(
+    request: SqlConvertRequest,
+    memory_limit: Option<String>,
+    backup_set: u32,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> Result<()> {
+    convert_onecd_with_options(
+        request,
+        memory_limit,
+        backup_set,
+        DtOptions::default(),
+        out,
+        err,
+    )
+}
+
+pub fn convert_onecd_with_options(
     mut request: SqlConvertRequest,
     memory_limit: Option<String>,
     backup_set: u32,
+    options: DtOptions,
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Result<()> {
@@ -377,7 +449,7 @@ pub fn convert_onecd_with_memory_and_backup_set(
     request.output = staging.path().join("source.dt");
     let report = {
         let _watch = watch_interrupts(err);
-        mssql_backup::sqlcmd::convert_dt_with_backup_set(&request, backup_set, err)?
+        mssql_backup::sqlcmd::convert_dt_with_options(&request, backup_set, options, err)?
     };
     let mut result = Vec::new();
     let code = crate::plain::convert::run(
@@ -398,6 +470,8 @@ pub fn convert_onecd_with_memory_and_backup_set(
     let mut status: serde_json::Value = serde_json::from_slice(&result)?;
     label_onecd_status(&mut status);
     note_users_email(report.users_with_email, &mut status, err);
+    note_extension_tables(report.extension_tables, &mut status);
+    note_ignored_extra_tables(&report.ignored_extra_tables, &mut status, err);
     if let Err(error) = serde_json::to_writer(&mut *out, &status) {
         return if error.io_error_kind() == Some(std::io::ErrorKind::BrokenPipe) {
             Ok(())

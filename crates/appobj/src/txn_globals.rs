@@ -19,7 +19,7 @@ fn begin(ex: &mut Execution, args: &mut [Arg]) -> CallResult<Value> {
         Value::Undefined => None,
         mode => Some(crate::data_lock::control_of(&mode).ok_or_else(|| type_mismatch(1))?),
     };
-    txn_of(ex)?.begin_with(control);
+    txn_of(ex)?.begin_explicit(control);
     Ok(Value::Undefined)
 }
 

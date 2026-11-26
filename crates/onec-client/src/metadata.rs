@@ -1,9 +1,11 @@
 use roxmltree::Node;
 
+use crate::answer::NS_LF;
 use crate::answer::{
     AnswerError, NS_APP, NS_CMI, Reader, Unrecognized, attr, boolean, guid, is, read, text_of,
     unsigned,
 };
+use crate::formdescr::{FieldType, FormData, FormKind, platform_type};
 
 pub const HIDDEN_CMI: &[&str] = &[
     "defaultNPHandleInfo",
@@ -18,11 +20,13 @@ pub struct MdAnswers<'a> {
     pub view: Option<&'a [u8]>,
     pub cmi: &'a [u8],
     pub commands: Option<&'a [u8]>,
+    pub panel: Option<&'a [u8]>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Metadata {
     pub types: Vec<MdType>,
+    pub objects: Vec<MdObject>,
     pub sections: Vec<MdSection>,
     pub unrecognized: Vec<Unrecognized>,
 }
@@ -41,6 +45,10 @@ pub enum MdKind {
     InformationRegister,
     AccumulationRegister,
     Constant,
+    Report,
+    DataProcessor,
+    DocumentJournal,
+    CommonCommand,
     Other(String),
 }
 
@@ -73,14 +81,75 @@ const KINDS: &[(MdKind, &str, &str)] = &[
         "РегистрНакопления",
     ),
     (MdKind::Constant, "Constant", "Константа"),
+    (MdKind::Report, "Report", "Отчет"),
+    (MdKind::DataProcessor, "DataProcessor", "Обработка"),
+    (
+        MdKind::DocumentJournal,
+        "DocumentJournal",
+        "ЖурналДокументов",
+    ),
+    (MdKind::CommonCommand, "CommonCommand", "ОбщаяКоманда"),
 ];
 
 impl MdKind {
-    fn of_stem(stem: &str) -> MdKind {
+    pub(crate) fn of_ru(ru: &str) -> Option<MdKind> {
+        KINDS
+            .iter()
+            .find(|(_, _, r)| *r == ru)
+            .map(|(k, _, _)| k.clone())
+    }
+
+    pub(crate) fn of_stem(stem: &str) -> MdKind {
         KINDS
             .iter()
             .find(|(_, en, _)| *en == stem)
             .map_or_else(|| MdKind::Other(stem.to_string()), |(k, _, _)| k.clone())
+    }
+
+    pub fn form_kind(&self) -> Option<FormKind> {
+        match self {
+            MdKind::Catalog
+            | MdKind::Document
+            | MdKind::ExchangePlan
+            | MdKind::ChartOfCharacteristicTypes
+            | MdKind::ChartOfAccounts
+            | MdKind::ChartOfCalculationTypes
+            | MdKind::BusinessProcess
+            | MdKind::Task => Some(FormKind::Object),
+            MdKind::InformationRegister => Some(FormKind::Record),
+            MdKind::AccumulationRegister => Some(FormKind::RecordSet),
+            MdKind::Enum
+            | MdKind::Constant
+            | MdKind::Report
+            | MdKind::DataProcessor
+            | MdKind::DocumentJournal
+            | MdKind::CommonCommand
+            | MdKind::Other(_) => None,
+        }
+    }
+
+    pub fn object_form(&self) -> Option<FormKind> {
+        match self {
+            MdKind::Report | MdKind::DataProcessor => Some(FormKind::Object),
+            MdKind::DocumentJournal => Some(FormKind::List),
+            _ => None,
+        }
+    }
+
+    pub fn value_type(&self) -> Option<(String, String)> {
+        let (en, ru) = match self {
+            MdKind::Other(_)
+            | MdKind::Report
+            | MdKind::DataProcessor
+            | MdKind::DocumentJournal
+            | MdKind::CommonCommand => return None,
+            MdKind::InformationRegister | MdKind::AccumulationRegister => {
+                ("RecordKey", "КлючЗаписи")
+            }
+            MdKind::Constant => ("ValueKey", "КлючЗначения"),
+            _ => ("Ref", "Ссылка"),
+        };
+        Some((format!("{}{en}", self.en()), format!("{}{ru}", self.ru())))
     }
 
     pub fn en(&self) -> &str {
@@ -116,6 +185,86 @@ pub struct MdType {
     pub recorder: Option<String>,
     pub periodic: Option<bool>,
     pub dims: Vec<Dim>,
+    pub attributes: Option<MdAttributes>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MdAttributes {
+    Read {
+        form_id: String,
+        data: FormData,
+    },
+    NoCommand,
+    Ambiguous {
+        uuids: Vec<String>,
+    },
+    Columns {
+        form_id: String,
+        columns: Vec<ListColumn>,
+    },
+    Failed {
+        form_id: String,
+        error: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListColumn {
+    pub name: String,
+    pub path: Option<String>,
+    pub ty: XmlType,
+    pub hidden: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct XmlType {
+    pub names: Vec<String>,
+    pub length: Option<u32>,
+    pub digits: Option<u32>,
+    pub fraction: Option<u32>,
+    pub nonnegative: bool,
+    pub date_fractions: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MdObject {
+    pub kind: MdKind,
+    pub name: String,
+    pub view: Option<String>,
+    pub uuids: Vec<String>,
+    pub commands: Vec<ObjectCommand>,
+    pub attributes: Option<MdAttributes>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjectCommand {
+    pub section: String,
+    pub section_text: Option<String>,
+    pub command: Command,
+}
+
+fn named_object(c: &Command) -> Option<(MdKind, String, Vec<String>)> {
+    let (name, kind_of): (&str, fn(&str) -> Option<MdKind>) = match (&c.name, &c.name_ru) {
+        (Some(n), _) => (n, |k| Some(MdKind::of_stem(k))),
+        (None, Some(n)) => (n, MdKind::of_ru),
+        (None, None) => return None,
+    };
+    let mut parts = name.split('.');
+    let kind = kind_of(parts.next()?)?;
+    let object = parts.next().filter(|o| !o.is_empty())?.to_string();
+    Some((kind, object, parts.map(str::to_string).collect()))
+}
+
+const STANDARD_COMMANDS: &[&str] = &["Open", "OpenList", "Открыть", "ОткрытьСписок"];
+
+fn same_name(a: &str, b: &str) -> bool {
+    a == b || a.to_lowercase() == b.to_lowercase()
+}
+
+fn command_uuid(c: &Command) -> Option<String> {
+    let uuid = c.id.strip_prefix("0:")?;
+    crate::value::Uuid::parse(uuid).ok()?;
+    Some(uuid.to_ascii_lowercase())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -150,9 +299,212 @@ pub struct Command {
     pub url: Option<String>,
     pub text: Option<String>,
     pub group: Option<String>,
+    pub category: Option<String>,
+}
+
+impl Command {
+    pub fn in_panel(&self) -> bool {
+        self.category.as_deref() == Some("panel")
+    }
 }
 
 impl Metadata {
+    pub fn md_uuids(&self) -> Vec<(usize, Vec<String>)> {
+        fn walk<'m>(s: &'m [MdSection], cmds: &mut Vec<&'m Command>) {
+            for x in s {
+                cmds.extend(x.commands.iter());
+                walk(&x.children, cmds);
+            }
+        }
+        let mut cmds = Vec::new();
+        walk(&self.sections, &mut cmds);
+        let mut out: Vec<(usize, Vec<String>)> = Vec::new();
+        for c in cmds {
+            if c.in_panel() {
+                continue;
+            }
+            let (Some(name), Some(uuid)) = (c.name.as_deref(), c.id.strip_prefix("0:")) else {
+                continue;
+            };
+            if crate::value::Uuid::parse(uuid).is_err() {
+                continue;
+            }
+            let parts: Vec<&str> = name.split('.').collect();
+            let [kind, object, _] = parts.as_slice() else {
+                continue;
+            };
+            let Some(i) = self
+                .types
+                .iter()
+                .position(|t| t.kind.en() == *kind && t.name == *object)
+            else {
+                continue;
+            };
+            let uuid = uuid.to_ascii_lowercase();
+            match out.iter_mut().find(|(j, _)| *j == i) {
+                Some((_, all)) if !all.contains(&uuid) => all.push(uuid),
+                Some(_) => {}
+                None => out.push((i, vec![uuid])),
+            }
+        }
+        out.sort_by_key(|(i, _)| *i);
+        out
+    }
+
+    fn objects_of(types: &[MdType], sections: &[MdSection]) -> Vec<MdObject> {
+        fn walk<'m>(s: &'m [MdSection], out: &mut Vec<(&'m MdSection, &'m Command)>) {
+            for x in s {
+                out.extend(x.commands.iter().map(|c| (x, c)));
+                walk(&x.children, out);
+            }
+        }
+        let mut cmds = Vec::new();
+        walk(sections, &mut cmds);
+        let mut out: Vec<MdObject> = Vec::new();
+        for (section, c) in cmds {
+            let Some((kind, name, rest)) = named_object(c) else {
+                continue;
+            };
+            if types
+                .iter()
+                .any(|t| t.kind.en() == kind.en() && same_name(&t.name, &name))
+            {
+                continue;
+            }
+            let standard = match rest.as_slice() {
+                [] => kind == MdKind::CommonCommand,
+                [command] => STANDARD_COMMANDS.contains(&command.as_str()),
+                _ => false,
+            };
+            let i = match out
+                .iter()
+                .position(|o| o.kind == kind && same_name(&o.name, &name))
+            {
+                Some(i) => i,
+                None => {
+                    out.push(MdObject {
+                        kind,
+                        name,
+                        view: None,
+                        uuids: Vec::new(),
+                        commands: Vec::new(),
+                        attributes: None,
+                    });
+                    out.len() - 1
+                }
+            };
+            let o = &mut out[i];
+            if standard {
+                if o.view.is_none() {
+                    o.view.clone_from(&c.text);
+                }
+                if let Some(u) = command_uuid(c)
+                    && !o.uuids.contains(&u)
+                {
+                    o.uuids.push(u);
+                }
+            }
+            o.commands.push(ObjectCommand {
+                section: section.id.clone(),
+                section_text: section.text.clone(),
+                command: c.clone(),
+            });
+        }
+        out
+    }
+
+    pub fn xml_type_text(&self, ty: &XmlType) -> String {
+        if ty.names.is_empty() {
+            return "Произвольный".into();
+        }
+        ty.names
+            .iter()
+            .map(|n| {
+                let (name, q): (String, Vec<String>) = match n.as_str() {
+                    "xs:string" => (
+                        "Строка".into(),
+                        ty.length
+                            .filter(|l| *l > 0)
+                            .map(|l| l.to_string())
+                            .into_iter()
+                            .collect(),
+                    ),
+                    "xs:decimal" => (
+                        "Число".into(),
+                        number_qualifiers(&FieldType {
+                            digits: ty.digits,
+                            fraction: ty.fraction,
+                            nonnegative: ty.nonnegative,
+                            ..FieldType::default()
+                        }),
+                    ),
+                    "xs:boolean" => ("Булево".into(), Vec::new()),
+                    "xs:dateTime" => (
+                        "Дата".into(),
+                        ty.date_fractions
+                            .clone()
+                            .filter(|f| f != "DateTime")
+                            .into_iter()
+                            .collect(),
+                    ),
+                    "v8:Type" => ("Тип".into(), Vec::new()),
+                    "v8:UUID" => ("УникальныйИдентификатор".into(), Vec::new()),
+                    other => (
+                        xml_ref_text(other).unwrap_or_else(|| other.to_string()),
+                        Vec::new(),
+                    ),
+                };
+                if q.is_empty() {
+                    name
+                } else {
+                    format!("{name}({})", q.join(", "))
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    pub fn type_names(&self, id: &str) -> Option<(String, String)> {
+        if let Some((en, ru)) = platform_type(id) {
+            return Some((en.to_string(), ru.to_string()));
+        }
+        let t = self
+            .types
+            .iter()
+            .find(|t| t.type_id.eq_ignore_ascii_case(id))?;
+        let (en, ru) = t.kind.value_type()?;
+        Some((format!("{en}.{}", t.name), format!("{ru}.{}", t.name)))
+    }
+
+    pub fn type_text(&self, ty: &FieldType) -> String {
+        if ty.ids.is_empty() {
+            return "Произвольный".into();
+        }
+        ty.ids
+            .iter()
+            .map(|id| {
+                let name = self.type_names(id).map_or_else(|| id.clone(), |(_, ru)| ru);
+                let q = match platform_type(id).map(|(en, _)| en) {
+                    Some("String") => ty
+                        .length
+                        .filter(|n| *n > 0)
+                        .map(|n| n.to_string())
+                        .into_iter()
+                        .collect(),
+                    Some("Number") => number_qualifiers(ty),
+                    Some("Date") => ty.date_fraction.clone().into_iter().collect(),
+                    _ => Vec::new(),
+                };
+                if q.is_empty() {
+                    name
+                } else {
+                    format!("{name}({})", q.join(", "))
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
     pub fn from_answers(a: &MdAnswers, root: Option<&str>) -> Result<Metadata, AnswerError> {
         let mut unrecognized = Vec::new();
         let mut types = read("types", a.types, NS_APP, &[], &mut unrecognized, read_types)?;
@@ -173,26 +525,145 @@ impl Metadata {
             &mut unrecognized,
             tree,
         )?;
-        if let Some(body) = a.commands {
-            let found = read("cmi/commands", body, NS_CMI, &[], &mut unrecognized, |r| {
+        let answers = [
+            ("cmi/commands", a.commands),
+            ("cmi/commands/panel", a.panel),
+        ];
+        for (answer, body) in answers {
+            let Some(body) = body else {
+                continue;
+            };
+            let found = read(answer, body, NS_CMI, &[], &mut unrecognized, |r| {
                 commands(r, root)
             })?;
-            for (id, cmds) in found {
-                match find(&mut sections, &id) {
-                    Some(s) => s.commands.extend(cmds),
+            for f in found {
+                if let Some(s) = find(&mut sections, &f.id) {
+                    s.commands.extend(f.commands);
+                    continue;
+                }
+                match f.parent.as_deref().and_then(|p| find(&mut sections, p)) {
+                    Some(parent) => parent.children.push(MdSection {
+                        id: f.id,
+                        name: f.name,
+                        text: f.text,
+                        include: f.include,
+                        commands: f.commands,
+                        children: Vec::new(),
+                    }),
                     None => unrecognized.push(Unrecognized {
-                        answer: "cmi/commands",
-                        name: format!("section {id}"),
+                        answer,
+                        name: format!("section {}", f.id),
                     }),
                 }
             }
         }
+        let objects = Metadata::objects_of(&types, &sections);
         Ok(Metadata {
             types,
+            objects,
             sections,
             unrecognized,
         })
     }
+}
+
+fn xml_ref_text(name: &str) -> Option<String> {
+    let (stem, object) = name.strip_prefix("cfg:")?.split_once('.')?;
+    let (_, ru) = MdKind::of_stem(stem.strip_suffix("Ref")?).value_type()?;
+    if !ru.ends_with("Ссылка") {
+        return None;
+    }
+    Some(format!("{ru}.{object}"))
+}
+
+pub fn list_columns(body: &[u8]) -> Result<Vec<ListColumn>, AnswerError> {
+    read(
+        "logForm/elements",
+        body,
+        crate::answer::NS_WS,
+        &[],
+        &mut Vec::new(),
+        |r| {
+            let tables: Vec<Node> = r
+                .root
+                .descendants()
+                .filter(|n| is(*n, NS_LF, "table"))
+                .collect();
+            let Some(table) = tables
+                .iter()
+                .find(|t| t.attribute("defItem") == Some("true"))
+                .or(tables.first())
+            else {
+                return Err(r.missing("table"));
+            };
+            let mut out = Vec::new();
+            for n in crate::dlist::table_fields(*table) {
+                let Some(path) = lf_text(n, "propName") else {
+                    continue;
+                };
+                out.push(ListColumn {
+                    name: attr(n, "name").ok_or_else(|| r.missing("field name"))?,
+                    path: Some(path),
+                    ty: n
+                        .children()
+                        .find(|c| is(*c, NS_LF, "tdp"))
+                        .map(|t| xml_type(r, t))
+                        .transpose()?
+                        .unwrap_or_default(),
+                    hidden: r.attr_parsed(n, "visible", "field visible", boolean)? == Some(false),
+                });
+            }
+            Ok(out)
+        },
+    )
+}
+
+const NS_V8: &str = "http://v8.1c.ru/8.1/data/core";
+
+fn lf_text(n: Node, local: &str) -> Option<String> {
+    n.children()
+        .find(|c| is(*c, NS_LF, local))
+        .and_then(text_of)
+}
+
+fn xml_type(r: &Reader, t: Node) -> Result<XmlType, AnswerError> {
+    let v8 = |n: Node, local: &str| -> Option<String> {
+        n.descendants()
+            .find(|c| is(*c, NS_V8, local))
+            .and_then(text_of)
+    };
+    let num = |local: &str, field: &str| -> Result<Option<u32>, AnswerError> {
+        match v8(t, local) {
+            None => Ok(None),
+            Some(s) => unsigned(&s).map(Some).ok_or_else(|| r.bad(field, &s)),
+        }
+    };
+    Ok(XmlType {
+        names: t
+            .children()
+            .filter(|c| is(*c, NS_V8, "Type") || is(*c, NS_V8, "TypeSet"))
+            .filter_map(text_of)
+            .collect(),
+        length: num("Length", "tdp Length")?,
+        digits: num("Digits", "tdp Digits")?,
+        fraction: num("FractionDigits", "tdp FractionDigits")?,
+        nonnegative: v8(t, "AllowedSign").as_deref() == Some("Nonnegative"),
+        date_fractions: v8(t, "DateFractions"),
+    })
+}
+
+fn number_qualifiers(ty: &FieldType) -> Vec<String> {
+    let mut q = Vec::new();
+    if ty.digits.unwrap_or(0) > 0 || ty.fraction.unwrap_or(0) > 0 {
+        q.push(ty.digits.unwrap_or(0).to_string());
+        if let Some(f) = ty.fraction.filter(|f| *f > 0) {
+            q.push(f.to_string());
+        }
+    }
+    if ty.nonnegative {
+        q.push("неотрицательное".into());
+    }
+    q
 }
 
 pub(crate) fn read_types(r: &Reader) -> Result<Vec<MdType>, AnswerError> {
@@ -255,6 +726,7 @@ fn md_type(r: &Reader, t: Node, kind: MdKind) -> Result<MdType, AnswerError> {
         recorder: attr(t, "recorder"),
         periodic: r.attr_parsed(t, "period", "type period", boolean)?,
         dims,
+        attributes: None,
     })
 }
 
@@ -302,7 +774,16 @@ fn child_text(n: Node, local: &str) -> Option<String> {
         .and_then(text_of)
 }
 
-fn commands(r: &Reader, root: Option<&str>) -> Result<Vec<(String, Vec<Command>)>, AnswerError> {
+struct FoundSection {
+    id: String,
+    parent: Option<String>,
+    name: Option<String>,
+    text: Option<String>,
+    include: Option<bool>,
+    commands: Vec<Command>,
+}
+
+fn commands(r: &Reader, root: Option<&str>) -> Result<Vec<FoundSection>, AnswerError> {
     let mut out = Vec::new();
     let top = r.children_of(NS_CMI, &["section", "group"]);
     let groups: Vec<Node> = top
@@ -312,10 +793,17 @@ fn commands(r: &Reader, root: Option<&str>) -> Result<Vec<(String, Vec<Command>)
         .collect();
     if !groups.is_empty() {
         let id = root.ok_or_else(|| r.missing("fragment of the root groups"))?;
-        out.push((id.to_string(), group_commands(r, &groups)?));
+        out.push(FoundSection {
+            id: id.to_string(),
+            parent: None,
+            name: None,
+            text: None,
+            include: None,
+            commands: group_commands(r, &groups)?,
+        });
     }
     for s in top.iter().filter(|n| n.tag_name().name() == "section") {
-        section_commands(r, *s, &mut out)?;
+        section_commands(r, *s, root.map(str::to_string), &mut out)?;
     }
     Ok(out)
 }
@@ -323,13 +811,21 @@ fn commands(r: &Reader, root: Option<&str>) -> Result<Vec<(String, Vec<Command>)
 fn section_commands(
     r: &Reader,
     s: Node,
-    out: &mut Vec<(String, Vec<Command>)>,
+    parent: Option<String>,
+    out: &mut Vec<FoundSection>,
 ) -> Result<(), AnswerError> {
     let id = section_id(r, s)?;
     let groups: Vec<Node> = s.children().filter(|n| is(*n, NS_CMI, "group")).collect();
-    out.push((id, group_commands(r, &groups)?));
+    out.push(FoundSection {
+        id: id.clone(),
+        parent,
+        name: attr(s, "name"),
+        text: child_text(s, "text"),
+        include: r.attr_parsed(s, "include", "section include", boolean)?,
+        commands: group_commands(r, &groups)?,
+    });
     for c in s.children().filter(|n| is(*n, NS_CMI, "section")) {
-        section_commands(r, c, out)?;
+        section_commands(r, c, Some(id.clone()), out)?;
     }
     Ok(())
 }
@@ -338,6 +834,7 @@ fn group_commands(r: &Reader, groups: &[Node]) -> Result<Vec<Command>, AnswerErr
     let mut out = Vec::new();
     for g in groups {
         let group = child_text(*g, "text");
+        let category = attr(*g, "cat");
         for c in g.children().filter(|n| is(*n, NS_CMI, "command")) {
             out.push(Command {
                 id: attr(c, "id").ok_or_else(|| r.missing("command id"))?,
@@ -347,6 +844,7 @@ fn group_commands(r: &Reader, groups: &[Node]) -> Result<Vec<Command>, AnswerErr
                 url: attr(c, "url"),
                 text: child_text(c, "text"),
                 group: group.clone(),
+                category: category.clone(),
             });
         }
     }

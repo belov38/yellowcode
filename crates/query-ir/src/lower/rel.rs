@@ -40,6 +40,8 @@ pub(super) struct Lower<'a> {
     pub agg_decs: Vec<super::Dec>,
     pub vt_used: Vec<Vec<QFieldId>>,
     pub slice_cols: HashMap<SrcId, Vec<QFieldId>>,
+    pub vt_raw_cols: HashMap<SrcId, Vec<Option<QFieldId>>>,
+    pub slice_extra: HashMap<SrcId, usize>,
     pub inner: u32,
     pub membership: bool,
     pub requires_calculation_admission: bool,
@@ -136,6 +138,8 @@ impl<'a> Lower<'a> {
             agg_decs: Vec::new(),
             vt_used: vec![Vec::new(); n],
             slice_cols: HashMap::new(),
+            vt_raw_cols: HashMap::new(),
+            slice_extra: HashMap::new(),
             inner: 0,
             membership: false,
             requires_calculation_admission: false,
@@ -359,12 +363,18 @@ impl<'a> Lower<'a> {
                 self.actual_action_period(v)
             }
             Rel::RegisterVt(v) if v.kind == crate::VtKind::ScheduleData => self.schedule_data(v),
+            Rel::RegisterVt(v) if v.kind == crate::VtKind::Base => self.calculation_base(v),
             Rel::RegisterVt(v) if v.kind == crate::VtKind::DrCrTurnovers => self.drcr(v),
             Rel::RegisterVt(v) if super::is_accounting_balance(self.schema, v.table) => {
                 self.accounting_balance(v)
             }
             Rel::RegisterVt(v) if super::is_accounting_turnovers(self.schema, v.table) => {
                 self.accounting_turnovers(v)
+            }
+            Rel::RegisterVt(v)
+                if super::is_accounting_balance_and_turnovers(self.schema, v.table) =>
+            {
+                self.accounting_balance_and_turnovers(v)
             }
             Rel::RegisterVt(v) | Rel::RunningBalance(v) => self.register_vt(v),
             Rel::Slice(v) => self.slice(v),
@@ -735,17 +745,121 @@ impl<'a> Lower<'a> {
         let Some(tid) = self.storage.table(table) else {
             return fatal(format!("таблица {} не привязана к хранению", t.name_ru));
         };
+        let mut rel = RelL::Scan {
+            table: tid,
+            fields: cols.iter().map(|c| c.1).collect(),
+        };
+        if t.kind == TableKind::Object(mdschema::MdKind::Constant) {
+            let default_row = self.constant_default_row(table, &cols)?;
+            rel = RelL::DefaultIfEmpty {
+                input: Box::new(rel),
+                row: default_row,
+            };
+            self.added += 1;
+        }
         let row = Row {
             signal: None,
             width: cols.len(),
-            rel: RelL::Scan {
-                table: tid,
-                fields: cols.iter().map(|c| c.1).collect(),
-            },
+            rel,
             rep: Some(src),
             keys: None,
         };
         self.secure_row(row, src)
+    }
+
+    fn constant_default_row(&self, table: QTableId, cols: &[Sf]) -> R<Arc<[QValue]>> {
+        let t = self.schema.table(table);
+        let mut out = Vec::with_capacity(cols.len());
+        for (_, fid) in cols {
+            let schema_field = t.fields.iter().enumerate().find(|(i, _)| {
+                u16::try_from(*i)
+                    .ok()
+                    .and_then(|k| self.storage.field(table, QFieldId(k)))
+                    == Some(*fid)
+            });
+            let val = match schema_field {
+                Some((_, fld)) => {
+                    if let Some(md) = fld.md
+                        && let Some(sep) = self
+                            .b
+                            .constant_separators
+                            .iter()
+                            .find(|s| s.common_attribute == md)
+                    {
+                        sep.value.clone()
+                    } else {
+                        self.default_value_for_type(&fld.ty)?
+                    }
+                }
+                None => QValue::Undefined,
+            };
+            out.push(val);
+        }
+        Ok(Arc::from(out))
+    }
+
+    fn default_value_for_type(&self, ty: &crate::types::QType) -> R<QValue> {
+        const EMPTY_VALUE_STORAGE: [u8; 18] = [
+            0x01, 0x01, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xEF, 0xBB, 0xBF, 0x7B,
+            0x22, 0x55, 0x22, 0x7D,
+        ];
+        if ty.atom_count() != 1 {
+            return Ok(QValue::Undefined);
+        }
+        if ty.boolean {
+            return Ok(QValue::Bool(false));
+        }
+        if ty.number.is_some() {
+            return Ok(QValue::Number(bsl_prim::Number::zero()));
+        }
+        if let Some(s) = ty.string {
+            return if s.fixed {
+                let Ok(len) = usize::try_from(s.len) else {
+                    return fatal("длина фиксированной строки константы превышает предел");
+                };
+                Ok(QValue::String(crate::QStr(
+                    vec![u16::from(b' '); len].into(),
+                )))
+            } else {
+                Ok(QValue::String(crate::QStr::from_str("")))
+            };
+        }
+        if ty.date.is_some() {
+            return Ok(QValue::Date(bsl_prim::BslDate::EMPTY));
+        }
+        if let [atom] = ty.refs.as_slice() {
+            let Some(table) = self.storage.ref_number(*atom) else {
+                return fatal(format!(
+                    "ссылочный тип {} не привязан к хранению",
+                    self.schema.ref_info(*atom).xml_name
+                ));
+            };
+            return Ok(QValue::Ref { table, id: [0; 16] });
+        }
+        if let [other] = ty.others.as_slice() {
+            return match other {
+                crate::types::Other::Uuid => Ok(QValue::Uuid([0; 16])),
+                crate::types::Other::Storage => Ok(QValue::Storage(
+                    Arc::<[u8]>::from(&EMPTY_VALUE_STORAGE[..]).into(),
+                )),
+                crate::types::Other::RoutePoint(atom) => {
+                    let Some((table, _)) = self
+                        .storage
+                        .route_point_refs()
+                        .into_iter()
+                        .find(|(_, a)| a == atom)
+                    else {
+                        return fatal(format!(
+                            "точка маршрута {} не привязана к хранению",
+                            self.schema.ref_info(*atom).xml_name
+                        ));
+                    };
+                    Ok(QValue::Ref { table, id: [0; 16] })
+                }
+                _ => Ok(QValue::Undefined),
+            };
+        }
+        Ok(QValue::Undefined)
     }
 
     fn constants(&mut self, src: SrcId, cols: Vec<Sf>) -> R<Row> {

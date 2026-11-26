@@ -5,10 +5,11 @@ use memory_budget::MemoryBudget;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io;
+use v8cont::V8Time;
 
 pub(super) struct CasSource<'a> {
     folder: ManagedConfigTxnSource<'a>,
-    rows: HashMap<String, String>,
+    rows: HashMap<String, (String, V8Time, V8Time, u32)>,
     manifest: String,
     entries: RefCell<HashMap<String, String>>,
 }
@@ -21,6 +22,23 @@ fn invalid(what: impl std::fmt::Display) -> mdconf::Error {
     io::Error::new(io::ErrorKind::InvalidData, what.to_string()).into()
 }
 
+fn to_mdconf(error: crate::Error) -> mdconf::Error {
+    match error {
+        crate::Error::Config(error) => error,
+        crate::Error::Memory(error)
+        | crate::Error::Inflate(zraw::ManagedInflateError::Memory(error))
+        | crate::Error::Engine(onecd::Error::Memory(error)) => charged_error(error),
+        other => invalid(other),
+    }
+}
+
+fn charged_error(error: memory_budget::BudgetError) -> mdconf::Error {
+    match error {
+        memory_budget::BudgetError::Limit(limit) => mdconf::Error::Memory(limit),
+        other => mdconf::Error::Io(io::Error::new(io::ErrorKind::OutOfMemory, other)),
+    }
+}
+
 impl<'a> CasSource<'a> {
     pub(super) fn open(
         txn: &'a onecd::ReadTxn,
@@ -31,7 +49,12 @@ impl<'a> CasSource<'a> {
         let rows = folder
             .list()
             .iter()
-            .map(|e| (e.name.to_ascii_lowercase(), e.name.clone()))
+            .map(|e| {
+                (
+                    e.name.to_ascii_lowercase(),
+                    (e.name.clone(), e.ctime, e.mtime, e.attrs),
+                )
+            })
             .collect();
         Ok(Self {
             folder,
@@ -49,7 +72,7 @@ impl<'a> CasSource<'a> {
             .collect();
     }
 
-    fn row(&self, name: &str) -> Option<String> {
+    fn row(&self, name: &str) -> Option<(String, V8Time, V8Time, u32)> {
         let key = if name == "configinfo" {
             self.manifest.clone()
         } else {
@@ -59,6 +82,11 @@ impl<'a> CasSource<'a> {
                 .clone()
         };
         self.rows.get(&key).cloned()
+    }
+
+    pub(super) fn meta(&self, name: &str) -> Option<(V8Time, V8Time, u32)> {
+        self.row(name)
+            .map(|(_, ctime, mtime, attrs)| (ctime, mtime, attrs))
     }
 }
 
@@ -70,7 +98,7 @@ impl EntrySource for CasSource<'_> {
         Err(io::Error::from(io::ErrorKind::Unsupported).into())
     }
     fn stored_len(&self, name: &str) -> mdconf::Result<Option<u64>> {
-        let Some(row) = self.row(name) else {
+        let Some((row, ..)) = self.row(name) else {
             return Ok(None);
         };
         self.folder
@@ -83,14 +111,14 @@ impl EntrySource for CasSource<'_> {
         name: &str,
         limit: usize,
     ) -> mdconf::Result<Option<StoredBytes>> {
-        let Some(row) = self.row(name) else {
+        let Some((row, ..)) = self.row(name) else {
             return Ok(None);
         };
         self.folder
             .stored_bounded(&row, limit)
-            .map_err(invalid)?
+            .map_err(to_mdconf)?
             .map(EntryBacking::from_charged)
             .transpose()
-            .map_err(invalid)
+            .map_err(charged_error)
     }
 }

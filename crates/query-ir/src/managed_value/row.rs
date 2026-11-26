@@ -179,7 +179,8 @@ impl<'a> Footprint<'a> {
                 | Backing::Date(_)
                 | Backing::Uuid(_)
                 | Backing::Ref { .. }
-                | Backing::SysEnum(..) => {}
+                | Backing::SysEnum(..)
+                | Backing::PointInTime(_) => {}
             }
         }
         Ok(())

@@ -69,6 +69,16 @@ impl Printer<'_> {
                 }
                 self.w(")");
             }
+            RelL::DefaultIfEmpty { input, row } => {
+                self.w("(default-if-empty ");
+                self.rel(input);
+                for v in row.iter() {
+                    self.w(" ");
+                    let s = lit_text(self.schema, v);
+                    self.w(&s);
+                }
+                self.w(")");
+            }
             RelL::Join {
                 kind,
                 l,
@@ -312,40 +322,137 @@ impl Printer<'_> {
                         if let Some(ext1) = &a.ext1 {
                             let _ = write!(
                                 self.out,
-                                " ext1-section={} owner={:?} ordinal={:?} turnover-only={:?} values={:?}",
+                                " ext-section={} owner={:?} ordinal={:?} turnover-only={:?} slots={:?}",
                                 name(ext1.section),
                                 ext1.owner,
                                 ext1.ordinal,
                                 ext1.turnover_only,
-                                ext1.values
+                                ext1.slots.as_slice()
                             );
+                            if let Some(ed) = ext1.ed {
+                                let _ = write!(self.out, " ed-table={}", name(ed.table));
+                            }
+                            if !ext1.ext_flag_fields.is_empty() {
+                                let _ = write!(
+                                    self.out,
+                                    " ext-flags={:?}",
+                                    ext1.ext_flag_fields.as_slice()
+                                );
+                            }
                         }
                         if let Some(child) = &a.chart_input {
                             self.w(" chart-input=");
                             self.rel(child);
                         }
+                        if !a.dims.is_empty() {
+                            let _ = write!(self.out, " dims={:?}", a.dims);
+                        }
+                        if !matches!(a.areas, super::BalanceAreasL::None) {
+                            let _ = write!(self.out, " areas={:?}", a.areas);
+                        }
                     }
                     super::RegisterRowsKindL::AccountingTurnovers(a) => {
                         let _ = write!(
                             self.out,
-                            "(register-rows {:?} main={} options={} account={} resources={:?} dates={:?}",
+                            "(register-rows {:?} main={} options={} account={} dims={:?} resources={:?} dates={:?}",
                             r.kind,
                             name(a.inputs.main),
                             name(a.inputs.options),
                             a.account,
+                            a.dims
+                                .iter()
+                                .map(|dim| (dim.metadata, dim.main))
+                                .collect::<Vec<_>>(),
                             a.resources,
                             a.dates
                         );
+                        if let Some(areas) = &a.areas {
+                            let _ = write!(self.out, " areas={areas:?}");
+                        }
+                        if let Some(period) = a.period {
+                            let _ = write!(self.out, " period={period:?}");
+                        }
+                        if let Some(rec) = &a.recorder {
+                            let _ = write!(self.out, " recorder={:?}", rec.field);
+                        }
+                        if let Some(line) = a.line {
+                            let _ = write!(self.out, " line={line:?}");
+                        }
+                        if let Some(ext) = &a.ext_dims {
+                            if let Some(ed) = &ext.acc_rg_ed {
+                                let _ = write!(
+                                    self.out,
+                                    " ext-dims-section={} owner={:?} ordinal={:?} acc-rg-ed={} dim-kind={:?} slots={:?}",
+                                    name(ext.section),
+                                    ext.owner,
+                                    ext.ordinal,
+                                    name(ed.table),
+                                    ed.section_dim_kind,
+                                    ext.slots
+                                        .iter()
+                                        .map(|slot| slot.ordinal)
+                                        .collect::<Vec<_>>()
+                                );
+                            } else {
+                                let _ = write!(
+                                    self.out,
+                                    " ext-dims-section={} owner={:?} ordinal={:?} slots={:?}",
+                                    name(ext.section),
+                                    ext.owner,
+                                    ext.ordinal,
+                                    ext.slots
+                                        .iter()
+                                        .filter_map(|slot| {
+                                            slot.values.map(|values| (slot.ordinal, values))
+                                        })
+                                        .collect::<Vec<_>>()
+                                );
+                            }
+                        }
+                    }
+                    super::RegisterRowsKindL::AccountingBalanceAndTurnovers(a) => {
+                        let _ = write!(
+                            self.out,
+                            "(register-rows {:?} main={} options={} chart={} resources={:?} periodic={}",
+                            r.kind,
+                            name(a.inputs.main),
+                            name(a.inputs.options),
+                            name(a.inputs.chart),
+                            a.resources,
+                            a.periodic,
+                        );
+                        if let Some(ext) = &a.ext_dims {
+                            let _ = write!(
+                                self.out,
+                                " ext-section={} slots={:?}",
+                                name(ext.section),
+                                ext.slots.iter().map(|s| s.ordinal).collect::<Vec<_>>()
+                            );
+                            if let Some(ed) = &ext.acc_rg_ed {
+                                let _ = write!(self.out, " ed-table={}", name(ed.table));
+                            }
+                        }
+                        if let Some(child) = &a.chart_input {
+                            self.w(" chart-input=");
+                            self.rel(child);
+                        }
+                        if !a.dims.is_empty() {
+                            let _ = write!(self.out, " dims={:?}", a.dims);
+                        }
+                        if !matches!(a.areas, super::BalanceAreasL::None) {
+                            let _ = write!(self.out, " areas={:?}", a.areas);
+                        }
                     }
                     super::RegisterRowsKindL::Accounting(a) => {
                         let _ = write!(
                             self.out,
-                            "(register-rows {:?} main={} ct={} options={} keys={:?} resources={:?} dates={:?}",
+                            "(register-rows {:?} main={} ct={} options={} keys={:?} ext_dims={:?} resources={:?} dates={:?}",
                             r.kind,
                             name(a.inputs.main),
                             name(a.inputs.ct),
                             name(a.inputs.options),
                             a.keys,
+                            a.ext_dims,
                             a.resources,
                             a.date_bounds
                         );
@@ -533,6 +640,21 @@ impl Printer<'_> {
             PExpr::TypeOf { x, .. } => {
                 self.w("(ТИПЗНАЧЕНИЯ ");
                 self.expr(x);
+                self.w(")");
+            }
+            PExpr::PredefName { x, names } => {
+                self.w("(predef-name ");
+                self.expr(x);
+                for (_, name) in names {
+                    let _ = write!(self.out, " {:?}", name.to_string_lossy());
+                }
+                self.w(")");
+            }
+            PExpr::PointInTime { date, reference } => {
+                self.w("(point-in-time ");
+                self.expr(date);
+                self.w(" ");
+                self.expr(reference);
                 self.w(")");
             }
             PExpr::SectionAgg { owner, rel, .. } => {

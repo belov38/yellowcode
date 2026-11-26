@@ -2,7 +2,7 @@
 name = "query-console"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.99.1"
+rust-version = "1.100.0"
 license = "MIT OR Apache-2.0"
 publish = false
 autotests = false
@@ -16,6 +16,7 @@ memory-budget = { path = "../memory-budget" }
 ibschema = { path = "../ibschema" }
 md-model = { path = "../md-model" }
 onecd = { path = "../onecd" }
+query-exec = { path = "../query-exec" }
 query-testhost = { path = "../query-testhost" }
 query-ir = { path = "../query-ir" }
 serde = { version = "1", features = ["derive"] }

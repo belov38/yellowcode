@@ -2,7 +2,8 @@ use super::schedule::Schedule;
 use crate::Application;
 use ibschema::fields::FieldValue;
 use ibschema::names::{field as f, purpose};
-use ibschema::storage::TableInfo;
+use ibschema::storage::{TableId, TableInfo};
+use ibschema::store::{ReadTxn, RowHandle};
 use ibschema::values::{RefId, Uuid16};
 
 #[derive(Clone, Debug)]
@@ -18,11 +19,20 @@ pub(crate) struct JobRow {
     pub restart_period: i64,
     pub parameters_empty: bool,
     pub schedule: Result<Schedule, String>,
+    pub version: i64,
+    pub at: Stored,
 }
 
-const EMPTY_PARAMETERS: [u8; 2] = [0x41, 0x20];
+#[derive(Clone, Debug)]
+pub(crate) struct Stored {
+    pub table: TableId,
+    pub handle: RowHandle,
+    pub fields: ibschema::Row,
+}
 
-fn job_tables(app: &Application) -> Vec<(ibschema::storage::TableId, &TableInfo)> {
+pub(crate) const EMPTY_PARAMETERS: [u8; 2] = [0x41, 0x20];
+
+pub(crate) fn job_tables(app: &Application) -> Vec<(TableId, &TableInfo)> {
     let map = app.store().storage();
     map.tables()
         .iter()
@@ -40,7 +50,7 @@ fn job_tables(app: &Application) -> Vec<(ibschema::storage::TableId, &TableInfo)
         .collect()
 }
 
-fn column(ti: &TableInfo, name: &str) -> Result<usize, String> {
+pub(crate) fn column(ti: &TableInfo, name: &str) -> Result<usize, String> {
     ti.field_by_name(name)
         .map(|f| usize::from(f.0))
         .ok_or_else(|| format!("нет поля {name} таблицы {}", ti.logical))
@@ -67,7 +77,7 @@ fn flag(v: Option<&FieldValue>) -> Result<bool, String> {
     }
 }
 
-fn int(v: Option<&FieldValue>) -> Result<i64, String> {
+pub(crate) fn int(v: Option<&FieldValue>) -> Result<i64, String> {
     match v {
         Some(FieldValue::Number(n)) => n.to_string().parse::<i64>().map_err(|_| "число".into()),
         _ => Err("числовое поле".into()),
@@ -96,15 +106,8 @@ pub(crate) fn schedule_of(blob: &[u8]) -> Result<Schedule, String> {
     Schedule::from_internal(text.trim_end_matches('\0'))
 }
 
-pub(crate) fn read_all(app: &Application) -> Result<Vec<JobRow>, String> {
+pub(crate) fn read_all(app: &Application, txn: &dyn ReadTxn) -> Result<Vec<JobRow>, String> {
     let tables = job_tables(app);
-    if tables.is_empty() {
-        return Ok(Vec::new());
-    }
-    let txn = app
-        .store()
-        .read()
-        .map_err(|e| format!("чтение базы: {e}"))?;
     let mut out = Vec::new();
     for (t, ti) in tables {
         let c = |name: &str| column(ti, name);
@@ -120,12 +123,12 @@ pub(crate) fn read_all(app: &Application) -> Result<Vec<JobRow>, String> {
             c(f::USE)?,
             c(f::RESTART_COUNT)?,
         );
-        let period = c(f::RESTART_PERIOD)?;
+        let (period, version) = (c(f::RESTART_PERIOD)?, c(f::VERSION)?);
         let rows = txn
             .scan(t)
             .map_err(|e| format!("чтение {}: {e}", ti.logical))?;
         for r in rows {
-            let (_, row) = r.map_err(|e| format!("чтение {}: {e}", ti.logical))?;
+            let (handle, row) = r.map_err(|e| format!("чтение {}: {e}", ti.logical))?;
             let schedule = bytes(row.get(cond))
                 .ok_or_else(|| "расписание: нет данных".to_string())
                 .and_then(schedule_of);
@@ -141,6 +144,12 @@ pub(crate) fn read_all(app: &Application) -> Result<Vec<JobRow>, String> {
                 restart_period: int(row.get(period))?,
                 parameters_empty: bytes(row.get(params)) == Some(&EMPTY_PARAMETERS[..]),
                 schedule,
+                version: int(row.get(version))?,
+                at: Stored {
+                    table: t,
+                    handle,
+                    fields: row,
+                },
             });
         }
     }

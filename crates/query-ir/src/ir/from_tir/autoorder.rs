@@ -75,6 +75,21 @@ impl Builder<'_> {
             }
             MdKind::Document => Ok(vec![AtomKey::Field(need(StdRole::Date)?), AtomKey::SelfRef]),
             MdKind::Enum => Ok(vec![AtomKey::Field(need(StdRole::Order)?)]),
+            MdKind::ChartOfAccounts => {
+                if self.schema.table(t).auto_order_by_code
+                    && let Some(order_f) = self.role_field(t, StdRole::Order)
+                {
+                    let mut v = vec![AtomKey::Field(order_f)];
+                    if let Some(code_f) = self.role_field(t, StdRole::Code) {
+                        v.push(AtomKey::Field(code_f));
+                    }
+                    Ok(v)
+                } else if let Some(code_f) = self.role_field(t, StdRole::Code) {
+                    Ok(vec![AtomKey::Field(code_f)])
+                } else {
+                    Ok(vec![AtomKey::Field(need(StdRole::Description)?)])
+                }
+            }
             _ => later("АВТОУПОРЯДОЧИВАНИЕ ссылки на объект этого вида", "Q3"),
         }
     }
@@ -232,10 +247,35 @@ impl Builder<'_> {
         Some((self.col_of(src, t, id), self.col_of(src, t, parent)))
     }
 
-    pub(super) fn main_order(&mut self, src: SrcId) -> R<Option<MainOrder>> {
-        let Some(SrcKind::Table(t)) = self.sources.get(src.0 as usize).map(|s| s.kind.clone())
-        else {
-            return Ok(None);
+    pub(super) fn main_order(&self, src: SrcId, select: &tir::Select) -> R<Option<MainOrder>> {
+        let t = match self.sources.get(src.0 as usize).map(|s| &s.kind) {
+            Some(SrcKind::Table(t)) => *t,
+            Some(SrcKind::Virtual { table, .. }) => {
+                let t = *table;
+                if !crate::sema::select::is_accum_balance(self.schema, t) {
+                    return Ok(None);
+                }
+                let keys: Vec<Expr> = self
+                    .schema
+                    .table(t)
+                    .fields
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, f)| {
+                        if f.role != FieldRole::Dimension {
+                            return None;
+                        }
+                        let id = QFieldId(u16::try_from(i).ok()?);
+                        crate::sema::select::balance_dim_used(select, &self.totals_extra, id)
+                            .then(|| self.col_of(src, t, id))
+                    })
+                    .collect();
+                if keys.is_empty() {
+                    return Ok(None);
+                }
+                return Ok(Some(MainOrder { keys, hier: None }));
+            }
+            _ => return Ok(None),
         };
         let kind = match self.schema.table(t).kind {
             TableKind::Object(k) => k,
@@ -243,7 +283,7 @@ impl Builder<'_> {
         };
         let role = |this: &Self, r: StdRole| this.role_field(t, r).map(|f| this.col_of(src, t, f));
         let keys = match kind {
-            MdKind::Catalog | MdKind::Document | MdKind::Enum => {
+            MdKind::Catalog | MdKind::Document | MdKind::Enum | MdKind::ChartOfAccounts => {
                 role(self, StdRole::Ref).into_iter().collect()
             }
             MdKind::AccumulationRegister => {
@@ -268,12 +308,90 @@ impl Builder<'_> {
             }
             _ => return later("АВТОУПОРЯДОЧИВАНИЕ таблицы этого вида", "Q3"),
         };
-        let hier = if kind == MdKind::Catalog {
+        let hier = if matches!(kind, MdKind::Catalog | MdKind::ChartOfAccounts) {
             self.hierarchy_of(src)
         } else {
             None
         };
         Ok(Some(MainOrder { keys, hier }))
+    }
+
+    pub(super) fn chart_code_order_expr(&mut self, base: &Expr) -> Option<Expr> {
+        match &base.kind {
+            ExprKind::Col {
+                src,
+                col: ColSel::Field(f),
+            } => {
+                let Some(SrcKind::Table(table)) = self.sources.get(src.0 as usize).map(|s| &s.kind)
+                else {
+                    return None;
+                };
+                let table = *table;
+                if !self.schema.table(table).auto_order_by_code {
+                    return None;
+                }
+                if !self
+                    .schema
+                    .field(table, *f)
+                    .is_some_and(|fi| fi.role == FieldRole::Std(StdRole::Code))
+                {
+                    return None;
+                }
+                let order_f = self.role_field(table, StdRole::Order)?;
+                Some(self.col_of(*src, table, order_f))
+            }
+            ExprKind::Deref { base: inner, steps } => {
+                let (last, head) = steps.split_last()?;
+                if last.targets.is_empty()
+                    || !last.targets.iter().all(|(t, f)| {
+                        self.schema
+                            .field(*t, *f)
+                            .is_some_and(|fi| fi.role == FieldRole::Std(StdRole::Code))
+                    })
+                {
+                    return None;
+                }
+                let has_auto = last.targets.iter().any(|(t, _)| {
+                    self.schema.table(*t).auto_order_by_code
+                        && self.role_field(*t, StdRole::Order).is_some()
+                });
+                if !has_auto {
+                    return None;
+                }
+                let mut new_targets = Vec::with_capacity(last.targets.len());
+                let mut ty = QType::default();
+                for &(t, f) in &last.targets {
+                    let chosen = if self.schema.table(t).auto_order_by_code
+                        && let Some(order_f) = self.role_field(t, StdRole::Order)
+                    {
+                        self.touch(t);
+                        order_f
+                    } else {
+                        f
+                    };
+                    if let Some(fi) = self.schema.field(t, chosen) {
+                        ty = ty.merge(&fi.ty);
+                    }
+                    new_targets.push((t, chosen));
+                }
+                if base.ty.null {
+                    ty = ty.with_null();
+                }
+                let mut new_steps = head.to_vec();
+                new_steps.push(tir::Deref {
+                    name: "\u{0}chart_order".to_string(),
+                    targets: new_targets,
+                });
+                Some(Expr {
+                    kind: ExprKind::Deref {
+                        base: inner.clone(),
+                        steps: new_steps,
+                    },
+                    ty,
+                })
+            }
+            _ => None,
+        }
     }
 }
 

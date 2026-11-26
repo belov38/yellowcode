@@ -2,9 +2,10 @@ use bsl_prim::Number;
 use query_ir::{ExecError, QValue, StmtL};
 
 use crate::model::{VALUE_SIZE, rows_model, value_model, vec_block};
+use crate::ops::present::{PresentCache, Presenter};
 use crate::ops::{Cx, rows_push_growth};
 use crate::plan::{PlanOptions, build, plan_temps};
-use crate::proxy::with_source;
+use crate::proxy::with_source_and_presenter;
 use crate::result::QueryResult;
 use crate::source::{DataSource, ExecEnv};
 use crate::temp::TempTables;
@@ -35,7 +36,19 @@ pub fn execute_temps(
     temps: Option<&TempTables>,
     opts: PlanOptions,
 ) -> Result<QueryResult, ExecError> {
-    execute_temps_impl(stmt, src, env, temps, opts, None)
+    execute_temps_impl(stmt, src, env, temps, opts, None, None)
+}
+
+pub(crate) fn execute_temps_with_presenter(
+    stmt: &StmtL,
+    src: &dyn DataSource,
+    env: &ExecEnv<'_>,
+    temps: Option<&TempTables>,
+    opts: PlanOptions,
+    observation: Option<&crate::observe::ObservationSession>,
+    presenter: Option<&dyn Presenter>,
+) -> Result<QueryResult, ExecError> {
+    execute_temps_impl(stmt, src, env, temps, opts, observation, presenter)
 }
 
 fn execute_temps_impl(
@@ -45,9 +58,10 @@ fn execute_temps_impl(
     temps: Option<&TempTables>,
     opts: PlanOptions,
     observation: Option<&crate::observe::ObservationSession>,
+    presenter: Option<&dyn Presenter>,
 ) -> Result<QueryResult, ExecError> {
     ibschema::store::with_key_cancel(env.cancel, || {
-        execute_on_source(stmt, src, env, temps, opts, observation)
+        execute_on_source(stmt, src, env, temps, opts, observation, presenter)
     })
 }
 
@@ -58,10 +72,11 @@ fn execute_on_source(
     temps: Option<&TempTables>,
     opts: PlanOptions,
     observation: Option<&crate::observe::ObservationSession>,
+    presenter: Option<&dyn Presenter>,
 ) -> Result<QueryResult, ExecError> {
     let Some(obs) = observation else {
-        return with_source(stmt.max_depth, src, move |s| {
-            run(stmt, s, env, temps, opts, None)
+        return with_source_and_presenter(stmt.max_depth, src, presenter, move |s, p| {
+            run(stmt, s, env, temps, opts, None, p)
         })?;
     };
     let seed = obs.execution_seed();
@@ -69,9 +84,9 @@ fn execute_on_source(
         session: obs,
         published: false,
     };
-    let transferred = with_source(stmt.max_depth, src, move |s| {
+    let transferred = with_source_and_presenter(stmt.max_depth, src, presenter, move |s, p| {
         let local = crate::observe::ObservationSession::from_seed(seed);
-        let result = run(stmt, s, env, temps, opts, Some(&local));
+        let result = run(stmt, s, env, temps, opts, Some(&local), p);
         local.finish(result.is_ok());
         (result, local.seed())
     });
@@ -126,6 +141,10 @@ fn charge_legacy_sets(r: &query_ir::RelL, cx: &mut Cx<'_>) -> Result<(), ExecErr
     fn rel(r: &RelL, b: &mut u64) {
         match r {
             RelL::Empty | RelL::Scan { .. } | RelL::TempScan { .. } | RelL::Values { .. } => {}
+            RelL::DefaultIfEmpty { input, row } => {
+                rel(input, b);
+                *b += vec_block(row.len(), VALUE_SIZE) + row.iter().map(value_model).sum::<u64>();
+            }
             RelL::RegisterRows(step) => {
                 if let Some(child) = step.chart_input() {
                     rel(child, b);
@@ -203,6 +222,7 @@ fn run(
     temps: Option<&TempTables>,
     opts: PlanOptions,
     observation: Option<&crate::observe::ObservationSession>,
+    presenter: Option<&dyn Presenter>,
 ) -> Result<QueryResult, ExecError> {
     crate::register::check_slice_use(stmt, src, observation)?;
     let managed = crate::coll::open(env)?;
@@ -211,6 +231,13 @@ fn run(
     cx.temps = temps;
     cx.observation = observation.cloned();
     cx.week_start = stmt.week_start;
+    cx.presenter = presenter;
+    cx.present_targets = &stmt.present_targets;
+    if stmt.has_inline_present {
+        cx.present = Some(std::rc::Rc::new(std::cell::RefCell::new(
+            PresentCache::new(),
+        )));
+    }
     cx.plan_options(opts);
     let mut protected =
         stmt.requires_calculation_admission || crate::accounting_inputs::protected(&stmt.root)?;
@@ -328,5 +355,5 @@ pub fn execute_temps_observed(
     opts: PlanOptions,
     obs: &crate::observe::ObservationSession,
 ) -> Result<QueryResult, ExecError> {
-    execute_temps_impl(stmt, src, env, temps, opts, Some(obs))
+    execute_temps_impl(stmt, src, env, temps, opts, Some(obs), None)
 }

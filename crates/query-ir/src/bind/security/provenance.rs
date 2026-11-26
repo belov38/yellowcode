@@ -464,7 +464,7 @@ impl Proof {
             self.account(key, src, balance);
         } else if self.balance_columns
             && balance
-            && f.role == FieldRole::Std(StdRole::ExtDimension(1))
+            && matches!(f.role, FieldRole::Std(role) if crate::lower::is_balance_ext_dimension(role))
         {
             self.unknown(key);
         } else {

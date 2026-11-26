@@ -3,7 +3,7 @@ mod accounting;
 mod accounting_turnovers;
 pub(crate) use accounting::{check_cancel as check_accounting_cancel, check_drcr_settings_shape};
 mod accounting_balance;
-pub(crate) use accounting_balance::check_balance_settings_shape;
+mod accounting_balance_and_turnovers;
 mod security;
 pub(crate) use security::CheckAccess;
 pub mod agg;
@@ -30,7 +30,7 @@ use query_ir::{ExecError, QValue};
 use crate::model::{block, row_cap_model, row_model, value_model};
 use crate::source::{DataSource, ExecEnv, Row};
 
-pub use access::{GetById, IndexRange, Scan};
+pub use access::{DefaultIfEmpty, GetById, IndexRange, Scan};
 pub use agg::HashAggregate;
 pub use expr::eval;
 pub use hier::{HierarchyClosure, HierarchyOrder};
@@ -450,6 +450,9 @@ pub struct Cx<'a> {
     pub(crate) subs: Rc<subq::SubCache>,
     ticks: u64,
     pub week_start: Option<u32>,
+    pub(crate) presenter: Option<&'a dyn present::Presenter>,
+    pub(crate) present_targets: &'a [query_ir::PresentTarget],
+    pub(crate) present: Option<Rc<std::cell::RefCell<present::PresentCache>>>,
 }
 
 impl<'a> Cx<'a> {
@@ -464,13 +467,26 @@ impl<'a> Cx<'a> {
             subs: Rc::new(subq::SubCache::default()),
             ticks: 0,
             week_start: None,
+            presenter: None,
+            present_targets: &[],
+            present: None,
             observation: None,
             input_payloads: None,
             input_structure: None,
         }
     }
 
+    pub(crate) fn release_present(&mut self) {
+        if let Some(cache) = self.present.take()
+            && Rc::strong_count(&cache) == 1
+            && let Ok(mut guard) = cache.try_borrow_mut()
+        {
+            guard.clear(&self.mem);
+        }
+    }
+
     pub(crate) fn release_inputs(&mut self) {
+        self.release_present();
         if Rc::strong_count(&self.subs) == 1 {
             self.subs.clear();
         }
@@ -493,6 +509,9 @@ impl<'a> Cx<'a> {
             subs: self.subs.clone(),
             ticks: 0,
             week_start: self.week_start,
+            presenter: self.presenter,
+            present_targets: self.present_targets,
+            present: self.present.clone(),
             observation: self.observation.clone(),
             input_payloads: self.input_payloads.clone(),
             input_structure: None,

@@ -1,6 +1,7 @@
 use crate::host::TestBase;
 use brace::Guid;
 use bsl_prim::{BslDate, Number};
+use query_ir::host::{HostError, SeparatorFilter, SessionValues, UserRef};
 use query_ir::value::{Boundary, Moment};
 use query_ir::{
     DateQ, NumQ, Other, ParamConst, ParamShape, ParamTypes, ParamValue, ParamValues, QStr, QType,
@@ -64,6 +65,51 @@ impl query_ir::ManagedParamTypes for CaseParams {
     }
     fn constant_lowercase(&self, name: &str) -> Option<&ParamConst> {
         self.0.get(name).and_then(|param| param.constant.as_ref())
+    }
+}
+
+#[derive(Default)]
+pub struct SessionParams(HashMap<String, QValue>);
+
+impl SessionParams {
+    pub fn insert_repr(
+        &mut self,
+        base: &TestBase,
+        name: &str,
+        repr: &str,
+    ) -> Result<(), ParamError> {
+        let parsed = parse(base, repr)?;
+        let value = match (&parsed.shape, parsed.value) {
+            (ParamShape::Value(_), ParamValue::Value(value)) => value,
+            _ => {
+                return Err(ParamError::Bad(format!(
+                    "session parameter must be scalar: {repr}"
+                )));
+            }
+        };
+        self.0.insert(name.to_lowercase(), value);
+        Ok(())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl SessionValues for SessionParams {
+    fn session_param(&self, name: &str) -> Result<QValue, HostError> {
+        self.0
+            .get(&name.to_lowercase())
+            .cloned()
+            .ok_or_else(|| HostError::new(format!("session parameter {name} is not set")))
+    }
+
+    fn separators(&self) -> Result<Vec<SeparatorFilter>, HostError> {
+        Ok(Vec::new())
+    }
+
+    fn user(&self) -> Option<&UserRef> {
+        None
     }
 }
 

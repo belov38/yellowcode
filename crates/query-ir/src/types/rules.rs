@@ -161,11 +161,20 @@ pub fn func(f: Func, args: &[Arg<'_>]) -> Result<QType, ArgError> {
 }
 
 pub(crate) fn func_recipe<'a>(f: Func, args: &[Arg<'a>]) -> Result<TypeResult<'a>, ArgError> {
+    func_recipe_checked(f, args, false)
+}
+
+pub(crate) fn func_recipe_checked<'a>(
+    f: Func,
+    args: &[Arg<'a>],
+    reject_undefined: bool,
+) -> Result<TypeResult<'a>, ArgError> {
     let Some(row) = row(f) else {
         let [a] = args else {
             return Err(ArgError::Count);
         };
-        return aggregate_recipe(f, Some(a.ty)).map_err(|AggError| ArgError::At(0));
+        return aggregate_recipe_checked(f, Some(a.ty), reject_undefined)
+            .map_err(|AggError| ArgError::At(0));
     };
     let min = row.args.len().saturating_sub(row.optional);
     if args.len() > row.args.len() {
@@ -173,14 +182,14 @@ pub(crate) fn func_recipe<'a>(f: Func, args: &[Arg<'a>]) -> Result<TypeResult<'a
     }
     if args.len() < min {
         for (i, (a, p)) in args.iter().zip(row.args).enumerate() {
-            if !fits(*p, a) {
+            if !fits(*p, a, reject_undefined) {
                 return Err(ArgError::At(i));
             }
         }
         return Err(ArgError::Count);
     }
     for (i, (a, p)) in args.iter().zip(row.args).enumerate() {
-        if !fits(*p, a) {
+        if !fits(*p, a, reject_undefined) {
             return Err(ArgError::At(i));
         }
     }
@@ -197,12 +206,20 @@ pub fn aggregate(f: Func, arg: Option<&QType>) -> Result<QType, AggError> {
 }
 
 pub(crate) fn aggregate_recipe(f: Func, arg: Option<&QType>) -> Result<TypeResult<'_>, AggError> {
+    aggregate_recipe_checked(f, arg, false)
+}
+
+pub(crate) fn aggregate_recipe_checked(
+    f: Func,
+    arg: Option<&QType>,
+    reject_undefined: bool,
+) -> Result<TypeResult<'_>, AggError> {
     match (f, arg) {
         (Func::Count, None) => Ok(TypeResult::Scalar(number(0, 0, true))),
         (Func::Count, Some(t)) if !t.has_unlimited_string() => {
             Ok(TypeResult::Scalar(number(0, 0, true)))
         }
-        (Func::Sum | Func::Avg, Some(t)) if of_kind(t, t.only_number()) => {
+        (Func::Sum | Func::Avg, Some(t)) if of_kind(t, t.only_number(), reject_undefined) => {
             Ok(TypeResult::Scalar(number(0, 0, false)))
         }
         (Func::Min | Func::Max, Some(t)) if !t.has_unlimited_string() => {
@@ -268,23 +285,28 @@ fn operand(t: &QType) -> Operand {
     }
 }
 
-fn of_kind(t: &QType, only: bool) -> bool {
-    only || t.atom_count() == 0
+fn of_kind(t: &QType, only: bool, reject_undefined: bool) -> bool {
+    only || (t.atom_count() == 0 && !(reject_undefined && t.is_undefined()))
 }
 
-fn fits(p: P, a: &Arg<'_>) -> bool {
+fn fits(p: P, a: &Arg<'_>, reject_undefined: bool) -> bool {
     let t = a.ty;
     match p {
-        P::Str => of_kind(t, t.only_string()),
-        P::Num => of_kind(t, t.only_number()),
-        P::Date => of_kind(t, t.only_date()),
+        P::Str => of_kind(t, t.only_string(), reject_undefined),
+        P::Num => of_kind(t, t.only_number(), reject_undefined),
+        P::Date => of_kind(t, t.only_date(), reject_undefined),
         P::Any | P::Unit(_) => true,
         P::Prim => of_kind(
             t,
             t.only_number() || t.only_date() || t.only_bool() || t.only_string(),
+            reject_undefined,
         ),
-        P::Ref => of_kind(t, !t.refs.is_empty() && t.atom_count() == t.refs.len()),
-        P::NumConst => a.constant && of_kind(t, t.only_number()),
+        P::Ref => of_kind(
+            t,
+            !t.refs.is_empty() && t.atom_count() == t.refs.len(),
+            reject_undefined,
+        ),
+        P::NumConst => a.constant && of_kind(t, t.only_number(), reject_undefined),
     }
 }
 

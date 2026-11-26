@@ -531,6 +531,43 @@ fn object_extension(cx: &MdCtx, path: MdPath, ru: &str) -> CallResult<Value> {
     }
 }
 
+fn lost_borrowed(
+    cx: &MdCtx,
+    facts: &[(&crate::ExtensionFacts, &crate::ExtensionStructure)],
+) -> Option<String> {
+    facts
+        .iter()
+        .flat_map(|(_, s)| &s.changed)
+        .find_map(|(k, n)| {
+            let found = cx
+                .model()
+                .config
+                .objects
+                .iter()
+                .any(|o| o.kind.as_str() == k.as_str() && fold(&o.name) == fold(n));
+            (!found).then(|| format!("заимствованный объект {k}.{n} не найден в конфигурации"))
+        })
+}
+
+fn root_changed(cx: &MdCtx, ru: &str) -> CallResult<Value> {
+    let Some(facts) =
+        crate::extensions::metadata_facts(&cx.app).map_err(|why| extension_refusal(ru, &why))?
+    else {
+        return Ok(Value::Bool(false));
+    };
+    if let Some(why) = lost_borrowed(cx, &facts) {
+        return Err(extension_refusal(ru, &why));
+    }
+    if facts.iter().any(|(_, s)| !s.changed.is_empty()) {
+        Ok(Value::Bool(true))
+    } else {
+        Err(extension_refusal(
+            ru,
+            "расширения без изменений объектов конфигурации",
+        ))
+    }
+}
+
 fn object_changed(cx: &MdCtx, path: MdPath, ru: &str) -> CallResult<Value> {
     let Some(facts) =
         crate::extensions::metadata_facts(&cx.app).map_err(|why| extension_refusal(ru, &why))?
@@ -543,21 +580,8 @@ fn object_changed(cx: &MdCtx, path: MdPath, ru: &str) -> CallResult<Value> {
     let own = facts.iter().any(|(_, s)| s.own.contains(&id));
     match (is_top(path), own, path) {
         (true, false, _) => {
-            for (_, s) in &facts {
-                for (k, n) in &s.changed {
-                    let found = cx
-                        .model()
-                        .config
-                        .objects
-                        .iter()
-                        .any(|o| o.kind.as_str() == k.as_str() && fold(&o.name) == fold(n));
-                    if !found {
-                        return Err(extension_refusal(
-                            ru,
-                            &format!("заимствованный объект {k}.{n} не найден в конфигурации"),
-                        ));
-                    }
-                }
+            if let Some(why) = lost_borrowed(cx, &facts) {
+                return Err(extension_refusal(ru, &why));
             }
             let object = md_of(cx, id).ok_or_else(|| extension_refusal(ru, "объект не найден"))?;
             let (kind, name) = (object.kind.as_str(), fold(&object.name));
@@ -638,7 +662,7 @@ impl HostObject for MdRoot {
                     })
                 }
                 "естьизменениярасширениямиконфигурации" => {
-                    Ok(Value::Bool(false))
+                    root_changed(&self.cx, ru)
                 }
                 _ => Err(not_implemented(ru).into()),
             },

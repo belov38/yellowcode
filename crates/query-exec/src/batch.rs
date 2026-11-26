@@ -14,7 +14,7 @@ use query_ir::{
 };
 use query_syntax::{ParseMode, Preflight, PublicParseLimit};
 
-use crate::exec::execute_temps;
+use crate::exec::execute_temps_with_presenter;
 use crate::host::ExecHost;
 use crate::ops::{MemBudget, present, row_bytes};
 use crate::plan::explain_temps;
@@ -746,6 +746,7 @@ fn drcr_lower_bytes(
     }
     let entries = stats.exprs.saturating_mul(
         3 * (std::mem::size_of::<query_ir::lower::DrCrResourceL>()
+            + std::mem::size_of::<query_ir::lower::DrCrExtDimL>()
             + std::mem::size_of::<query_ir::lower::DrCrSideL>()) as u64,
     );
     let area_snapshot = sources.saturating_mul(
@@ -769,6 +770,11 @@ fn turnovers_lower_bytes(
 ) -> u64 {
     let mut sources = 0u64;
     let mut columns = 0u64;
+    let mut dims = 0u64;
+    let mut dim_refs = 0u64;
+    let mut recorder_refs = 0u64;
+    let mut ext_slots = 0u64;
+    let mut ext_refs = 0u64;
     for source in &stmt.sources {
         if let query_ir::ir::SrcKind::Virtual { table, .. } = &source.kind {
             let table = schema.table(*table);
@@ -780,6 +786,22 @@ fn turnovers_lower_bytes(
             {
                 sources = sources.saturating_add(1);
                 columns = columns.saturating_add(table.fields.len() as u64);
+                for field in &table.fields {
+                    if field.role == query_ir::FieldRole::Dimension {
+                        dims = dims.saturating_add(1);
+                        dim_refs = dim_refs.saturating_add(field.ty.refs.len() as u64);
+                    }
+                    if field.period() == Some(query_ir::schema::PeriodField::Recorder) {
+                        recorder_refs = recorder_refs.saturating_add(field.ty.refs.len() as u64);
+                    }
+                    if matches!(
+                        field.role,
+                        query_ir::FieldRole::Std(query_ir::StdRole::ExtDimension(_))
+                    ) {
+                        ext_slots = ext_slots.saturating_add(1);
+                        ext_refs = ext_refs.saturating_add(field.ty.refs.len() as u64);
+                    }
+                }
             }
         }
     }
@@ -791,7 +813,37 @@ fn turnovers_lower_bytes(
             + 3 * std::mem::size_of::<query_ir::lower::AggL>()
             + 6 * std::mem::size_of::<query_ir::PExpr>()) as u64,
     );
+    let dim_bytes = dims
+        .saturating_mul(
+            3 * std::mem::size_of::<query_ir::lower::AccountingTurnoversDimensionL>() as u64,
+        )
+        .saturating_add(
+            dim_refs
+                .saturating_add(recorder_refs)
+                .saturating_mul(3 * std::mem::size_of::<u32>() as u64),
+        );
+    let ext_bytes = ext_slots
+        .saturating_mul(3 * std::mem::size_of::<query_ir::lower::TurnoversExtDimSlotL>() as u64)
+        .saturating_add(ext_refs.saturating_mul(3 * std::mem::size_of::<u32>() as u64))
+        .saturating_add(if ext_slots > 0 {
+            sources
+                .saturating_mul(
+                    3 * std::mem::size_of::<query_ir::lower::TurnoversAccRgEdL>() as u64,
+                )
+                .saturating_add(recorder_refs.saturating_mul(3 * std::mem::size_of::<u32>() as u64))
+        } else {
+            0
+        });
+    let area_snapshot = sources.saturating_mul(
+        4 * (std::mem::size_of::<(query_ir::QTableId, query_ir::lower::TurnoversAreasL)>() as u64
+            + 1)
+            + 16 * std::mem::size_of::<(ibschema::storage::FieldId, query_ir::QValue)>() as u64
+            + 256,
+    );
     entries
+        .saturating_add(dim_bytes)
+        .saturating_add(ext_bytes)
+        .saturating_add(area_snapshot)
         .saturating_add(columns.saturating_mul(3 * std::mem::size_of::<query_ir::PExpr>() as u64))
         .saturating_add(
             sources.saturating_mul(
@@ -812,8 +864,14 @@ fn balance_lower_bytes(
             continue;
         };
         let t = schema.table(*table);
-        if t.kind == query_ir::TableKind::Virtual(query_ir::VtKind::Balance)
-            && t.owner.is_some_and(|owner| matches!(schema.table(owner).kind, query_ir::TableKind::Object(kind) if kind.as_str() == "AccountingRegister")) {
+        if matches!(
+            t.kind,
+            query_ir::TableKind::Virtual(
+                query_ir::VtKind::Balance | query_ir::VtKind::BalanceAndTurnovers
+            )
+        ) && t.owner.is_some_and(|owner| {
+            matches!(schema.table(owner).kind, query_ir::TableKind::Object(kind) if kind.as_str() == "AccountingRegister")
+        }) {
             sources = sources.saturating_add(1);
             fields = fields.saturating_add(t.fields.len() as u64);
         }
@@ -822,16 +880,50 @@ fn balance_lower_bytes(
         return 0;
     }
     fields
-        .saturating_mul(3 * std::mem::size_of::<query_ir::PExpr>() as u64)
+        .saturating_mul(6 * std::mem::size_of::<query_ir::PExpr>() as u64)
         .saturating_add(stats.exprs.saturating_mul(
-            3 * (std::mem::size_of::<query_ir::lower::BalanceResourceL>()
-                + 24 * std::mem::size_of::<query_ir::PExpr>()) as u64,
+            3 * (std::mem::size_of::<query_ir::lower::BalanceDimL>()
+                + std::mem::size_of::<query_ir::lower::BalanceResourceL>()
+                + std::mem::size_of::<query_ir::lower::AggL>()
+                + 32 * std::mem::size_of::<query_ir::PExpr>()) as u64,
         ))
-        .saturating_add(
-            sources.saturating_mul(
-                3 * std::mem::size_of::<query_ir::lower::BalanceRowsL>() as u64 + 4096,
-            ),
-        )
+        .saturating_add(sources.saturating_mul(
+            3 * std::mem::size_of::<query_ir::lower::AccountingBalanceAndTurnoversL>() as u64
+                + 3 * std::mem::size_of::<query_ir::lower::RunningBalanceL>() as u64
+                + 8192,
+        ))
+}
+
+fn constant_lower_bytes(stmt: &query_ir::ir::StmtS, schema: &query_ir::QuerySchema) -> u64 {
+    let mut bytes = 0u64;
+    for source in &stmt.sources {
+        let query_ir::ir::SrcKind::Table(table) = source.kind else {
+            continue;
+        };
+        let info = schema.table(table);
+        if !matches!(
+            info.kind,
+            query_ir::TableKind::Object(kind) if kind.as_str() == "Constant"
+        ) {
+            continue;
+        }
+        let mut row_bytes = (info.fields.len() as u64)
+            .saturating_mul(std::mem::size_of::<QValue>() as u64)
+            .saturating_add(256);
+        for field in &info.fields {
+            if let Some(s) = field.ty.string
+                && s.fixed
+                && field.ty.atom_count() == 1
+            {
+                row_bytes =
+                    row_bytes.saturating_add(u64::from(s.len).saturating_mul(2).saturating_add(64));
+            } else if field.ty.others.contains(&query_ir::Other::Storage) {
+                row_bytes = row_bytes.saturating_add(64);
+            }
+        }
+        bytes = bytes.saturating_add(row_bytes);
+    }
+    bytes
 }
 
 fn checked_batch_origins<'a>(
@@ -1009,7 +1101,8 @@ fn prepare(
             .lower(&stats, st.mem.max_predefined_bytes)
             .saturating_add(drcr_lower_bytes(&ir, schema, &stats))
             .saturating_add(turnovers_lower_bytes(&ir, schema, &stats))
-            .saturating_add(balance_lower_bytes(&ir, schema, &stats));
+            .saturating_add(balance_lower_bytes(&ir, schema, &stats))
+            .saturating_add(constant_lower_bytes(&ir, schema));
         st.mem.grow(bytes)?;
         *leased += bytes;
     }
@@ -1203,17 +1296,19 @@ fn step_prepared(
             return Err(BatchError::Compile(e).into());
         }
         let mut presentation_mem = (!lowered.present.is_empty()).then(|| MemBudget::of_env(&env));
-        let result = match observation {
-            Some(obs) => crate::exec::execute_temps_observed(
-                lowered,
-                &*src,
-                &env,
-                Some(&*temp),
-                host.plan_options(),
-                obs,
-            ),
-            None => execute_temps(lowered, &*src, &env, Some(&*temp), host.plan_options()),
-        }
+        let host_presenter = present::HostPresenter(host);
+        let presenter = lowered
+            .has_inline_present
+            .then_some(&host_presenter as &dyn present::Presenter);
+        let result = execute_temps_with_presenter(
+            lowered,
+            &*src,
+            &env,
+            Some(&*temp),
+            host.plan_options(),
+            observation,
+            presenter,
+        )
         .map_err(exec)?;
         let charge = if env.lease.is_some() {
             crate::exec::result_model(&result)
@@ -1231,12 +1326,22 @@ fn step_prepared(
             .ok_or_else(|| exec(ExecError::Fatal("missing pending result".into())))?;
         if let Some(mem) = presentation_mem.as_mut() {
             let before = crate::exec::result_model(res);
-            if !mem.is_leased()
-                && let Err(e) = mem.grow(res.rows.iter().map(|r| row_bytes(r)).sum())
-            {
-                return Err(exec(e).into());
+            if !mem.is_leased() {
+                let rows_bytes: u64 = res.rows.iter().map(|r| row_bytes(r)).sum();
+                let totals_bytes: u64 = res
+                    .totals
+                    .as_ref()
+                    .map_or(0, |t| t.totals.iter().map(|r| row_bytes(r)).sum());
+                if let Err(e) = mem.grow(rows_bytes.saturating_add(totals_bytes)) {
+                    return Err(exec(e).into());
+                }
             }
             if let Err(e) = present::apply(lowered, &mut res.rows, host, &*src, mem) {
+                return Err(exec(e).into());
+            }
+            if let Some(tree) = res.totals.as_mut()
+                && let Err(e) = present::apply_totals(lowered, tree, host, &*src, mem)
+            {
                 return Err(exec(e).into());
             }
             let after = crate::exec::result_model(res);

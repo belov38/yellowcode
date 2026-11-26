@@ -27,16 +27,16 @@ pub(crate) enum Reads {
         queries: bool,
         names: bool,
     },
+    TemplateList,
     Templates,
 }
 
+pub(crate) const BOUNDED_CACHE: Option<std::num::NonZeroUsize> = std::num::NonZeroUsize::new(64);
+
 pub(crate) fn load_options(reads: Reads) -> LoadOptions {
     let stages = match reads {
-        Reads::Tree {
-            depth: Some(0 | 1),
-            rooted: false,
-        } => Stages::NONE,
-        Reads::Tree { .. } | Reads::Show | Reads::Modules => Stages::MODULES,
+        Reads::Tree { .. } | Reads::Show | Reads::TemplateList => Stages::NONE,
+        Reads::Modules => Stages::MODULES,
         Reads::Grep {
             code,
             queries,

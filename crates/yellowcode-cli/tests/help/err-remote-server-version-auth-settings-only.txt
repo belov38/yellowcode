@@ -1,0 +1,8 @@
+exit 2
+--- stdout
+--- stderr
+error: the argument '--auth-settings-only' cannot be used with '--server-version <ВЕРСИЯ>'
+
+Usage: yellowcode remote info --auth-settings-only <URL>
+
+For more information, try '--help'.

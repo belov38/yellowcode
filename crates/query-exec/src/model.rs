@@ -404,6 +404,33 @@ fn totals_spec_capacity(
                 )?,
             )?;
         }
+        bytes = size_add(
+            bytes,
+            size_vec(
+                cap(point.dependent.len(), point.dependent.capacity()),
+                std::mem::size_of::<DependentSpec>(),
+            )?,
+        )?;
+        for dep in &point.dependent {
+            if let Some(HierDepSpec::Chain(steps)) = &dep.hier {
+                bytes = size_add(
+                    bytes,
+                    size_vec(
+                        cap(steps.len(), steps.capacity()),
+                        std::mem::size_of::<HierDepStep>(),
+                    )?,
+                )?;
+                for step in steps {
+                    bytes = size_add(
+                        bytes,
+                        size_vec(
+                            cap(step.branches.len(), step.branches.capacity()),
+                            std::mem::size_of::<HierFieldRead>(),
+                        )?,
+                    )?;
+                }
+            }
+        }
     }
     bytes = size_add(
         bytes,

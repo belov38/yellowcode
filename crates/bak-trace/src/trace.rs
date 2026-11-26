@@ -244,6 +244,7 @@ impl Trace {
             .opt_unum("timeout_s", shape.lifecycle_timeout_secs)
             .flag("memory_limit", shape.memory_limit_given)
             .opt_flag("raw", shape.raw)
+            .opt_flag("ignore_extra_tables", shape.ignore_extra_tables)
             .flag("trace", shape.trace_requested)
             .opt_unum(
                 "cpus",

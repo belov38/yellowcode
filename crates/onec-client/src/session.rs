@@ -5,15 +5,20 @@ use crate::auth::{AuthSettings, AuthSettingsError};
 use crate::body::{self, ACCEPT_ENCODING};
 use crate::cred;
 use crate::enums::{self, EnumPresentations, EnumType};
+use crate::formdescr::{FormData, FormKind};
 use crate::info::{Answers, InfoError, ServerInfo};
-use crate::metadata::{MdAnswers, MdKind, MdType, Metadata, read_types};
+use crate::metadata::{MdAnswers, MdAttributes, MdKind, MdType, Metadata, read_types};
 use crate::modules::{self, HttpCache, ModuleDefs, ModuleId, ModuleSource, ModulesError};
 use crate::refs::{self, Presentations};
+use crate::report::{self, FormAttribute, OpenedForm, ReportError};
+use crate::spreadsheet::{self, CellCount, Sheet, SheetChanges, SheetLimits};
 use crate::transport::{HttpTransport, Response, TransportError};
 use crate::value::{EnumRef, Ref, Uuid, Value};
 use crate::xml::{self, LoginInfo, XmlError};
 
 pub const VERSION: &str = "8.5.1.1529";
+
+const BUILD_MISMATCH: u16 = 409;
 
 const FOVER: &str = "d98c1dd4-008f-04b2-e980-0998ecf8427e";
 const ZERO_VER: &str = "00000000-0000-0000-0000-000000000000";
@@ -47,6 +52,8 @@ pub enum SessionError {
     Modules(#[from] ModulesError),
     #[error(transparent)]
     AuthSettings(#[from] AuthSettingsError),
+    #[error(transparent)]
+    Report(#[from] ReportError),
     #[error("random source failed: {0}")]
     Random(String),
     #[error("{step}: HTTP {status} {message}")]
@@ -55,8 +62,12 @@ pub enum SessionError {
         status: u16,
         message: String,
     },
+    #[error(transparent)]
+    List(#[from] crate::dlist::ListError),
     #[error("password rejected (round 2 returned empty cred)")]
     PasswordRejected,
+    #[error(transparent)]
+    Object(#[from] crate::object::ObjectError),
     #[error("{0}")]
     Protocol(String),
 }
@@ -109,6 +120,7 @@ pub struct InfoView {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MetadataOptions {
     pub enum_synonyms: bool,
+    pub attributes: bool,
 }
 
 #[derive(Debug)]
@@ -116,6 +128,29 @@ pub struct MetadataView {
     pub metadata: Metadata,
     pub enum_synonyms_error: Option<SessionError>,
 }
+
+#[derive(Debug, Clone, Copy)]
+pub struct ReportOptions<'a> {
+    pub form: &'a str,
+    pub call: Option<(&'a str, &'a [Value])>,
+    pub limits: SheetLimits,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReportSheet {
+    pub position: usize,
+    pub sheet: Sheet,
+    pub rows_asked: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReportView {
+    pub form: OpenedForm,
+    pub attributes: Vec<FormAttribute>,
+    pub sheets: Vec<ReportSheet>,
+}
+
+const ROWS_PER_REQUEST: usize = 1000;
 
 pub struct Session<R: RandomSource = OsRandom> {
     tr: HttpTransport,
@@ -127,10 +162,12 @@ pub struct Session<R: RandomSource = OsRandom> {
     types: Option<Vec<u8>>,
     enum_texts: std::collections::HashMap<Uuid, Vec<String>>,
     steps: Vec<Step>,
+    pub(crate) version: String,
+    auto_version: bool,
 }
 
-struct Prologue {
-    conf: String,
+pub(crate) struct Prologue {
+    pub(crate) conf: String,
     types: Option<Vec<u8>>,
     start_info: Vec<u8>,
     defs: Vec<u8>,
@@ -155,7 +192,18 @@ impl<R: RandomSource> Session<R> {
             types: None,
             enum_texts: Default::default(),
             steps: Vec::new(),
+            version: VERSION.to_string(),
+            auto_version: true,
         }
+    }
+
+    pub fn set_version(&mut self, build: &str) {
+        self.version = build.to_string();
+        self.auto_version = false;
+    }
+
+    pub fn version(&self) -> &str {
+        &self.version
     }
 
     pub fn steps(&self) -> &[Step] {
@@ -172,7 +220,12 @@ impl<R: RandomSource> Session<R> {
         Ok(b)
     }
 
-    fn headers(&mut self, accept: &str, state: bool, xml_body: bool) -> Vec<(String, String)> {
+    pub(crate) fn headers(
+        &mut self,
+        accept: &str,
+        state: bool,
+        xml_body: bool,
+    ) -> Vec<(String, String)> {
         let mut h = vec![
             ("User-Agent".into(), "1CV8C".into()),
             ("1C-ApplicationName".into(), "1CV8C".into()),
@@ -198,7 +251,20 @@ impl<R: RandomSource> Session<R> {
         h
     }
 
-    fn step(
+    pub(crate) fn step(
+        &mut self,
+        name: &'static str,
+        method: &str,
+        path: &str,
+        headers: &[(String, String)],
+        body: &[u8],
+        accept: &[u16],
+    ) -> Result<Response, SessionError> {
+        let resp = self.step_raw(name, method, path, headers, body, accept)?;
+        Self::accepted(name, resp, accept)
+    }
+
+    fn step_raw(
         &mut self,
         name: &'static str,
         method: &str,
@@ -224,7 +290,15 @@ impl<R: RandomSource> Session<R> {
             status: resp.status,
             ok,
         });
-        if !ok {
+        Ok(resp)
+    }
+
+    fn accepted(
+        name: &'static str,
+        resp: Response,
+        accept: &[u16],
+    ) -> Result<Response, SessionError> {
+        if !accept.contains(&resp.status) {
             let decoded =
                 body::decode(&resp.body, resp.header("content-encoding")).unwrap_or_default();
             let message = if decoded.is_empty() {
@@ -241,7 +315,7 @@ impl<R: RandomSource> Session<R> {
         Ok(resp)
     }
 
-    fn decoded(resp: &Response) -> Result<Vec<u8>, SessionError> {
+    pub(crate) fn decoded(resp: &Response) -> Result<Vec<u8>, SessionError> {
         Ok(body::decode(&resp.body, resp.header("content-encoding"))?)
     }
 
@@ -273,18 +347,12 @@ impl<R: RandomSource> Session<R> {
 
     pub fn cred_login(&mut self, query: &str, c: &Credentials) -> Result<(), SessionError> {
         self.forget_types();
-        let noise: [u8; 16] = self.rand()?;
-        let pad1: [u8; 16] = self.rand()?;
-        let blob = cred::cred_blob(&cred::build_cred_req1(c.user, &noise, &pad1));
-        let (h, b) = self.cred_json(&blob);
-        let resp = self.step(
-            "login/cred1",
-            "POST",
-            &format!("/e1cib/login?{query}"),
-            &h,
-            &b,
-            &[200],
-        )?;
+        let (resp, query) = self.first_login("login/cred1", query, |s| {
+            let noise: [u8; 16] = s.rand()?;
+            let pad1: [u8; 16] = s.rand()?;
+            let blob = cred::cred_blob(&cred::build_cred_req1(c.user, &noise, &pad1));
+            Ok(s.cred_json(&blob))
+        })?;
         let vrs = resp
             .header("vrs-session")
             .ok_or_else(|| SessionError::Protocol("round 1 answer has no vrs-session".into()))?
@@ -331,21 +399,38 @@ impl<R: RandomSource> Session<R> {
 
     pub fn login_plain(&mut self, query: &str) -> Result<(), SessionError> {
         self.forget_types();
-        let mut h = self.headers("*/*", false, false);
-        h.push((
-            "Content-Type".into(),
-            "application/x-www-form-urlencoded".into(),
-        ));
-        let resp = self.step(
-            "login",
-            "POST",
-            &format!("/e1cib/login?{query}"),
-            &h,
-            &[],
-            &[200],
-        )?;
+        let (resp, _) = self.first_login("login", query, |s| {
+            let mut h = s.headers("*/*", false, false);
+            h.push((
+                "Content-Type".into(),
+                "application/x-www-form-urlencoded".into(),
+            ));
+            Ok((h, Vec::new()))
+        })?;
         self.vrs = resp.header("vrs-session").map(|s| s.to_string());
         self.set_login(Self::decoded(&resp)?)
+    }
+
+    fn first_login(
+        &mut self,
+        name: &'static str,
+        query: &str,
+        mut request: impl FnMut(&mut Self) -> Result<(Vec<(String, String)>, Vec<u8>), SessionError>,
+    ) -> Result<(Response, String), SessionError> {
+        let q = with_version(query, &self.version);
+        let (h, b) = request(self)?;
+        let resp = self.step_raw(name, "POST", &format!("/e1cib/login?{q}"), &h, &b, &[200])?;
+        if resp.status == BUILD_MISMATCH
+            && self.auto_version
+            && let Some(build) = server_build(&resp).filter(|b| *b != self.version)
+        {
+            self.version = build;
+            let q = with_version(query, &self.version);
+            let (h, b) = request(self)?;
+            let resp = self.step(name, "POST", &format!("/e1cib/login?{q}"), &h, &b, &[200])?;
+            return Ok((resp, q));
+        }
+        Ok((Self::accepted(name, resp, &[200])?, q))
     }
 
     fn forget_types(&mut self) {
@@ -359,7 +444,7 @@ impl<R: RandomSource> Session<R> {
         Ok(())
     }
 
-    fn prologue(&mut self, with_types: bool) -> Result<Prologue, SessionError> {
+    pub(crate) fn prologue(&mut self, with_types: bool) -> Result<Prologue, SessionError> {
         let info = self
             .info
             .clone()
@@ -386,21 +471,23 @@ impl<R: RandomSource> Session<R> {
         )?;
         let start_info = Self::decoded(&resp)?;
 
+        let sysver = self.version.clone();
         let h = self.headers("*/*", false, false);
         self.step(
             "splash",
             "GET",
-            &format!("/e1cib/metadata/splash?sysver={VERSION}&confver={conf}&scale=100&interfaceVar=16&operatingSystem=1&theme=1&extract=true"),
+            &format!("/e1cib/metadata/splash?sysver={sysver}&confver={conf}&scale=100&interfaceVar=16&operatingSystem=1&theme=1&extract=true"),
             &h,
             &[],
             &[200, 404],
         )?;
 
+        let sysver = self.version.clone();
         let h = self.headers("application/xml", false, false);
         let resp = self.step(
             "modules/defs",
             "GET",
-            &format!("/e1cib/modules/defs?sysver={VERSION}&confver={conf}&lm=2"),
+            &format!("/e1cib/modules/defs?sysver={sysver}&confver={conf}&lm=2"),
             &h,
             &[],
             &[200],
@@ -419,11 +506,12 @@ impl<R: RandomSource> Session<R> {
         let Some(key) = key else {
             return Ok(None);
         };
+        let sysver = self.version.clone();
         let h = self.headers("application/xml", false, false);
         let resp = self.step(
             "types",
             "GET",
-            &format!("/e1cib/types?sysver={VERSION}&types={key}"),
+            &format!("/e1cib/types?sysver={sysver}&types={key}"),
             &h,
             &[],
             &[200],
@@ -470,7 +558,7 @@ impl<R: RandomSource> Session<R> {
         Ok(Presentations::new(items, unrecognized))
     }
 
-    fn session_types(&mut self, what: &str) -> Result<Vec<MdType>, SessionError> {
+    pub(crate) fn session_types(&mut self, what: &str) -> Result<Vec<MdType>, SessionError> {
         let body = match self.types.clone() {
             Some(b) => b,
             None => {
@@ -502,11 +590,12 @@ impl<R: RandomSource> Session<R> {
             return Ok(texts.clone());
         }
         let key = self.info.as_ref().and_then(|i| i.types.clone());
+        let sysver = self.version.clone();
         let h = self.headers("application/xml", false, false);
         let resp = self.step(
             "types/view/values",
             "GET",
-            &enums::values_path(t.clsid, VERSION, key.as_deref()),
+            &enums::values_path(t.clsid, &sysver, key.as_deref()),
             &h,
             &[],
             &[200],
@@ -555,11 +644,12 @@ impl<R: RandomSource> Session<R> {
 
     fn module_defs(&mut self, conf: &str, module_id: &str) -> Result<Vec<u8>, SessionError> {
         let qid = percent_encode(module_id);
+        let sysver = self.version.clone();
         let h = self.headers("application/xml", false, false);
         let resp = self.step(
             "modules/defs?id",
             "GET",
-            &format!("/e1cib/modules/defs?sysver={VERSION}&confver={conf}&lm=2&id={qid}"),
+            &format!("/e1cib/modules/defs?sysver={sysver}&confver={conf}&lm=2&id={qid}"),
             &h,
             &[],
             &[200],
@@ -671,11 +761,12 @@ impl<R: RandomSource> Session<R> {
         };
         let mut cmi = None;
         if opts.sections {
+            let sysver = self.version.clone();
             let h = self.headers("application/xml", false, false);
             let resp = self.step(
                 "cmiStartData",
                 "GET",
-                &format!("/e1cib/cmi/cmiStartData?sysver={VERSION}&confver={conf}"),
+                &format!("/e1cib/cmi/cmiStartData?sysver={sysver}&confver={conf}"),
                 &h,
                 &[],
                 &[200],
@@ -707,6 +798,9 @@ impl<R: RandomSource> Session<R> {
         opts: MetadataOptions,
     ) -> Result<MetadataView, SessionError> {
         let mut metadata = self.metadata_answers()?;
+        if opts.attributes {
+            self.attributes_of(&mut metadata)?;
+        }
         let mut enum_synonyms_error = None;
         if opts.enum_synonyms {
             match self.enum_synonyms_of(&metadata.types) {
@@ -726,6 +820,126 @@ impl<R: RandomSource> Session<R> {
             metadata,
             enum_synonyms_error,
         })
+    }
+
+    fn attributes_of(&mut self, metadata: &mut Metadata) -> Result<(), SessionError> {
+        let info = self
+            .info
+            .clone()
+            .ok_or_else(|| SessionError::Protocol("not logged in".into()))?;
+        let conf = info
+            .config
+            .ok_or_else(|| SessionError::Protocol("login response had no config".into()))?;
+        let roles = info.roles_id.unwrap_or_else(|| "0".to_string());
+        let uuids = metadata.md_uuids();
+        let mut broken = false;
+        for i in 0..metadata.types.len() {
+            let Some(kind) = metadata.types[i].kind.form_kind() else {
+                continue;
+            };
+            let found = uuids
+                .iter()
+                .find(|(j, _)| *j == i)
+                .map_or(&[][..], |(_, u)| u.as_slice());
+            let a = self.form_attributes(kind, found, &conf, &roles, &mut broken, metadata);
+            metadata.types[i].attributes = Some(a);
+        }
+        for i in 0..metadata.objects.len() {
+            let Some(kind) = metadata.objects[i].kind.object_form() else {
+                continue;
+            };
+            let found = metadata.objects[i].uuids.clone();
+            let a = self.form_attributes(kind, &found, &conf, &roles, &mut broken, metadata);
+            metadata.objects[i].attributes = Some(a);
+        }
+        Ok(())
+    }
+
+    fn form_attributes(
+        &mut self,
+        kind: FormKind,
+        uuids: &[String],
+        conf: &str,
+        roles: &str,
+        broken: &mut bool,
+        metadata: &mut Metadata,
+    ) -> MdAttributes {
+        let uuid = match uuids {
+            [] => return MdAttributes::NoCommand,
+            [one] => one,
+            many => {
+                return MdAttributes::Ambiguous {
+                    uuids: many.to_vec(),
+                };
+            }
+        };
+        let form_id = kind.form_id(uuid);
+        if *broken {
+            return MdAttributes::Failed {
+                form_id,
+                error: "not asked: an earlier exchange failed".into(),
+            };
+        }
+        let sysver = self.version.clone();
+        let h = self.headers("application/xml", false, false);
+        let (step, path) = match kind {
+            FormKind::List => (
+                "logForm/elements",
+                format!(
+                    "/e1cib/logForm?sysver={sysver}&cmd=elements&clang={CLANG}&formId={form_id}&confver={conf}\
+                     &rolesId={roles}&iweb=16"
+                ),
+            ),
+            _ => (
+                "logForm/dataDescrWMethods",
+                format!(
+                    "/e1cib/logForm?sysver={sysver}&cmd=dataDescrWMethods&formId={form_id}&confver={conf}\
+                     &rolesId={roles}"
+                ),
+            ),
+        };
+        let resp = match self.step(step, "GET", &path, &h, &[], &ANY_STATUS) {
+            Ok(r) => r,
+            Err(e) => {
+                *broken = true;
+                return MdAttributes::Failed {
+                    form_id,
+                    error: e.to_string(),
+                };
+            }
+        };
+        let status = resp.status;
+        let read = Self::decoded(&resp)
+            .map_err(|e| e.to_string())
+            .and_then(|body| {
+                let read = match kind {
+                    FormKind::List => {
+                        crate::metadata::list_columns(&body).map(|columns| MdAttributes::Columns {
+                            form_id: form_id.clone(),
+                            columns,
+                        })
+                    }
+                    _ => {
+                        let mut unrecognized = Vec::new();
+                        FormData::from_answer(&body, &mut unrecognized).map(|data| {
+                            if status == 200 {
+                                metadata.unrecognized.extend(unrecognized);
+                            }
+                            MdAttributes::Read {
+                                form_id: form_id.clone(),
+                                data,
+                            }
+                        })
+                    }
+                };
+                match read {
+                    Ok(a) if status == 200 => Ok(a),
+                    Ok(_) => Err(format!("HTTP {status}")),
+                    Err(e) if status == 200 => Err(e.to_string()),
+                    Err(e) => Err(format!("HTTP {status}: {e}")),
+                }
+            });
+        read.unwrap_or_else(|error| MdAttributes::Failed { form_id, error })
     }
 
     fn enum_synonyms_of(
@@ -754,11 +968,12 @@ impl<R: RandomSource> Session<R> {
             .and_then(|i| i.roles_id.clone())
             .unwrap_or_else(|| "0".to_string());
 
+        let sysver = self.version.clone();
         let h = self.headers("application/xml", false, false);
         let resp = self.step(
             "types/view",
             "GET",
-            &format!("/e1cib/types/view?sysver={VERSION}&confver={conf}"),
+            &format!("/e1cib/types/view?sysver={sysver}&confver={conf}"),
             &h,
             &[],
             &ANY_STATUS,
@@ -769,12 +984,13 @@ impl<R: RandomSource> Session<R> {
             None
         };
 
+        let sysver = self.version.clone();
         let h = self.headers("application/xml", false, false);
         let resp = self.step(
             "cmiStartData",
             "GET",
             &format!(
-                "/e1cib/cmi/cmiStartData?sysver={VERSION}&confver={conf}&fover={FOVER}&taxi=1&rolesId={roles}\
+                "/e1cib/cmi/cmiStartData?sysver={sysver}&confver={conf}&fover={FOVER}&taxi=1&rolesId={roles}\
                  &navVer={ZERO_VER}&subsystemVer={ZERO_VER}&actionVer={ZERO_VER}&clang={CLANG}"
             ),
             &h,
@@ -788,6 +1004,7 @@ impl<R: RandomSource> Session<R> {
                 view: view.as_deref(),
                 cmi: &cmi,
                 commands: None,
+                panel: None,
             },
             None,
         )?;
@@ -795,28 +1012,54 @@ impl<R: RandomSource> Session<R> {
             return Ok(tree);
         };
 
+        let sysver = self.version.clone();
         let h = self.headers("application/xml", false, false);
         let resp = self.step(
             "cmi/commands",
             "GET",
             &format!(
                 "/e1cib/cmi/commands?subtree=true&fover={FOVER}&categories=1&user=26&fo=true&fragment={root}\
-                 &sysver={VERSION}&confver={conf}&navVer={ZERO_VER}&rolesId={roles}&clang={CLANG}&taxi=1"
+                 &sysver={sysver}&confver={conf}&navVer={ZERO_VER}&rolesId={roles}&clang={CLANG}&taxi=1"
             ),
             &h,
             &[],
             &[200, 204],
         )?;
         let commands = Some(Self::decoded(&resp)?).filter(|b| !b.is_empty());
-        Ok(Metadata::from_answers(
+        let sysver = self.version.clone();
+        let h = self.headers("application/xml", false, false);
+        let resp = self.step(
+            "cmi/commands/panel",
+            "GET",
+            &format!(
+                "/e1cib/cmi/commands?subtree=true&fover={FOVER}&categories=4&user=26&fo=true&fragment={root}\
+                 &sysver={sysver}&confver={conf}&navVer={ZERO_VER}&rolesId={roles}&clang={CLANG}&taxi=1"
+            ),
+            &h,
+            &[],
+            &ANY_STATUS,
+        )?;
+        let (panel, panel_status) = match resp.status {
+            200 | 204 => (Some(Self::decoded(&resp)?).filter(|b| !b.is_empty()), None),
+            status => (None, Some(status)),
+        };
+        let mut md = Metadata::from_answers(
             &MdAnswers {
                 types: &types,
                 view: view.as_deref(),
                 cmi: &cmi,
                 commands: commands.as_deref(),
+                panel: panel.as_deref(),
             },
             Some(&root),
-        )?)
+        )?;
+        if let Some(status) = panel_status {
+            md.unrecognized.push(crate::info::Unrecognized {
+                answer: "cmi/commands/panel",
+                name: format!("HTTP {status}"),
+            });
+        }
+        Ok(md)
     }
 
     pub fn run_modules(&mut self) -> Result<ModuleDefs, SessionError> {
@@ -836,11 +1079,12 @@ impl<R: RandomSource> Session<R> {
             .clone()
             .ok_or_else(|| SessionError::Protocol("login response had no config".into()))?;
         let qid = percent_encode(id.as_str());
+        let sysver = self.version.clone();
         let h = self.headers("text/plain", false, false);
         let resp = self.step(
             "modules/src",
             "GET",
-            &format!("/e1cib/modules/src?sysver={VERSION}&confver={conf}&lm=2&id={qid}"),
+            &format!("/e1cib/modules/src?sysver={sysver}&confver={conf}&lm=2&id={qid}"),
             &h,
             &[],
             &[200],
@@ -852,6 +1096,120 @@ impl<R: RandomSource> Session<R> {
             content_type,
             cache: http_cache(&resp),
         })
+    }
+
+    pub fn run_report(&mut self, opts: ReportOptions) -> Result<ReportView, SessionError> {
+        let pro = self.prologue(true)?;
+        let roles = self
+            .info
+            .as_ref()
+            .and_then(|i| i.roles_id.clone())
+            .unwrap_or_else(|| "0".to_string());
+        let body = body::zstd_compress(&report::query_request(opts.form));
+        let h = self.headers("application/xml", true, true);
+        let resp = self.step(
+            "logForm/query",
+            "POST",
+            "/e1cib/logForm?cmd=query",
+            &h,
+            &body,
+            &[200],
+        )?;
+        let body = Self::decoded(&resp)?;
+        let form = match report::read_opened(&body) {
+            Ok(f) => f,
+            Err(e) => {
+                if let Some(fid) = report::fid_of(&body) {
+                    let _ = self.close_form(&fid);
+                }
+                return Err(e.into());
+            }
+        };
+        let outcome = self.report_of(&form, &pro.conf, &roles, opts);
+        let closed = self.close_form(&form.fid);
+        let (attributes, sheets) = outcome?;
+        closed?;
+        Ok(ReportView {
+            form,
+            attributes,
+            sheets,
+        })
+    }
+
+    fn report_of(
+        &mut self,
+        form: &OpenedForm,
+        conf: &str,
+        roles: &str,
+        opts: ReportOptions,
+    ) -> Result<(Vec<FormAttribute>, Vec<ReportSheet>), SessionError> {
+        let sysver = self.version.clone();
+        let h = self.headers("application/xml", false, false);
+        let resp = self.step(
+            "logForm/dataDescrWMethods",
+            "GET",
+            &format!(
+                "/e1cib/logForm?sysver={sysver}&cmd=dataDescrWMethods&formId={}&confver={conf}&rolesId={roles}",
+                form.id
+            ),
+            &h,
+            &[],
+            &[200],
+        )?;
+        let attributes = report::read_attributes(&Self::decoded(&resp)?)?;
+        let Some((procedure, params)) = opts.call else {
+            return Ok((attributes, Vec::new()));
+        };
+        let body = body::zstd_compress(&report::call_request(form, procedure, params)?);
+        let h = self.headers("application/xml", true, true);
+        let resp = self.step(
+            "logForm/call",
+            "POST",
+            "/e1cib/logForm?cmd=call",
+            &h,
+            &body,
+            &[200],
+        )?;
+        let mut count = CellCount::default();
+        let changed = report::read_call(&Self::decoded(&resp)?, opts.limits, &mut count)?;
+        let mut sheets = Vec::with_capacity(changed.len());
+        for c in changed {
+            let (sheet, rows_asked) = match c.changes {
+                SheetChanges::Full(sheet) => (sheet, false),
+                SheetChanges::WithoutContent { key, mut sheet } => {
+                    let rows: Vec<u32> = (0..sheet.height).collect();
+                    for batch in rows.chunks(ROWS_PER_REQUEST) {
+                        let body =
+                            body::zstd_compress(&spreadsheet::row_contents_request(&key, batch));
+                        let h = self.headers("application/xml", true, true);
+                        let resp = self.step(
+                            "moxel/getRowContents",
+                            "POST",
+                            "/e1cib/moxel?cmd=getRowContents",
+                            &h,
+                            &body,
+                            &[200],
+                        )?;
+                        spreadsheet::read_row_contents(
+                            &Self::decoded(&resp)?,
+                            batch,
+                            &mut sheet,
+                            opts.limits,
+                            &mut count,
+                        )
+                        .map_err(ReportError::from)?;
+                    }
+                    sheet.settle(opts.limits).map_err(ReportError::from)?;
+                    (sheet, true)
+                }
+            };
+            sheets.push(ReportSheet {
+                position: c.position,
+                sheet,
+                rows_asked,
+            });
+        }
+        Ok((attributes, sheets))
     }
 
     pub fn logout(&mut self) -> Result<(), SessionError> {
@@ -893,6 +1251,52 @@ fn sid_from_vrs(vrs: &str) -> Result<String, SessionError> {
     }
     String::from_utf8(raw[..36].to_vec())
         .map_err(|e| SessionError::Protocol(format!("bad sid: {e}")))
+}
+
+fn with_version(query: &str, build: &str) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let mut set = false;
+    for p in query.split('&').filter(|p| !p.is_empty()) {
+        if p.starts_with("version=") {
+            if !set {
+                parts.push(format!("version={build}"));
+                set = true;
+            }
+        } else {
+            parts.push(p.to_string());
+        }
+    }
+    if !set {
+        parts.push(format!("version={build}"));
+    }
+    parts.join("&")
+}
+
+fn server_build(resp: &Response) -> Option<String> {
+    let body = body::decode(&resp.body, resp.header("content-encoding")).unwrap_or_default();
+    let text = String::from_utf8_lossy(&body);
+    let from_body = text
+        .find("<?xml-stylesheet")
+        .map(|i| &text[i..])
+        .and_then(|pi| pi.find("?>").map(|end| &pi[..end]))
+        .and_then(|pi| pi.find("sysver=").map(|i| &pi[i + "sysver=".len()..]))
+        .map(|v| v.split(['&', '"', '\'']).next().unwrap_or(""))
+        .filter(|v| is_build(v));
+    let from_header = || {
+        resp.header("server")
+            .and_then(|s| s.trim().strip_prefix("1C:Enterprise/"))
+            .map(|v| v.split_whitespace().next().unwrap_or(""))
+            .filter(|v| is_build(v))
+    };
+    from_body.or_else(from_header).map(str::to_string)
+}
+
+pub fn is_build(v: &str) -> bool {
+    let parts: Vec<&str> = v.split('.').collect();
+    (2..=4).contains(&parts.len())
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.len() <= 6 && p.bytes().all(|b| b.is_ascii_digit()))
 }
 
 fn percent_encode(s: &str) -> String {

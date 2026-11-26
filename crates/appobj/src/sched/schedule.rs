@@ -286,6 +286,58 @@ impl Schedule {
         }
     }
 
+    pub(crate) fn to_internal(&self) -> Result<String, String> {
+        if !self.detailed.is_empty() {
+            return Err("детальные расписания дня".into());
+        }
+        let num = |n: &Number, what: &str| -> Result<String, String> {
+            n.to_i64()
+                .map(|v| v.to_string())
+                .ok_or_else(|| format!("{what}: не целое число"))
+        };
+        let list = |items: &[Value], what: &str| -> Result<Vec<String>, String> {
+            let mut out = vec![items.len().to_string()];
+            for v in items {
+                match v {
+                    Value::Number(n) => out.push(num(n, what)?),
+                    _ => return Err(format!("{what}: не числа")),
+                }
+            }
+            Ok(out)
+        };
+        let mut f: Vec<String> = [
+            self.begin_date,
+            self.end_date,
+            self.begin_time,
+            self.end_time,
+            self.completion_time,
+        ]
+        .iter()
+        .map(|d| date14(*d))
+        .collect();
+        f.push(num(&self.completion_interval, "ИнтервалЗавершения")?);
+        f.push(num(&self.repeat_period_in_day, "ПериодПовтораВТечениеДня")?);
+        f.push(num(&self.repeat_pause, "ПаузаПовтора")?);
+        f.extend(list(&self.week_days, "ДниНедели")?);
+        f.push(num(&self.week_day_in_month, "ДеньНеделиВМесяце")?);
+        f.push(num(&self.day_in_month, "ДеньВМесяце")?);
+        f.extend(list(&self.months, "Месяцы")?);
+        f.push(num(&self.weeks_period, "ПериодНедель")?);
+        f.push(num(&self.days_repeat_period, "ПериодПовтораДней")?);
+        f.push("0".into());
+        Ok(format!("{{\"#\",{CLASS},\r\n{{{}}}\r\n}}", f.join(",")))
+    }
+
+    pub(crate) fn of_value(v: &Value) -> Option<Schedule> {
+        match v {
+            Value::Object(o) => o
+                .as_any()
+                .downcast_ref::<JobSchedule>()
+                .map(|s| s.value.borrow().clone()),
+            _ => None,
+        }
+    }
+
     fn from_fields(node: &brace::Node, top: bool) -> Result<Schedule, String> {
         let items = node.as_list().ok_or("расписание: поля не список")?;
         let mut at = 0usize;
@@ -345,6 +397,14 @@ impl Schedule {
         }
         Ok(s)
     }
+}
+
+fn date14(d: BslDate) -> String {
+    let p = d.parts();
+    format!(
+        "{:04}{:02}{:02}{:02}{:02}{:02}",
+        p.year, p.month, p.day, p.hour, p.minute, p.second
+    )
 }
 
 fn parse_date14(t: &str) -> Option<BslDate> {

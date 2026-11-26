@@ -1680,6 +1680,28 @@ impl AccumSet {
         Ok(Value::Object(r))
     }
 
+    fn remove(&self, key: &Value) -> CallResult<()> {
+        if self.state.unposted.get() == accum::Unposted::Refused {
+            return Err(self
+                .refuse("Удалить: состояние набора после отмены проведения не наблюдено")
+                .into());
+        }
+        if !self.read.get() {
+            return Err(self.refuse("Удалить: набор не прочитан").into());
+        }
+        let Value::Number(n) = key else {
+            return Err(self.refuse("Удалить: параметр не Число").into());
+        };
+        let i = n
+            .to_i64()
+            .and_then(|i| usize::try_from(i).ok())
+            .filter(|i| *i < self.records.borrow().len())
+            .ok_or_else(|| self.refuse("Удалить: индекс вне набора"))?;
+        self.records.borrow_mut().remove(i);
+        self.state.changed();
+        Ok(())
+    }
+
     fn written_flag(&self, member: &str) -> CallResult<Value> {
         match self.state.unposted.get() {
             accum::Unposted::Refused => {
@@ -1820,7 +1842,12 @@ impl HostObject for AccumSet {
                 self.state.changed();
                 Ok(Value::Undefined)
             }
-            Some((true, "Записать")) if self.doc.is_some() => {
+            Some((true, "Удалить")) if args.len() == 1 => {
+                let key = arg_value(ex, args, 0)?;
+                self.remove(&key)?;
+                Ok(Value::Undefined)
+            }
+            Some((true, "Записать")) => {
                 accum::write_set(ex, self, args)?;
                 Ok(Value::Undefined)
             }
@@ -1843,6 +1870,27 @@ impl HostObject for AccumSet {
             .get(i)
             .cloned()
             .ok_or_else(|| internal("a record of the set out of its range"))?;
+        let record: Rc<dyn HostObject> = record;
+        Ok(Value::Object(record))
+    }
+
+    fn index_get(&self, _: &mut Execution, key: &Value) -> CallResult<Value> {
+        if let Some(Err(e)) = self.after_rollback("[]", 0) {
+            return Err(e);
+        }
+        if self.state.unposted.get() == accum::Unposted::Refused {
+            return Err(self
+                .refuse("[]: состояние набора после отмены проведения не наблюдено")
+                .into());
+        }
+        let Value::Number(n) = key else {
+            return Err(self.refuse("[]: индекс не Число").into());
+        };
+        let record = n
+            .to_i64()
+            .and_then(|i| usize::try_from(i).ok())
+            .and_then(|i| self.records.borrow().get(i).cloned())
+            .ok_or_else(|| self.refuse("[]: индекс вне набора"))?;
         let record: Rc<dyn HostObject> = record;
         Ok(Value::Object(record))
     }

@@ -713,12 +713,12 @@ impl XmlReader {
         }
     }
 
-    fn attr_value(&mut self, tag: &str, tag_line: u32) -> R<String> {
+    fn attr_value(&mut self) -> R<String> {
         let q = self.bump().unwrap_or('"');
         let mut v = String::new();
         loop {
             match self.peek() {
-                None => return Err(self.premature(tag, tag_line)),
+                None => return self.err("AttValue: ' expected"),
                 Some(c) if c == q => {
                     self.bump();
                     return Ok(v);
@@ -749,11 +749,17 @@ impl XmlReader {
         let mut raw: Vec<(String, String)> = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
         let empty;
+        let mut cut = false;
         loop {
             let ws = self.skip_ws();
             match self.peek() {
                 None if !ws && !raw.is_empty() => return self.err("attributes construct error"),
-                None => return Err(self.premature(&qname, tag_line)),
+                None if ws => return Err(self.premature(&qname, tag_line)),
+                None => {
+                    cut = true;
+                    empty = false;
+                    break;
+                }
                 Some('>') => {
                     empty = false;
                     break;
@@ -790,10 +796,9 @@ impl XmlReader {
             self.skip_ws();
             match self.peek() {
                 Some('"' | '\'') => {}
-                None => return Err(self.premature(&qname, tag_line)),
-                Some(_) => return self.err("AttValue: \" or ' expected"),
+                _ => return self.err("AttValue: \" or ' expected"),
             }
-            let v = self.attr_value(&qname, tag_line)?;
+            let v = self.attr_value()?;
             if !seen.insert(an.clone()) {
                 return self.err(format!("Attribute {an} redefined"));
             }
@@ -872,6 +877,9 @@ impl XmlReader {
             });
         }
         let ns = self.resolve_elem(&prefix, &local)?;
+        if cut {
+            return self.err(format!("Couldn't find end of Start Tag {local}"));
+        }
         self.bump();
         if empty {
             self.bump();

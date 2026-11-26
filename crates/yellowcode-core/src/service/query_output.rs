@@ -3,6 +3,107 @@ use query_console::{Cell, CellKind, Column, ErrorOut, Report, Stmt};
 use serde::Serialize;
 use std::io::Write;
 
+#[derive(Clone, Copy)]
+struct NestedTable<'a> {
+    columns: &'a [Column],
+    total: u64,
+    kept: usize,
+    truncated: bool,
+    rows: &'a [Vec<Cell>],
+}
+impl Serialize for NestedTable<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("NestedTable", 5)?;
+        state.serialize_field("columns", self.columns)?;
+        state.serialize_field("total", &self.total)?;
+        state.serialize_field("kept", &self.kept)?;
+        state.serialize_field("truncated", &self.truncated)?;
+        state.serialize_field("rows", self.rows)?;
+        state.end()
+    }
+}
+
+fn nested_table(report: &Report, stmt: usize, row: usize, col: usize) -> Option<NestedTable<'_>> {
+    let nested = report.rows.nested(stmt, row, col)?;
+    let total = report.rows.nested_total(stmt, row, col)?;
+    let kept = nested.rows.len();
+    Some(NestedTable {
+        columns: &nested.columns,
+        total,
+        kept,
+        truncated: (kept as u64) < total,
+        rows: &nested.rows,
+    })
+}
+
+#[derive(Clone, Copy)]
+struct CellView<'a> {
+    cell: &'a Cell,
+    nested: Option<NestedTable<'a>>,
+}
+impl Serialize for CellView<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let len = 2 + usize::from(self.cell.r.is_some()) + usize::from(self.nested.is_some());
+        let mut state = serializer.serialize_struct("Cell", len)?;
+        state.serialize_field("k", &self.cell.k)?;
+        state.serialize_field("t", &self.cell.t)?;
+        if let Some(ref_out) = &self.cell.r {
+            state.serialize_field("r", ref_out)?;
+        }
+        if let Some(nested) = &self.nested {
+            state.serialize_field("nested", nested)?;
+        }
+        state.end()
+    }
+}
+
+#[derive(Clone, Copy)]
+struct RowView<'a> {
+    report: &'a Report,
+    stmt: usize,
+    row_index: usize,
+    cells: &'a [Cell],
+}
+impl Serialize for RowView<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let mut seq = serializer.serialize_seq(Some(self.cells.len()))?;
+        for (col_index, cell) in self.cells.iter().enumerate() {
+            let nested = if cell.k == CellKind::Nested {
+                nested_table(self.report, self.stmt, self.row_index, col_index)
+            } else {
+                None
+            };
+            seq.serialize_element(&CellView { cell, nested })?;
+        }
+        seq.end()
+    }
+}
+
+#[derive(Clone, Copy)]
+struct RowsView<'a> {
+    report: &'a Report,
+    stmt: usize,
+    rows: &'a [Vec<Cell>],
+}
+impl Serialize for RowsView<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let mut seq = serializer.serialize_seq(Some(self.rows.len()))?;
+        for (row_index, cells) in self.rows.iter().enumerate() {
+            seq.serialize_element(&RowView {
+                report: self.report,
+                stmt: self.stmt,
+                row_index,
+                cells,
+            })?;
+        }
+        seq.end()
+    }
+}
+
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 enum Statement<'a> {
@@ -12,7 +113,7 @@ enum Statement<'a> {
         kept: usize,
         truncated: bool,
         ordered: bool,
-        rows: &'a [Vec<Cell>],
+        rows: RowsView<'a>,
     },
     Count {
         name: &'a str,
@@ -86,7 +187,11 @@ impl<'a> Statements<'a> {
                         kept: rows.len(),
                         truncated: *truncated || (rows.len() as u64) < *kept,
                         ordered: *ordered,
-                        rows,
+                        rows: RowsView {
+                            report: self.report,
+                            stmt: index,
+                            rows,
+                        },
                     }
                 }
                 Stmt::Count { name, n } => Statement::Count { name, n: *n },
@@ -161,6 +266,67 @@ pub fn visible_line<'a>(
     out.write_all(b"\n")
 }
 
+fn write_nested_visible(out: &mut dyn Write, nested: NestedTable<'_>) -> std::io::Result<()> {
+    out.write_all(b"[")?;
+    for (row_index, row) in nested.rows.iter().enumerate() {
+        if row_index > 0 {
+            out.write_all(b", ")?;
+        }
+        out.write_all(b"(")?;
+        for (col_index, cell) in row.iter().enumerate() {
+            if col_index > 0 {
+                out.write_all(b", ")?;
+            }
+            write_visible(out, &cell.t)?;
+        }
+        out.write_all(b")")?;
+    }
+    if nested.truncated {
+        if !nested.rows.is_empty() {
+            out.write_all(b", ")?;
+        }
+        write!(
+            out,
+            "... ({} of {} rows, truncated)",
+            nested.kept, nested.total
+        )?;
+    }
+    out.write_all(b"]")
+}
+
+fn validate_nested_table(nested: Option<NestedTable<'_>>) -> crate::Result<()> {
+    let Some(nested) = nested else {
+        return Err(
+            "nested tabular result completeness is unavailable in public query output".into(),
+        );
+    };
+    if nested.total < nested.kept as u64 {
+        return Err(
+            "nested tabular result completeness is inconsistent in public query output".into(),
+        );
+    }
+    if nested
+        .columns
+        .iter()
+        .any(|column| column.kind == CellKind::Nested)
+        || nested
+            .rows
+            .iter()
+            .flatten()
+            .any(|inner| inner.k == CellKind::Nested)
+    {
+        return Err(
+            "multi-level nested tabular results are unsupported in public query output".into(),
+        );
+    }
+    Ok(())
+}
+
+fn has_nested_column_or_cell(columns: &[Column], rows: &[Vec<Cell>]) -> bool {
+    columns.iter().any(|column| column.kind == CellKind::Nested)
+        || rows.iter().flatten().any(|cell| cell.k == CellKind::Nested)
+}
+
 pub fn write_report(
     report: &Report,
     max_rows: usize,
@@ -169,40 +335,80 @@ pub fn write_report(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> crate::Result<()> {
-    for (index, statement) in report.statements().iter().enumerate() {
-        if let Stmt::Result { columns, .. } = statement
-            && (columns.iter().any(|column| column.kind == CellKind::Nested)
-                || report
-                    .rows
-                    .slice(index, 0, report.rows.kept(index))
-                    .iter()
-                    .flatten()
-                    .any(|cell| cell.k == CellKind::Nested))
-        {
-            return Err("nested tabular results are unsupported in public query output (completeness is unavailable)".into());
+    if matches!(format, Format::Csv) {
+        if report.error().is_none() && !matches!(report.statements(), [Stmt::Result { .. }]) {
+            return Err(
+                "CSV requires exactly one tabular result and no other batch statements".into(),
+            );
         }
-    }
-    if matches!(format, Format::Csv)
-        && report.error().is_none()
-        && !matches!(report.statements(), [Stmt::Result { .. }])
-    {
-        return Err("CSV requires exactly one tabular result and no other batch statements".into());
+        for (index, statement) in report.statements().iter().enumerate() {
+            if let Stmt::Result { columns, .. } = statement
+                && has_nested_column_or_cell(
+                    columns,
+                    report.rows.slice(index, 0, report.rows.kept(index)),
+                )
+            {
+                return Err(
+                    "CSV does not support nested tabular results; use JSON or table format".into(),
+                );
+            }
+        }
+    } else {
+        for (stmt_index, statement) in report.statements().iter().enumerate() {
+            if !matches!(statement, Stmt::Result { .. }) {
+                continue;
+            }
+            for (row_index, row) in report
+                .rows
+                .slice(stmt_index, 0, max_rows)
+                .iter()
+                .enumerate()
+            {
+                for (col_index, cell) in row.iter().enumerate() {
+                    if cell.k != CellKind::Nested {
+                        continue;
+                    }
+                    validate_nested_table(nested_table(report, stmt_index, row_index, col_index))?;
+                }
+            }
+        }
     }
     let statements = Statements { report, max_rows };
     for (index, stmt) in statements.iter().enumerate() {
         if let Statement::Result {
             total,
             kept,
-            truncated: true,
+            truncated,
+            rows,
             ..
         } = stmt
         {
-            let _ = writeln!(
-                err,
-                "yellowcode: statement {} truncated: {} of {total} rows emitted",
-                index + 1,
-                kept
-            );
+            if truncated {
+                let _ = writeln!(
+                    err,
+                    "yellowcode: statement {} truncated: {} of {total} rows emitted",
+                    index + 1,
+                    kept
+                );
+            }
+            for (row_index, row) in rows.rows.iter().enumerate() {
+                for (col_index, cell) in row.iter().enumerate() {
+                    if cell.k == CellKind::Nested
+                        && let Some(nested) = nested_table(report, index, row_index, col_index)
+                        && nested.truncated
+                    {
+                        let _ = writeln!(
+                            err,
+                            "yellowcode: statement {} row {} col {} nested table truncated: {} of {} rows emitted",
+                            index + 1,
+                            row_index + 1,
+                            col_index + 1,
+                            nested.kept,
+                            nested.total,
+                        );
+                    }
+                }
+            }
         }
     }
     encode_report(report, statements, timed_out, format, out)
@@ -337,16 +543,29 @@ fn encode_report(
             match statement {
                 Statement::Result { columns, rows, .. } if matches!(format, Format::Csv) => {
                     line(out, columns.iter().map(|c| c.name.as_str()))?;
-                    for row in rows {
+                    for row in rows.rows {
                         line(out, row.iter().map(|c| c.t.as_str()))?;
                     }
                 }
                 Statement::Result { columns, rows, .. } => {
                     visible_line(out, columns.iter().map(|c| c.name.as_str()))?;
-                    for row in rows {
-                        visible_line(out, row.iter().map(|c| c.t.as_str()))?;
+                    for (row_index, row) in rows.rows.iter().enumerate() {
+                        for (col_index, cell) in row.iter().enumerate() {
+                            if col_index > 0 {
+                                out.write_all(b" | ")?;
+                            }
+                            if cell.k == CellKind::Nested
+                                && let Some(nested) =
+                                    nested_table(rows.report, rows.stmt, row_index, col_index)
+                            {
+                                write_nested_visible(out, nested)?;
+                            } else {
+                                write_visible(out, &cell.t)?;
+                            }
+                        }
+                        out.write_all(b"\n")?;
                     }
-                    writeln!(out, "({} rows)", rows.len())?;
+                    writeln!(out, "({} rows)", rows.rows.len())?;
                 }
                 Statement::Count { name, n } => {
                     write_visible(out, name)?;

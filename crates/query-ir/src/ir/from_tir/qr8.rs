@@ -85,6 +85,80 @@ impl<'a> Builder<'a> {
             _ => internal("not a QR8 source"),
         }
     }
+    fn empty_ref_expr(&mut self, atom: crate::types::RefAtom) -> R<Expr> {
+        let empty_table = self.schema.ref_info(atom).table;
+        let slot = u16::try_from(self.values.len())
+            .map_err(|_| BuildError::Internal("too many values".into()))?;
+        self.values.push(ValuePath::EmptyRef(empty_table));
+        Ok(Expr {
+            kind: ExprKind::Value(slot),
+            ty: QType::reference(atom),
+        })
+    }
+    fn addressing_main_empty(&mut self, main_expr: Expr) -> R<Expr> {
+        let ty = main_expr.ty.clone();
+        let atoms = ty.atom_count();
+        let mut empties = Vec::new();
+        if atoms != 1 {
+            empties.push(Expr {
+                kind: ExprKind::Lit(QValue::Undefined),
+                ty: QType::undefined(),
+            });
+        }
+        if ty.boolean {
+            empties.push(Expr {
+                kind: ExprKind::Lit(QValue::Bool(false)),
+                ty: QType::boolean(),
+            });
+        }
+        if let Some(q) = ty.number {
+            empties.push(Expr {
+                kind: ExprKind::Lit(QValue::Number(bsl_prim::Number::zero())),
+                ty: QType::num(q),
+            });
+        }
+        if let Some(q) = ty.string {
+            empties.push(Expr {
+                kind: ExprKind::Lit(QValue::String(crate::QStr::from_str(""))),
+                ty: QType::str_(q),
+            });
+        }
+        if let Some(q) = ty.date {
+            empties.push(Expr {
+                kind: ExprKind::Lit(QValue::Date(bsl_prim::BslDate::EMPTY)),
+                ty: QType::date(q),
+            });
+        }
+        for &atom in &ty.refs {
+            empties.push(self.empty_ref_expr(atom)?);
+        }
+        for &other in &ty.others {
+            match other {
+                crate::types::Other::Uuid => empties.push(Expr {
+                    kind: ExprKind::Lit(QValue::Uuid([0; 16])),
+                    ty: QType::other(crate::types::Other::Uuid),
+                }),
+                _ => return later("Q7d-AddressingMainType"),
+            }
+        }
+        let mut iter = empties.into_iter();
+        let Some(first) = iter.next() else {
+            return internal("addressing main empty value");
+        };
+        if iter.len() == 0 {
+            Ok(equal(main_expr, first))
+        } else {
+            let mut rhs = Vec::with_capacity(1 + iter.len());
+            rhs.push(first);
+            rhs.extend(iter);
+            Ok(boolean(ExprKind::InList {
+                l: vec![main_expr],
+                not: false,
+                hierarchy: false,
+                rhs,
+            }))
+        }
+    }
     fn task_performer(&mut self, src: SrcId, table: QTableId, args: &'a [Option<TExpr>]) -> R<Rel> {
         let Some(owner) = self.schema.table(table).owner else {
             return internal("task owner");
@@ -147,20 +221,7 @@ impl<'a> Builder<'a> {
         )?;
         let performer = column(argument_src, 0, performer_ty);
         let main_expr = self.qr8_col(src, table, main)?;
-        let Some(atom) = main_expr.ty.refs.first() else {
-            return later("Q7d-AddressingMainType");
-        };
-        if main_expr.ty.refs.len() != 1 {
-            return later("Q7d-AddressingMainType");
-        }
-        let empty_table = self.schema.ref_info(*atom).table;
-        let slot = u16::try_from(self.values.len())
-            .map_err(|_| BuildError::Internal("too many values".into()))?;
-        self.values.push(ValuePath::EmptyRef(empty_table));
-        let empty = Expr {
-            kind: ExprKind::Value(slot),
-            ty: main_expr.ty.clone(),
-        };
+        let main_empty = self.addressing_main_empty(main_expr.clone())?;
         let (address_src, address_rows) = self.qr8_scan(meta.register)?;
         let mut conditions = Vec::new();
         for (task, reg) in mapped {
@@ -188,8 +249,8 @@ impl<'a> Builder<'a> {
             }),
         });
         let pred = boolean(ExprKind::Or(vec![
-            equal(main_expr.clone(), performer),
-            boolean(ExprKind::And(vec![equal(main_expr, empty), exists])),
+            equal(main_expr, performer),
+            boolean(ExprKind::And(vec![main_empty, exists])),
         ]));
         let rows = Rel::Join {
             kind: query_syntax::ast::JoinKind::Inner,
@@ -214,10 +275,6 @@ impl<'a> Builder<'a> {
             return later("Q7d-CriterionParameter");
         };
         let value = self.expr(arg)?;
-        if let ExprKind::Param(slot) = value.kind {
-            self.qr8
-                .push(super::super::Qr8Param::Criterion { slot, table });
-        }
         let fields = self.schema.table(table).fields.len();
         if let Some(s) = self.sources.get_mut(src.0 as usize) {
             s.kind = SrcKind::Virtual {
@@ -259,11 +316,34 @@ impl<'a> Builder<'a> {
             return later("Q7d-EmptyCriterionContent");
         }
         let all = vec![true; parts.len().saturating_sub(1)];
+        let value_ty = value.ty.clone();
+        let (argument_src, argument_rows) = self.qr8_subquery(
+            Rel::Project {
+                input: Box::new(Rel::Empty),
+                exprs: vec![value],
+            },
+            vec![value_ty.clone()],
+        )?;
+        let value = column(argument_src, 0, value_ty);
+        let not_undefined = boolean(ExprKind::Compare(
+            CmpOp::Ne,
+            Box::new(value.clone()),
+            Box::new(Expr {
+                kind: ExprKind::Lit(QValue::Undefined),
+                ty: QType::undefined(),
+            }),
+        ));
+        let argument_rows = filter(argument_rows, not_undefined);
         let (members, rows) = self.qr8_subquery(
             Rel::Union { parts, all },
             vec![reference_ty.clone(), member_ty.clone()],
         )?;
-        let rows = filter(rows, equal(column(members, 1, member_ty), value));
+        let rows = Rel::Join {
+            kind: query_syntax::ast::JoinKind::Inner,
+            l: Box::new(rows),
+            r: Box::new(argument_rows),
+            on: equal(column(members, 1, member_ty), value),
+        };
         Ok(Rel::Subquery {
             src,
             input: Box::new(Rel::Distinct(Box::new(Rel::Project {

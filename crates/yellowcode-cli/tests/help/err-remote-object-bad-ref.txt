@@ -1,0 +1,6 @@
+exit 2
+--- stdout
+--- stderr
+error: invalid value 'Справочник.Товары' for '--ref <ССЫЛКА>': not a reference: "Справочник.Товары" (cfg:<Kind>Ref.<Name>(<uuid>) or <Вид>.<Имя>(<uuid>), e.g. cfg:CatalogRef.Имя(…) or Справочник.Имя(…))
+
+For more information, try '--help'.

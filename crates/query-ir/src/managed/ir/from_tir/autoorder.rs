@@ -17,15 +17,18 @@ impl<'c, 'a, 'r, 'w, 't> Builder<'c, 'a, 'r, 'w, 't> {
     pub(super) fn copy_expr(&self, e: &ir::Expr) -> BuildResult<NativeOwned<'a, ir::Expr>> {
         let keys = self.ctx.scratch(0)?;
         let index = Index::new();
+        let ref_index = Index::new();
         super::super::rebuild::Rebuild {
             ctx: self.ctx,
             keys: &keys,
             index: &index,
+            ref_index: &ref_index,
             own: &[],
             anchor: None,
             in_sub: false,
             replace: false,
             allow_prefix: false,
+            explicit_keys: 0,
         }
         .expr(e)
     }
@@ -61,6 +64,20 @@ impl<'c, 'a, 'r, 'w, 't> Builder<'c, 'a, 'r, 'w, 't> {
                 ctx.scratch_push(&mut keys, AtomKey::SelfRef)?;
             }
             MdKind::Enum => ctx.scratch_push(&mut keys, AtomKey::Field(need(StdRole::Order)?))?,
+            MdKind::ChartOfAccounts => {
+                if self.schema.table(info.table).auto_order_by_code
+                    && let Some(order_f) = self.role_field(info.table, StdRole::Order)
+                {
+                    ctx.scratch_push(&mut keys, AtomKey::Field(order_f))?;
+                    if let Some(code_f) = self.role_field(info.table, StdRole::Code) {
+                        ctx.scratch_push(&mut keys, AtomKey::Field(code_f))?;
+                    }
+                } else if let Some(code_f) = self.role_field(info.table, StdRole::Code) {
+                    ctx.scratch_push(&mut keys, AtomKey::Field(code_f))?;
+                } else {
+                    ctx.scratch_push(&mut keys, AtomKey::Field(need(StdRole::Description)?))?;
+                }
+            }
             _ => {
                 return Err(BuildProblem::Later {
                     what: "АВТОУПОРЯДОЧИВАНИЕ ссылки на объект этого вида",
@@ -282,7 +299,7 @@ impl<'c, 'a, 'r, 'w, 't> Builder<'c, 'a, 'r, 'w, 't> {
         }
         Ok(out)
     }
-    fn col_of(
+    pub(super) fn col_of(
         &self,
         src: ir::SrcId,
         table: QTableId,
@@ -324,16 +341,39 @@ impl<'c, 'a, 'r, 'w, 't> Builder<'c, 'a, 'r, 'w, 't> {
             self.col_of(src, *table, parent)?,
         )))
     }
-    pub(super) fn main_order(&mut self, src: ir::SrcId) -> BuildResult<Option<MainOrder<'a>>> {
+    pub(super) fn main_order(
+        &self,
+        src: ir::SrcId,
+        select: &'t tir::Select,
+    ) -> BuildResult<Option<MainOrder<'a>>> {
         let ctx = self.ctx;
-        let Some(ir::SrcKind::Table(table)) = self
+        let table = match self
             .sources
             .get(src.0 as usize)
             .map(|s| &s.trusted_borrow().kind)
-        else {
-            return Ok(None);
+        {
+            Some(ir::SrcKind::Table(table)) => *table,
+            Some(ir::SrcKind::Virtual { table, .. }) => {
+                let table = *table;
+                if !crate::sema::select::is_accum_balance(self.schema, table) {
+                    return Ok(None);
+                }
+                let mut keys = ctx.scratch(0)?;
+                for (i, field) in self.schema.table(table).fields.iter().enumerate() {
+                    if field.role == FieldRole::Dimension
+                        && let Ok(i) = u16::try_from(i)
+                        && crate::sema::select::balance_dim_used(select, &[], QFieldId(i))
+                    {
+                        ctx.scratch_push(&mut keys, self.col_of(src, table, QFieldId(i))?)?;
+                    }
+                }
+                if keys.is_empty() {
+                    return Ok(None);
+                }
+                return Ok(Some(MainOrder { keys, hier: None }));
+            }
+            _ => return Ok(None),
         };
-        let table = *table;
         let kind = match self.schema.table(table).kind {
             TableKind::Object(k) => k,
             _ => {
@@ -351,7 +391,9 @@ impl<'c, 'a, 'r, 'w, 't> Builder<'c, 'a, 'r, 'w, 't> {
             Ok(())
         };
         match kind {
-            MdKind::Catalog | MdKind::Document | MdKind::Enum => role(StdRole::Ref)?,
+            MdKind::Catalog | MdKind::Document | MdKind::Enum | MdKind::ChartOfAccounts => {
+                role(StdRole::Ref)?
+            }
             MdKind::AccumulationRegister => {
                 role(StdRole::Period)?;
                 role(StdRole::Recorder)?;
@@ -374,12 +416,104 @@ impl<'c, 'a, 'r, 'w, 't> Builder<'c, 'a, 'r, 'w, 't> {
                 });
             }
         }
-        let hier = if kind == MdKind::Catalog {
+        let hier = if matches!(kind, MdKind::Catalog | MdKind::ChartOfAccounts) {
             self.hierarchy_of(src)?
         } else {
             None
         };
         Ok(Some(MainOrder { keys, hier }))
+    }
+    pub(super) fn chart_code_order_expr(
+        &mut self,
+        base: &ir::Expr,
+    ) -> BuildResult<Option<NativeOwned<'a, ir::Expr>>> {
+        let ctx = self.ctx;
+        match &base.kind {
+            ir::ExprKind::Col {
+                src,
+                col: ir::ColSel::Field(f),
+            } => {
+                let Some(ir::SrcKind::Table(table)) = self
+                    .sources
+                    .get(src.0 as usize)
+                    .map(|s| &s.trusted_borrow().kind)
+                else {
+                    return Ok(None);
+                };
+                let table = *table;
+                if !self.schema.table(table).auto_order_by_code {
+                    return Ok(None);
+                }
+                if !self
+                    .schema
+                    .field(table, *f)
+                    .is_some_and(|fi| fi.role == FieldRole::Std(StdRole::Code))
+                {
+                    return Ok(None);
+                }
+                let Some(order_f) = self.role_field(table, StdRole::Order) else {
+                    return Ok(None);
+                };
+                self.col_of(*src, table, order_f).map(Some)
+            }
+            ir::ExprKind::Deref { base: inner, steps } => {
+                let Some((last, head)) = steps.split_last() else {
+                    return Ok(None);
+                };
+                if last.targets.is_empty()
+                    || !last.targets.iter().all(|(t, f)| {
+                        self.schema
+                            .field(*t, *f)
+                            .is_some_and(|fi| fi.role == FieldRole::Std(StdRole::Code))
+                    })
+                {
+                    return Ok(None);
+                }
+                let has_auto = last.targets.iter().any(|(t, _)| {
+                    self.schema.table(*t).auto_order_by_code
+                        && self.role_field(*t, StdRole::Order).is_some()
+                });
+                if !has_auto {
+                    return Ok(None);
+                }
+                let mut new_targets = ctx.vector(last.targets.len())?;
+                let mut ty = ctx.copy(&QType::default())?;
+                for &(t, f) in &last.targets {
+                    let chosen = if self.schema.table(t).auto_order_by_code
+                        && let Some(order_f) = self.role_field(t, StdRole::Order)
+                    {
+                        self.touch(t)?;
+                        order_f
+                    } else {
+                        f
+                    };
+                    if let Some(fi) = self.schema.field(t, chosen) {
+                        ty = ctx.merge_type(ty.trusted_borrow(), &fi.ty)?;
+                    }
+                    ctx.push(&mut new_targets, ctx.scalar((t, chosen)))?;
+                }
+                if base.ty.null {
+                    ty = ty.map(QType::with_null);
+                }
+                let step_name = ctx.string("\u{0}chart_order")?;
+                let step = ctx
+                    .allocated(step_name.zip(new_targets.finish()))?
+                    .map(|(name, targets)| tir::Deref { name, targets });
+                let mut new_steps = ctx.vector(head.len() + 1)?;
+                for h in head {
+                    ctx.push(&mut new_steps, ctx.copy(h)?)?;
+                }
+                ctx.push(&mut new_steps, step)?;
+                let inner_copy = self.copy_expr(inner)?;
+                ctx.parent_depth(std::iter::once(inner_copy.depth()))?;
+                let inner_box = ctx.boxed(inner_copy)?;
+                let kind = ctx
+                    .allocated(inner_box.zip(new_steps.finish()))?
+                    .map(|(base, steps)| ir::ExprKind::Deref { base, steps });
+                ctx.expr(kind, ty).map(Some)
+            }
+            _ => Ok(None),
+        }
     }
 }
 pub(super) fn first_src(e: &ir::Expr) -> Option<ir::SrcId> {

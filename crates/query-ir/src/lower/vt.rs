@@ -30,6 +30,7 @@ pub enum RegisterRowsKindL {
     Accounting(AccountingRowsL),
     AccountingTurnovers(super::AccountingTurnoversL),
     AccountingBalance(super::BalanceRowsL),
+    AccountingBalanceAndTurnovers(super::AccountingBalanceAndTurnoversL),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -55,9 +56,18 @@ pub struct AccumulationRowsL {
 pub struct AccountingRowsL {
     pub inputs: DrCrInputsL,
     pub keys: Vec<DrCrSideL>,
+    pub ext_dims: Vec<DrCrExtDimL>,
     pub resources: Vec<DrCrResourceL>,
     pub date_bounds: [Option<bsl_prim::BslDate>; 2],
     pub area: Option<DrCrAreaL>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DrCrExtDimL {
+    pub side: DrCrSideL,
+    pub index: u8,
+    pub output: QFieldId,
+    pub main: FieldId,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -106,6 +116,7 @@ impl RegisterRowsL {
     pub fn chart_input(&self) -> Option<&RelL> {
         match &self.rows {
             RegisterRowsKindL::AccountingBalance(a) => a.chart_input.as_deref(),
+            RegisterRowsKindL::AccountingBalanceAndTurnovers(a) => a.chart_input.as_deref(),
             _ => None,
         }
     }
@@ -113,6 +124,7 @@ impl RegisterRowsL {
     pub fn bounds(&self) -> &[Option<PExpr>] {
         match &self.rows {
             RegisterRowsKindL::Accumulation(a) => &a.bounds,
+            RegisterRowsKindL::AccountingBalanceAndTurnovers(a) => &a.bounds,
             RegisterRowsKindL::Accounting(_) => &[],
             RegisterRowsKindL::AccountingTurnovers(_) | RegisterRowsKindL::AccountingBalance(_) => {
                 &[]
@@ -123,14 +135,24 @@ impl RegisterRowsL {
     pub fn raw_width(&self) -> usize {
         match &self.rows {
             RegisterRowsKindL::Accumulation(a) => raw::width(a.dims.len(), a.resources.len()),
-            RegisterRowsKindL::Accounting(a) => raw::width(a.keys.len(), a.resources.len()),
+            RegisterRowsKindL::Accounting(a) => {
+                raw::width(a.keys.len() + a.ext_dims.len(), a.resources.len())
+            }
             RegisterRowsKindL::AccountingBalance(a) => {
-                raw::width(2 + usize::from(a.ext1.is_some()), a.resources.len())
+                raw::width(2 + a.dims.len() + a.ext_count(), a.resources.len())
+                    + a.policy_fields.len()
+                    + usize::from(a.chart_layout.is_some_and(|l| l.signal.is_some()))
+            }
+            RegisterRowsKindL::AccountingBalanceAndTurnovers(a) => {
+                raw::width(2 + a.dims.len() + a.ext_count(), a.resources.len())
                     + a.policy_fields.len()
                     + usize::from(a.chart_layout.is_some_and(|l| l.signal.is_some()))
             }
             RegisterRowsKindL::AccountingTurnovers(a) => {
-                raw::width(usize::from(a.account), a.resources.len()) + a.policy_fields.len()
+                let nk = usize::from(a.account)
+                    + a.dims.len()
+                    + a.ext_dims.as_ref().map_or(0, |e| e.slots.len());
+                raw::width(nk, a.resources.len()) + a.policy_fields.len()
             }
         }
     }

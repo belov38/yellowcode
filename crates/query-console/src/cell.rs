@@ -1,7 +1,10 @@
 use memory_budget::{BudgetError, BudgetedVec, Category, MemoryBudget, TextOutput};
-use query_ir::{QType, QValue, uuid_of};
+use query_ir::{ColumnInfo, QType, QValue, uuid_of};
 use query_syntax::Lang;
-use query_testhost::{TestBase, measure_native_repr, repr_lang, write_native_repr};
+use query_testhost::{
+    TestBase, column_may_be_type_description, decode_value_type_blob, measure_native_column_repr,
+    repr_lang, try_decode_value_type_blob, write_native_repr,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -99,6 +102,25 @@ fn ref_out(v: &QValue, base: &TestBase) -> Option<RefOut> {
 }
 
 pub(crate) fn cell(v: &QValue, base: &TestBase, lang: Lang) -> Cell {
+    cell_in_column(v, None, base, lang)
+}
+
+pub(crate) fn cell_in_column(
+    v: &QValue,
+    col_ty: Option<&QType>,
+    base: &TestBase,
+    lang: Lang,
+) -> Cell {
+    if let QValue::Binary(b) = v
+        && col_ty.is_some_and(column_may_be_type_description)
+        && let Some(td) = decode_value_type_blob(b, base.schema())
+    {
+        return Cell {
+            k: CellKind::Other,
+            t: query_testkit::repr::type_repr(base.schema(), &td, lang),
+            r: None,
+        };
+    }
     Cell {
         k: kind_of(v),
         t: repr_lang(v, base, lang),
@@ -126,13 +148,14 @@ fn ref_out_bytes(v: &QValue, base: &TestBase) -> u64 {
     block(kind) + block(UUID_TEXT)
 }
 
-pub(crate) fn cell_measure(
+pub(crate) fn cell_measure_in_column(
     v: &QValue,
+    col_ty: Option<&QType>,
     base: &TestBase,
     lang: Lang,
     budget: &MemoryBudget,
 ) -> Result<u64, BudgetError> {
-    measure_native_repr(v, base, lang, budget, u64::MAX)
+    measure_native_column_repr(v, col_ty, base, lang, budget, u64::MAX)
 }
 
 pub(crate) fn cell_charge(v: &QValue, base: &TestBase, n: u64) -> u64 {
@@ -148,10 +171,38 @@ pub(crate) fn cell_write(
     budget: &MemoryBudget,
     n: u64,
 ) -> Result<Cell, BudgetError> {
+    cell_write_in_column(v, None, base, lang, budget, n)
+}
+
+pub(crate) fn cell_write_in_column(
+    v: &QValue,
+    col_ty: Option<&QType>,
+    base: &TestBase,
+    lang: Lang,
+    budget: &MemoryBudget,
+    n: u64,
+) -> Result<Cell, BudgetError> {
     let mut text = ExactText::try_new(n)?;
-    write_native_repr(v, base, lang, budget, &mut text)?;
+    let kind = if let QValue::Binary(b) = v
+        && col_ty.is_some_and(column_may_be_type_description)
+        && let Some(td) = try_decode_value_type_blob(b, base.schema(), budget)?
+    {
+        query_testkit::repr::write_type_repr_budgeted(
+            base.schema(),
+            &td,
+            lang,
+            budget,
+            Category::Execution,
+            &mut text,
+            true,
+        )?;
+        CellKind::Other
+    } else {
+        write_native_repr(v, base, lang, budget, &mut text)?;
+        kind_of(v)
+    };
     Ok(Cell {
-        k: kind_of(v),
+        k: kind,
         t: text.into_exact(n)?,
         r: ref_out(v, base),
     })
@@ -176,12 +227,13 @@ impl RowSizes {
         base: &TestBase,
         lang: Lang,
     ) -> Result<u64, BudgetError> {
-        self.measure_checked(values, base, lang, || Ok::<(), BudgetError>(()))
+        self.measure_columns_checked(values, &[], base, lang, || Ok::<(), BudgetError>(()))
     }
 
-    pub(crate) fn measure_checked<E: From<BudgetError>>(
+    pub(crate) fn measure_columns_checked<E: From<BudgetError>>(
         &mut self,
         values: &[QValue],
+        columns: &[ColumnInfo],
         base: &TestBase,
         lang: Lang,
         mut check: impl FnMut() -> Result<(), E>,
@@ -198,9 +250,10 @@ impl RowSizes {
         sizes.clear();
         sizes.try_reserve(values.len())?;
         let mut total = 0u64;
-        for v in values {
+        for (i, v) in values.iter().enumerate() {
             check()?;
-            let n = cell_measure(v, base, lang, &self.budget)?;
+            let col_ty = columns.get(i).map(|c| &c.ty);
+            let n = cell_measure_in_column(v, col_ty, base, lang, &self.budget)?;
             sizes.try_push(n)?;
             total = total.saturating_add(cell_charge(v, base, n));
         }

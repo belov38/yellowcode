@@ -424,19 +424,24 @@ fn ctx_of(result: &QueryResult, item: &Item) -> Vec<(usize, QValue)> {
             let first = details_of(result, item)
                 .first()
                 .and_then(|i| result.rows.get(*i as usize));
-            t.spec
-                .points
-                .iter()
-                .take(g + 1)
-                .filter_map(|p| p.column)
-                .map(|c| {
+            let mut out = Vec::new();
+            for p in t.spec.points.iter().take(g + 1) {
+                if let Some(c) = p.column {
                     let v = if c < t.spec.width { row } else { first }
                         .and_then(|row| row.get(c))
                         .cloned()
                         .unwrap_or(QValue::Null);
-                    (c, v)
-                })
-                .collect()
+                    out.push((c, v));
+                }
+                for dep in &p.dependent {
+                    let v = row
+                        .and_then(|row| row.get(dep.column))
+                        .cloned()
+                        .unwrap_or(QValue::Null);
+                    out.push((dep.column, v));
+                }
+            }
+            out
         }
     }
 }
@@ -747,7 +752,16 @@ fn flat_jump(
     }
     let mut made = Vec::with_capacity(groups.len());
     for (v, rows) in groups {
-        made.push(make(RecordType::GroupTotal, rows, with(ctx, col, &v))?);
+        let mut inner = with(ctx, col, &v);
+        if let Some(first) = rows.first().and_then(|r| result.rows.get(*r as usize)) {
+            for dep in &point.dependent {
+                inner.push((
+                    dep.column,
+                    first.get(dep.column).cloned().unwrap_or(QValue::Null),
+                ));
+            }
+        }
+        made.push(make(RecordType::GroupTotal, rows, inner)?);
     }
     if div.get() {
         return Err(WalkError::DivisionByZero);

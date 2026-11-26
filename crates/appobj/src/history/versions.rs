@@ -24,6 +24,10 @@ pub(crate) struct Version {
     pub node_empty: bool,
 }
 
+type Ids = Vec<([u8; 20], FieldValue)>;
+
+type WithContent = Vec<(Version, Vec<u8>)>;
+
 pub(crate) struct HistTables<'a> {
     settings: TableId,
     s_index: IndexId,
@@ -42,6 +46,7 @@ pub(crate) struct HistTables<'a> {
     v_user_full_name: usize,
     v_comment: usize,
     v_txn: usize,
+    v_content: usize,
     queue: TableId,
     after: TableId,
 }
@@ -80,6 +85,7 @@ impl<'a> HistTables<'a> {
             v_user_full_name: column(v, "UserFullName")?,
             v_comment: column(v, "Comment")?,
             v_txn: column(v, "Transaction")?,
+            v_content: column(v, "Content")?,
             queue,
             after,
         })
@@ -106,18 +112,18 @@ impl<'a> HistTables<'a> {
         Ok(true)
     }
 
-    pub(crate) fn versions(
+    fn ids(
         &self,
         r: &dyn ReadTxn,
         md: Uuid16,
         data: Option<[u8; 20]>,
         each: &mut dyn FnMut() -> Result<(), String>,
-    ) -> StoreResult<Result<Vec<Version>, String>> {
+    ) -> StoreResult<Result<Ids, String>> {
         let mut key = vec![FieldValue::Uuid(md)];
         if let Some(d) = data {
             key.push(FieldValue::Binary(d.to_vec()));
         }
-        let mut found: Vec<([u8; 20], FieldValue)> = Vec::new();
+        let mut found: Ids = Vec::new();
         for item in r.range(
             self.latest,
             self.l_index,
@@ -137,24 +143,79 @@ impl<'a> HistTables<'a> {
             };
             found.push((data, hid));
         }
+        Ok(Ok(found))
+    }
+
+    fn rows_of(
+        &self,
+        r: &dyn ReadTxn,
+        hid: FieldValue,
+        each: &mut dyn FnMut() -> Result<(), String>,
+        f: &mut dyn FnMut(&[FieldValue]) -> Result<(), String>,
+    ) -> StoreResult<Result<(), String>> {
+        let key = [hid];
+        for item in r.range(
+            self.versions,
+            self.v_index,
+            Bound::Included(key.as_slice()),
+            Bound::Included(key.as_slice()),
+            Direction::Forward,
+        )? {
+            let (_, row) = item?;
+            if let Err(e) = each().and_then(|()| f(&row)) {
+                return Ok(Err(e));
+            }
+        }
+        Ok(Ok(()))
+    }
+
+    pub(crate) fn versions(
+        &self,
+        r: &dyn ReadTxn,
+        md: Uuid16,
+        data: Option<[u8; 20]>,
+        each: &mut dyn FnMut() -> Result<(), String>,
+    ) -> StoreResult<Result<Vec<Version>, String>> {
+        let found = match self.ids(r, md, data, each)? {
+            Ok(f) => f,
+            Err(e) => return Ok(Err(e)),
+        };
         let mut out = Vec::new();
         for (data, hid) in found {
-            let key = [hid];
-            for item in r.range(
-                self.versions,
-                self.v_index,
-                Bound::Included(key.as_slice()),
-                Bound::Included(key.as_slice()),
-                Direction::Forward,
-            )? {
-                let (_, row) = item?;
-                if let Err(e) = each() {
-                    return Ok(Err(e));
-                }
-                match self.version(&row, data) {
-                    Ok(v) => out.push(v),
-                    Err(e) => return Ok(Err(e)),
-                }
+            let got = self.rows_of(r, hid, each, &mut |row| {
+                out.push(self.version(row, data)?);
+                Ok(())
+            })?;
+            if let Err(e) = got {
+                return Ok(Err(e));
+            }
+        }
+        Ok(Ok(out))
+    }
+
+    pub(crate) fn contents(
+        &self,
+        r: &dyn ReadTxn,
+        md: Uuid16,
+        data: [u8; 20],
+        each: &mut dyn FnMut() -> Result<(), String>,
+    ) -> StoreResult<Result<WithContent, String>> {
+        let found = match self.ids(r, md, Some(data), each)? {
+            Ok(f) => f,
+            Err(e) => return Ok(Err(e)),
+        };
+        let mut out = Vec::new();
+        for (data, hid) in found {
+            let got = self.rows_of(r, hid, each, &mut |row| {
+                let content = match row.get(self.v_content) {
+                    Some(FieldValue::Binary(b) | FieldValue::Storage(b)) => b.clone(),
+                    _ => return Err("содержимое версии".into()),
+                };
+                out.push((self.version(row, data)?, content));
+                Ok(())
+            })?;
+            if let Err(e) = got {
+                return Ok(Err(e));
             }
         }
         Ok(Ok(out))

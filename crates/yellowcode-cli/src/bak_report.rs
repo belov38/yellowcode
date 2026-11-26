@@ -78,6 +78,7 @@ pub(crate) fn begin(command: Option<&crate::Command>) -> Result<Option<Session>,
         memory_limit,
         raw,
         strict: _,
+        ignore_extra_tables,
     })) = command
     else {
         return Ok(None);
@@ -116,6 +117,7 @@ pub(crate) fn begin(command: Option<&crate::Command>) -> Result<Option<Session>,
         lifecycle_timeout_secs: *sqlcmd_lifecycle_timeout,
         memory_limit_given: memory_limit.is_some(),
         raw: Some(*raw),
+        ignore_extra_tables: Some(*ignore_extra_tables),
         trace_requested: asked.is_some(),
         source,
         output: &output_text,

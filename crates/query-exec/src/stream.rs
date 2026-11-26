@@ -122,7 +122,7 @@ fn run(
     tx: &SyncSender<Result<StreamRow, ExecError>>,
     memory: Option<&MemoryBudget>,
 ) -> Result<(), ExecError> {
-    if !stmt.present.is_empty() {
+    if !stmt.present.is_empty() || stmt.has_inline_present {
         return Err(ExecError::Later {
             what: "ПРЕДСТАВЛЕНИЕ в потоке строк",
             stage: "Q3",

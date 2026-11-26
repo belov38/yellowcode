@@ -206,9 +206,9 @@ impl Tf {
         );
     }
 
-    fn commons(&mut self, commons: &[QField]) {
-        for c in commons {
-            self.push(c.clone(), true);
+    fn commons(&mut self, commons: &[(QField, bool)]) {
+        for (c, separator) in commons {
+            self.push(c.clone(), !*separator);
         }
     }
 
@@ -223,7 +223,7 @@ struct Reg<'a> {
     obj: &'a MdObject,
     table: QTableId,
     meta: ObjMeta,
-    commons: Vec<QField>,
+    commons: Vec<(QField, bool)>,
     recorder: QType,
     record_kind: QType,
     account: QType,
@@ -431,6 +431,7 @@ pub(super) fn declare_main(
         star: Vec::new(),
         params: Vec::new(),
         reference: None,
+        auto_order_by_code: false,
     };
     let id = b.add_table(t, &[])?;
     b.add_object(o.kind, &o.name, o.id, id);
@@ -461,7 +462,10 @@ fn declare<'a>(
     let mut r = Reg {
         obj: o,
         table,
-        commons: used.iter().map(|c| common_field(c)).collect(),
+        commons: used
+            .iter()
+            .map(|c| (common_field(c), c.separator))
+            .collect(),
         meta,
         recorder: refs_type(recorders.get(&o.id).cloned().unwrap_or_default()),
         record_kind: QType::default(),
@@ -1280,7 +1284,20 @@ fn calculation_vts(
             format!("{ru}{}", base.obj.name),
             format!("{en}{}", base.obj.name),
         );
-        add_vt(b, r, VtKind::Base, tpl, seg, f)?;
+        let vt = add_vt(b, r, VtKind::Base, tpl, seg, f)?;
+        super::calculation_base::register(
+            b,
+            vt,
+            r.table,
+            base.table,
+            r.obj,
+            base.obj,
+            r.chart,
+            r.meta.action_period,
+            r.meta.base_period,
+            base.meta.action_period,
+            &base.meta.resources,
+        );
     }
     Ok(())
 }

@@ -1,6 +1,7 @@
 mod cas;
+pub mod cfe;
 mod compose;
-pub(crate) use compose::compose;
+pub(crate) use compose::{ComposeError, MeteredComposeInput, compose, compose_metered};
 mod control;
 mod logic;
 mod row;

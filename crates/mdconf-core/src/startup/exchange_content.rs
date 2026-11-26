@@ -5,6 +5,7 @@ use memory_budget::{BudgetError, BudgetedVec, Category, Charged};
 #[derive(Debug)]
 pub struct ManagedExchangeContent {
     pub items: Option<Charged<Vec<ContentItem>>>,
+    pub stream: Option<Charged<Vec<u32>>>,
     pub miss: Option<&'static str>,
 }
 enum Failure {
@@ -35,7 +36,8 @@ fn pair(nodes: &[Node], k: usize) -> R<(&str, &str)> {
     )?)?;
     Ok((id, auto))
 }
-fn decode(index: &ManagedIndex, raw: &Node) -> R<Charged<Vec<ContentItem>>> {
+type Decoded = (Charged<Vec<ContentItem>>, Charged<Vec<u32>>);
+fn decode(index: &ManagedIndex, raw: &Node) -> R<Decoded> {
     let budget = index.memory_budget();
     let nodes = raw.as_list().ok_or(Failure::Bad("shape"))?;
     if txt(at(nodes, 0)?)? != "2" {
@@ -52,12 +54,20 @@ fn decode(index: &ManagedIndex, raw: &Node) -> R<Charged<Vec<ContentItem>>> {
     }
     let mut sorted = BudgetedVec::try_with_capacity(budget, Category::Metadata, n)?;
     for k in 0..n {
-        sorted.try_push(pair(nodes, k)?)?;
+        let (id, auto) = pair(nodes, k)?;
+        sorted.try_push((id, auto, k))?;
     }
     sorted.sort_unstable();
+    let mut stream = BudgetedVec::try_with_capacity(budget, Category::Metadata, n)?;
+    stream.try_resize(n, 0u32)?;
     let mut output =
         BudgetedVec::try_with_capacity(budget, Category::Metadata, n)?.into_charged_vec();
-    for (raw_id, raw_auto) in sorted.iter() {
+    for (pos, (raw_id, raw_auto, k)) in sorted.iter().enumerate() {
+        *stream
+            .as_mut_slice()
+            .get_mut(*k)
+            .ok_or(Failure::Bad("number"))? =
+            u32::try_from(pos).map_err(|_| Failure::Bad("number"))?;
         let id = Guid::parse(raw_id).ok_or(Failure::Bad("object"))?;
         let name = index.names.get(&id).ok_or(Failure::Bad("object"))?;
         let auto_record = match *raw_auto {
@@ -82,17 +92,19 @@ fn decode(index: &ManagedIndex, raw: &Node) -> R<Charged<Vec<ContentItem>>> {
         [node] if node.text() == Some("0") => {}
         _ => return Err(Failure::Bad("tail")),
     }
-    Ok(output)
+    Ok((output, stream.into_charged_vec()))
 }
 impl ManagedExchangeContent {
     pub(crate) fn decode(index: &ManagedIndex, raw: &Node) -> Result<Self, BudgetError> {
         match decode(index, raw) {
-            Ok(items) => Ok(Self {
+            Ok((items, stream)) => Ok(Self {
                 items: Some(items),
+                stream: Some(stream),
                 miss: None,
             }),
             Err(Failure::Bad(miss)) => Ok(Self {
                 items: None,
+                stream: None,
                 miss: Some(miss),
             }),
             Err(Failure::Memory(error)) => Err(error),

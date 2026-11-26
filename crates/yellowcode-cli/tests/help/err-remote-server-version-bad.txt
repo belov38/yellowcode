@@ -1,0 +1,6 @@
+exit 2
+--- stdout
+--- stderr
+error: invalid value '8.3.x' for '--server-version <ВЕРСИЯ>': not a platform build: "8.3.x" (for example 8.3.27.2214)
+
+For more information, try '--help'.

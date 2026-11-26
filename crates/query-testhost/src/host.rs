@@ -34,6 +34,7 @@ pub struct TestBase {
     pub(crate) predefined_ids: HashMap<QTableId, Vec<([u8; 16], String)>>,
     pub(crate) enum_names: HashMap<(u32, RefId), String>,
     pub(crate) enum_ids: HashMap<(u32, String), RefId>,
+    object_titles: HashMap<RefAtom, (Option<String>, Option<String>)>,
     warnings: Vec<Warning>,
     bounds: crate::batch_memory::SchemaBounds,
     open_inputs: crate::open_model::HostInputs,
@@ -168,6 +169,7 @@ impl TestBase {
             predefined_ids: HashMap::new(),
             enum_names: HashMap::new(),
             enum_ids: HashMap::new(),
+            object_titles: HashMap::new(),
             warnings,
             bounds: crate::batch_memory::SchemaBounds::default(),
             open_inputs: inputs,
@@ -207,6 +209,7 @@ impl TestBase {
             predefined_ids: self.predefined_ids.clone(),
             enum_names: self.enum_names.clone(),
             enum_ids: self.enum_ids.clone(),
+            object_titles: self.object_titles.clone(),
             warnings: self.warnings.clone(),
             bounds: self.bounds,
             open_inputs: self.open_inputs,
@@ -303,6 +306,7 @@ impl TestBase {
         line(format!("predefined_ids {}", sorted(&self.predefined_ids)));
         line(format!("enum_names {}", sorted(&self.enum_names)));
         line(format!("enum_ids {}", sorted(&self.enum_ids)));
+        line(format!("object_titles {}", sorted(&self.object_titles)));
         line(format!("max_ref_fanout {}", self.max_ref_fanout()));
         out
     }
@@ -405,6 +409,9 @@ impl TestBase {
             let Some(obj) = cfg.objects.iter().find(|o| o.id == info.object) else {
                 continue;
             };
+            if let Some(titles) = object_presentation_titles(obj) {
+                self.object_titles.insert(atom, titles);
+            }
             match info.kind {
                 MdKind::Enum => {
                     for v in obj.enum_values() {
@@ -590,7 +597,16 @@ impl TestBase {
                             Lang::Ru => "от",
                             Lang::En => "dated",
                         };
-                        format!("{} {} {from} {date}", info.name, number.unwrap_or_default())
+                        let title = self
+                            .object_titles
+                            .get(&atom)
+                            .and_then(|(ru, en)| match lang {
+                                Lang::Ru => ru.as_deref(),
+                                Lang::En => en.as_deref(),
+                            })
+                            .unwrap_or(info.name.as_str());
+                        let number = number.as_deref().unwrap_or("").trim_end_matches(' ');
+                        format!("{title} {number} {from} {date}")
                     }
                     _ => match field(StdRole::Description) {
                         Some(d) => {
@@ -612,6 +628,36 @@ impl TestBase {
         };
         Ok(QStr::from_str(&s))
     }
+}
+
+fn localized<'a>(s: &'a md_model::LocalString, code: &str) -> Option<&'a str> {
+    s.0.iter()
+        .find(|(l, t)| l.eq_ignore_ascii_case(code) && !t.is_empty())
+        .map(|(_, t)| t.as_str())
+}
+
+pub(crate) fn object_presentation_titles(
+    obj: &md_model::MdObject,
+) -> Option<(Option<String>, Option<String>)> {
+    if !matches!(
+        obj.kind,
+        MdKind::Document | MdKind::BusinessProcess | MdKind::Task
+    ) {
+        return None;
+    }
+    let obj_pres = match obj.prop("ObjectPresentation") {
+        Some(md_model::Value::LStr(s)) => Some(s),
+        _ => None,
+    };
+    let resolve = |code: &str| -> Option<String> {
+        let text = obj_pres
+            .and_then(|s| localized(s, code))
+            .or_else(|| localized(&obj.synonym, code))?;
+        (text != obj.name).then(|| text.to_string())
+    };
+    let ru = resolve("ru");
+    let en = resolve("en");
+    (ru.is_some() || en.is_some()).then_some((ru, en))
 }
 
 pub fn project_root() -> Option<PathBuf> {

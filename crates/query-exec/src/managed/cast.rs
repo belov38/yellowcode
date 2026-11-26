@@ -108,6 +108,7 @@ pub fn try_cast(
         ValueRef::Storage(_) if to.others.contains(&Other::Storage) => value.clone(),
         ValueRef::Type(_) if to.others.contains(&Other::Type) => value.clone(),
         ValueRef::SysEnum(t, _) if to.others.contains(&Other::SysEnum(t)) => value.clone(),
+        ValueRef::PointInTime(_) if to.others.contains(&Other::PointInTime) => value.clone(),
         _ => null(),
     })
 }

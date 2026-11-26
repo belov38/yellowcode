@@ -91,4 +91,10 @@ impl MdObject {
     pub fn exchange_content(&self) -> Option<&[ContentItem]> {
         self.parts.exchange_content.as_deref()
     }
+
+    pub fn exchange_content_stream_order(&self) -> Option<&[u32]> {
+        let items = self.parts.exchange_content.as_deref()?;
+        let stream = self.parts.exchange_content_stream.as_deref()?;
+        (stream.len() == items.len()).then_some(stream)
+    }
 }

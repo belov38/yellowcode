@@ -26,26 +26,26 @@ const WORDS: &str = concat!(
      bitmap block blocked blocking blocks boolean boot bound bounded boundary bounds broken budget buffer \
      buffers build builds built bulk busy button byte bytes ",
     "cache cached calculate calculated call called calling calls cancel canceled cancelled cancellation \
-     capacity case cases catalog category cause caused causes certificate chain change changed changes \
+     capacity case cases catalog category cause caused causes certificate cf chain change changed changes \
      changing channel char character characters charset check checked checking checkpoint checks checksum \
      checksums children chosen chunk class classes clean cleaned cleanup clear client clients clock clone \
      close closed closing cluster code codepage codes collate collation collations collect collected column \
      columns combination comma command commands comment commit committed common communication compare \
      compared comparison compatibility compatible compile complete completed completely completes completion \
      component components compress compressed compression compromised computer concurrent condition \
-     conditions config configuration configurations configure configured confirm confirmed conflict connect \
+     conditions config configcas configcassave configuration configurations configure configured confirm confirmed conflict connect \
      connected connecting connection connections consecutive consistency consistent constraint consumer \
      contain contained container containing contains containment content contents context continue control \
      controller conversion convert converted converting copy copyright core corrupt corrupted corruption \
      correct correctly count counted counter counters counts cpu crash create created creates creating \
-     creation credential credentials critical cross current currently cursor custom cyclic ",
-    "damaged data database databases datasize datatype date datetime day days deadlock deadline debug decimal \
+     creation credential credentials critical cross current currently currentschema cursor custom cut cyclic ",
+    "damaged data database databases datasize datatype date datetime day days dbo dbschema deadlock deadline debug decimal \
      decision declared decode decompress default defaults deferred define defined definition definitions \
      delete deleted deleting delimiter denied depend dependent deprecated derived describe description \
      descriptor design destination detach detail details detect detected detection developer device devices \
      diagnostic diagnostics differ different differential differs digit digits direct direction directory \
      dirty disable disabled disappeared disconnect disconnected discovered disk dismounted display \
-     distributed divide domain  double  download drain drive driver drivers drop dropped duplicate \
+     distributed divide domain  double  download drain drive driver drivers drop dropped dt duplicate \
      duration dynamic ",
     "earlier early edition effective element elements email empty enable enabled enclosing encoded encoding \
      encountered encrypt encrypted encryption end ended ends endpoint engine ensure enterprise entire entries \
@@ -68,7 +68,7 @@ const WORDS: &str = concat!(
      inspect inspecting inspection instance instances insufficient integer integrity interface internal \
      interrupt interrupted interval inventory invalid invoke io ip issue issued item items ",
     "job join journal json key keys kill killed kind kinds known label labelonly lack language large larger \
-     largest  latch latency latin layer layout lead leading  left legacy length  level levels \
+     largest  latch latency latin layer layout lead leading  left leftovers legacy length letter level levels \
      library license life lifecycle limit limited limits line lines link linked list listed listen listener \
      load loaded loading local location lock locked locking locks log logged logging logic logical login \
      logins logon logs long longer lookup lost low lower machine main maintenance major manage managed \
@@ -76,7 +76,7 @@ const WORDS: &str = concat!(
      media member members memory merge message messages metadata method methods microseconds microsoft \
      migration minimum minor minute minutes mirror mismatch mismatched missing mixed mode model modified \
      modify module modules monitor month mount mounted move moved msdb multi multipart multiple ",
-    "name named namely names namespace native need needed negative nested network  newer newest  \
+    "name named namely names namespace native need needed needs negative nested network newgencreated newgendropped newer newest \
      node nodes non none nonnegative normal note notice notification notified nul null number numbers numeric \
      object objects observed observing occur occurred occurrence occurs odbc odd offline offset offsets old \
      older omitted online open opened opening operating operation operations operator option optional \
@@ -89,7 +89,7 @@ const WORDS: &str = concat!(
      positive possible post practice precision predicate prefix prepare prepared presence present preserve \
      previous previously primary print priority private privilege problem problems procedure procedures \
      process processed processes processing product profile program progress projected property protect \
-     protected protection protocol provide provided provider provides public purpose ",
+     protected protection protocol provide provided provider provides public publishing purpose ",
     "query queue quota quoted raise random range rate raw read readable reading readonly ready real reap \
      reaping reason reasons rebuild receive received recent recompile reconnect record records recover \
      recovered recovery recursive redirect redacted reduce redundancy reference references refresh refuse \
@@ -100,28 +100,28 @@ const WORDS: &str = concat!(
      resources respond response responses restart restore restored restoring restrict restricted result \
      results resume retain retained retention retrieve retry return returned returns reuse reverse revert \
      review right rights role roles rollback root row rows rowversion rule rules run running runtime ",
-    "safe sample save saved scan schedule scheduler schema scope script scripts search second seconds \
-     section sections secure security seek segment select selected selection send sending sent separate \
-     separated separation sequence serial serializable server servers service services session sessions set \
-     sets setting settings setup  severe severity shape shared shell short shrink shut shutdown side \
+    "safe safely sample save saved scan schedule scheduler schema schemaid schemastorage scope script scripts \
+     search second seconds section sections secure security seek segment select selected selection send sending \
+     sent separate separated separation sequence serial serializable server servers service services session \
+     sessions set sets setting settings setup  severe severity shape shared shell short shrink shut shutdown side \
      signal signature signed simple single site size sizes skip slot slow small smallint snapshot socket \
      software solution  sort source sources space spaces spare special specific specification specified \
-     specify split spool sql sqlcmd sqlserver ssl stack stage staged stages staging standard standby start \
-     started starting starts startup state statement statements static statistics status  stop stopped \
-     storage store stored stores stream streams strict string strings stripe striped structure structures \
+     specify split spool sql sqlcmd sqlcmdpassword sqlserver ssl stack stage staged stages staging standard \
+     standby start started starting starts startup state statement statements static statistics status  stop \
+     stopped storage store stored stores stream streams strict string strings stripe striped structure structures \
      style subcommand subject success successful successfully suffix suggest supervisor supply support \
-     supported supports suspend suspended switch symbol sync synchronous syntax sysadmin system systems ",
+     supported supports suspend suspended switch symbol sync syncing synchronous syntax sysadmin system systems ",
     "table tables tail take taken tape target task tasks tcp temp temporary terminate terminated \
      terminating termination terminator test tested text thread threads threshold time timed timeout \
      timeouts times timestamp tinyint tls token tokens tool tools top total trace track trailing transaction \
      transactions transfer transient transport trigger triggers true truncate truncated trust trusted try \
-     tuple type types unable unaccounted unavailable uncertain unchanged unclean unconfirmed undefined \
+     tuple two type types unable unaccounted unavailable uncertain unchanged unclean unconfirmed undefined \
      underlying undo unexpected unicode unique unit units unknown unlimited unlock unnamed unproven \
      unreachable unreadable unrecognized unresolved unsafe unsigned unsupported unused unverified update \
      updated updates upgrade upgraded upgrading usage user username users utc utf uuid ",
     "valid validate validated validation value values variable variables verification verified verify \
-     verifying version versions view views violates violation virtual volume volumes wait waiting waits \
-     wake warning warnings wide width window windows wire work worker workers workload write writer writes \
+     verifying version versions view views violates violation virtual visible volume volumes wait waiting waits \
+     wake warning warnings wide width window windows wire work worker workers workload works write writer writes \
      writing written wrong xml year years yellowcode zero zone ",
     "msg see books mb kb gb tb sec ms rtm id ids filename filenames expand principal able matching evaluating \
      handshake handshakes accept limitation actively unneeded autogrowth immediately corrected threatens factors \

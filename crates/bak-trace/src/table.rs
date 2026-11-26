@@ -3,6 +3,19 @@ use std::collections::HashSet;
 const MAX_DIGITS: usize = 10;
 const MAX_NAME: usize = 128;
 
+const EXTENSION_HISTORY_TABLES: [&str; 4] = [
+    "_DataHistoryLatestVerExt",
+    "_DataHistoryMetadataExt",
+    "_DataHistorySettingsExt",
+    "_DataHistoryVersionsExt",
+];
+
+fn is_extension_history_base(base: &str) -> bool {
+    EXTENSION_HISTORY_TABLES
+        .iter()
+        .any(|known| base.eq_ignore_ascii_case(known))
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct ClearTable(String);
 
@@ -52,7 +65,7 @@ impl TableVocabulary {
             return Some(ClearTable(name.to_owned()));
         }
         if let Some(base) = strip_extension_suffix(name)
-            && self.known.contains(&base.to_ascii_lowercase())
+            && (self.known.contains(&base.to_ascii_lowercase()) || is_extension_history_base(base))
         {
             return Some(ClearTable(name.to_owned()));
         }
@@ -112,7 +125,7 @@ pub fn extension_suffix(name: &str) -> Option<(&str, u32)> {
         return None;
     }
     let base = name.get(..x_at)?;
-    if !base.as_bytes().last().is_some_and(u8::is_ascii_digit) {
+    if !base.as_bytes().last().is_some_and(u8::is_ascii_digit) && !is_extension_history_base(base) {
         return None;
     }
     let number = name.get(number_at..)?.parse().ok()?;

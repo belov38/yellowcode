@@ -1,7 +1,7 @@
 use crate::schema::{QTableId, QuerySchema, StorageBinding};
 use crate::{DateQ, ExecError, NumQ, QShared, QType, StrQ};
 use ibschema::logical::{TypeCode, VAR};
-use ibschema::storage::{FieldId, FieldInfo, StorageMap, TableId};
+use ibschema::storage::{FieldId, FieldInfo, IndexId, StorageMap, TableId};
 use memory_budget::{BudgetError, BudgetedVec, Category, Charged, RequestMemory, Shared};
 
 pub struct BalanceValueCheckL {
@@ -31,12 +31,41 @@ pub struct BalanceFieldCheckL {
     pub field: FieldId,
     pub value: BalanceValueCheckL,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BalanceExtSlotL {
+    pub ordinal: u8,
+    pub values: [FieldId; 2],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BalanceExtEdL {
+    pub table: TableId,
+    pub main_period: FieldId,
+    pub main_recorder: FieldId,
+    pub main_line: FieldId,
+    pub period: FieldId,
+    pub recorder: FieldId,
+    pub line: FieldId,
+    pub correspond: FieldId,
+    pub kind: FieldId,
+    pub value: FieldId,
+    pub max_ext_dims: u8,
+    pub main_by_period: Option<IndexId>,
+    pub ed_by_period: Option<IndexId>,
+}
+
 pub struct BalanceExt1L {
     pub section: TableId,
     pub owner: FieldId,
     pub ordinal: FieldId,
     pub turnover_only: FieldId,
-    pub values: [FieldId; 2],
+    pub dim_kind: Option<FieldId>,
+    pub kind_ref_table: u32,
+    pub requested_kinds: Option<Charged<Vec<[u8; 16]>>>,
+    pub physical_values: Charged<Vec<[FieldId; 2]>>,
+    pub ed: Option<BalanceExtEdL>,
+    pub ext_flag_fields: Charged<Vec<FieldId>>,
+    pub slots: Charged<Vec<BalanceExtSlotL>>,
     pub value_check: BalanceValueCheckL,
     pub shared_checks: Charged<Vec<BalanceFieldCheckL>>,
 }
@@ -46,7 +75,14 @@ impl PartialEq for BalanceExt1L {
             && self.owner == other.owner
             && self.ordinal == other.ordinal
             && self.turnover_only == other.turnover_only
-            && self.values == other.values
+            && self.dim_kind == other.dim_kind
+            && self.kind_ref_table == other.kind_ref_table
+            && self.requested_kinds.as_ref().map(|v| v.as_slice())
+                == other.requested_kinds.as_ref().map(|v| v.as_slice())
+            && self.physical_values.as_slice() == other.physical_values.as_slice()
+            && self.ed == other.ed
+            && self.ext_flag_fields.as_slice() == other.ext_flag_fields.as_slice()
+            && self.slots.as_slice() == other.slots.as_slice()
             && self.value_check == other.value_check
             && self.shared_checks.as_slice() == other.shared_checks.as_slice()
     }
@@ -73,7 +109,16 @@ impl std::fmt::Debug for BalanceExt1L {
             .field("owner", &self.owner)
             .field("ordinal", &self.ordinal)
             .field("turnover_only", &self.turnover_only)
-            .field("values", &self.values)
+            .field("dim_kind", &self.dim_kind)
+            .field("kind_ref_table", &self.kind_ref_table)
+            .field(
+                "requested_kinds_len",
+                &self.requested_kinds.as_ref().map(|v| v.len()),
+            )
+            .field("physical_values_len", &self.physical_values.len())
+            .field("ed", &self.ed)
+            .field("ext_flag_fields_len", &self.ext_flag_fields.len())
+            .field("slots_len", &self.slots.len())
             .field("value_check", &self.value_check)
             .field("shared_checks_len", &self.shared_checks.len())
             .finish()
@@ -287,41 +332,138 @@ pub(super) fn policy_type<'a>(
     ty.ok_or_else(|| fatal("accounting payload: policy field has no semantic binding"))
 }
 
+pub(super) struct ExtKindRemap<'a> {
+    pub dim_kind: FieldId,
+    pub kind_ref_table: u32,
+    pub requested_kinds: &'a [[u8; 16]],
+    pub physical_slots: Vec<([FieldId; 2], &'a QType)>,
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "builder accepts validated section identity, slot specs, optional kind remap, and memory"
+)]
 pub(super) fn build<'a>(
-    identity: (TableId, FieldId, FieldId, FieldId, [FieldId; 2]),
-    semantic: &QType,
+    identity: (TableId, FieldId, FieldId, FieldId),
+    slot_specs: impl Iterator<Item = Result<(u8, [FieldId; 2], &'a QType), ExecError>>,
+    ext_remap: Option<ExtKindRemap<'a>>,
+    ext_flag_fields: &[FieldId],
     main: TableId,
     shared: impl Iterator<Item = Result<(FieldId, &'a QType), ExecError>>,
     storage: &StorageBinding,
     map: &StorageMap,
     memory: &RequestMemory,
 ) -> Result<QShared<BalanceExt1L>, ExecError> {
-    let (section, owner, ordinal, turnover_only, values) = identity;
+    let (section, owner, ordinal, turnover_only) = identity;
     let main_info = map
         .try_table(main)
         .ok_or_else(|| fatal("accounting payload: missing main"))?;
-    let dr = value_check(
-        semantic,
-        main_info
-            .field(values[0])
-            .ok_or_else(|| fatal("accounting payload: missing Dt1"))?,
-        storage,
-        map,
-        memory,
-    )?;
-    let cr = value_check(
-        semantic,
-        main_info
-            .field(values[1])
-            .ok_or_else(|| fatal("accounting payload: missing Ct1"))?,
-        storage,
-        map,
-        memory,
-    )?;
-    if dr != cr {
-        return Err(fatal("accounting payload: incompatible side checks"));
+    let mut slots = BudgetedVec::new(&memory.budget, Category::Execution).map_err(memory_error)?;
+    let mut first_check: Option<BalanceValueCheckL> = None;
+    for spec in slot_specs {
+        let (slot_ordinal, values, semantic) = spec?;
+        let dr = value_check(
+            semantic,
+            main_info
+                .field(values[0])
+                .ok_or_else(|| fatal("accounting payload: missing ValueDt"))?,
+            storage,
+            map,
+            memory,
+        )?;
+        let cr = value_check(
+            semantic,
+            main_info
+                .field(values[1])
+                .ok_or_else(|| fatal("accounting payload: missing ValueCt"))?,
+            storage,
+            map,
+            memory,
+        )?;
+        if dr != cr {
+            return Err(fatal("accounting payload: incompatible side checks"));
+        }
+        drop(cr);
+        match &first_check {
+            None => first_check = Some(dr),
+            Some(existing) => {
+                if *existing != dr {
+                    return Err(fatal(
+                        "accounting payload: incompatible subconto slot checks",
+                    ));
+                }
+                drop(dr);
+            }
+        }
+        slots
+            .try_push(BalanceExtSlotL {
+                ordinal: slot_ordinal,
+                values,
+            })
+            .map_err(memory_error)?;
     }
-    drop(cr);
+    let dr = first_check.ok_or_else(|| fatal("accounting payload: missing subconto slots"))?;
+    let slots = slots.into_charged_vec();
+    let (dim_kind, kind_ref_table, requested_kinds, physical_values) = match ext_remap {
+        None => (
+            None,
+            0,
+            None,
+            BudgetedVec::new(&memory.budget, Category::Execution)
+                .map_err(memory_error)?
+                .into_charged_vec(),
+        ),
+        Some(remap) => {
+            let mut req = BudgetedVec::try_with_capacity(
+                &memory.budget,
+                Category::Execution,
+                remap.requested_kinds.len(),
+            )
+            .map_err(memory_error)?;
+            for &id in remap.requested_kinds {
+                req.try_push(id).map_err(memory_error)?;
+            }
+            let mut phys = BudgetedVec::try_with_capacity(
+                &memory.budget,
+                Category::Execution,
+                remap.physical_slots.len(),
+            )
+            .map_err(memory_error)?;
+            for (values, semantic) in remap.physical_slots {
+                let p_dr = value_check(
+                    semantic,
+                    main_info
+                        .field(values[0])
+                        .ok_or_else(|| fatal("accounting payload: missing physical ValueDt"))?,
+                    storage,
+                    map,
+                    memory,
+                )?;
+                let p_cr = value_check(
+                    semantic,
+                    main_info
+                        .field(values[1])
+                        .ok_or_else(|| fatal("accounting payload: missing physical ValueCt"))?,
+                    storage,
+                    map,
+                    memory,
+                )?;
+                if p_dr != dr || p_cr != dr {
+                    return Err(fatal(
+                        "accounting payload: incompatible physical subconto slot checks",
+                    ));
+                }
+                drop((p_dr, p_cr));
+                phys.try_push(values).map_err(memory_error)?;
+            }
+            (
+                Some(remap.dim_kind),
+                remap.kind_ref_table,
+                Some(req.into_charged_vec()),
+                phys.into_charged_vec(),
+            )
+        }
+    };
     let mut checks = BudgetedVec::new(&memory.budget, Category::Execution).map_err(memory_error)?;
     for shared in shared {
         let (field, semantic) = shared?;
@@ -339,6 +481,29 @@ pub(super) fn build<'a>(
             .map_err(memory_error)?;
     }
     let checks = checks.into_charged_vec();
+    let mut charged_flags =
+        BudgetedVec::try_with_capacity(&memory.budget, Category::Execution, ext_flag_fields.len())
+            .map_err(memory_error)?;
+    for &field in ext_flag_fields {
+        charged_flags.try_push(field).map_err(memory_error)?;
+    }
+    let ext_flag_fields = charged_flags.into_charged_vec();
+    assert!(slots.reservation().budget().same_scope(&memory.budget));
+    assert!(
+        ext_flag_fields
+            .reservation()
+            .budget()
+            .same_scope(&memory.budget)
+    );
+    assert!(
+        physical_values
+            .reservation()
+            .budget()
+            .same_scope(&memory.budget)
+    );
+    if let Some(ref req) = requested_kinds {
+        assert!(req.reservation().budget().same_scope(&memory.budget));
+    }
     assert!(checks.reservation().budget().same_scope(&memory.budget));
     assert!(
         dr.reference_tags
@@ -359,8 +524,160 @@ pub(super) fn build<'a>(
         owner,
         ordinal,
         turnover_only,
-        values,
+        dim_kind,
+        kind_ref_table,
+        requested_kinds,
+        physical_values,
+        ed: None,
+        ext_flag_fields,
+        slots,
         value_check: dr,
+        shared_checks: checks,
+    };
+    let node = memory
+        .budget
+        .try_reserve(Category::Execution, 0)
+        .map_err(ExecError::Memory)?;
+    assert!(node.budget().same_scope(&memory.budget));
+    Ok(QShared::from_managed(
+        Shared::try_new(payload, node).map_err(memory_error)?,
+    ))
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "builder accepts validated section identity, AccRgED descriptor, ordinals, optional requested kinds, and memory"
+)]
+pub(super) fn build_ed<'a>(
+    identity: (TableId, FieldId, FieldId, FieldId),
+    dim_kind: FieldId,
+    kind_ref_table: u32,
+    ed: BalanceExtEdL,
+    ordinals: &[u8],
+    requested_kinds: Option<&[[u8; 16]]>,
+    ext_flag_fields: &[FieldId],
+    semantic_ext: &QType,
+    main: TableId,
+    shared: impl Iterator<Item = Result<(FieldId, &'a QType), ExecError>>,
+    storage: &StorageBinding,
+    map: &StorageMap,
+    memory: &RequestMemory,
+) -> Result<QShared<BalanceExt1L>, ExecError> {
+    let (section, owner, ordinal, turnover_only) = identity;
+    let main_info = map
+        .try_table(main)
+        .ok_or_else(|| fatal("accounting payload: missing main"))?;
+    let ed_info = map
+        .try_table(ed.table)
+        .ok_or_else(|| fatal("accounting payload: missing AccRgED"))?;
+    if ordinals.is_empty() {
+        return Err(fatal("accounting payload: missing subconto slots"));
+    }
+    let val_check = value_check(
+        semantic_ext,
+        ed_info
+            .field(ed.value)
+            .ok_or_else(|| fatal("accounting payload: missing AccRgED Value"))?,
+        storage,
+        map,
+        memory,
+    )?;
+    let mut slots =
+        BudgetedVec::try_with_capacity(&memory.budget, Category::Execution, ordinals.len())
+            .map_err(memory_error)?;
+    for &slot_ordinal in ordinals {
+        slots
+            .try_push(BalanceExtSlotL {
+                ordinal: slot_ordinal,
+                values: [FieldId(0), FieldId(0)],
+            })
+            .map_err(memory_error)?;
+    }
+    let slots = slots.into_charged_vec();
+    let requested_kinds = match requested_kinds {
+        None => None,
+        Some(ids) => {
+            let mut req =
+                BudgetedVec::try_with_capacity(&memory.budget, Category::Execution, ids.len())
+                    .map_err(memory_error)?;
+            for &id in ids {
+                req.try_push(id).map_err(memory_error)?;
+            }
+            Some(req.into_charged_vec())
+        }
+    };
+    let physical_values = BudgetedVec::new(&memory.budget, Category::Execution)
+        .map_err(memory_error)?
+        .into_charged_vec();
+    let mut checks = BudgetedVec::new(&memory.budget, Category::Execution).map_err(memory_error)?;
+    for shared in shared {
+        let (field, semantic) = shared?;
+        let value = value_check(
+            semantic,
+            main_info
+                .field(field)
+                .ok_or_else(|| fatal("accounting payload: missing shared field"))?,
+            storage,
+            map,
+            memory,
+        )?;
+        checks
+            .try_push(BalanceFieldCheckL { field, value })
+            .map_err(memory_error)?;
+    }
+    let checks = checks.into_charged_vec();
+    let mut charged_flags =
+        BudgetedVec::try_with_capacity(&memory.budget, Category::Execution, ext_flag_fields.len())
+            .map_err(memory_error)?;
+    for &field in ext_flag_fields {
+        charged_flags.try_push(field).map_err(memory_error)?;
+    }
+    let ext_flag_fields = charged_flags.into_charged_vec();
+    assert!(slots.reservation().budget().same_scope(&memory.budget));
+    assert!(
+        ext_flag_fields
+            .reservation()
+            .budget()
+            .same_scope(&memory.budget)
+    );
+    assert!(
+        physical_values
+            .reservation()
+            .budget()
+            .same_scope(&memory.budget)
+    );
+    if let Some(ref req) = requested_kinds {
+        assert!(req.reservation().budget().same_scope(&memory.budget));
+    }
+    assert!(checks.reservation().budget().same_scope(&memory.budget));
+    assert!(
+        val_check
+            .reference_tags
+            .reservation()
+            .budget()
+            .same_scope(&memory.budget)
+    );
+    assert!(checks.iter().all(|check| {
+        check
+            .value
+            .reference_tags
+            .reservation()
+            .budget()
+            .same_scope(&memory.budget)
+    }));
+    let payload = BalanceExt1L {
+        section,
+        owner,
+        ordinal,
+        turnover_only,
+        dim_kind: Some(dim_kind),
+        kind_ref_table,
+        requested_kinds,
+        physical_values,
+        ed: Some(ed),
+        ext_flag_fields,
+        slots,
+        value_check: val_check,
         shared_checks: checks,
     };
     let node = memory

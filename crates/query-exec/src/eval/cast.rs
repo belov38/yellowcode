@@ -74,6 +74,7 @@ pub fn cast(
         QValue::Storage(_) if to.others.contains(&Other::Storage) => v.clone(),
         QValue::Type(_) if to.others.contains(&Other::Type) => v.clone(),
         QValue::SysEnum(t, _) if to.others.contains(&Other::SysEnum(*t)) => v.clone(),
+        QValue::PointInTime(_) if to.others.contains(&Other::PointInTime) => v.clone(),
         _ => QValue::Null,
     })
 }

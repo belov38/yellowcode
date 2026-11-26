@@ -463,6 +463,7 @@ fn node_arg(
 fn data_arg(
     app: &Application,
     method: &str,
+    register: bool,
     plan: ObjId,
     v: &Value,
 ) -> Result<(ObjId, Key), CallError> {
@@ -488,10 +489,24 @@ fn data_arg(
     }
     if let Some(crate::meta::MdKey::Path(crate::model::MdPath::Object(obj))) =
         crate::meta::key_of(v)
-        && app.model().obj(obj).kind == ObjKind::Constant
     {
+        let kind = app.model().obj(obj).kind;
+        let whole = matches!(
+            kind,
+            ObjKind::Catalog | ObjKind::Document | ObjKind::InformationRegister
+        );
+        if kind != ObjKind::Constant && !(whole && register) {
+            return Err(refusal(&format!(
+                "{method}: объект метаданных вида {}",
+                kind.name(platform_catalog::messages::Lang::Ru)
+            ))
+            .into());
+        }
         if !in_content(obj) {
             return Err(crate::select::value_mismatch(2).into());
+        }
+        if whole {
+            return Ok((obj, Key::All));
         }
         return Ok((obj, Key::Constant(app.model().obj(obj).md)));
     }
@@ -501,6 +516,119 @@ fn data_arg(
 enum Key {
     Ref(u32, RefId),
     Constant(crate::model::Uuid16),
+    All,
+}
+
+fn all_keys(
+    ex: &mut Execution,
+    app: &Application,
+    method: &str,
+    obj: ObjId,
+    changes: &ChangeTable<'_>,
+) -> CallResult<Vec<Vec<(usize, FieldValue)>>> {
+    let model = app.model();
+    let def = model.obj(obj);
+    let st = model
+        .storage_of(obj)
+        .ok_or_else(|| internal("an object of the content without storage"))?;
+    let main = app
+        .store()
+        .storage()
+        .try_table(st.main)
+        .ok_or_else(|| internal("no main table"))?;
+    if !main.separators.is_empty() {
+        return Err(refusal(&format!("{method}: разделённые данные")).into());
+    }
+    let register = def.kind == ObjKind::InformationRegister;
+    let (fields, number) = if register {
+        if def.behavior.write_mode != Some(crate::model::InfoRegWriteMode::Independent) {
+            return Err(refusal(&format!("{method}: регистр, подчинённый регистратору")).into());
+        }
+        let sources = changes.key_sources(main)?;
+        let by_period = sources
+            .iter()
+            .any(|f| main.field(*f).and_then(|fi| fi.std) == Some(StdField::Period));
+        let periodic = def
+            .fields
+            .iter()
+            .any(|f| f.std == Some(crate::model::StdAttr::Period));
+        if periodic && !by_period {
+            return Err(refusal(&format!(
+                "{method}: периодический регистр без основного отбора по периоду"
+            ))
+            .into());
+        }
+        let dimensions = def
+            .fields
+            .iter()
+            .filter(|f| f.role == crate::model::FieldRole::Dimension)
+            .count();
+        if sources.len() - usize::from(by_period) != dimensions {
+            return Err(refusal(&format!(
+                "{method}: регистр с измерением вне основного отбора"
+            ))
+            .into());
+        }
+        (sources, 0)
+    } else {
+        let id = main
+            .field_by_std(StdField::Id)
+            .ok_or_else(|| internal("a main table without a reference"))?;
+        let number = st
+            .ref_number
+            .ok_or_else(|| internal("an object without a reference table"))?;
+        app.predefined()
+            .ensure(app, obj, &crate::predefined::AreaKey::default())?;
+        (vec![id], number)
+    };
+    let txn = CallTxn::of_call(ex);
+    let mut view = crate::read::read_view(ex, txn.as_deref(), app)?;
+    let _memory = crate::codes::open_read(ex, &mut view)?;
+    let rd = view.txn();
+    let rows = rd
+        .scan_fields(st.main, &fields, None)
+        .map_err(|e| crate::read::store_call_error(ex, e))?;
+    let mut keys = Vec::new();
+    let mut bytes = 0u64;
+    for item in rows {
+        ex.charge(1)?;
+        let (_, row) = item.map_err(|e| crate::read::store_call_error(ex, e))?;
+        let key = if register {
+            changes.key_of_row(main, &row)?
+        } else {
+            let cell = fields.first().and_then(|f| row.get(usize::from(f.0)));
+            let Some(FieldValue::Ref { id, .. }) = cell else {
+                return Err(internal("a row without a reference").into());
+            };
+            changes.key_ref(number, *id)?
+        };
+        bytes = bytes.saturating_add(crate::read_budget::slots::<FieldValue>(
+            key.len().saturating_add(1),
+        ));
+        crate::read_budget::reserve(ex, bytes)?;
+        keys.push(key);
+    }
+    Ok(keys)
+}
+
+fn constant_has_row(ex: &mut Execution, app: &Application, obj: ObjId) -> CallResult<bool> {
+    let st = app
+        .model()
+        .storage_of(obj)
+        .ok_or_else(|| internal("a constant without storage"))?;
+    let txn = CallTxn::of_call(ex);
+    let mut view = crate::read::read_view(ex, txn.as_deref(), app)?;
+    let _memory = crate::codes::open_read(ex, &mut view)?;
+    let rd = view.txn();
+    let mut rows = rd
+        .scan_fields(st.main, &[], None)
+        .map_err(|e| crate::read::store_call_error(ex, e))?;
+    match rows.next() {
+        None => Ok(false),
+        Some(item) => item
+            .map(|_| true)
+            .map_err(|e| crate::read::store_call_error(ex, e)),
+    }
 }
 
 pub(crate) fn manager_call(
@@ -532,23 +660,34 @@ pub(crate) fn manager_call(
     if !register && matches!(data, Value::Number(_)) {
         return Err(refusal(&format!("{method}: номер сообщения")).into());
     }
-    let (obj, key) = data_arg(app, method, plan, &data)?;
+    let (obj, key) = data_arg(app, method, register, plan, &data)?;
     let changes = ChangeTable::of(app, obj)?
         .ok_or_else(|| internal("an object of the content of a plan without a table of changes"))?;
-    let key = match key {
-        Key::Ref(number, id) => changes.key_ref(number, id)?,
-        Key::Constant(md) => changes.key_constant(md)?,
+    if register && matches!(key, Key::Constant(_)) && !constant_has_row(ex, app, obj)? {
+        return Err(refusal(&format!("{method}: константа без строки")).into());
+    }
+    let keys = match key {
+        Key::Ref(number, id) => vec![changes.key_ref(number, id)?],
+        Key::Constant(md) => vec![changes.key_constant(md)?],
+        Key::All => all_keys(ex, app, method, obj, &changes)?,
     };
     let txn = CallTxn::of_call(ex).ok_or_else(|| internal("a registration outside a call"))?;
     txn.check().map_err(|e| e.host())?;
     txn.begin();
-    let done = txn.with_write(&**app, |w| {
-        if register {
-            changes.register(w, node, &key)
-        } else {
-            changes.unregister(w, node, &key).map(drop)
-        }
-    });
+    let done = if keys.is_empty() {
+        Ok(())
+    } else {
+        txn.with_write(&**app, |w| {
+            for key in &keys {
+                if register {
+                    changes.register(w, node, key)?;
+                } else {
+                    changes.unregister(w, node, key)?;
+                }
+            }
+            Ok(())
+        })
+    };
     let ended = match done {
         Ok(()) => txn.commit(&**app).map_err(|e| e.call_error(ex)),
         Err(e) => {

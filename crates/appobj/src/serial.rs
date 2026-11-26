@@ -1,3 +1,5 @@
+mod object;
+
 use crate::Application;
 use crate::errors::{self, keys};
 use crate::model::{ObjId, ObjKind};
@@ -152,7 +154,14 @@ impl AppSerializer for AppSerializerImpl {
         self.app.types()?.type_of(obj, Category::Ref)
     }
 
-    fn xdto_write(&self, _ex: &mut Execution, v: &ObjRef) -> Result<Option<AppXdto>, Exception> {
+    fn xdto_write(&self, ex: &mut Execution, v: &ObjRef) -> Result<Option<AppXdto>, Exception> {
+        if let Some(o) = object::catalog_object(&self.app, v) {
+            return Ok(
+                object::object_props(ex, &self.app, o, object::Writer::Xdto)?
+                    .ok()
+                    .map(AppXdto::Object),
+            );
+        }
         let Some(o) = Self::as_ref_obj(v) else {
             return Ok(None);
         };
@@ -166,6 +175,32 @@ impl AppSerializer for AppSerializerImpl {
             return Ok(Some(AppXdto::Text(name.to_string())));
         }
         Ok(Some(AppXdto::Text(o.r.id.to_uuid().to_string())))
+    }
+
+    fn xdto_types(
+        &self,
+        ex: &mut Execution,
+        v: &ObjRef,
+        root: &XdtoName,
+    ) -> Result<Option<Vec<bsl_vm::host::AppXdtoTypeDef>>, Exception> {
+        match object::catalog_object(&self.app, v) {
+            Some(o) => object::object_types(ex, &self.app, o, root),
+            None => Ok(None),
+        }
+    }
+
+    fn old_xml_write(
+        &self,
+        ex: &mut Execution,
+        v: &ObjRef,
+    ) -> Result<Option<Vec<bsl_vm::AppXdtoProp>>, Exception> {
+        let Some(o) = object::catalog_object(&self.app, v) else {
+            return Ok(None);
+        };
+        match object::object_props(ex, &self.app, o, object::Writer::Old)? {
+            Ok(props) => Ok(Some(props)),
+            Err(e) => Err(ex.error(e)),
+        }
     }
 
     fn xdto_read(&self, ex: &mut Execution, t: TypeId, data: AppXdto) -> Result<Value, Exception> {

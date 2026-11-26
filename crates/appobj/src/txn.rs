@@ -129,6 +129,7 @@ fn writer_closed() {
 #[derive(Default)]
 pub struct CallTxn {
     depth: Cell<u32>,
+    explicit: RefCell<Vec<bool>>,
     poisoned: Cell<bool>,
     id: Cell<u64>,
     last_id: Cell<u64>,
@@ -210,6 +211,7 @@ impl CallTxn {
             );
         }
         self.depth.set(depth.saturating_add(1));
+        self.explicit.borrow_mut().push(false);
     }
 
     pub fn begin_with(&self, control: Option<LockControl>) {
@@ -217,6 +219,17 @@ impl CallTxn {
             self.control.set(control);
         }
         self.begin();
+    }
+
+    pub fn begin_explicit(&self, control: Option<LockControl>) {
+        self.begin_with(control);
+        if let Some(top) = self.explicit.borrow_mut().last_mut() {
+            *top = true;
+        }
+    }
+
+    pub fn innermost_explicit(&self) -> bool {
+        self.depth.get() > 0 && self.explicit.borrow().last() == Some(&true)
     }
 
     pub fn control(&self) -> Option<LockControl> {
@@ -254,6 +267,7 @@ impl CallTxn {
         }
         if depth > 1 {
             self.depth.set(depth - 1);
+            self.explicit.borrow_mut().pop();
             return Ok(Commit::Inner);
         }
         let writer = self.take_writer()?;
@@ -322,6 +336,7 @@ impl CallTxn {
         }
         if depth > 1 {
             self.depth.set(depth - 1);
+            self.explicit.borrow_mut().pop();
             self.poisoned.set(true);
             return Ok(Rollback::Inner);
         }
@@ -480,6 +495,7 @@ impl CallTxn {
             *slot = None;
         }
         self.depth.set(0);
+        self.explicit.borrow_mut().clear();
         self.poisoned.set(false);
         self.id.set(0);
         self.control.set(None);

@@ -12,6 +12,7 @@ pub(crate) fn clone_register_step_without_chart(step: &RegisterRowsL) -> Registe
         RegisterRowsKindL::AccountingBalance(a) => {
             RegisterRowsKindL::AccountingBalance(query_ir::lower::BalanceRowsL {
                 inputs: a.inputs.clone(),
+                dims: a.dims.clone(),
                 resources: a.resources.clone(),
                 date: a.date,
                 period: a.period,
@@ -20,7 +21,33 @@ pub(crate) fn clone_register_step_without_chart(step: &RegisterRowsL) -> Registe
                 ext1: a.ext1.clone(),
                 policy_fields: a.policy_fields.clone(),
                 secured: a.secured,
+                areas: a.areas.clone(),
             })
+        }
+        RegisterRowsKindL::AccountingBalanceAndTurnovers(a) => {
+            RegisterRowsKindL::AccountingBalanceAndTurnovers(
+                query_ir::lower::AccountingBalanceAndTurnoversL {
+                    inputs: a.inputs.clone(),
+                    areas: a.areas.clone(),
+                    chart_input: None,
+                    chart_layout: a.chart_layout,
+                    policy_fields: a.policy_fields.clone(),
+                    secured: a.secured,
+                    dims: a.dims.clone(),
+                    ext_dims: a.ext_dims.clone(),
+                    resources: a.resources.clone(),
+                    bounds: a.bounds.clone(),
+                    period: a.period,
+                    recorder: a.recorder.clone(),
+                    line: a.line,
+                    periodic: a.periodic,
+                    need_opening: a.need_opening,
+                    need_turnovers: a.need_turnovers,
+                    correspondence: a.correspondence,
+                    record_kind: a.record_kind,
+                    account_filter: a.account_filter.clone(),
+                },
+            )
         }
         other => other.clone(),
     };
@@ -59,6 +86,7 @@ pub(crate) fn walk<'a>(
             | PExpr::Refs { l: x, .. }
             | PExpr::Cast { x, .. }
             | PExpr::TypeOf { x, .. }
+            | PExpr::PredefName { x, .. }
             | PExpr::StoredSize { x, .. } => expr(x, d, f)?,
             PExpr::Arith { first, steps, .. } => {
                 expr(first, d, f)?;
@@ -83,6 +111,10 @@ pub(crate) fn walk<'a>(
             PExpr::Like { l, pat, .. } => {
                 expr(l, d, f)?;
                 expr(pat, d, f)?;
+            }
+            PExpr::PointInTime { date, reference } => {
+                expr(date, d, f)?;
+                expr(reference, d, f)?;
             }
             PExpr::InList { l, rhs, .. } => {
                 for e in l.iter().chain(rhs) {
@@ -192,9 +224,10 @@ pub(crate) fn walk<'a>(
                     expr(e, d, f)?;
                 }
             }
-            RelL::Distinct(input) | RelL::Top { input, .. } | RelL::CheckAccess { input, .. } => {
-                rel(input, d, f)?
-            }
+            RelL::Distinct(input)
+            | RelL::Top { input, .. }
+            | RelL::CheckAccess { input, .. }
+            | RelL::DefaultIfEmpty { input, .. } => rel(input, d, f)?,
             RelL::Sort { input, keys } | RelL::HierarchyOrder { input, keys, .. } => {
                 rel(input, d, f)?;
                 for (e, _) in keys {
@@ -247,6 +280,7 @@ pub(crate) fn protected(r: &RelL) -> Result<bool, ExecError> {
         if let Node::Rel(RelL::RegisterRows(s)) = n {
             found |= match &s.rows {
                 RegisterRowsKindL::AccountingBalance(a) => a.secured,
+                RegisterRowsKindL::AccountingBalanceAndTurnovers(a) => a.secured,
                 RegisterRowsKindL::AccountingTurnovers(a) => a.secured,
                 _ => false,
             };
@@ -331,30 +365,274 @@ pub(crate) fn structural_model(r: &RelL) -> Result<u64, ExecError> {
             )?,
             Node::Rel(RelL::SemiJoin { l, .. }) => v(l.len(), std::mem::size_of::<PExpr>())?,
             Node::Rel(RelL::RegisterRows(s)) => match &s.rows {
-                RegisterRowsKindL::AccountingBalance(a) => size_add(
-                    v(
-                        a.resources.len(),
-                        std::mem::size_of::<query_ir::lower::BalanceResourceL>(),
-                    )?,
-                    v(
-                        a.policy_fields.len(),
-                        std::mem::size_of::<ibschema::storage::FieldId>(),
-                    )?,
-                )?,
-                RegisterRowsKindL::AccountingTurnovers(a) => size_add(
-                    v(
-                        a.resources.len(),
-                        std::mem::size_of::<query_ir::lower::AccountingTurnoversResourceL>(),
-                    )?,
-                    v(
-                        a.policy_fields.len(),
-                        std::mem::size_of::<ibschema::storage::FieldId>(),
-                    )?,
-                )?,
+                RegisterRowsKindL::AccountingBalance(a) => {
+                    let mut b = size_add(
+                        size_add(
+                            v(
+                                a.dims.len(),
+                                std::mem::size_of::<query_ir::lower::BalanceDimL>(),
+                            )?,
+                            v(
+                                a.resources.len(),
+                                std::mem::size_of::<query_ir::lower::BalanceResourceL>(),
+                            )?,
+                        )?,
+                        v(
+                            a.policy_fields.len(),
+                            std::mem::size_of::<ibschema::storage::FieldId>(),
+                        )?,
+                    )?;
+                    match &a.areas {
+                        query_ir::lower::BalanceAreasL::None => {}
+                        query_ir::lower::BalanceAreasL::Exact(t) => {
+                            for list in [&t.main, &t.options, &t.chart, &t.section, &t.ext_dims] {
+                                b = size_add(
+                                    b,
+                                    v(
+                                        list.len(),
+                                        std::mem::size_of::<query_ir::lower::BalanceAreaExactL>(),
+                                    )?,
+                                )?;
+                                for item in list {
+                                    b = size_add(b, literal_copy(&item.value))?;
+                                }
+                            }
+                        }
+                        query_ir::lower::BalanceAreasL::Unseparated(t) => {
+                            for list in [&t.main, &t.options, &t.chart, &t.section, &t.ext_dims] {
+                                b = size_add(
+                                    b,
+                                    v(
+                                        list.len(),
+                                        std::mem::size_of::<query_ir::lower::BalanceAreaFieldL>(),
+                                    )?,
+                                )?;
+                            }
+                        }
+                    }
+                    b
+                }
+                RegisterRowsKindL::AccountingBalanceAndTurnovers(a) => {
+                    let mut b = size_add(
+                        size_add(
+                            v(
+                                a.dims.len(),
+                                std::mem::size_of::<query_ir::lower::BalanceDimL>(),
+                            )?,
+                            v(
+                                a.resources.len(),
+                                std::mem::size_of::<query_ir::lower::BalanceResourceL>(),
+                            )?,
+                        )?,
+                        v(
+                            a.policy_fields.len(),
+                            std::mem::size_of::<ibschema::storage::FieldId>(),
+                        )?,
+                    )?;
+                    match &a.areas {
+                        query_ir::lower::BalanceAreasL::None => {}
+                        query_ir::lower::BalanceAreasL::Exact(t) => {
+                            for list in [&t.main, &t.options, &t.chart, &t.section, &t.ext_dims] {
+                                b = size_add(
+                                    b,
+                                    v(
+                                        list.len(),
+                                        std::mem::size_of::<query_ir::lower::BalanceAreaExactL>(),
+                                    )?,
+                                )?;
+                                for item in list {
+                                    b = size_add(b, literal_copy(&item.value))?;
+                                }
+                            }
+                        }
+                        query_ir::lower::BalanceAreasL::Unseparated(t) => {
+                            for list in [&t.main, &t.options, &t.chart, &t.section, &t.ext_dims] {
+                                b = size_add(
+                                    b,
+                                    v(
+                                        list.len(),
+                                        std::mem::size_of::<query_ir::lower::BalanceAreaFieldL>(),
+                                    )?,
+                                )?;
+                            }
+                        }
+                    }
+                    if let Some(rec) = &a.recorder {
+                        b = size_add(b, v(rec.reference_tags.len(), std::mem::size_of::<u32>())?)?;
+                    }
+                    if let Some(ext) = &a.ext_dims {
+                        b = size_add(
+                            b,
+                            v(
+                                ext.ext_flag_fields.len(),
+                                std::mem::size_of::<ibschema::storage::FieldId>(),
+                            )?,
+                        )?;
+                        b = size_add(
+                            b,
+                            v(
+                                ext.slots.len(),
+                                std::mem::size_of::<
+                                    query_ir::lower::AccountingBalanceAndTurnoversExtSlotL,
+                                >(),
+                            )?,
+                        )?;
+                        b = size_add(
+                            b,
+                            v(
+                                ext.physical_values.len(),
+                                std::mem::size_of::<[ibschema::storage::FieldId; 2]>(),
+                            )?,
+                        )?;
+                        b = size_add(
+                            b,
+                            v(
+                                ext.value_check.reference_tags.len(),
+                                std::mem::size_of::<u32>(),
+                            )?,
+                        )?;
+                        if let Some(req) = &ext.requested_kinds {
+                            b = size_add(b, v(req.len(), std::mem::size_of::<[u8; 16]>())?)?;
+                        }
+                        if let Some(ed) = &ext.acc_rg_ed {
+                            b = size_add(
+                                b,
+                                size_block(std::mem::size_of::<
+                                    query_ir::lower::AccountingBalanceAndTurnoversAccRgEdL,
+                                >() as u64)?,
+                            )?;
+                            b = size_add(
+                                b,
+                                v(ed.recorder_tags.len(), std::mem::size_of::<u32>())?,
+                            )?;
+                        }
+                    }
+                    b
+                }
+                RegisterRowsKindL::AccountingTurnovers(a) => {
+                    let mut b = size_add(
+                        v(
+                            a.resources.len(),
+                            std::mem::size_of::<query_ir::lower::AccountingTurnoversResourceL>(),
+                        )?,
+                        v(
+                            a.policy_fields.len(),
+                            std::mem::size_of::<ibschema::storage::FieldId>(),
+                        )?,
+                    )?;
+                    b = size_add(
+                        b,
+                        v(
+                            a.dims.len(),
+                            std::mem::size_of::<query_ir::lower::AccountingTurnoversDimensionL>(),
+                        )?,
+                    )?;
+                    for dim in &a.dims {
+                        b = size_add(
+                            b,
+                            v(
+                                dim.value_check.reference_tags.len(),
+                                std::mem::size_of::<u32>(),
+                            )?,
+                        )?;
+                    }
+                    if let Some(areas) = &a.areas {
+                        match areas {
+                            query_ir::lower::TurnoversAreasL::Exact {
+                                main,
+                                options,
+                                ext,
+                                ed,
+                            } => {
+                                for list in [main, options, ext, ed] {
+                                    b = size_add(
+                                        b,
+                                        v(
+                                            list.len(),
+                                            std::mem::size_of::<(
+                                                ibschema::storage::FieldId,
+                                                query_ir::QValue,
+                                            )>(),
+                                        )?,
+                                    )?;
+                                    for (_, val) in list {
+                                        b = size_add(b, crate::model::value_model(val))?;
+                                    }
+                                }
+                            }
+                            query_ir::lower::TurnoversAreasL::Unseparated {
+                                main,
+                                options,
+                                ext,
+                                ed,
+                                ..
+                            } => {
+                                for list in [main, options, ext, ed] {
+                                    b = size_add(
+                                        b,
+                                        v(
+                                            list.len(),
+                                            std::mem::size_of::<(u16, ibschema::storage::FieldId)>(
+                                            ),
+                                        )?,
+                                    )?;
+                                }
+                            }
+                        }
+                    }
+                    if let Some(rec) = &a.recorder {
+                        b = size_add(b, v(rec.reference_tags.len(), std::mem::size_of::<u32>())?)?;
+                    }
+                    if let Some(ext) = &a.ext_dims {
+                        b = size_add(
+                            b,
+                            v(
+                                ext.ext_flag_fields.len(),
+                                std::mem::size_of::<ibschema::storage::FieldId>(),
+                            )?,
+                        )?;
+                        b = size_add(
+                            b,
+                            v(
+                                ext.slots.len(),
+                                std::mem::size_of::<query_ir::lower::TurnoversExtDimSlotL>(),
+                            )?,
+                        )?;
+                        for slot in &ext.slots {
+                            b = size_add(
+                                b,
+                                v(
+                                    slot.value_check.reference_tags.len(),
+                                    std::mem::size_of::<u32>(),
+                                )?,
+                            )?;
+                        }
+                        if let Some(ed) = &ext.acc_rg_ed {
+                            b = size_add(
+                                b,
+                                size_block(
+                                    std::mem::size_of::<query_ir::lower::TurnoversAccRgEdL>()
+                                        as u64,
+                                )?,
+                            )?;
+                            b = size_add(
+                                b,
+                                v(ed.recorder_tags.len(), std::mem::size_of::<u32>())?,
+                            )?;
+                        }
+                    }
+                    b
+                }
                 RegisterRowsKindL::Accounting(a) => size_add(
-                    v(
-                        a.keys.len(),
-                        std::mem::size_of::<query_ir::lower::DrCrSideL>(),
+                    size_add(
+                        v(
+                            a.keys.len(),
+                            std::mem::size_of::<query_ir::lower::DrCrSideL>(),
+                        )?,
+                        v(
+                            a.ext_dims.len(),
+                            std::mem::size_of::<query_ir::lower::DrCrExtDimL>(),
+                        )?,
                     )?,
                     v(
                         a.resources.len(),
@@ -417,6 +695,10 @@ pub(crate) fn structural_model(r: &RelL) -> Result<u64, ExecError> {
                     std::mem::size_of::<(u32, query_ir::RefAtom)>(),
                 )?,
             )?,
+            Node::Expr(PExpr::PredefName { names, .. }) => v(
+                names.len(),
+                std::mem::size_of::<([u8; 16], query_ir::QStr)>(),
+            )?,
             Node::Expr(PExpr::Arith { steps, decs, .. }) => {
                 let mut b = size_add(
                     v(
@@ -457,6 +739,7 @@ pub(crate) fn admit_plan_for_calculation(
 
 struct Payload {
     _set: Option<Arc<query_ir::ValueSet>>,
+    _row: Option<Arc<[QValue]>>,
     _value: Option<QValue>,
 }
 struct Entry {
@@ -535,6 +818,7 @@ impl PaidPayloads {
                 crate::model::value_model(value),
                 || Payload {
                     _set: None,
+                    _row: None,
                     _value: Some(value.clone()),
                 },
                 mem,
@@ -559,6 +843,7 @@ impl PaidPayloads {
                         bytes,
                         || Payload {
                             _set: Some(set.clone()),
+                            _row: None,
                             _value: None,
                         },
                         mem,
@@ -568,7 +853,50 @@ impl PaidPayloads {
                         }
                     }
                 }
+                Node::Rel(RelL::DefaultIfEmpty { row, .. }) => {
+                    let id = (4, Arc::as_ptr(row).cast::<()>() as usize, row.len());
+                    let bytes = row.iter().try_fold(
+                        size_add(
+                            size_block(16)?,
+                            size_vec(row.len(), std::mem::size_of::<QValue>())?,
+                        )?,
+                        |b, v| size_add(b, literal_copy(v)),
+                    )?;
+                    if self.insert(
+                        id,
+                        bytes,
+                        || Payload {
+                            _set: None,
+                            _row: Some(row.clone()),
+                            _value: None,
+                        },
+                        mem,
+                    )? {
+                        for value in row.iter() {
+                            self.value(value, mem)?;
+                        }
+                    }
+                }
+                Node::Rel(RelL::RegisterRows(step)) => {
+                    let areas = match &step.rows {
+                        RegisterRowsKindL::AccountingBalance(a) => Some(&a.areas),
+                        RegisterRowsKindL::AccountingBalanceAndTurnovers(a) => Some(&a.areas),
+                        _ => None,
+                    };
+                    if let Some(query_ir::lower::BalanceAreasL::Exact(t)) = areas {
+                        for list in [&t.main, &t.options, &t.chart, &t.section, &t.ext_dims] {
+                            for item in list {
+                                self.value(&item.value, mem)?;
+                            }
+                        }
+                    }
+                }
                 Node::Expr(PExpr::Lit(value)) => self.value(value, mem)?,
+                Node::Expr(PExpr::PredefName { names, .. }) => {
+                    for (_, name) in names {
+                        self.value(&QValue::String(name.clone()), mem)?;
+                    }
+                }
                 _ => {}
             }
             Ok(())

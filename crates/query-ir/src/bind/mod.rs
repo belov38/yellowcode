@@ -84,6 +84,11 @@ pub struct Bound<'s> {
     pub values: Vec<QValue>,
     pub tables: Vec<TableId>,
     pub constants: Vec<TableId>,
+    pub constant_separators: Vec<crate::host::SeparatorFilter>,
+    pub(crate) base_dims: std::collections::HashMap<
+        crate::ir::SrcId,
+        Vec<(crate::schema::QFieldId, crate::schema::QFieldId)>,
+    >,
 }
 
 pub(crate) fn resolve<'s>(

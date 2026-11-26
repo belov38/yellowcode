@@ -28,6 +28,7 @@ pub(crate) struct VtSource<'scope> {
     pub drcr: mem::NativeOwned<'scope, Option<DrCrSource>>,
     pub args: mem::NativeOwned<'scope, Vec<Option<TExpr>>>,
     pub breakdown: mem::NativeOwned<'scope, Vec<QFieldId>>,
+    pub base: mem::NativeOwned<'scope, Option<Box<crate::tir::BaseArguments>>>,
     pub check: Option<VtCheck>,
 }
 
@@ -220,6 +221,13 @@ fn period_type_ok(t: &QType) -> bool {
         && t.others
             .iter()
             .all(|o| matches!(o, Other::PointInTime | Other::Boundary))
+}
+
+fn criterion_type_ok(arg: &QType, criterion: &QType) -> bool {
+    if arg.atom_count() == 0 {
+        return !arg.null;
+    }
+    arg.is_subtype_of(criterion)
 }
 
 fn drcr_inert(e: &ast::Expr) -> bool {
@@ -700,9 +708,10 @@ impl<'scope> Analyzer<'scope> {
                 .map(|p| (p.kind, p.name_en == "View points")),
         )?;
         let mut typed_args = mem::NativeVec::new(self.memory, args.map_or(0, |a| a.args.len()))?;
+        let is_accounting_bt = crate::lower::is_accounting_balance_and_turnovers(self.schema, id);
         let accounting_periods = if crate::lower::is_accounting_balance(self.schema, id) {
             1
-        } else if crate::lower::is_accounting_turnovers(self.schema, id) {
+        } else if crate::lower::is_accounting_turnovers(self.schema, id) || is_accounting_bt {
             2
         } else {
             0
@@ -769,8 +778,7 @@ impl<'scope> Analyzer<'scope> {
                                 == TableKind::Virtual(VtKind::FilterCriterion)
                                 && let Some(meta) =
                                     self.schema.meta(id).and_then(|m| m.criterion.as_ref())
-                                && t.ty != QType::default()
-                                && t.ty != meta.ty
+                                && !criterion_type_ok(&t.ty, &meta.ty)
                             {
                                 return Err(self.view_parameter_error(path, i));
                             }
@@ -875,6 +883,33 @@ impl<'scope> Analyzer<'scope> {
                             breakdown = self.vt_breakdown(id, arg)?;
                             mem::NativeOwned::none(self.memory)
                         }
+                        Some((VtParamKind::ExtDimensions, _))
+                            if (accounting_periods == 1 || is_accounting_bt)
+                                && arg.dir.is_none()
+                                && arg.dcs.is_empty()
+                                && matches!(
+                                    &arg.expr.kind,
+                                    ExprKind::Value { .. } | ExprKind::Param(_)
+                                ) =>
+                        {
+                            let t = self.in_vt_scope(Level::default(), |a| {
+                                a.expr_list_or_value(
+                                    &arg.expr,
+                                    ExprCtx::new(Clause::VtArg, arg.expr.span.start),
+                                )
+                            })?;
+                            if let Some(capture) = accounting_capture.as_mut() {
+                                let copy = mem::owned_copy(self.memory, &*t)?;
+                                capture.keep(
+                                    self.memory,
+                                    i,
+                                    &arg.expr,
+                                    DrCrArgScope::NoSources,
+                                    copy,
+                                )?;
+                            }
+                            t.into_native_owned()?.into_some()
+                        }
                         _ => {
                             self.vt_params(arg)?;
                             mem::NativeOwned::none(self.memory)
@@ -911,7 +946,43 @@ impl<'scope> Analyzer<'scope> {
                         .get_or_insert(crate::tir::RecordsDeferred::OrderShape);
                 }
                 if let (Some(marker), Some(arg)) = (accounting.as_mut(), arg) {
-                    if i < accounting_periods
+                    if is_accounting_bt {
+                        let valid_slot = arg.dir.is_none()
+                            && arg.dcs.is_empty()
+                            && !matches!(&arg.expr.kind, ExprKind::Dcs(_))
+                            && match params.get(i) {
+                                Some((VtParamKind::Period, _)) => typed.trusted_borrow().is_some(),
+                                Some((VtParamKind::Periodicity, _)) => {
+                                    periodicity != Periodicity::Absent
+                                }
+                                Some((VtParamKind::ComplementMethod, _)) => complement.is_some(),
+                                Some((VtParamKind::AccountCondition, _)) => {
+                                    typed.trusted_borrow().is_some()
+                                        && self
+                                            .schema
+                                            .table(id)
+                                            .params
+                                            .get(i)
+                                            .is_some_and(|p| p.name_en == "Account condition")
+                                }
+                                Some((VtParamKind::ExtDimensions, _)) => {
+                                    typed.trusted_borrow().as_ref().is_some_and(|e| {
+                                        matches!(
+                                            e.kind,
+                                            crate::tir::TKind::Value(_)
+                                                | crate::tir::TKind::Param(_)
+                                        )
+                                    })
+                                }
+                                Some((VtParamKind::Condition, _)) => {
+                                    typed.trusted_borrow().is_some()
+                                }
+                                _ => false,
+                            };
+                        if !valid_slot {
+                            marker.deferred = true;
+                        }
+                    } else if i < accounting_periods
                         && arg.dir.is_none()
                         && arg.dcs.is_empty()
                         && matches!(
@@ -924,6 +995,51 @@ impl<'scope> Analyzer<'scope> {
                             .is_some_and(crate::tir::AccountingArguments::plain_date)
                     {
                         marker.date_slots |= 1 << i;
+                    } else if accounting_periods == 1
+                        && (1..8).contains(&i)
+                        && arg.dir.is_none()
+                        && arg.dcs.is_empty()
+                        && !matches!(&arg.expr.kind, ExprKind::Dcs(_))
+                        && match params.get(i) {
+                            Some((VtParamKind::AccountCondition | VtParamKind::Condition, _)) => {
+                                typed.trusted_borrow().as_ref().is_some_and(|e| {
+                                    !matches!(e.kind, crate::tir::TKind::Const(QValue::Undefined))
+                                })
+                            }
+                            Some((VtParamKind::ExtDimensions, _)) => {
+                                typed.trusted_borrow().as_ref().is_some_and(|e| {
+                                    matches!(
+                                        e.kind,
+                                        crate::tir::TKind::Value(_) | crate::tir::TKind::Param(_)
+                                    )
+                                })
+                            }
+                            _ => false,
+                        }
+                    {
+                        marker.balance_arg_slots |= 1 << i;
+                    } else if accounting_periods == 2
+                        && i == 2
+                        && matches!(params.get(i), Some((VtParamKind::Periodicity, _)))
+                        && arg.dir.is_none()
+                        && arg.dcs.is_empty()
+                        && periodicity != Periodicity::Absent
+                    {
+                    } else if accounting_periods == 2
+                        && let Some(bit) = u32::try_from(i).ok().and_then(|s| 1u8.checked_shl(s))
+                        && arg.dir.is_none()
+                        && arg.dcs.is_empty()
+                        && typed.trusted_borrow().is_some()
+                        && (matches!(params.get(i), Some((VtParamKind::Condition, _)))
+                            || (matches!(params.get(i), Some((VtParamKind::AccountCondition, _)))
+                                && self
+                                    .schema
+                                    .table(id)
+                                    .params
+                                    .get(i)
+                                    .is_some_and(|p| p.name_en == "Account condition")))
+                    {
+                        marker.cond_slots |= bit;
                     } else {
                         marker.deferred = true;
                     }
@@ -932,11 +1048,21 @@ impl<'scope> Analyzer<'scope> {
             }
         }
         if let Some(a) = args {
-            self.check_period_order(id, path, a)?;
+            self.check_period_order(id, path, a, typed_args.items())?;
+            if let Some(marker) = accounting.as_mut() {
+                use query_syntax::lexer::{Punct, TokKind, Tokens};
+                if Tokens::new(a.span.text(self.text))
+                    .any(|t| t.kind == TokKind::Punct(Punct::LBrace))
+                {
+                    marker.deferred = true;
+                }
+            }
             if records.is_some()
                 || matches!(
                     self.schema.table(id).kind,
-                    TableKind::Virtual(VtKind::ActualActionPeriod | VtKind::ScheduleData)
+                    TableKind::Virtual(
+                        VtKind::ActualActionPeriod | VtKind::ScheduleData | VtKind::Base
+                    )
                 )
             {
                 use query_syntax::lexer::{Punct, TokKind, Tokens};
@@ -986,9 +1112,12 @@ impl<'scope> Analyzer<'scope> {
         {
             return Err(self.view_parameter_error(path, 0));
         }
-        if self.schema.table(id).kind == TableKind::Virtual(VtKind::Base) {
+        let base = if self.schema.table(id).kind == TableKind::Virtual(VtKind::Base) {
             self.base_main_dimensions(id, path, args)?;
-        }
+            self.base_arguments(args)?
+        } else {
+            mem::NativeOwned::none(self.memory)
+        };
         let mut out = VtSource {
             periodicity,
             complement,
@@ -998,6 +1127,7 @@ impl<'scope> Analyzer<'scope> {
             accounting_dependencies,
             drcr,
             breakdown,
+            base,
             check: None,
         };
         if self.needs_dimension_or_resource(id) {
@@ -1271,6 +1401,91 @@ impl<'scope> Analyzer<'scope> {
         Ok(())
     }
 
+    fn base_arguments(
+        &mut self,
+        args: Option<&ast::VtArgs>,
+    ) -> R<mem::NativeOwned<'scope, Option<Box<crate::tir::BaseArguments>>>> {
+        let mut main_dims_param = mem::NativeOwned::none(self.memory);
+        let mut base_dims_param = mem::NativeOwned::none(self.memory);
+        let mut breakdown_param = mem::NativeOwned::none(self.memory);
+        let mut deferred = false;
+        let check_list_param = |a: &mut Self,
+                                arg: Option<&ast::VtArg>,
+                                required: bool,
+                                record_dep: bool|
+         -> R<(mem::NativeOwned<'scope, Option<String>>, bool)> {
+            let Some(arg) = arg else {
+                return Ok((mem::NativeOwned::none(a.memory), required));
+            };
+            if arg.dir.is_some() || !arg.dcs.is_empty() {
+                return Ok((mem::NativeOwned::none(a.memory), true));
+            }
+            let ExprKind::Param(p) = &arg.expr.kind else {
+                return Ok((mem::NativeOwned::none(a.memory), true));
+            };
+            let mut slot_deferred = false;
+            if a.opts.mode == AnalyzeMode::Execute {
+                let constant = a.params.constant(&p.name.text)?;
+                let valid = matches!(
+                    constant.as_deref(),
+                    Some(ParamConst::List(vs))
+                        if vs.iter().all(|v| matches!(v, QValue::String(_)))
+                );
+                drop(constant);
+                if valid {
+                    if record_dep {
+                        a.note_value_dep(&p.name.text)?;
+                    }
+                } else {
+                    slot_deferred = true;
+                }
+            }
+            let owned = mem::OwnedString::new(a.memory, &p.name.text)?
+                .into_native_owned()
+                .into_some();
+            Ok((owned, slot_deferred))
+        };
+        if let Some(a) = args {
+            let (p0, d0) =
+                check_list_param(self, a.args.first().and_then(Option::as_ref), true, false)?;
+            main_dims_param = p0;
+            deferred |= d0;
+            let (p1, d1) =
+                check_list_param(self, a.args.get(1).and_then(Option::as_ref), true, true)?;
+            base_dims_param = p1;
+            deferred |= d1;
+            let (p2, d2) =
+                check_list_param(self, a.args.get(2).and_then(Option::as_ref), false, false)?;
+            breakdown_param = p2;
+            deferred |= d2;
+            if let Some(Some(cond)) = a.args.get(3)
+                && (cond.dir.is_some() || !cond.dcs.is_empty())
+            {
+                deferred = true;
+            }
+            if a.args.len() > 4 {
+                deferred = true;
+            }
+        } else {
+            deferred = true;
+        }
+        let built = mem::allocation_result(
+            self.memory,
+            main_dims_param
+                .zip(base_dims_param)
+                .and_then(|pair| pair.zip(breakdown_param)),
+        )?
+        .map(|((main_dims_param, base_dims_param), breakdown_param)| {
+            crate::tir::BaseArguments {
+                main_dims_param,
+                base_dims_param,
+                breakdown_param,
+                deferred,
+            }
+        });
+        Ok(mem::allocation_result(self.memory, built.boxed())?.into_some())
+    }
+
     fn vt_breakdown(
         &mut self,
         id: QTableId,
@@ -1289,6 +1504,7 @@ impl<'scope> Analyzer<'scope> {
             Some(ParamConst::Value(v)) => std::slice::from_ref(v),
             None => return Ok(mem::NativeVec::new(self.memory, 0)?.finish()),
         };
+        let target = self.schema.calculation_base(id).map_or(id, |f| f.base);
         let mut out = mem::NativeVec::new(self.memory, 0)?;
         for v in values {
             let QValue::String(s) = v else { continue };
@@ -1302,10 +1518,10 @@ impl<'scope> Analyzer<'scope> {
                 )?;
             }
             let key = mem::NameKey::folded(self.memory, &text)?;
-            let Some(f) = self.schema.find_field_folded(id, &key) else {
+            let Some(f) = self.schema.find_field_folded(target, &key) else {
                 continue;
             };
-            let breakable = self.schema.field(id, f).is_some_and(|qf| {
+            let breakable = self.schema.field(target, f).is_some_and(|qf| {
                 matches!(
                     qf.role,
                     FieldRole::Dimension | FieldRole::Std(StdRole::Recorder)
@@ -1325,9 +1541,10 @@ impl<'scope> Analyzer<'scope> {
         id: QTableId,
         fields: &[QFieldId],
     ) -> R<mem::ScratchVec<ExtraCol>> {
+        let target = self.schema.calculation_base(id).map_or(id, |f| f.base);
         let mut out = mem::ScratchVec::new(self.memory, 0)?;
         for field in fields {
-            if let Some(qf) = self.schema.field(id, *field) {
+            if let Some(qf) = self.schema.field(target, *field) {
                 out.push(
                     self.memory,
                     ExtraCol::breakdown(self.memory, &qf.name_ru, &qf.name_en, &qf.ty)?,
@@ -1360,23 +1577,34 @@ impl<'scope> Analyzer<'scope> {
             .with_quoted(MsgArg::text(&format!("{}, {index}", path.dotted())))
     }
 
-    fn check_period_order(&mut self, id: QTableId, path: &ast::Path, a: &ast::VtArgs) -> R<()> {
+    fn check_period_order(
+        &mut self,
+        id: QTableId,
+        path: &ast::Path,
+        a: &ast::VtArgs,
+        typed: &[Option<TExpr>],
+    ) -> R<()> {
         if self.opts.mode != AnalyzeMode::Execute
             || self.schema.table(id).kind != TableKind::Virtual(VtKind::BalanceAndTurnovers)
         {
             return Ok(());
         }
         let mut dates = [None, None];
-        for (slot, arg) in dates.iter_mut().zip(a.args.iter()) {
+        for (idx, (slot, arg)) in dates.iter_mut().zip(a.args.iter()).enumerate() {
             let Some(arg) = arg else { return Ok(()) };
-            let ExprKind::Param(p) = &arg.expr.kind else {
+            if let ExprKind::Param(p) = &arg.expr.kind {
+                let constant = self.params.constant(&p.name.text)?;
+                let Some(ParamConst::Value(v)) = constant.as_deref() else {
+                    return Ok(());
+                };
+                *slot = point_date(v);
+            } else if let Some(Some(t)) = typed.get(idx)
+                && let crate::tir::TKind::Const(v) = &t.kind
+            {
+                *slot = point_date(v);
+            } else {
                 return Ok(());
-            };
-            let constant = self.params.constant(&p.name.text)?;
-            let Some(ParamConst::Value(v)) = constant.as_deref() else {
-                return Ok(());
-            };
-            *slot = point_date(v);
+            }
         }
         let [Some(start), Some(end)] = dates else {
             return Ok(());

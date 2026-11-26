@@ -393,7 +393,7 @@ fn assemble(tables: Vec<Table>) -> Result<Vec<Table>> {
     let (mut top, mut nested): (Vec<Table>, Vec<Table>) =
         tables.into_iter().partition(|t| t.kind == TableKind::Main);
     top.sort_by_key(|t| t.number);
-    nested.sort_by_key(|t| name_number(&t.name));
+    nested.sort_by_key(|t| name_number(&t.name).is_some());
     for n in nested {
         let owner = top.iter_mut().find(|t| t.name == n.parent).ok_or_else(|| {
             Error::Unsupported(format!(

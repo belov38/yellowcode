@@ -22,6 +22,8 @@ pub(crate) struct Security {
     pub accounting_sources: HashMap<SrcId, AccountingPolicySources>,
     pub calculation_sources: HashMap<SrcId, CalculationPolicySources>,
     pub drcr_areas: HashMap<QTableId, crate::lower::vt::DrCrAreaL>,
+    pub balance_areas: HashMap<SrcId, crate::lower::BalanceAreasL>,
+    pub turnovers_areas: HashMap<QTableId, crate::lower::TurnoversAreasL>,
     max_depth: u32,
 }
 impl Drop for Security {
@@ -69,6 +71,113 @@ fn drcr_areas(
             filters = Some(ctx.security.session.separators().map_err(ExecError::Host)?);
         }
         if let Some(area) = inputs.bind_area(filters.as_deref().unwrap_or(&[]))? {
+            areas.insert(source.table, area);
+        }
+    }
+    Ok(areas)
+}
+
+fn balance_areas(
+    decisions: &[(Occurrence, SourceTable, Access)],
+    ctx: &BindCtx<'_>,
+) -> Result<HashMap<SrcId, crate::lower::BalanceAreasL>, ExecError> {
+    let mut areas = HashMap::new();
+    let mut filters = None;
+    for (key, source, _) in decisions {
+        let Occurrence::Direct(src) = key else {
+            continue;
+        };
+        let is_bal = crate::lower::is_accounting_balance(ctx.schema, source.table);
+        let is_bt = crate::lower::is_accounting_balance_and_turnovers(ctx.schema, source.table);
+        if !(is_bal || is_bt) || areas.contains_key(src) {
+            continue;
+        }
+        let with_section = decisions.iter().any(|(k, _, _)| {
+            matches!(
+                k,
+                Occurrence::BalanceExtDimensionTypes(inner)
+                    if matches!(&**inner, Occurrence::Direct(s) if s == src)
+            )
+        });
+        let inputs = if is_bt {
+            crate::lower::accounting_bt_inputs(ctx.schema, ctx.storage, ctx.map, source.table)?.0
+        } else {
+            crate::lower::balance_inputs(ctx.schema, ctx.storage, ctx.map, source.table)?
+        };
+        let mut tables = vec![inputs.main, inputs.options, inputs.chart];
+        if with_section {
+            let logical = if is_bt {
+                crate::lower::accounting_bt_ext_section_identity(ctx.schema, source.table)
+            } else {
+                crate::lower::balance_ext1_section_identity(ctx.schema, source.table)
+            };
+            if let Some(logical) = logical
+                && let Some(section) = ctx.storage.table(logical)
+            {
+                tables.push(section);
+            }
+            let ed_table = if is_bt {
+                crate::lower::accounting_bt_ext_ed_table(ctx.schema, ctx.map, source.table)?
+            } else {
+                crate::lower::balance_ext_ed_table(ctx.schema, ctx.map, source.table)?
+            };
+            if let Some(ed_table) = ed_table {
+                tables.push(ed_table);
+            }
+        }
+        if !crate::lower::balance_validate_areas_static(ctx.schema, ctx.map, &tables)? {
+            continue;
+        }
+        if filters.is_none() {
+            filters = Some(ctx.security.session.separators().map_err(ExecError::Host)?);
+        }
+        let bound = if is_bt {
+            crate::lower::accounting_bt_bind_areas(
+                ctx.schema,
+                ctx.storage,
+                ctx.map,
+                source.table,
+                with_section,
+                filters.as_deref().unwrap_or(&[]),
+            )?
+        } else {
+            crate::lower::balance_bind_areas(
+                ctx.schema,
+                ctx.storage,
+                ctx.map,
+                source.table,
+                with_section,
+                filters.as_deref().unwrap_or(&[]),
+            )?
+        };
+        areas.insert(*src, bound);
+    }
+    Ok(areas)
+}
+
+fn turnovers_areas(
+    stmt: &StmtS,
+    decisions: &[(Occurrence, SourceTable, Access)],
+    ctx: &BindCtx<'_>,
+) -> Result<HashMap<QTableId, crate::lower::TurnoversAreasL>, ExecError> {
+    let mut areas = HashMap::new();
+    let mut filters = None;
+    for (_, source, _) in decisions {
+        if !crate::lower::is_accounting_turnovers(ctx.schema, source.table) {
+            continue;
+        }
+        let with_ext_dims = crate::lower::turnovers_uses_ext_dims(stmt, ctx.schema, source.table);
+        let inputs = crate::lower::turnovers_inputs(ctx.schema, ctx.storage, ctx.map, source.table);
+        if !inputs.has_physical_separators(with_ext_dims) {
+            continue;
+        }
+        if inputs.area_mapping(with_ext_dims)?.is_none() {
+            continue;
+        }
+        if filters.is_none() {
+            filters = Some(ctx.security.session.separators().map_err(ExecError::Host)?);
+        }
+        if let Some(area) = inputs.bind_areas(with_ext_dims, filters.as_deref().unwrap_or(&[]))? {
             areas.insert(source.table, area);
         }
     }
@@ -131,6 +240,8 @@ pub(in crate::bind) fn prepare_with_admission(
                 accounting_sources: HashMap::new(),
                 calculation_sources: HashMap::new(),
                 drcr_areas: drcr_areas(&decisions, ctx)?,
+                balance_areas: balance_areas(&decisions, ctx)?,
+                turnovers_areas: turnovers_areas(stmt, &decisions, ctx)?,
                 max_depth: 0,
             },
         ));
@@ -164,6 +275,8 @@ pub(in crate::bind) fn prepare_with_admission(
     }
     super::calculation::reserve_expansion(&mut stats, &decisions, schema)?;
     let drcr_areas = drcr_areas(&decisions, ctx)?;
+    let balance_areas = balance_areas(&decisions, ctx)?;
+    let turnovers_areas = turnovers_areas(stmt, &decisions, ctx)?;
     let mut pending = Vec::new();
     let mut names_seen = std::collections::HashSet::new();
     let mut copied_payload = 0_u64;
@@ -218,6 +331,8 @@ pub(in crate::bind) fn prepare_with_admission(
         security.max_depth = max_depth;
         security.aliases = aliases;
         security.drcr_areas = drcr_areas;
+        security.balance_areas = balance_areas;
+        security.turnovers_areas = turnovers_areas;
         for (key, mut source, decision) in decisions {
             let Access::Restricted(predicates) = decision else {
                 continue;
@@ -225,7 +340,11 @@ pub(in crate::bind) fn prepare_with_admission(
             let src = match key {
                 Occurrence::Direct(view)
                     if crate::lower::is_accounting_balance(schema, source.table)
-                        || crate::lower::is_accounting_turnovers(schema, source.table) =>
+                        || crate::lower::is_accounting_turnovers(schema, source.table)
+                        || crate::lower::is_accounting_balance_and_turnovers(
+                            schema,
+                            source.table,
+                        ) =>
                 {
                     let owner = schema
                         .table(source.table)

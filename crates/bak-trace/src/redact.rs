@@ -640,8 +640,14 @@ fn part_is_usual(part: &str) -> bool {
     vocabulary::contains(part)
 }
 
+const CLEAR_ALNUM_WORDS: &[&str] = &["1c", "1cd"];
+
 fn classify_word(word: &str) -> WordClass {
-    if TempDbName::parse(word).is_some() {
+    if TempDbName::parse(word).is_some()
+        || CLEAR_ALNUM_WORDS
+            .iter()
+            .any(|known| word.eq_ignore_ascii_case(known))
+    {
         return WordClass::Keep;
     }
     if is_guid(word)

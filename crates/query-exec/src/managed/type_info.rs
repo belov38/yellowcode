@@ -67,6 +67,7 @@ pub fn try_type_of(
         ValueRef::Binary(_) => Some(TypeAtom::Other(Other::Binary)),
         ValueRef::Storage(_) => Some(TypeAtom::Other(Other::Storage)),
         ValueRef::SysEnum(ty, _) => Some(TypeAtom::Other(Other::SysEnum(ty))),
+        ValueRef::PointInTime(_) => Some(TypeAtom::Other(Other::PointInTime)),
         ValueRef::Nested(_) => Some(TypeAtom::Other(Other::QueryResult)),
     };
     Ok(ManagedValue::try_type_atom(atom, input.budget())?)

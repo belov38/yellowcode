@@ -107,7 +107,11 @@ impl Lower<'_> {
         };
         let id = self.physical_column(src, inputs.chart, inputs.chart_id)?;
         let kind = self.physical_column(src, inputs.chart, inputs.chart_kind)?;
-        let table = super::balance_chart(self.schema, v.table)?;
+        let table = if super::is_accounting_balance_and_turnovers(self.schema, v.table) {
+            super::accounting_bt_chart(self.schema, v.table)?
+        } else {
+            super::balance_chart(self.schema, v.table)?
+        };
         let mut row = self.scan(src, table)?;
         let signal = row.signal.map(|_| 2);
         let mut exprs = vec![PExpr::Col(id), PExpr::Col(kind)];

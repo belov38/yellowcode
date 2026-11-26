@@ -5,6 +5,7 @@ use crate::model::{ObjId, ObjKind};
 use crate::predefined::{self, AreaKey};
 use crate::txn::CallTxn;
 use crate::values::refs::{RefValue, empty_ref, ref_value};
+use bsl_prim::fold_name;
 use bsl_syntax::ast::MethodKind;
 use bsl_vm::{
     Arg, CallError, CallResult, Execution, HostError, HostObject, MemberId, MemberKind, TypeId,
@@ -17,6 +18,9 @@ use std::sync::Arc;
 
 const VALUE_BASE: u32 = 1 << 20;
 const EXPORT_BASE: u32 = 1 << 24;
+const EXT_BASE: u32 = 1 << 28;
+const EXT_SLOTS: usize = 256;
+const EXT_METHODS: u32 = 1 << 16;
 
 pub(crate) struct ObjMgr {
     app: Arc<Application>,
@@ -111,6 +115,152 @@ impl ObjMgr {
     fn off_bound() -> HostError {
         HostError::key(bsl_stdlib::bind::msg::RANGE)
     }
+
+    fn value_member(&self, name: &str) -> Option<MemberId> {
+        if self.is_enum()
+            && let Some(i) = enums::find(&self.app, self.obj, name)
+        {
+            return u32::try_from(i).ok().map(|i| MemberId(VALUE_BASE + i));
+        }
+        if !self.is_enum()
+            && let Some(i) = predefined::item_position(&self.app, self.obj, name)
+        {
+            return u32::try_from(i).ok().map(|i| MemberId(VALUE_BASE + i));
+        }
+        None
+    }
+
+    fn intercept_module(&self) -> String {
+        let def = self.app.model().obj(self.obj);
+        format!("{}.{}.ManagerModule", def.kind.md_kind().as_str(), def.name)
+    }
+
+    fn intercepted(&self, folded: &str) -> Option<String> {
+        let module = fold_name(&self.intercept_module());
+        self.app.options().extensions.iter().find_map(|e| {
+            e.intercepts
+                .iter()
+                .find(|x| fold_name(&x.module) == module && fold_name(&x.target) == folded)
+                .map(|x| {
+                    format!(
+                        "расширение «{}» перехватывает метод ({})",
+                        e.name, x.annotation
+                    )
+                })
+        })
+    }
+
+    fn resolve(&self, name: &str, lang: Lang) -> Result<Option<MemberId>, String> {
+        let folded = fold_name(name);
+        let mods = self.app.modules();
+        let ext = mods.extension_managers(self.obj);
+        if let Some((_, i)) = self.export(name) {
+            if let Some(why) = self.intercepted(&folded) {
+                return Err(why);
+            }
+            for &m in ext {
+                let methods = mods.extension_methods(m)?;
+                if methods.iter().any(|x| x.export && x.folded == folded) {
+                    let extension = mods.extension_of(m).map_or("", |(_, n)| n);
+                    return Err(format!(
+                        "метод есть и в модуле менеджера конфигурации, и в модуле менеджера расширения «{extension}»"
+                    ));
+                }
+            }
+            return Ok(Some(MemberId(EXPORT_BASE + i)));
+        }
+        if !crate::extensions::manager_gate(&self.app)? {
+            return Ok(None);
+        }
+        let mut found = Vec::new();
+        for (slot, &m) in ext.iter().enumerate() {
+            let methods = mods.extension_methods(m)?;
+            if let Some(x) = methods.iter().find(|x| x.export && x.folded == folded) {
+                found.push((slot, m, x.intercept));
+            }
+        }
+        let (slot, m, annotated) = match found.as_slice() {
+            [] => return Ok(None),
+            [one] => *one,
+            [..] => {
+                return Err("метод есть в модулях менеджера нескольких расширений".to_string());
+            }
+        };
+        let (facts, extension) = mods
+            .extension_of(m)
+            .ok_or("internal: not a module of an extension")?;
+        if let Some(why) = self.intercepted(&folded) {
+            return Err(why);
+        }
+        if annotated {
+            return Err(format!(
+                "метод расширения «{extension}» с аннотацией перехвата"
+            ));
+        }
+        let e = self
+            .app
+            .options()
+            .extensions
+            .get(facts)
+            .ok_or("internal: no facts of the extension")?;
+        match &e.info {
+            Ok(info) if info.safe_mode || !info.security_profile.is_empty() => {
+                return Err(format!(
+                    "метод расширения «{extension}» в безопасном режиме"
+                ));
+            }
+            Ok(_) => {}
+            Err(why) => return Err(format!("расширение «{extension}»: {why}")),
+        }
+        let compiled = match mods.compiled(m) {
+            Ok(c) => c,
+            Err(crate::modules::ModuleError::Compile(err)) => {
+                let module = mods.name_of(m).unwrap_or("");
+                return Err(format!(
+                    "модуль менеджера расширения «{extension}» не компилируется: {}",
+                    err.cause_text(module, lang)
+                ));
+            }
+            Err(crate::modules::ModuleError::InvalidRef(r)) => {
+                return Err(format!("internal: invalid module reference {}", r.0));
+            }
+        };
+        let Some((i, _)) = compiled.method(name).filter(|(_, code)| code.export) else {
+            return Ok(None);
+        };
+        if slot >= EXT_SLOTS || i >= EXT_METHODS {
+            return Err("слишком много модулей или методов расширений".to_string());
+        }
+        Ok(Some(MemberId(EXT_BASE | ((slot as u32) << 16) | i)))
+    }
+
+    fn ext_method(
+        &self,
+        m: MemberId,
+    ) -> Option<(bsl_vm::ModuleRef, Arc<bsl_compiler::CompiledModule>, usize)> {
+        let rest = m.0.checked_sub(EXT_BASE)?;
+        let slot = (rest >> 16) as usize;
+        let idx = (rest & (EXT_METHODS - 1)) as usize;
+        let mods = self.app.modules();
+        let mref = *mods.extension_managers(self.obj).get(slot)?;
+        let compiled = mods.compiled(mref).ok()?;
+        compiled.methods.get(idx)?;
+        Some((mref, compiled, idx))
+    }
+}
+
+fn method_kind(code: &bsl_compiler::MethodCode) -> MemberKind {
+    let clamp = |n: usize| u16::try_from(n).unwrap_or(u16::MAX);
+    let required = code
+        .params
+        .iter()
+        .rposition(|p| p.default.is_none())
+        .map_or(0, |i| i + 1);
+    MemberKind::Method {
+        is_function: code.kind == MethodKind::Function,
+        min_args: clamp(required),
+        max_args: Some(clamp(code.params.len())),
+    }
 }
 
 impl HostObject for ObjMgr {
@@ -178,8 +328,40 @@ impl HostObject for ObjMgr {
     }
 
     fn call(&self, ex: &mut Execution, m: MemberId, args: &mut [Arg]) -> CallResult<Value> {
+        if m.0 >= EXT_BASE {
+            let (mref, compiled, idx) = self.ext_method(m).ok_or_else(|| {
+                HostError::text(
+                    "internal: no method of an extension",
+                    "internal: no method of an extension",
+                )
+            })?;
+            let name = compiled
+                .methods
+                .get(idx)
+                .map(|code| code.name.name.to_string())
+                .unwrap_or_default();
+            let inst = self
+                .app
+                .instance_in_call(ex, mref)
+                .map_err(CallError::Exc)?;
+            return ex.call(&inst, &name, args).map_err(CallError::Exc);
+        }
         if m.0 >= EXPORT_BASE {
             let idx = (m.0 - EXPORT_BASE) as usize;
+            if let Some(name) = self
+                .app
+                .modules()
+                .of_object(self.obj, md_model::ModuleKind::ManagerModule)
+                .and_then(|r| self.app.modules().compiled(r).ok())
+                .and_then(|c| c.methods.get(idx).map(|code| code.name.name.to_string()))
+                && let Err(why) = self.resolve(&name, ex.lang())
+            {
+                return Err(HostError::not_implemented(
+                    &self.type_name(),
+                    &format!("{name}: {why}"),
+                )
+                .into());
+            }
             let mref = self
                 .app
                 .modules()
@@ -218,6 +400,10 @@ impl HostObject for ObjMgr {
             "СоздатьГруппу" if self.kind() == ObjKind::Catalog => {
                 crate::write::admit_insert(ex, &self.app, self.obj, "СоздатьГруппу")?;
                 crate::objects::create_group(ex, &self.app, self.obj)
+            }
+            "СоздатьУзел" if self.kind() == ObjKind::ExchangePlan => {
+                crate::write::admit_insert(ex, &self.app, self.obj, "СоздатьУзел")?;
+                crate::objects::create_node(ex, &self.app, self.obj)
             }
             "СоздатьНаборЗаписей" if self.kind() == ObjKind::InformationRegister => {
                 crate::recordset::create_set(ex, &self.app, self.obj)
@@ -294,17 +480,24 @@ impl HostObject for ObjMgr {
     }
 
     fn find_member(&self, name: &str) -> Option<MemberId> {
-        if self.is_enum()
-            && let Some(i) = enums::find(&self.app, self.obj, name)
-        {
-            return u32::try_from(i).ok().map(|i| MemberId(VALUE_BASE + i));
+        self.value_member(name)
+            .or_else(|| self.export(name).map(|(_, i)| MemberId(EXPORT_BASE + i)))
+    }
+
+    fn find_member_guarded(
+        &self,
+        ex: &mut Execution,
+        name: &str,
+    ) -> Result<Option<MemberId>, bsl_vm::Exception> {
+        if let Some(m) = self.value_member(name) {
+            return Ok(Some(m));
         }
-        if !self.is_enum()
-            && let Some(i) = predefined::item_position(&self.app, self.obj, name)
-        {
-            return u32::try_from(i).ok().map(|i| MemberId(VALUE_BASE + i));
-        }
-        self.export(name).map(|(_, i)| MemberId(EXPORT_BASE + i))
+        self.resolve(name, ex.lang()).map_err(|why| {
+            ex.error(HostError::not_implemented(
+                &self.type_name(),
+                &format!("{name}: {why}"),
+            ))
+        })
     }
 
     fn member_kind(&self, m: MemberId) -> Option<MemberKind> {
@@ -317,23 +510,17 @@ impl HostObject for ObjMgr {
         if m.0 < EXPORT_BASE {
             return None;
         }
+        if m.0 >= EXT_BASE {
+            let (_, compiled, idx) = self.ext_method(m)?;
+            return compiled.methods.get(idx).map(method_kind);
+        }
         let mref = self
             .app
             .modules()
             .of_object(self.obj, md_model::ModuleKind::ManagerModule)?;
         let c = self.app.modules().compiled(mref).ok()?;
         let code = c.methods.get((m.0 - EXPORT_BASE) as usize)?;
-        let clamp = |n: usize| u16::try_from(n).unwrap_or(u16::MAX);
-        let required = code
-            .params
-            .iter()
-            .rposition(|p| p.default.is_none())
-            .map_or(0, |i| i + 1);
-        Some(MemberKind::Method {
-            is_function: code.kind == MethodKind::Function,
-            min_args: clamp(required),
-            max_args: Some(clamp(code.params.len())),
-        })
+        Some(method_kind(code))
     }
 
     fn index_get(&self, _: &mut Execution, key: &Value) -> CallResult<Value> {

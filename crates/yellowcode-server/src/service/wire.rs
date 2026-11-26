@@ -260,6 +260,59 @@ pub fn no_session(call: Call<'_>) -> Result<WireResponse, Unimplemented> {
     Ok(response)
 }
 
+const XML: &str = "application/xml; charset=utf-8";
+const EXCEPTION_CLSID: &str = "580392e6-ba49-4280-ac67-fcd6f2180121";
+const INNER_CLSID: &str = "4472f4ae-18e3-407c-a1f2-9650d2d50d57";
+const NO_SESSION_ID: &str = "Недопустимое значение аргумента функции\nsessionId != kUUIDNull\n[ibsrv - src\\ib-server-worker\\src\\serverImpl.cpp (279)]";
+const CATEGORY: &str = "00000000000000000000000000";
+
+fn plain(text: &str) -> bool {
+    !text.is_empty()
+        && text
+            .bytes()
+            .all(|b| b.is_ascii_graphic() && !matches!(b, b'<' | b'>' | b'&' | b'"'))
+}
+
+pub fn unknown_root(
+    call: Call<'_>,
+    method: &str,
+    origin: &str,
+    path: &str,
+) -> Result<WireResponse, Unimplemented> {
+    if call.head {
+        return Err(Unimplemented(
+            "the XML exception of an unknown service root to HEAD",
+        ));
+    }
+    if !matches!(method, "GET" | "POST") {
+        return Err(Unimplemented(
+            "the XML exception of an unknown service root to a method other than GET and POST",
+        ));
+    }
+    if !plain(path) || !plain(origin) {
+        return Err(Unimplemented(
+            "the XML exception of an unknown service root for a path or origin that is not plain ASCII",
+        ));
+    }
+    if !matches!(call.login, Login::Anonymous | Login::Credentials) {
+        return Err(Unimplemented(
+            "the XML exception of an unknown service root in a session with IBSession or a cookie",
+        ));
+    }
+    russian(call)?;
+    let sysver = platform_catalog::startup::DEFAULT_BUILD;
+    let body = format!(
+        "{BOM}<?xml version=\"1.0\" encoding=\"UTF-8\"?><?xml-stylesheet type=\"text/xsl\" href=\"{origin}//e1csys/vrscore/exception.xslt?sysver={sysver}\"?>\
+<exception xmlns=\"http://v8.1c.ru/8.2/virtual-resource-system\" xmlns:xs=\"http://www.w3.org/2001/XMLSchema\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:type=\"Exception\" clsid=\"{EXCEPTION_CLSID}\" reason=\"503\">\
+<descr xmlns=\"http://v8.1c.ru/8.1/data/core\">HTTP: Service unavailable\nОшибка при выполнении запроса {method} к ресурсу {path}:</descr>\
+<inner xmlns=\"http://v8.1c.ru/8.1/data/core\" xsi:type=\"Exception\" clsid=\"{INNER_CLSID}\"><descr>{NO_SESSION_ID}</descr><data></data>\
+<category>{CATEGORY}</category><creationStack></creationStack></inner>\
+<category xmlns=\"http://v8.1c.ru/8.1/data/core\">{CATEGORY}</category><creationStack xmlns=\"http://v8.1c.ru/8.1/data/core\"/></exception>"
+    )
+    .into_bytes();
+    envelope(call, 503, None, Some(XML), body)
+}
+
 pub fn unanswered_method(
     call: Call<'_>,
     method: &str,
@@ -278,7 +331,7 @@ pub fn unanswered_method(
 fn token(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte)
 }
-fn russian(call: Call<'_>) -> Result<(), Unimplemented> {
+pub(crate) fn russian(call: Call<'_>) -> Result<(), Unimplemented> {
     let Some(value) = call
         .accept_language
         .map(str::trim)

@@ -245,6 +245,88 @@ pub fn populate_with(
 }
 
 #[allow(dead_code)]
+pub fn populate_goods_barcodes(dir: &Path, name: &str, rows: &[(u64, &str, i64)]) {
+    use ibschema::{fields, fields::FieldValue, names::StdField, storage::FieldId};
+    use std::collections::HashMap;
+    let ib = infobase::Infobase::open(
+        dir,
+        infobase::OpenOptions {
+            schema_check: infobase::SchemaCheck::Warn,
+            locking: onecd::Locking::None,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let tables = ib.storage().tables();
+    let owner = tables
+        .iter()
+        .find(|t| t.query_name == format!("Catalog.{name}"))
+        .unwrap()
+        .clone();
+    let table = tables
+        .iter()
+        .find(|t| t.query_name == format!("Catalog.{name}.Barcodes"))
+        .unwrap()
+        .clone();
+    drop(ib);
+    let db = onecd::Database::open(
+        &dir.join("1Cv8.1CD"),
+        onecd::OpenOptions {
+            locking: onecd::Locking::None,
+            ..onecd::OpenOptions::read_write()
+        },
+    )
+    .unwrap();
+    let mut write = db.write().unwrap();
+    let mut target = write.table(&table.phys).unwrap();
+    let mut next_line: HashMap<u64, i64> = HashMap::new();
+    for &(owner_n, barcode, qty) in rows {
+        let line = next_line.entry(owner_n).or_insert(0);
+        *line += 1;
+        let line_no = *line;
+        let mut row = table
+            .columns
+            .iter()
+            .map(|c| {
+                if c.part == ibschema::columns::Part::Type {
+                    Value::Binary(vec![ibschema::values::type_code::UNDEFINED])
+                } else if c.ty == ibschema::columns::ColType::RV {
+                    Value::Null
+                } else {
+                    infobase::colval::to_onecd(&fields::empty_value(c), c.ty).unwrap()
+                }
+            })
+            .collect::<Vec<_>>();
+        for (i, field) in table.fields.iter().enumerate() {
+            let value = match field.std {
+                Some(StdField::Id) => Some(FieldValue::Ref {
+                    table: owner.number,
+                    id: ibschema::values::RefId(u128::from(owner_n).to_be_bytes()),
+                }),
+                Some(StdField::KeyField | StdField::LineNo) => {
+                    Some(FieldValue::Number(Numeric::from_i64(line_no)))
+                }
+                _ if field.md_name.ends_with(".Barcode") => {
+                    Some(FieldValue::String(barcode.to_owned()))
+                }
+                _ if field.md_name.ends_with(".Qty") => {
+                    Some(FieldValue::Number(Numeric::from_i64(qty)))
+                }
+                _ => None,
+            };
+            if let Some(value) = value {
+                let cols = fields::encode(&table, FieldId(i as u16), &value).unwrap();
+                for (j, value) in field.columns.clone().zip(cols) {
+                    row[j] = infobase::colval::to_onecd(&value, table.columns[j].ty).unwrap();
+                }
+            }
+        }
+        target.insert(&row).unwrap();
+    }
+    write.commit().unwrap();
+}
+
+#[allow(dead_code)]
 pub fn replace_config_entry(dir: &Path, name: &str, stored: &[u8]) {
     let db = onecd::Database::open(
         &dir.join("1Cv8.1CD"),

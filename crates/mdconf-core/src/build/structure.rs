@@ -384,6 +384,7 @@ impl Diffs<'_, '_> {
             picture,
             schedule,
             exchange_content,
+            exchange_content_stream: _,
             style,
             binary_modules,
             ws_definition,

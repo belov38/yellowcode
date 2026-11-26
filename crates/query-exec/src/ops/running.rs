@@ -210,6 +210,13 @@ impl<'a> RunningBalance<'a> {
             ));
         }
         for (r, c) in &self.step.wanted {
+            if self.step.accounting && movement && matches!(*c, raw::BALANCE | raw::CLOSING) {
+                let b = number(row, raw::component(self.step.dims, *r, raw::BALANCE))?;
+                let cl = number(row, raw::component(self.step.dims, *r, raw::CLOSING))?;
+                if b != cl {
+                    return Ok(true);
+                }
+            }
             let components: &[usize] = match (movement, *c) {
                 (true, raw::BALANCE | raw::CLOSING) => &[raw::RECEIPT, raw::EXPENSE],
                 (true, raw::RECEIPT) => &[raw::RECEIPT],
@@ -249,16 +256,22 @@ impl<'a> RunningBalance<'a> {
             let b = number(&g.state, at(raw::BALANCE))?;
             let p = number(&row, at(raw::RECEIPT))?;
             let e = number(&row, at(raw::EXPENSE))?;
+            let delta = number(&row, at(raw::CLOSING))?;
             let limbs = b
                 .size_hint_limbs()
                 .max(p.size_hint_limbs())
-                .max(e.size_hint_limbs());
+                .max(e.size_hint_limbs())
+                .max(delta.size_hint_limbs());
             cx.mem.grow_scratch(block(
                 64u64
                     .saturating_mul(limbs.saturating_add(1))
                     .saturating_add(256),
             ))?;
-            let closing = b.add(p).sub(e);
+            let closing = if self.step.accounting {
+                b.add(delta)
+            } else {
+                b.add(p).sub(e)
+            };
             crate::num::guard(cx.env, &closing)?;
             let opening = b.clone();
             let old = value_model(

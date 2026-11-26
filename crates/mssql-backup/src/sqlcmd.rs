@@ -47,13 +47,20 @@ pub struct Report {
     pub dynamic_update: Option<Summary>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DtOptions {
+    pub ignore_extra_tables: bool,
+}
+
 #[derive(Debug)]
 pub struct DtReport {
     pub tables: usize,
+    pub extension_tables: usize,
     pub rows: u64,
     pub files: u64,
     pub users: u64,
     pub users_with_email: u64,
+    pub ignored_extra_tables: Vec<String>,
 }
 
 pub use process_containment::interrupt::{Kind as Interrupt, Watch as InterruptWatch};
@@ -420,6 +427,87 @@ fn restore(request: &Request, plan: &SqlPlan) -> Result<Restored, (RunError, Pha
 }
 
 const TRACED_TABLES: usize = 50;
+
+fn trace_ignored_extra_tables(
+    schema: &ibschema::logical::LogicalSchema,
+    extension: Option<(u32, &ibschema::logical::LogicalSchema)>,
+    ignored: &[String],
+) {
+    let Some(trace) = bak_trace::Trace::current() else {
+        return;
+    };
+    let known =
+        crate::sql_inventory::known_tables_with_extensions(schema, extension).unwrap_or_default();
+    let vocabulary = bak_trace::TableVocabulary::new(known.iter().map(String::as_str));
+    let ext_schemas = if extension.is_some() { 1 } else { 0 };
+    trace.inventory(0, ignored.len() as u64, 0, Some(ext_schemas));
+    for table in ignored.iter().take(TRACED_TABLES) {
+        trace.inventory_table("extra", "other", &vocabulary, table);
+    }
+}
+
+fn trace_unexpected_extension_twins(
+    schema: &ibschema::logical::LogicalSchema,
+    extension: Option<(u32, &ibschema::logical::LogicalSchema)>,
+    twins: &[String],
+) {
+    let Some(trace) = bak_trace::Trace::current() else {
+        return;
+    };
+    let known =
+        crate::sql_inventory::known_tables_with_extensions(schema, extension).unwrap_or_default();
+    let vocabulary = bak_trace::TableVocabulary::new(known.iter().map(String::as_str));
+    let ext_schemas = if extension.is_some() { 1 } else { 0 };
+    trace.inventory(0, twins.len() as u64, twins.len() as u64, Some(ext_schemas));
+    for table in twins.iter().take(TRACED_TABLES) {
+        trace.inventory_table("extra", "extension", &vocabulary, table);
+    }
+}
+
+fn public_inventory_refusal(
+    schema: &ibschema::logical::LogicalSchema,
+    extension: Option<(u32, &ibschema::logical::LogicalSchema)>,
+    mismatch: &crate::sql_inventory::Mismatch,
+) -> String {
+    let storage_missing = mismatch
+        .missing
+        .iter()
+        .any(|m| m.name.eq_ignore_ascii_case("SchemaStorage"));
+    let twins: Vec<&str> = mismatch.unaccounted_extension_twins().collect();
+    if let Some(trace) = bak_trace::Trace::current() {
+        let known = crate::sql_inventory::known_tables_with_extensions(schema, extension)
+            .unwrap_or_default();
+        let vocabulary = bak_trace::TableVocabulary::new(known.iter().map(String::as_str));
+        let ext_schemas = if storage_missing {
+            None
+        } else {
+            Some(if extension.is_some() { 1 } else { 0 })
+        };
+        trace.inventory(
+            mismatch.missing.len() as u64,
+            mismatch.extra.len() as u64,
+            twins.len() as u64,
+            ext_schemas,
+        );
+        for table in mismatch.missing.iter().take(TRACED_TABLES) {
+            let kind = if table.system { "system" } else { "schema" };
+            trace.inventory_table("missing", kind, &vocabulary, &table.name);
+        }
+        for table in mismatch.extra.iter().take(TRACED_TABLES) {
+            let kind = if twins.contains(&table.as_str()) {
+                "extension"
+            } else {
+                "other"
+            };
+            trace.inventory_table("extra", kind, &vocabulary, table);
+        }
+    }
+    let mut text = crate::sql_inventory::Error::Mismatch(mismatch.clone()).to_string();
+    if mismatch.missing.is_empty() && !mismatch.extra.is_empty() && twins.is_empty() {
+        text.push_str("; pass --ignore-extra-tables to skip extra dbo tables");
+    }
+    text
+}
 
 fn inventory_refusal(
     request: &Request,
@@ -964,7 +1052,7 @@ pub fn convert_cf_with_options(
 }
 
 pub fn convert_dt(request: &Request, progress: &mut dyn Write) -> Result<DtReport, Error> {
-    convert_dt_inner(request, progress, DtMode::Strict)
+    convert_dt_inner(request, progress, DtMode::Strict, DtOptions::default())
 }
 
 pub fn convert_dt_with_backup_set(
@@ -972,10 +1060,20 @@ pub fn convert_dt_with_backup_set(
     backup_set: u32,
     progress: &mut dyn Write,
 ) -> Result<DtReport, Error> {
+    convert_dt_with_options(request, backup_set, DtOptions::default(), progress)
+}
+
+pub fn convert_dt_with_options(
+    request: &Request,
+    backup_set: u32,
+    options: DtOptions,
+    progress: &mut dyn Write,
+) -> Result<DtReport, Error> {
     convert_dt_inner_owned(
         request,
         progress,
         DtMode::Strict,
+        options,
         None,
         backup_set,
         None,
@@ -987,14 +1085,19 @@ pub fn convert_dt_framed_research(
     request: &Request,
     progress: &mut dyn Write,
 ) -> Result<DtReport, Error> {
-    convert_dt_inner(request, progress, DtMode::StrictFramed)
+    convert_dt_inner(
+        request,
+        progress,
+        DtMode::StrictFramed,
+        DtOptions::default(),
+    )
 }
 
 pub fn convert_dt_for_separated_users(
     request: &Request,
     progress: &mut dyn Write,
 ) -> Result<DtReport, Error> {
-    convert_dt_inner(request, progress, DtMode::Separated)
+    convert_dt_inner(request, progress, DtMode::Separated, DtOptions::default())
 }
 
 #[derive(Clone, Copy)]
@@ -1008,7 +1111,12 @@ pub fn convert_dt_for_legacy(
     progress: &mut dyn Write,
     users: LegacyUsersLayout,
 ) -> Result<DtReport, Error> {
-    convert_dt_inner(request, progress, DtMode::Legacy(users))
+    convert_dt_inner(
+        request,
+        progress,
+        DtMode::Legacy(users),
+        DtOptions::default(),
+    )
 }
 
 pub fn convert_dt_for_legacy_framed(
@@ -1016,7 +1124,12 @@ pub fn convert_dt_for_legacy_framed(
     progress: &mut dyn Write,
     users: LegacyUsersLayout,
 ) -> Result<DtReport, Error> {
-    convert_dt_inner(request, progress, DtMode::LegacyFramed(users))
+    convert_dt_inner(
+        request,
+        progress,
+        DtMode::LegacyFramed(users),
+        DtOptions::default(),
+    )
 }
 
 pub fn convert_dt_for_owned_legacy_framed(
@@ -1029,6 +1142,7 @@ pub fn convert_dt_for_owned_legacy_framed(
         request,
         progress,
         DtMode::LegacyFramed(users),
+        DtOptions::default(),
         Some(task_token),
         1,
         None,
@@ -1048,6 +1162,7 @@ pub fn convert_dt_for_owned_legacy_framed_with_incomplete(
         request,
         progress,
         DtMode::LegacyFramed(users),
+        DtOptions::default(),
         Some(task_token),
         1,
         Some(incomplete),
@@ -1067,6 +1182,7 @@ pub fn convert_dt_for_owned_legacy_framed_keep_sql(
         request,
         progress,
         DtMode::LegacyFramed(users),
+        DtOptions::default(),
         Some(task_token),
         1,
         Some(incomplete),
@@ -1143,11 +1259,13 @@ fn convert_dt_inner(
     request: &Request,
     progress: &mut dyn Write,
     mode: DtMode,
+    options: DtOptions,
 ) -> Result<DtReport, Error> {
     convert_dt_inner_owned(
         request,
         progress,
         mode,
+        options,
         None,
         1,
         None,
@@ -1155,18 +1273,20 @@ fn convert_dt_inner(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn convert_dt_inner_owned(
     request: &Request,
     progress: &mut dyn Write,
     mode: DtMode,
+    options: DtOptions,
     task_token: Option<&str>,
     backup_set: u32,
     incomplete: Option<&Path>,
     cleanup_policy: SqlCleanup,
 ) -> Result<DtReport, Error> {
     use crate::{
-        sql_blob, sql_catalog, sql_dt, sql_folder, sql_inventory, sql_metadata, sql_schema_wire,
-        sql_support, sql_users,
+        sql_blob, sql_catalog, sql_dt, sql_folder, sql_inventory, sql_metadata, sql_schema_storage,
+        sql_schema_wire, sql_support, sql_users,
     };
     use brace::binary::{Atom, BinNode};
     use dtfile::{
@@ -1213,6 +1333,15 @@ fn convert_dt_inner_owned(
     let result = (|| {
         let legacy = matches!(mode, DtMode::Legacy(_) | DtMode::LegacyFramed(_));
         let framed = matches!(mode, DtMode::LegacyFramed(_) | DtMode::StrictFramed);
+        let strict = matches!(mode, DtMode::Strict | DtMode::StrictFramed);
+        let catalog = |table: &str| -> Result<Vec<sql_catalog::SqlColumn>, Error> {
+            let script = plan.catalog_script(table).map_err(|e| err(e.to_string()))?;
+            run(request, &script, |stdout| {
+                sql_catalog::read_catalog(stdout, sql_catalog::Limits::default())
+                    .map_err(|e| e.to_string())
+            })
+            .map_err(|e| err(format!("SQL catalog export failed: {}", e.message)))
+        };
         let schema_script = if legacy {
             plan.legacy_schema_script()
         } else {
@@ -1235,7 +1364,35 @@ fn convert_dt_inner_owned(
                 .map_err(|e| e.to_string())
         })
         .map_err(|e| err(format!("SQL inventory export failed: {}", e.message)))?;
-        let depot_files = if legacy {
+        let extension_storage = if strict
+            && inventory
+                .iter()
+                .any(|table| table.eq_ignore_ascii_case("SchemaStorage"))
+        {
+            let actual = catalog("SchemaStorage")?;
+            let script = plan
+                .schema_storage_script(&actual)
+                .map_err(|e| err(format!("SQL schema storage catalog failed: {e}")))?;
+            let raw_rows = run(request, &script, |stdout| {
+                sql_schema_storage::read_schema_storage(
+                    stdout,
+                    sql_schema_storage::Limits::default(),
+                )
+                .map_err(|e| e.to_string())
+            })
+            .map_err(|e| err(format!("SQL schema storage export failed: {}", e.message)))?;
+            match sql_schema_storage::validate_schema_storage(raw_rows, &schema.raw_bytes) {
+                Ok(sql_schema_storage::SchemaStorageState::MainOnly) => None,
+                Ok(sql_schema_storage::SchemaStorageState::WithExtension(ext)) => Some(ext),
+                Err(sql_schema_storage::Error::Unsupported(reason)) => {
+                    return Err(err(format!("unsupported extension storage: {reason}")));
+                }
+                Err(e) => return Err(err(format!("SQL schema storage export failed: {e}"))),
+            }
+        } else {
+            None
+        };
+        let (depot_files, ignored_extra_tables) = if legacy {
             let report = sql_inventory::inspect_legacy_inventory(&schema.schema, &inventory)
                 .map_err(|e| err(e.to_string()))?;
             let expected = [
@@ -1263,10 +1420,45 @@ fn convert_dt_inner_owned(
                     return Err(err("unsupported nonempty SQL table"));
                 }
             }
-            true
+            (true, Vec::new())
+        } else if strict {
+            let ext_ref = extension_storage
+                .as_ref()
+                .map(|ext| (ext.schema_id, &ext.schema));
+            match sql_inventory::validate_inventory_with_extensions(
+                &schema.schema,
+                ext_ref,
+                &inventory,
+                options.ignore_extra_tables,
+            ) {
+                Ok(found) => {
+                    if !found.ignored_extra_tables.is_empty() {
+                        trace_ignored_extra_tables(
+                            &schema.schema,
+                            ext_ref,
+                            &found.ignored_extra_tables,
+                        );
+                    }
+                    (found.depot_files, found.ignored_extra_tables)
+                }
+                Err(sql_inventory::Error::Mismatch(mismatch)) => {
+                    return Err(err(public_inventory_refusal(
+                        &schema.schema,
+                        ext_ref,
+                        &mismatch,
+                    )));
+                }
+                Err(sql_inventory::Error::UnexpectedExtensionTwins(twins)) => {
+                    trace_unexpected_extension_twins(&schema.schema, ext_ref, &twins);
+                    return Err(err(
+                        sql_inventory::Error::UnexpectedExtensionTwins(twins).to_string()
+                    ));
+                }
+                Err(e) => return Err(err(e.to_string())),
+            }
         } else {
             match sql_inventory::validate_inventory(&schema.schema, &inventory) {
-                Ok(found) => found.depot_files,
+                Ok(found) => (found.depot_files, Vec::new()),
                 Err(sql_inventory::Error::Mismatch(mismatch)) => {
                     return Err(err(inventory_refusal(
                         request,
@@ -1283,12 +1475,57 @@ fn convert_dt_inner_owned(
         } else {
             plan.support_script()
         };
-        let presence = run(request, &support_script, |stdout| {
-            sql_support::read_support_findings(stdout).map_err(|e| e.to_string())
-        })
-        .map_err(|e| err(format!("SQL system data check failed: {}", e.message)))?
-        .map_err(|found| err(format!("SQL system data check failed: {found}")))?;
-        let strict = matches!(mode, DtMode::Strict | DtMode::StrictFramed);
+        let heads = TableHead::database(&schema.schema).map_err(|e| err(e.to_string()))?;
+        let ext_heads = match &extension_storage {
+            Some(ext) => {
+                TableHead::extension(ext.schema_id, &ext.schema).map_err(|e| err(e.to_string()))?
+            }
+            None => Vec::new(),
+        };
+        let presence = if strict {
+            let public = run(request, &support_script, |stdout| {
+                sql_support::read_support_findings_public(stdout, extension_storage.is_some())
+                    .map_err(|e| e.to_string())
+            })
+            .map_err(|e| err(format!("SQL system data check failed: {}", e.message)))?
+            .map_err(|found| err(format!("SQL system data check failed: {found}")))?;
+            if public.config_cas_present || extension_storage.is_some() {
+                let ngs_tables: Vec<&str> = heads
+                    .iter()
+                    .map(|head| head.phys_name.as_str())
+                    .filter(|name| {
+                        name.eq_ignore_ascii_case("_ExtensionsInfoNGS")
+                            || name.eq_ignore_ascii_case("_ExtensionsRestructNGS")
+                    })
+                    .collect();
+                if !ngs_tables.is_empty() {
+                    let script = plan
+                        .extensions_ngs_script(&ngs_tables)
+                        .map_err(|e| err(format!("SQL extension state check failed: {e}")))?;
+                    let nonempty = run(request, &script, |stdout| {
+                        sql_support::read_extensions_ngs(stdout, &ngs_tables)
+                            .map_err(|e| e.to_string())
+                    })
+                    .map_err(|e| err(format!("SQL extension state check failed: {}", e.message)))?;
+                    if !nonempty.is_empty() {
+                        return Err(err(format!(
+                            "SQL system data check failed: в базе есть незавершённая реструктуризация расширений (не пусты таблицы: {}); DT для такой базы пока не поддерживается",
+                            nonempty.join(", ")
+                        )));
+                    }
+                }
+            }
+            sql_support::UsersPresence {
+                users_present: public.users_present,
+                legacy_users_present: public.legacy_users_present,
+            }
+        } else {
+            run(request, &support_script, |stdout| {
+                sql_support::read_support_findings(stdout).map_err(|e| e.to_string())
+            })
+            .map_err(|e| err(format!("SQL system data check failed: {}", e.message)))?
+            .map_err(|found| err(format!("SQL system data check failed: {found}")))?
+        };
         let mut staged = if strict {
             let limits = crate::sql_config_spool::Limits {
                 max_files: 1_000_000,
@@ -1413,20 +1650,12 @@ fn convert_dt_inner_owned(
             }
         };
         drop(config);
-        let catalog = |table: &str| -> Result<Vec<sql_catalog::SqlColumn>, Error> {
-            let script = plan.catalog_script(table).map_err(|e| err(e.to_string()))?;
-            run(request, &script, |stdout| {
-                sql_catalog::read_catalog(stdout, sql_catalog::Limits::default())
-                    .map_err(|e| e.to_string())
-            })
-            .map_err(|e| err(format!("SQL catalog export failed: {}", e.message)))
-        };
-        let heads = TableHead::database(&schema.schema).map_err(|e| err(e.to_string()))?;
         let tables = if legacy {
             None
         } else {
             let names: Vec<&str> = std::iter::once("BINARYDATA")
                 .chain(heads.iter().map(|head| head.phys_name.as_str()))
+                .chain(ext_heads.iter().map(|head| head.phys_name.as_str()))
                 .collect();
             let script = plan
                 .catalog_batch_script(&names)
@@ -1440,12 +1669,14 @@ fn convert_dt_inner_owned(
             let storage = tables
                 .next()
                 .ok_or_else(|| err("missing storage catalog"))?;
-            Some((storage.columns, tables.collect::<Vec<_>>()))
+            let mut all_catalogs: Vec<sql_catalog::TableCatalog> = tables.collect();
+            let ext_catalogs = all_catalogs.split_off(heads.len());
+            Some((storage.columns, all_catalogs, ext_catalogs))
         };
         let mut accounting = sql_blob::StorageAccounting::new(100_000);
         let mut storage = None;
         let storage_rows = match &tables {
-            Some((storage_catalog, _)) => {
+            Some((storage_catalog, _, _)) => {
                 let count = run(request, &plan.blob_count_script(), |out| {
                     sql_blob::read_storage_count(out).map_err(|e| e.to_string())
                 })
@@ -1627,7 +1858,7 @@ fn convert_dt_inner_owned(
                 data,
             }])
         };
-        if let (Some((_, catalogs)), false) = (&tables, framed) {
+        if let (Some((_, catalogs, _)), false) = (&tables, framed) {
             let estimates: Vec<u64> = catalogs
                 .iter()
                 .map(|table| table.pages.saturating_mul(8192))
@@ -1692,7 +1923,7 @@ fn convert_dt_inner_owned(
         for (index, head) in heads.iter().enumerate().take(per_table) {
             let actual = match &tables {
                 None => catalog(&head.phys_name)?,
-                Some((_, catalogs)) => catalogs
+                Some((_, catalogs, _)) => catalogs
                     .get(index)
                     .ok_or_else(|| err("missing SQL catalog"))?
                     .columns
@@ -1755,6 +1986,123 @@ fn convert_dt_inner_owned(
                 .map_err(|e| err(format!("writing progress: {e}")))?;
             }
         }
+        if let Some(ext) = &extension_storage {
+            dt.begin_extensions().map_err(|e| err(e.to_string()))?;
+            let storage_head = TableHead::system(&Source::SchemaStorage)
+                .ok_or_else(|| err("missing DT SchemaStorage layout"))?;
+            dt.begin_table(&storage_head)
+                .map_err(|e| err(e.to_string()))?;
+            for row in &ext.rows {
+                dt.row(row).map_err(|e| err(e.to_string()))?;
+            }
+            dt.end_table().map_err(|e| err(e.to_string()))?;
+            dt.begin_extension(ext.schema_id, &ext.schema)
+                .map_err(|e| err(e.to_string()))?;
+            if let (Some((_, _, ext_catalogs)), false) = (&tables, framed) {
+                let estimates: Vec<u64> = ext_catalogs
+                    .iter()
+                    .map(|table| table.pages.saturating_mul(8192))
+                    .collect();
+                for batch in crate::sql_batch::plan(&estimates, crate::sql_batch::LIMITS) {
+                    let members: Vec<(u64, &TableHead, &sql_catalog::TableCatalog)> = ext_heads
+                        .iter()
+                        .zip(ext_catalogs)
+                        .enumerate()
+                        .skip(batch.start)
+                        .take(batch.len())
+                        .map(|(index, (head, table))| (index as u64 + 1, head, table))
+                        .collect();
+                    let script = plan
+                        .data_batch_script(
+                            &members
+                                .iter()
+                                .map(|(index, head, table)| crate::sql_batch::Table {
+                                    index: *index,
+                                    name: &head.phys_name,
+                                    columns: &head.columns,
+                                    actual: &table.columns,
+                                })
+                                .collect::<Vec<_>>(),
+                        )
+                        .map_err(|e| err(e.to_string()))?;
+                    let count = run(request, &script, |stdout| {
+                        let mut frames = crate::sql_rows::Frames::new(stdout);
+                        let mut count = 0_u64;
+                        for (index, head, _) in &members {
+                            let at = |e: String| {
+                                format!(
+                                    "extension table {index} of {} ({}): {e}",
+                                    ext_heads.len(),
+                                    head.phys_name
+                                )
+                            };
+                            crate::sql_batch::begin(&mut frames, *index)
+                                .map_err(|e| at(e.to_string()))?;
+                            let rows = sql_dt::write_sql_section_with_resolver(
+                                &mut dt,
+                                head,
+                                &mut frames,
+                                schema.year_offset,
+                                &mut resolve,
+                            )
+                            .map_err(|e| at(e.to_string()))?;
+                            crate::sql_batch::end(&mut frames, *index, rows)
+                                .map_err(|e| at(e.to_string()))?;
+                            count += rows;
+                        }
+                        frames.end().map_err(|e| e.to_string())?;
+                        Ok(count)
+                    })
+                    .map_err(|e| err(format!("SQL data export failed: {}", e.message)))?;
+                    rows = rows
+                        .checked_add(count)
+                        .ok_or_else(|| err("data row count overflow"))?;
+                }
+            } else {
+                for (index, head) in ext_heads.iter().enumerate() {
+                    let actual = match &tables {
+                        None => catalog(&head.phys_name)?,
+                        Some((_, _, ext_catalogs)) => ext_catalogs
+                            .get(index)
+                            .ok_or_else(|| err("missing SQL catalog"))?
+                            .columns
+                            .clone(),
+                    };
+                    let script = if framed {
+                        plan.framed_data_table_script(&head.phys_name, &head.columns, &actual)
+                    } else {
+                        plan.data_table_script(&head.phys_name, &head.columns, &actual)
+                    }
+                    .map_err(|e| err(e.to_string()))?;
+                    let count = run(request, &script, |stdout| {
+                        if framed {
+                            sql_dt::write_framed_sql_table_with_resolver(
+                                &mut dt,
+                                head,
+                                stdout,
+                                schema.year_offset,
+                                &mut resolve,
+                            )
+                        } else {
+                            sql_dt::write_sql_table_with_resolver(
+                                &mut dt,
+                                head,
+                                stdout,
+                                schema.year_offset,
+                                &mut resolve,
+                            )
+                        }
+                        .map_err(|e| e.to_string())
+                    })
+                    .map_err(|e| err(format!("SQL data export failed: {}", e.message)))?;
+                    rows = rows
+                        .checked_add(count)
+                        .ok_or_else(|| err("data row count overflow"))?;
+                }
+            }
+            dt.end_extension().map_err(|e| err(e.to_string()))?;
+            dt.end_extensions().map_err(|e| err(e.to_string()))?;
+        }
         dt.end_database().map_err(|e| err(e.to_string()))?;
         drop(resolve);
         if let Some(count) = storage_rows {
@@ -1765,11 +2113,13 @@ fn convert_dt_inner_owned(
             .flush()
             .map_err(|e| err(format!("writing DT: {e}")))?;
         Ok(DtReport {
-            tables: heads.len(),
+            tables: heads.len() + ext_heads.len(),
+            extension_tables: ext_heads.len(),
             rows,
             files,
             users,
             users_with_email,
+            ignored_extra_tables,
         })
     })();
     let result = match (cleanup_policy, requested()) {

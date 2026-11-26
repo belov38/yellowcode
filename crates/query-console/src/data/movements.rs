@@ -320,6 +320,7 @@ impl Console {
             &RunRequest {
                 text,
                 params,
+                session_params: Vec::new(),
                 mode: Mode::One,
                 lang: Lang::En,
             },

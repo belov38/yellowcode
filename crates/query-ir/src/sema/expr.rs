@@ -76,21 +76,35 @@ pub(crate) fn unlimited_view() -> QType {
     }
 }
 
-fn sys_enum_mismatch(a: &QType, b: &QType) -> bool {
+fn sys_enum_mismatch(mode: AnalyzeMode, a: &QType, b: &QType) -> bool {
     let only_sys_enum = |t: &QType| match t.others.as_slice() {
         [o @ Other::SysEnum(_)] if t.atom_count() == 1 => Some(*o),
         _ => None,
     };
+    let runtime_undef = |t: &QType| mode == AnalyzeMode::Execute && t.is_undefined();
     let clash = |x: &QType, y: &QType| {
-        only_sys_enum(x).is_some_and(|o| y.atom_count() > 0 && !y.others.contains(&o))
+        only_sys_enum(x)
+            .is_some_and(|o| (y.atom_count() > 0 && !y.others.contains(&o)) || runtime_undef(y))
     };
     clash(a, b) || clash(b, a)
 }
 
-fn uuid_binary_mismatch(a: &QType, b: &QType) -> bool {
+fn type_compare_mismatch(mode: AnalyzeMode, a: &QType, b: &QType) -> bool {
+    let only_type = |t: &QType| t.atom_count() == 1 && t.others.as_slice() == [Other::Type];
+    let runtime_undef = |t: &QType| mode == AnalyzeMode::Execute && t.is_undefined();
+    let clash = |x: &QType, y: &QType| {
+        only_type(x)
+            && ((y.atom_count() > 0 && !y.others.contains(&Other::Type)) || runtime_undef(y))
+    };
+    clash(a, b) || clash(b, a)
+}
+
+fn uuid_compare_mismatch(mode: AnalyzeMode, a: &QType, b: &QType) -> bool {
     let only = |t: &QType, o: Other| t.atom_count() == 1 && t.others.as_slice() == [o];
-    (only(a, Other::Uuid) && only(b, Other::Binary))
-        || (only(a, Other::Binary) && only(b, Other::Uuid))
+    let runtime_undef = |t: &QType| mode == AnalyzeMode::Execute && t.is_undefined();
+    let clash =
+        |x: &QType, y: &QType| only(x, Other::Uuid) && (only(y, Other::Binary) || runtime_undef(y));
+    clash(a, b) || clash(b, a)
 }
 
 fn number0() -> QType {
@@ -231,17 +245,44 @@ impl<'scope> Analyzer<'scope> {
         mem::ScratchType::new(self.memory, ty)
     }
 
+    pub(super) fn is_runtime_undefined(&self, t: &QType) -> bool {
+        self.opts.mode == AnalyzeMode::Execute && t.is_undefined()
+    }
+
+    pub(super) fn is_bool_operand(&self, t: &QType) -> bool {
+        !self.is_runtime_undefined(t) && bool_like(t)
+    }
+
+    fn is_number_operand(&self, t: &QType) -> bool {
+        !self.is_runtime_undefined(t) && is_number_like(t)
+    }
+
+    fn is_string_operand(&self, t: &QType) -> bool {
+        !self.is_runtime_undefined(t) && is_string_like(t)
+    }
+
     fn check_unary(&self, op: UnOp, operand: &ast::Expr, inner: &TExpr) -> R<()> {
         match op {
-            UnOp::Not if !bool_like(&inner.ty) => {
+            UnOp::Not if !self.is_bool_operand(&inner.ty) => {
                 Err(self.wrong_param(mem::Argument::Kw(Kw::Not), root_at(operand)))
             }
-            UnOp::Neg | UnOp::Plus if !is_number_like(&inner.ty) => Err(self.wrong_param(
-                mem::Argument::Text(if op == UnOp::Neg { "-" } else { "+" }),
-                operand.span.start,
-            )),
+            UnOp::Neg if !self.is_number_operand(&inner.ty) => {
+                Err(self.wrong_param(mem::Argument::Text("-"), operand.span.start))
+            }
+            UnOp::Plus if !is_number_like(&inner.ty) => {
+                Err(self.wrong_param(mem::Argument::Text("+"), operand.span.start))
+            }
             _ => Ok(()),
         }
+    }
+
+    pub(super) fn expr_list_or_value(
+        &mut self,
+        e: &ast::Expr,
+        ctx: ExprCtx,
+    ) -> R<mem::ExprValue<'scope>> {
+        let undefined = QType::undefined();
+        self.operand_value(e, ctx, Hint::In(&undefined))
     }
 
     pub(crate) fn expr_value(&mut self, e: &ast::Expr, ctx: ExprCtx) -> R<mem::ExprValue<'scope>> {
@@ -267,8 +308,9 @@ impl<'scope> Analyzer<'scope> {
                 let (l, r) = lr?;
                 if !self.comparable(&l)
                     || !self.comparable(&r)
-                    || sys_enum_mismatch(&l.ty, &r.ty)
-                    || uuid_binary_mismatch(&l.ty, &r.ty)
+                    || sys_enum_mismatch(self.opts.mode, &l.ty, &r.ty)
+                    || type_compare_mismatch(self.opts.mode, &l.ty, &r.ty)
+                    || uuid_compare_mismatch(self.opts.mode, &l.ty, &r.ty)
                 {
                     return Err(self.wrong_compare(op_span.start));
                 }
@@ -385,11 +427,11 @@ impl<'scope> Analyzer<'scope> {
                 escape,
             } => {
                 let lt = self.operand_value(l, ctx, Hint::Like)?;
-                if !is_string_like(&lt.ty) {
+                if !self.is_string_operand(&lt.ty) {
                     return Err(self.wrong_like(root_at(l)));
                 }
                 let pt = self.operand_value(pattern, ctx, Hint::Like)?;
-                if !is_string_like(&pt.ty) {
+                if !self.is_string_operand(&pt.ty) {
                     return Err(self.wrong_like(root_at(pattern)));
                 }
                 let ty = self.scalar_type(boolean_of(&[&lt, &pt]));
@@ -635,7 +677,7 @@ impl<'scope> Analyzer<'scope> {
                 .enumerate()
             {
                 let t = self.expr_value(x, ctx)?;
-                if !bool_like(&t.ty) {
+                if !self.is_bool_operand(&t.ty) {
                     let at = elem_at(x);
                     if ctx.and_root == Some(e.span) {
                         let kw = if ctx.clause == Clause::Having {
@@ -690,6 +732,9 @@ impl<'scope> Analyzer<'scope> {
         for o in rest {
             let mut rhs = self.operand_value(&o.expr, ctx, Hint::Arith)?;
             let rhs_const = is_const(&rhs);
+            if self.is_runtime_undefined(&cur) || self.is_runtime_undefined(&rhs.ty) {
+                return Err(self.wrong_param(mem::Argument::Text(op_text(o.op)), e.span.start));
+            }
             let l = Arg {
                 ty: &cur,
                 constant: acc_const,
@@ -1197,7 +1242,8 @@ impl<'scope> Analyzer<'scope> {
                 })
             }),
         )?;
-        let recipe = match rules::func_recipe(f, &rargs) {
+        let reject_undefined = self.opts.mode == AnalyzeMode::Execute;
+        let recipe = match rules::func_recipe_checked(f, &rargs, reject_undefined) {
             Ok(t) => t,
             Err(ArgError::Func) => {
                 return Err(self.wrong_param(mem::Argument::Func(f), name.start));
@@ -1371,10 +1417,12 @@ impl<'scope> Analyzer<'scope> {
             _ => return Err(self.wrong_param(mem::Argument::Func(f), name.start)),
         };
         let checked = arg.as_ref().map(|a| self.comparable_view(a)).transpose()?;
-        let recipe = rules::aggregate_recipe(f, checked.as_deref()).map_err(|_| {
-            let at = ast_arg.map_or(name.start, root_at);
-            self.wrong_param(mem::Argument::Func(f), at)
-        })?;
+        let reject_undefined = self.opts.mode == AnalyzeMode::Execute;
+        let recipe = rules::aggregate_recipe_checked(f, checked.as_deref(), reject_undefined)
+            .map_err(|_| {
+                let at = ast_arg.map_or(name.start, root_at);
+                self.wrong_param(mem::Argument::Func(f), at)
+            })?;
         let recipe = if let (Func::Min | Func::Max, Some(a)) = (f, arg.as_ref()) {
             rules::TypeResult::WithoutNull(&a.ty)
         } else {

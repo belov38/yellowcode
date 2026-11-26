@@ -1,22 +1,46 @@
 mod accounting;
 pub(crate) use accounting::drcr_inputs;
 mod accounting_balance;
+mod accounting_balance_and_turnovers;
+pub use accounting_balance_and_turnovers::{
+    AccountingBalanceAndTurnoversAccRgEdL, AccountingBalanceAndTurnoversExtL,
+    AccountingBalanceAndTurnoversExtSlotL, AccountingBalanceAndTurnoversL,
+};
+pub(crate) use accounting_balance_and_turnovers::{
+    accounting_bt_bind_areas, accounting_bt_chart, accounting_bt_ext_ed_table,
+    accounting_bt_ext_section_identity, accounting_bt_inputs, accounting_bt_uses_ext_dims,
+    is_accounting_balance_and_turnovers,
+};
 pub(crate) mod accounting_balance_payload;
-pub use accounting_balance_payload::{BalanceExt1L, BalanceFieldCheckL, BalanceValueCheckL};
+pub use accounting_balance_payload::{
+    BalanceExt1L, BalanceExtEdL, BalanceExtSlotL, BalanceFieldCheckL, BalanceValueCheckL,
+};
 mod accounting_security;
 pub use accounting_balance::{
-    AccountingChartLayoutL, BalanceInputsL, BalanceResourceL, BalanceRowsL,
+    AccountingChartLayoutL, BalanceAreaExactL, BalanceAreaFieldL, BalanceAreasL, BalanceDimL,
+    BalanceInputsL, BalanceResourceL, BalanceRowsL, BalanceTableAreasL,
 };
 pub(crate) use accounting_balance::{
-    balance_chart, balance_ext1_section_identity, balance_ext1_static_inputs, balance_form,
-    balance_inputs, balance_resources, is_accounting_balance,
+    balance_bind_areas, balance_chart, balance_dims, balance_ext_ed_table,
+    balance_ext1_section_identity, balance_ext1_static_inputs, balance_form, balance_inputs,
+    balance_resources, balance_validate_areas_static, is_accounting_balance,
+    is_balance_ext_dimension,
 };
 mod accounting_turnovers;
+mod accounting_turnovers_payload;
 pub use accounting_turnovers::{
-    AccountingTurnoversInputsL, AccountingTurnoversL, AccountingTurnoversResourceL,
+    AccountingTurnoversDimensionL, AccountingTurnoversInputsL, AccountingTurnoversL,
+    AccountingTurnoversRecorderL, AccountingTurnoversResourceL, TurnoversAreasL,
 };
-pub(crate) use accounting_turnovers::{is_accounting_turnovers, turnovers_inputs};
+pub(crate) use accounting_turnovers::{
+    is_accounting_turnovers, turnovers_ext_section_identity, turnovers_inputs,
+    turnovers_uses_ext_dims,
+};
+pub use accounting_turnovers_payload::{
+    TurnoversAccRgEdL, TurnoversExtDimSlotL, TurnoversExtDimsL, TurnoversValueCheckL,
+};
 mod calculation;
+mod calculation_base;
 mod calculation_security;
 mod dec;
 mod depth;
@@ -36,6 +60,7 @@ pub use slice::SliceL;
 pub(crate) mod vt;
 
 pub(crate) use calculation::actual_inputs;
+pub(crate) use calculation_base::base_inputs;
 pub use dec::{
     ArithDec, Dec, MAX_DIGITS, MIN_DIV_SCALE, MIN_MUL_SCALE, Opd, agg_dec, dec_add, dec_div,
     dec_mul, dec_mul_floor, dec_of, dec_of_lit, dec_op, dec_op_k, mul_floor, opd_of,
@@ -44,8 +69,8 @@ pub use print::print;
 pub(crate) use schedule::schedule_inputs;
 pub(crate) use vt::vt_shape;
 pub use vt::{
-    AccountingRowsL, AccumulationRowsL, DrCrAccountL, DrCrInputsL, DrCrResourceL, DrCrSideL,
-    RegisterRowsKindL, RegisterRowsL, StoredTotals,
+    AccountingRowsL, AccumulationRowsL, DrCrAccountL, DrCrExtDimL, DrCrInputsL, DrCrResourceL,
+    DrCrSideL, RegisterRowsKindL, RegisterRowsL, StoredTotals,
 };
 
 use crate::bind::{BindCtx, Bound};
@@ -69,6 +94,7 @@ pub struct StmtL {
     pub touched: Vec<TableId>,
     pub nested: Vec<NestedL>,
     pub present: Vec<u16>,
+    pub has_inline_present: bool,
     pub present_targets: Vec<PresentTarget>,
     pub totals: Option<crate::totals::TotalsSpec>,
     pub week_start: Option<u32>,
@@ -114,6 +140,10 @@ pub enum RelL {
     Scan {
         table: TableId,
         fields: Vec<FieldId>,
+    },
+    DefaultIfEmpty {
+        input: Box<RelL>,
+        row: Arc<[QValue]>,
     },
     TempScan {
         name: String,
@@ -292,6 +322,14 @@ pub enum PExpr {
         refs: Vec<(u32, RefAtom)>,
         route_points: Vec<(u32, RefAtom)>,
     },
+    PredefName {
+        x: Box<PExpr>,
+        names: Vec<([u8; 16], crate::QStr)>,
+    },
+    PointInTime {
+        date: Box<PExpr>,
+        reference: Box<PExpr>,
+    },
     StoredSize {
         x: Box<PExpr>,
         kind: SizeKind,
@@ -359,6 +397,7 @@ pub(crate) fn lower(
                     columns: b.stmt.columns.clone(),
                     touched: b.tables.clone(),
                     present: Vec::new(),
+                    has_inline_present: false,
                     present_targets: Vec::new(),
                     totals: None,
                     week_start: None,
@@ -369,7 +408,9 @@ pub(crate) fn lower(
         });
         if wanted.is_empty() {
             let mut l = out?;
-            if !b.stmt.present.is_empty() {
+            let inline_present = has_inline_present(b.stmt);
+            l.has_inline_present = inline_present;
+            if !b.stmt.present.is_empty() || inline_present {
                 l.present = b.stmt.present.clone();
                 l.present_targets = present_targets(b.stmt, schema, storage, map);
             }
@@ -395,16 +436,21 @@ pub(crate) fn lower(
     }
 }
 
-pub(crate) fn presentation_expr(stmt: &crate::ir::StmtS, col: u16) -> Option<&crate::ir::Expr> {
+pub(crate) fn presentation_exprs(
+    stmt: &crate::ir::StmtS,
+    col: u16,
+) -> Option<Vec<&crate::ir::Expr>> {
     let mut rel = &stmt.root;
     loop {
         match rel {
-            crate::ir::Rel::Project { exprs, .. } => return exprs.get(usize::from(col)),
+            crate::ir::Rel::Project { exprs, .. } => {
+                return exprs.get(usize::from(col)).map(|expr| vec![expr]);
+            }
             crate::ir::Rel::Union { parts, all } => {
                 if parts.len() < 2 || all.len() != parts.len() - 1 || all.iter().any(|all| !all) {
                     return None;
                 }
-                let mut representative: Option<&crate::ir::Expr> = None;
+                let mut exprs = Vec::with_capacity(parts.len());
                 for part in parts {
                     let mut arm = part;
                     let expr = loop {
@@ -416,8 +462,22 @@ pub(crate) fn presentation_expr(stmt: &crate::ir::StmtS, col: u16) -> Option<&cr
                             _ => return None,
                         }
                     };
+                    exprs.push(expr);
+                }
+                let first = *exprs.first()?;
+                if crate::ir::is_pure_ref_type(&first.ty) {
+                    return exprs
+                        .iter()
+                        .skip(1)
+                        .all(|expr| crate::ir::is_pure_ref_type(&expr.ty))
+                        .then_some(exprs);
+                }
+                if !matches!(first.ty.others.as_slice(), [crate::Other::SysEnum(_)]) {
+                    return None;
+                }
+                for expr in &exprs {
                     if expr.ty.atom_count() != 1
-                        || !matches!(expr.ty.others.as_slice(), [crate::Other::SysEnum(_)])
+                        || expr.ty.others != first.ty.others
                         || !matches!(
                             expr.kind,
                             crate::ir::ExprKind::Col {
@@ -428,15 +488,8 @@ pub(crate) fn presentation_expr(stmt: &crate::ir::StmtS, col: u16) -> Option<&cr
                     {
                         return None;
                     }
-                    if let Some(first) = representative {
-                        if first.ty.others != expr.ty.others {
-                            return None;
-                        }
-                    } else {
-                        representative = Some(expr);
-                    }
                 }
-                return representative;
+                return Some(exprs);
             }
             crate::ir::Rel::Sort { input, .. }
             | crate::ir::Rel::Top { input, .. }
@@ -480,19 +533,53 @@ pub(crate) fn presentation_roles(kind: MdKind) -> &'static [StdRole] {
     }
 }
 
+pub(crate) fn inline_presentation_exprs<'s>(
+    stmt: &'s crate::ir::StmtS,
+) -> Vec<&'s crate::ir::Expr> {
+    let mut out: Vec<&'s crate::ir::Expr> = Vec::new();
+    let mut look = |e: &'s crate::ir::Expr| {
+        if let crate::ir::ExprKind::Func {
+            f: Func::Presentation | Func::RefPresentation,
+            args,
+        } = &e.kind
+        {
+            out.extend(args.iter());
+        }
+    };
+    with_deep_stack(stmt.max_depth, || {
+        crate::ir::visit_rel(&stmt.root, &mut look);
+        for rows in stmt.nested.iter().filter_map(|n| n.rows.as_ref()) {
+            crate::ir::visit_rel(&rows.scan, &mut look);
+            for e in &rows.exprs {
+                crate::ir::visit_expr_in_place(e, true, &mut look);
+            }
+        }
+    });
+    out
+}
+
+pub(crate) fn has_inline_present(stmt: &crate::ir::StmtS) -> bool {
+    !inline_presentation_exprs(stmt).is_empty()
+}
+
 pub(crate) fn present_targets(
     stmt: &crate::ir::StmtS,
     schema: &crate::QuerySchema,
     storage: &crate::StorageBinding,
     map: &ibschema::storage::StorageMap,
 ) -> Vec<PresentTarget> {
+    let mut exprs: Vec<&crate::ir::Expr> = stmt
+        .present
+        .iter()
+        .filter_map(|i| presentation_exprs(stmt, *i))
+        .flatten()
+        .collect();
+    exprs.extend(inline_presentation_exprs(stmt));
     let mut out = Vec::new();
     for (number, atom) in storage.ref_atoms() {
         let info = schema.ref_info(atom);
-        if !stmt
-            .present
+        if !exprs
             .iter()
-            .filter_map(|i| presentation_expr(stmt, *i))
             .any(|e| e.ty.refs.contains(&atom) || unconstrained_presentation(stmt, e))
         {
             continue;
@@ -526,10 +613,11 @@ pub(crate) fn present_targets(
         if t.kind != TableKind::Virtual(VtKind::BusinessProcessPoints) {
             continue;
         }
-        let wanted = stmt.present.iter().filter_map(|i| presentation_expr(stmt, *i)).any(|e| {
-            unconstrained_presentation(stmt, e) || e.ty.others.iter().any(|o| {
-                matches!(o, crate::types::Other::RoutePoint(atom) if t.owner.is_some_and(|owner| schema.table(owner).reference == Some(*atom)))
-            })
+        let wanted = exprs.iter().any(|e| {
+            unconstrained_presentation(stmt, e)
+                || e.ty.others.iter().any(|o| {
+                    matches!(o, crate::types::Other::RoutePoint(atom) if t.owner.is_some_and(|owner| schema.table(owner).reference == Some(*atom)))
+                })
         });
         if !wanted {
             continue;

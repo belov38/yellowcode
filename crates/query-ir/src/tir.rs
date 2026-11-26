@@ -379,6 +379,7 @@ pub enum From {
         complement: Option<crate::schema::Complement>,
         span: Option<query_syntax::Span>,
         breakdown: Vec<QFieldId>,
+        base: Option<Box<BaseArguments>>,
     },
     Temp(QShared<TempSchema>),
     Param {
@@ -388,9 +389,19 @@ pub enum From {
     Subquery(Box<Query>),
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BaseArguments {
+    pub main_dims_param: Option<String>,
+    pub base_dims_param: Option<String>,
+    pub breakdown_param: Option<String>,
+    pub deferred: bool,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct AccountingArguments {
     pub date_slots: u8,
+    pub balance_arg_slots: u8,
+    pub cond_slots: u8,
     pub deferred: bool,
 }
 
@@ -406,18 +417,48 @@ impl AccountingArguments {
         })
     }
 
-    pub(crate) fn supports(self, args: &[Option<TExpr>], periods: usize) -> bool {
-        let mask = (1u8 << periods) - 1;
+    pub(crate) fn supports_balance(self, args: &[Option<TExpr>]) -> bool {
         !self.deferred
-            && self.date_slots & !mask == 0
-            && (0..periods).all(|i| {
+            && self.date_slots & !1 == 0
+            && match args.first().and_then(Option::as_ref) {
+                Some(e) => self.date_slots & 1 != 0 && Self::plain_date(e),
+                None => self.date_slots & 1 == 0,
+            }
+            && args.iter().enumerate().skip(1).all(|(i, arg)| {
+                let Some(bit) = 1u8.checked_shl(i as u32) else {
+                    return arg.is_none();
+                };
+                match arg {
+                    Some(_) => self.balance_arg_slots & bit != 0,
+                    None => self.balance_arg_slots & bit == 0,
+                }
+            })
+    }
+
+    pub(crate) fn supports_turnovers(self, args: &[Option<TExpr>]) -> bool {
+        let date_mask = 0b11u8;
+        !self.deferred
+            && self.date_slots & !date_mask == 0
+            && self.cond_slots & date_mask == 0
+            && (0..2).all(|i| {
                 let expression = args.get(i).and_then(Option::as_ref);
                 match expression {
                     Some(e) => self.date_slots & (1 << i) != 0 && Self::plain_date(e),
                     None => self.date_slots & (1 << i) == 0,
                 }
             })
-            && args.iter().skip(periods).all(Option::is_none)
+            && args
+                .iter()
+                .enumerate()
+                .skip(2)
+                .all(|(i, expression)| match expression {
+                    Some(_) => i < 8 && self.cond_slots & (1 << i) != 0,
+                    None => i >= 8 || self.cond_slots & (1 << i) == 0,
+                })
+    }
+
+    pub(crate) fn supports_balance_and_turnovers(self, _args: &[Option<TExpr>]) -> bool {
+        !self.deferred
     }
 }
 

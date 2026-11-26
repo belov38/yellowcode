@@ -40,6 +40,7 @@ pub mod sql_inventory;
 pub mod sql_json_row;
 pub mod sql_metadata;
 pub mod sql_rows;
+pub mod sql_schema_storage;
 pub mod sql_schema_wire;
 pub mod sql_server;
 pub mod sql_support;

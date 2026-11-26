@@ -1,4 +1,4 @@
-use crate::{ColumnInfo, NestedResult, QStr, QType, QValue, RefId};
+use crate::{ColumnInfo, NestedResult, QStr, QType, QValue, RefId, value::Moment};
 use bsl_prim::{BslDate, Number};
 use memory_budget::{
     BudgetError, BudgetedText, BudgetedVec, Category, Charged, MemoryBudget, Shared,
@@ -41,6 +41,7 @@ pub enum ScalarValue {
     Uuid([u8; 16]),
     Ref { table: u32, id: RefId },
     SysEnum(TypeIdx, u32),
+    PointInTime(Moment),
 }
 
 #[derive(Clone, Debug)]
@@ -59,6 +60,7 @@ enum Backing {
     Binary(Shared<Vec<u8>>),
     Storage(Shared<Vec<u8>>),
     SysEnum(TypeIdx, u32),
+    PointInTime(Moment),
     Nested(Shared<ManagedNestedResult>),
 }
 #[derive(Clone, Debug)]
@@ -114,6 +116,7 @@ pub enum ValueRef<'a> {
     Binary(&'a [u8]),
     Storage(&'a [u8]),
     SysEnum(TypeIdx, u32),
+    PointInTime(&'a Moment),
     Nested(&'a ManagedNestedResult),
 }
 
@@ -139,6 +142,7 @@ impl ManagedValue {
             ScalarValue::Uuid(value) => Backing::Uuid(value),
             ScalarValue::Ref { table, id } => Backing::Ref { table, id },
             ScalarValue::SysEnum(ty, index) => Backing::SysEnum(ty, index),
+            ScalarValue::PointInTime(moment) => Backing::PointInTime(moment),
         })
     }
     pub fn try_string(text: &str, budget: &MemoryBudget) -> Result<Self, BudgetError> {
@@ -197,8 +201,8 @@ impl ManagedValue {
             QValue::Binary(value) => return Self::try_binary(value, budget).map_err(Into::into),
             QValue::Storage(value) => return Self::try_storage(value, budget).map_err(Into::into),
             QValue::SysEnum(ty, value) => Backing::SysEnum(*ty, *value),
+            QValue::PointInTime(moment) => Backing::PointInTime(**moment),
             QValue::Nested(value) => Backing::Nested(copy_nested(value, budget, depth)?),
-            QValue::PointInTime(_) => return Err(ManagedCopyError::Unsupported("point in time")),
             QValue::Boundary(_) => return Err(ManagedCopyError::Unsupported("boundary")),
         }))
     }
@@ -216,6 +220,7 @@ impl ManagedValue {
             Backing::Binary(value) => ValueRef::Binary(value),
             Backing::Storage(value) => ValueRef::Storage(value),
             Backing::SysEnum(ty, value) => ValueRef::SysEnum(*ty, *value),
+            Backing::PointInTime(moment) => ValueRef::PointInTime(moment),
             Backing::Nested(value) => ValueRef::Nested(value),
         }
     }

@@ -135,6 +135,7 @@ pub fn stats(s: &StmtS) -> IrStats {
                         todo.extend(
                             v.cond
                                 .iter()
+                                .chain(v.ext_dims_arg.iter())
                                 .chain(v.area.iter().map(|a| &a.pred))
                                 .chain(v.access.iter())
                                 .chain(v.order.iter().map(|k| &k.expr))

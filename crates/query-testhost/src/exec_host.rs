@@ -26,6 +26,8 @@ impl AccessPolicy for Unrestricted {
 
 struct NoSession;
 
+static NO_SESSION: NoSession = NoSession;
+
 impl SessionValues for NoSession {
     fn session_param(&self, name: &str) -> Result<QValue, HostError> {
         Err(HostError::new(format!(
@@ -54,7 +56,7 @@ pub struct TestHost<'b> {
     memory: Option<&'b BatchMemory>,
     logging: bool,
     access: Unrestricted,
-    session: NoSession,
+    session: &'b dyn SessionValues,
     plan: query_exec::plan::PlanOptions,
     pub movements: bool,
 }
@@ -107,10 +109,15 @@ impl<'b> TestHost<'b> {
             memory: None,
             logging: true,
             access: Unrestricted,
-            session: NoSession,
+            session: &NO_SESSION,
             plan: query_exec::plan::PlanOptions::default(),
             movements: false,
         })
+    }
+
+    pub fn with_session(mut self, session: &'b dyn SessionValues) -> Self {
+        self.session = session;
+        self
     }
 
     #[doc(hidden)]
@@ -193,7 +200,7 @@ impl ExecHost for TestHost<'_> {
         &self.access
     }
     fn session(&self) -> &dyn SessionValues {
-        &self.session
+        self.session
     }
     fn read_source(&self) -> Box<dyn DataSource + '_> {
         self.note("read_source".to_string());

@@ -200,6 +200,34 @@ const CASES: &[(&str, &[&str], &str)] = cases![
         ]
     ),
     (
+        "err-bak-convert-ignore-extra-tables-cf",
+        [
+            "bak",
+            "convert",
+            "base.bak",
+            "--server",
+            "localhost",
+            "--to",
+            "cf",
+            "--output",
+            "base.cf",
+            "--ignore-extra-tables"
+        ]
+    ),
+    (
+        "err-bak-convert-ignore-extra-tables-direct",
+        [
+            "bak",
+            "convert",
+            "base.bak",
+            "--to",
+            "cf",
+            "--output",
+            "base.cf",
+            "--ignore-extra-tables"
+        ]
+    ),
+    (
         "err-bak-convert-direct-sql-options",
         [
             "bak",
@@ -251,9 +279,63 @@ const CASES: &[(&str, &[&str], &str)] = cases![
     ("remote-metadata--help", ["remote", "metadata", "--help"]),
     ("remote-call--help", ["remote", "call", "--help"]),
     ("remote-modules--help", ["remote", "modules", "--help"]),
+    ("remote-object--help", ["remote", "object", "--help"]),
+    (
+        "err-remote-object-no-ref",
+        ["remote", "object", "http://127.0.0.1:1"]
+    ),
+    (
+        "err-remote-object-bad-ref",
+        [
+            "remote",
+            "object",
+            "http://127.0.0.1:1",
+            "--ref",
+            "Справочник.Товары"
+        ]
+    ),
+    ("remote-list--help", ["remote", "list", "--help"]),
+    (
+        "err-remote-list-page-and-all",
+        [
+            "remote",
+            "list",
+            "http://127.0.0.1:1",
+            "--object",
+            "A.B",
+            "--page",
+            "2",
+            "--all"
+        ]
+    ),
+    ("remote-report--help", ["remote", "report", "--help"]),
     (
         "err-remote-call-no-call",
         ["remote", "call", "http://127.0.0.1:1"]
+    ),
+    (
+        "err-remote-report-csv-no-call",
+        [
+            "remote",
+            "report",
+            "http://127.0.0.1:1",
+            "--form",
+            "Отчет.Х.Форма.Ф",
+            "--format",
+            "csv"
+        ]
+    ),
+    (
+        "err-remote-report-attribute-no-call",
+        [
+            "remote",
+            "report",
+            "http://127.0.0.1:1",
+            "--form",
+            "Отчет.Х.Форма.Ф",
+            "--attribute",
+            "Р"
+        ]
     ),
     (
         "err-remote-call-param-conflict",
@@ -329,6 +411,27 @@ const CASES: &[(&str, &[&str], &str)] = cases![
     (
         "err-remote-strong-password-without-user",
         ["remote", "info", "http://127.0.0.1:1", "--strong-password"]
+    ),
+    (
+        "err-remote-server-version-bad",
+        [
+            "remote",
+            "info",
+            "http://127.0.0.1:1",
+            "--server-version",
+            "8.3.x"
+        ]
+    ),
+    (
+        "err-remote-server-version-auth-settings-only",
+        [
+            "remote",
+            "info",
+            "http://127.0.0.1:1",
+            "--auth-settings-only",
+            "--server-version",
+            "8.3.27.2214"
+        ]
     ),
     (
         "err-remote-modules-id-without-out",

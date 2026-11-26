@@ -120,7 +120,6 @@ impl<'t> Parser<'t> {
                     }
                     _ => return Err(self.unexpected()),
                 }
-            } else if self.skip_query_characteristics()? {
             } else if let Some(block) = self.query_dcs_block()? {
                 crate::resource::push(self.memory, &mut dcs, block)?;
             } else {

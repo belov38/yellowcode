@@ -23,8 +23,8 @@ impl<'t> Parser<'t> {
         let mut sources = crate::resource::list(self.memory, [self.source(&mut scope, false)?])?;
         while self.eat_source_comma()?.is_some() {
             match sources.last_mut() {
-                Some(prev) if self.at_join(true).is_some() => {
-                    self.joins(&mut scope, &mut prev.joins, true)?;
+                Some(prev) if self.at_join().is_some() => {
+                    self.joins(&mut scope, &mut prev.joins)?;
                     prev.span = Span::new(prev.span.start, self.prev_end());
                 }
                 _ => crate::resource::push(
@@ -52,7 +52,7 @@ impl<'t> Parser<'t> {
             self.declare_source_alias(scope, a)?;
         }
         let mut joins = Vec::new();
-        self.joins(scope, &mut joins, false)?;
+        self.joins(scope, &mut joins)?;
         Ok(Source {
             table,
             alias,
@@ -61,14 +61,8 @@ impl<'t> Parser<'t> {
         })
     }
 
-    fn joins(
-        &mut self,
-        scope: &mut AliasScope,
-        joins: &mut Vec<Join>,
-        mut after_comma: bool,
-    ) -> PResult<()> {
-        while let Some((kind, optional)) = self.at_join(after_comma) {
-            after_comma = false;
+    fn joins(&mut self, scope: &mut AliasScope, joins: &mut Vec<Join>) -> PResult<()> {
+        while let Some((kind, optional)) = self.at_join() {
             if optional {
                 self.optional_joins(scope, kind, joins)?;
             } else {
@@ -78,11 +72,11 @@ impl<'t> Parser<'t> {
         Ok(())
     }
 
-    fn at_join(&self, after_comma: bool) -> Option<(JoinKind, bool)> {
+    fn at_join(&self) -> Option<(JoinKind, bool)> {
         if let Some(kind) = self.nth_join_kind(0) {
             return Some((kind, false));
         }
-        if (self.dcs() || after_comma) && self.at_punct(Punct::LBrace) {
+        if self.at_punct(Punct::LBrace) {
             return self.nth_join_kind(1).map(|kind| (kind, true));
         }
         None
@@ -99,7 +93,7 @@ impl<'t> Parser<'t> {
         self.enter(open.start)?;
         self.bump()?;
         let mut block = crate::resource::list(self.memory, [self.join(scope, kind)?])?;
-        self.joins(scope, &mut block, false)?;
+        self.joins(scope, &mut block)?;
         self.expect_punct(Punct::RBrace)?;
         self.leave();
         let optional = self.dcs();

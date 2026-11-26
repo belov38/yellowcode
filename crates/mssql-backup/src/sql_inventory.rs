@@ -55,9 +55,29 @@ pub enum Error {
     Dt(#[from] dtfile::Error),
     #[error("invalid SQL table inventory: {0}")]
     Mismatch(Mismatch),
+    #[error("unsupported: unexpected 1C extension tables even with --ignore-extra-tables ({})", format_names(.0))]
+    UnexpectedExtensionTwins(Vec<String>),
 }
 
 pub const SHOWN_NAMES: usize = 10;
+
+fn format_names(names: &[String]) -> String {
+    let mut out = format!("{} unexpected: ", sql_tables(names.len()));
+    for (i, name) in names.iter().take(SHOWN_NAMES).enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        out.push_str(name);
+    }
+    if names.len() > SHOWN_NAMES {
+        out.push_str(&format!(" (and {} more)", names.len() - SHOWN_NAMES));
+    }
+    out
+}
+
+pub fn is_extension_twin_name(name: &str) -> bool {
+    name.starts_with('_') && bak_trace::extension_suffix(name).is_some()
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Mismatch {
@@ -81,6 +101,13 @@ impl Mismatch {
                 && bak_trace::extension_suffix(name)
                     .is_some_and(|(_, id)| extension_ids.contains(&id))
         })
+    }
+
+    pub fn unaccounted_extension_twins(&self) -> impl Iterator<Item = &str> {
+        self.extra
+            .iter()
+            .map(String::as_str)
+            .filter(|name| is_extension_twin_name(name))
     }
 }
 
@@ -243,15 +270,45 @@ pub struct Inventory {
     pub depot_files: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidatedInventory {
+    pub depot_files: bool,
+    pub ignored_extra_tables: Vec<String>,
+}
+
 pub fn known_tables(schema: &LogicalSchema) -> Result<Vec<String>, Error> {
+    known_tables_with_extensions(schema, None)
+}
+
+pub fn known_tables_with_extensions(
+    schema: &LogicalSchema,
+    extension: Option<(u32, &LogicalSchema)>,
+) -> Result<Vec<String>, Error> {
     let mut names: Vec<String> = SYSTEM_TABLES.iter().map(|t| (*t).to_owned()).collect();
     for head in dtfile::TableHead::database(schema)? {
         names.push(head.phys_name);
+    }
+    if let Some((schema_id, ext_schema)) = extension {
+        for head in dtfile::TableHead::extension(schema_id, ext_schema)? {
+            names.push(head.phys_name);
+        }
     }
     Ok(names)
 }
 
 pub fn validate_inventory(schema: &LogicalSchema, tables: &[String]) -> Result<Inventory, Error> {
+    let validated = validate_inventory_with_extensions(schema, None, tables, false)?;
+    Ok(Inventory {
+        depot_files: validated.depot_files,
+    })
+}
+
+pub fn validate_inventory_with_extensions(
+    schema: &LogicalSchema,
+    extension: Option<(u32, &LogicalSchema)>,
+    tables: &[String],
+    ignore_extra_tables: bool,
+) -> Result<ValidatedInventory, Error> {
     let optional = name(OPTIONAL_SYSTEM_TABLE)?;
     let mut expected: HashMap<String, (String, bool)> = HashMap::new();
     for table in SYSTEM_TABLES {
@@ -269,6 +326,16 @@ pub fn validate_inventory(schema: &LogicalSchema, tables: &[String]) -> Result<I
             .is_some()
         {
             return Err(Error::Invalid("duplicate schema table"));
+        }
+    }
+    if let Some((schema_id, ext_schema)) = extension {
+        for head in dtfile::TableHead::extension(schema_id, ext_schema)? {
+            if expected
+                .insert(name(&head.phys_name)?, (head.phys_name, false))
+                .is_some()
+            {
+                return Err(Error::Invalid("duplicate extension table"));
+            }
         }
     }
     if expected.contains_key(&optional) {
@@ -294,11 +361,28 @@ pub fn validate_inventory(schema: &LogicalSchema, tables: &[String]) -> Result<I
         .filter(|(key, _)| !expected.contains_key(*key))
         .map(|(_, table)| (*table).clone())
         .collect();
-    if missing.is_empty() && extra.is_empty() {
-        return Ok(Inventory { depot_files });
-    }
     missing.sort_unstable_by_key(|m| (!m.system, m.name.to_ascii_lowercase()));
     extra.sort_unstable_by_key(|s| s.to_ascii_lowercase());
+    if missing.is_empty() && extra.is_empty() {
+        return Ok(ValidatedInventory {
+            depot_files,
+            ignored_extra_tables: Vec::new(),
+        });
+    }
+    if missing.is_empty() && ignore_extra_tables {
+        let twins: Vec<String> = extra
+            .iter()
+            .filter(|table| is_extension_twin_name(table))
+            .cloned()
+            .collect();
+        if !twins.is_empty() {
+            return Err(Error::UnexpectedExtensionTwins(twins));
+        }
+        return Ok(ValidatedInventory {
+            depot_files,
+            ignored_extra_tables: extra,
+        });
+    }
     Err(Error::Mismatch(Mismatch { missing, extra }))
 }
 

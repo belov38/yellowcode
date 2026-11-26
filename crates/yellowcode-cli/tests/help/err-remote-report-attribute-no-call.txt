@@ -1,0 +1,9 @@
+exit 2
+--- stdout
+--- stderr
+error: the following required arguments were not provided:
+  --call <ПРОЦЕДУРА>
+
+Usage: yellowcode remote report --form <ИМЯ_ФОРМЫ> --call <ПРОЦЕДУРА> --attribute <РЕКВИЗИТ> <URL>
+
+For more information, try '--help'.

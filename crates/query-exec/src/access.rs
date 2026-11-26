@@ -89,6 +89,7 @@ fn leftmost_scan(mut r: &mut RelL) -> Option<&mut RelL> {
         r = match r {
             RelL::Join { l, .. } => l,
             RelL::CheckAccess { input, .. }
+            | RelL::DefaultIfEmpty { input, .. }
             | RelL::RunningBalance { input, .. }
             | RelL::Filter { input, .. }
             | RelL::Project { input, .. }

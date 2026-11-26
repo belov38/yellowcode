@@ -1,12 +1,12 @@
 use md_model::{Child, ChildTag, MdKind, MdRef};
 
 use super::catalog::{attributes, indexed_attributes, main_table, tabular_sections};
-use super::common::common_group;
+use super::common::{common_group, separators_group};
 use super::ctx::{Ctx, Props, tag_name};
 use super::exchange;
 use super::fields::{self, RefForm};
 use super::in_object;
-use super::index::{Tok, indexed};
+use super::index::{Tok, add_order, indexed};
 use super::types::{
     Class, RefTarget, classes as classes_of, logical_types, main_target, ref_target,
 };
@@ -58,15 +58,17 @@ pub(crate) fn main(cx: &Ctx, names: &mut Names) -> Result<Vec<(Table, TableRole)
         Tok::AddOrder(f::DATE_TIME),
         F(f::ID),
         Tok::AddOrder(f::MARKED),
+        Tok::AddOrderOther,
     ];
     for a in indexed_attributes(cx) {
-        b.rule(cx, names, field_index_name(a), true, &toks, Some(a))?;
+        let tmpl = field_index_name(a, names);
+        b.rule(cx, names, tmpl, true, &toks, Some(a))?;
     }
     Ok(vec![b.finish()])
 }
 
-fn field_index_name(a: &Child) -> &'static str {
-    if indexed(a) {
+fn field_index_name(a: &Child, names: &Names) -> &'static str {
+    if indexed(a) && names.get(a.id, "ByField").is_none() {
         "ByField{F}"
     } else {
         "ByField{n}"
@@ -107,6 +109,49 @@ fn referenced_item<'a>(cx: &Ctx<'a>, r: &MdRef) -> Option<&'a Child> {
     }
 }
 
+fn push_merged_class(classes: &mut Vec<Class>, c: Class) {
+    match c {
+        Class::S { len, fixed } => {
+            if let Some(Class::S {
+                len: cur_len,
+                fixed: cur_fixed,
+            }) = classes.iter_mut().find(|x| matches!(x, Class::S { .. }))
+            {
+                if *cur_len == 0 || len == 0 {
+                    *cur_len = 0;
+                    *cur_fixed = false;
+                } else {
+                    *cur_len = (*cur_len).max(len);
+                    *cur_fixed = *cur_fixed && fixed;
+                }
+            } else {
+                classes.push(Class::S { len, fixed });
+            }
+        }
+        Class::N { digits, fraction } => {
+            if let Some(Class::N {
+                digits: cur_digits,
+                fraction: cur_frac,
+            }) = classes.iter_mut().find(|x| matches!(x, Class::N { .. }))
+            {
+                let int_digits = cur_digits
+                    .saturating_sub(*cur_frac)
+                    .max(digits.saturating_sub(fraction));
+                let frac = (*cur_frac).max(fraction);
+                *cur_digits = (int_digits + frac).min(38);
+                *cur_frac = frac;
+            } else {
+                classes.push(Class::N { digits, fraction });
+            }
+        }
+        other => {
+            if !classes.contains(&other) {
+                classes.push(other);
+            }
+        }
+    }
+}
+
 pub(crate) fn journal(cx: &Ctx, names: &mut Names) -> Result<Vec<(Table, TableRole)>> {
     use Tok::F;
     let mut b = table_of(
@@ -124,8 +169,13 @@ pub(crate) fn journal(cx: &Ctx, names: &mut Names) -> Result<Vec<(Table, TableRo
     b.std(StdField::Marked, fields::marked());
     b.std(StdField::Posted, fields::posted());
     let mut classes: Vec<Class> = Vec::new();
+    let mut num_docs = 0usize;
     for d in &cx.docs {
         let dc = Ctx::new(cx.md, d)?;
+        if dc.num_len == 0 {
+            continue;
+        }
+        num_docs += 1;
         let c = match dc.number {
             Class::N { digits, .. } => Class::N {
                 digits,
@@ -133,13 +183,12 @@ pub(crate) fn journal(cx: &Ctx, names: &mut Names) -> Result<Vec<(Table, TableRo
             },
             other => other,
         };
-        if !classes.contains(&c) {
-            classes.push(c);
-        }
+        push_merged_class(&mut classes, c);
     }
     if !classes.is_empty() {
         let t = logical_types(&classes, false).map_err(|e| in_object(&cx.full_name, e))?;
-        b.std(StdField::Number, fields::field(f::NUMBER, false, t));
+        let null = num_docs < cx.docs.len();
+        b.std(StdField::Number, fields::field(f::NUMBER, null, t));
     }
     let columns: Vec<&Child> = cx
         .obj
@@ -160,13 +209,44 @@ pub(crate) fn journal(cx: &Ctx, names: &mut Names) -> Result<Vec<(Table, TableRo
         let null = rs.len() < cx.docs.len();
         b.item(fields::field(name, null, types), col.id, at);
     }
+    separators_group(&mut b, cx, names)?;
+
+    let mut ao_cols: Vec<(&Child, String)> = Vec::new();
+    for &col in &columns {
+        if add_order(col) {
+            ao_cols.push((col, fields::item_name(col, names)?));
+        }
+    }
+    ao_cols.sort_by_key(|(c, _)| *c.id.as_bytes());
+    let ao_all: Vec<String> = ao_cols.iter().map(|(_, n)| n.clone()).collect();
 
     b.rule(cx, names, "ByDoc", true, &[F(f::DOCUMENT)], None)?;
-    let toks = [F(f::DATE_TIME), F(f::DOCUMENT), F(f::MARKED)];
+    let toks = [
+        F(f::DATE_TIME),
+        F(f::DOCUMENT),
+        F(f::MARKED),
+        Tok::List(ao_all),
+    ];
     b.rule(cx, names, "ByDocDate", true, &toks, None)?;
     for col in columns.iter().filter(|c| indexed(c)) {
-        let toks = [Tok::Attr, F(f::DOCUMENT)];
-        b.rule(cx, names, "ByField{n}", true, &toks, Some(col))?;
+        if add_order(col) {
+            let ao_other: Vec<String> = ao_cols
+                .iter()
+                .filter(|(c, _)| c.id != col.id)
+                .map(|(_, n)| n.clone())
+                .collect();
+            let toks = [
+                Tok::Attr,
+                F(f::DATE_TIME),
+                F(f::DOCUMENT),
+                F(f::MARKED),
+                Tok::List(ao_other),
+            ];
+            b.rule(cx, names, "ByField{n}", true, &toks, Some(col))?;
+        } else {
+            let toks = [Tok::Attr, F(f::DOCUMENT)];
+            b.rule(cx, names, "ByField{n}", true, &toks, Some(col))?;
+        }
     }
     Ok(vec![b.finish()])
 }
@@ -184,9 +264,7 @@ fn union_classes(cx: &Ctx, rs: &[MdRef], at: &str, names: &mut Names) -> Result<
             .type_desc()
             .ok_or_else(|| Error::Unsupported(format!("{at}: referenced item has no type")))?;
         for c in classes_of(cx, td, at, names)? {
-            if !cls.contains(&c) {
-                cls.push(c);
-            }
+            push_merged_class(&mut cls, c);
         }
     }
     Ok(cls)
@@ -222,6 +300,7 @@ pub(crate) fn sequence(cx: &Ctx, names: &mut Names) -> Result<Vec<(Table, TableR
         fields::reference(f::RECORDER, &targets, RefForm::T, false),
     );
     dimensions(&mut b, cx, names)?;
+    separators_group(&mut b, cx, names)?;
     b.rule(cx, names, "ByRecorder", !cx.dims, &[F(f::RECORDER)], None)?;
     let toks = [Tok::Dims, F(f::PERIOD), F(f::RECORDER)];
     b.rule(cx, names, "ByDims", true, &toks, None)?;
@@ -240,6 +319,7 @@ pub(crate) fn sequence(cx: &Ctx, names: &mut Names) -> Result<Vec<(Table, TableR
         StdField::Recorder,
         fields::reference(f::RECORDER, &[], RefForm::E, false),
     );
+    separators_group(&mut bb, cx, names)?;
     if cx.dims {
         bb.rule(cx, names, "ByDims", true, &[Tok::Dims], None)?;
     }
@@ -257,8 +337,7 @@ pub(crate) fn business_process(cx: &Ctx, names: &mut Names) -> Result<Vec<(Table
     use Tok::F;
     let tasks = cx
         .md
-        .resolve_all(cx.obj.refs("Task"), &format!("{}.Task", cx.full_name))?;
-    let tasks = tasks
+        .of_kind(MdKind::Task)
         .iter()
         .map(|t| main_target(t, names))
         .collect::<Result<Vec<_>>>()?;
@@ -272,7 +351,7 @@ pub(crate) fn business_process(cx: &Ctx, names: &mut Names) -> Result<Vec<(Table
     }
     b.std(
         StdField::HeadTask,
-        fields::reference(f::HEAD_TASK, &tasks, RefForm::T, false),
+        fields::reference(f::HEAD_TASK, &tasks, RefForm::E, false),
     );
     b.std(StdField::Started, fields::boolean(f::STARTED));
     attributes(&mut b, cx, names, false)?;
@@ -348,19 +427,22 @@ pub(crate) fn business_process(cx: &Ctx, names: &mut Names) -> Result<Vec<(Table
 
 pub(crate) fn task(cx: &Ctx, names: &mut Names) -> Result<Vec<(Table, TableRole)>> {
     use Tok::F;
-    let procs = process_targets(cx, names, purpose::BPR)?;
-    let points = process_targets(cx, names, purpose::BPR_POINTS)?;
+    let has_bp = !cx.bps.is_empty();
     let mut b = main_table(cx, names)?;
     b.std(StdField::Version, fields::version());
     b.std(StdField::Marked, fields::marked());
-    b.std(
-        StdField::BusinessProcess,
-        fields::reference(f::BUSINESS_PROCESS, &procs, RefForm::T, false),
-    );
-    b.std(
-        StdField::Point,
-        fields::reference(f::POINT, &points, RefForm::T, false),
-    );
+    if has_bp {
+        let procs = process_targets(cx, names, purpose::BPR)?;
+        let points = process_targets(cx, names, purpose::BPR_POINTS)?;
+        b.std(
+            StdField::BusinessProcess,
+            fields::reference(f::BUSINESS_PROCESS, &procs, RefForm::E, false),
+        );
+        b.std(
+            StdField::Point,
+            fields::reference(f::POINT, &points, RefForm::E, false),
+        );
+    }
     b.std(StdField::DateTime, fields::date_time());
     if cx.num_len > 0 {
         b.std(StdField::Number, fields::number(cx)?);
@@ -370,12 +452,13 @@ pub(crate) fn task(cx: &Ctx, names: &mut Names) -> Result<Vec<(Table, TableRole)
     }
     b.std(StdField::Executed, fields::boolean(f::EXECUTED));
     attributes(&mut b, cx, names, false)?;
-    for a in cx
+    let addr_attrs: Vec<&Child> = cx
         .obj
         .children
         .iter()
         .filter(|c| c.tag == ChildTag::AddressingAttribute)
-    {
+        .collect();
+    for &a in &addr_attrs {
         let at = cx.child_name(a);
         let fl = fields::item(cx, a, &at, false, false, names)?;
         b.item(fl, a.id, at);
@@ -402,17 +485,19 @@ pub(crate) fn task(cx: &Ctx, names: &mut Names) -> Result<Vec<(Table, TableRole)
     )?;
     let toks = [F(f::EXECUTED), F(f::DATE_TIME), F(f::ID)];
     b.rule(cx, names, "ByExecTaskDate", true, &toks, None)?;
-    let toks = [F(f::BUSINESS_PROCESS), F(f::POINT), F(f::ID)];
-    b.rule(cx, names, "ByProcPoint", true, &toks, None)?;
-    let toks = [
-        F(f::EXECUTED),
-        F(f::BUSINESS_PROCESS),
-        F(f::POINT),
-        F(f::ID),
-    ];
-    b.rule(cx, names, "ByProcPointExec", true, &toks, None)?;
-    let toks = [F(f::BUSINESS_PROCESS), F(f::DATE_TIME), F(f::ID)];
-    b.rule(cx, names, "ByProcDate", true, &toks, None)?;
+    if has_bp {
+        let toks = [F(f::BUSINESS_PROCESS), F(f::POINT), F(f::ID)];
+        b.rule(cx, names, "ByProcPoint", true, &toks, None)?;
+        let toks = [
+            F(f::EXECUTED),
+            F(f::BUSINESS_PROCESS),
+            F(f::POINT),
+            F(f::ID),
+        ];
+        b.rule(cx, names, "ByProcPointExec", true, &toks, None)?;
+        let toks = [F(f::BUSINESS_PROCESS), F(f::DATE_TIME), F(f::ID)];
+        b.rule(cx, names, "ByProcDate", true, &toks, None)?;
+    }
     if cx.descr_len > 0 {
         b.rule(cx, names, "ByName", true, &[F(f::NAME), F(f::ID)], None)?;
         let toks = [F(f::EXECUTED), F(f::NAME), F(f::ID)];
@@ -428,14 +513,43 @@ pub(crate) fn task(cx: &Ctx, names: &mut Names) -> Result<Vec<(Table, TableRole)
             Some(a),
         )?;
     }
-    if cx.addressing {
+    let main_addr: Option<&Child> = cx
+        .obj
+        .refs("MainAddressingAttribute")
+        .first()
+        .and_then(|r| {
+            addr_attrs.iter().copied().find(|c| {
+                r.id.is_some_and(|id| id == c.id)
+                    || (!r.name.is_empty() && r.name.rsplit('.').next() == Some(c.name.as_str()))
+            })
+        });
+    let other_addr: Vec<String> = addr_attrs
+        .iter()
+        .filter(|a| main_addr.is_none_or(|m| m.id != a.id))
+        .map(|a| fields::item_name(a, names))
+        .collect::<Result<_>>()?;
+    if !other_addr.is_empty() {
         b.rule(
             cx,
             names,
             "ByAddrProps",
             true,
-            &[Tok::Addressing, F(f::ID)],
+            &[Tok::List(other_addr), F(f::ID)],
             None,
+        )?;
+    }
+    if let Some(main) = main_addr {
+        let toks = [F(f::EXECUTED), Tok::Attr, F(f::ID)];
+        b.rule(cx, names, "ByMainAddrProp", true, &toks, Some(main))?;
+    }
+    for &a in addr_attrs.iter().filter(|a| indexed(a)) {
+        b.rule(
+            cx,
+            names,
+            "ByField{n}",
+            true,
+            &[Tok::Attr, F(f::ID)],
+            Some(a),
         )?;
     }
     let mut out = vec![b.finish()];

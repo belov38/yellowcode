@@ -1,6 +1,7 @@
 mod accounting_flags;
 pub mod atoms;
 mod bind;
+pub(crate) mod calculation_base;
 mod managed;
 mod misc;
 pub mod names;
@@ -51,6 +52,7 @@ pub struct QTable {
     pub star: Vec<QFieldId>,
     pub params: Vec<VtParam>,
     pub reference: Option<RefAtom>,
+    pub auto_order_by_code: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -395,6 +397,7 @@ pub struct QuerySchema {
     meta: HashMap<QTableId, ObjMeta>,
     diagnostics: Vec<String>,
     schedules: HashMap<QTableId, schedule::Facts>,
+    bases: HashMap<QTableId, calculation_base::BaseFacts>,
     data_separators: Vec<DataSeparator>,
 }
 
@@ -408,6 +411,7 @@ static EMPTY_TABLE: QTable = QTable {
     star: Vec::new(),
     params: Vec::new(),
     reference: None,
+    auto_order_by_code: false,
 };
 
 static EMPTY_REF: RefInfo = RefInfo {
@@ -562,10 +566,13 @@ impl QuerySchema {
                             | VtKind::DrCrTurnovers
                             | VtKind::Turnovers
                             | VtKind::Balance
+                            | VtKind::BalanceAndTurnovers
                     )
                 ) | (
                     TableKind::Object(mdschema::MdKind::CalculationRegister),
-                    TableKind::Virtual(VtKind::ActualActionPeriod | VtKind::ScheduleData)
+                    TableKind::Virtual(
+                        VtKind::ActualActionPeriod | VtKind::ScheduleData | VtKind::Base
+                    )
                 ) | (
                     TableKind::Object(mdschema::MdKind::InformationRegister),
                     TableKind::Virtual(VtKind::SliceLast | VtKind::SliceFirst)
@@ -816,6 +823,7 @@ pub(crate) struct Builder<'a> {
     pub by_full: HashMap<String, QTableId>,
     pub meta: HashMap<QTableId, ObjMeta>,
     schedules: HashMap<QTableId, schedule::Facts>,
+    bases: HashMap<QTableId, calculation_base::BaseFacts>,
     pub refs: RefIndex,
     pub sys: SysTypes,
     pub sys_enums: SysEnums,
@@ -837,6 +845,7 @@ impl<'a> Builder<'a> {
             by_full: HashMap::new(),
             meta: HashMap::new(),
             schedules: HashMap::new(),
+            bases: HashMap::new(),
             refs: RefIndex::default(),
             sys,
             sys_enums: SysEnums::new(cat),
@@ -924,9 +933,11 @@ impl<'a> Builder<'a> {
         );
         let mut schedule_version = Fnv(version);
         hash_sorted(&self.schedules, &mut schedule_version);
+        hash_sorted(&self.bases, &mut schedule_version);
         Ok(QuerySchema {
             version: schedule_version.finish(),
             schedules: self.schedules,
+            bases: self.bases,
             script,
             tables: self.tables,
             by_name,

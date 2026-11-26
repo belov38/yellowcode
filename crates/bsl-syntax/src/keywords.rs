@@ -185,9 +185,7 @@ const fn build() -> [Entry; KEYWORDS.len()] {
     while i < out.len() {
         let mut j = i;
         while j > 0 && out[j - 1].len > out[j].len {
-            let t = out[j - 1];
-            out[j - 1] = out[j];
-            out[j] = t;
+            out.swap(j - 1, j);
             j -= 1;
         }
         i += 1;

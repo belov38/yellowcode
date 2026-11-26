@@ -269,6 +269,7 @@ impl Typed<'_> {
                 args,
                 drcr,
                 accounting_dependencies,
+                periodicity,
                 ..
             } => {
                 let periods = if crate::lower::is_accounting_balance(self.collector.schema, *id) {
@@ -279,6 +280,23 @@ impl Typed<'_> {
                     0
                 };
                 if let Some(binding) = binding {
+                    if periods == 2 {
+                        let forced_roles: &[StdRole] = match periodicity {
+                            crate::schema::Periodicity::Unit(_) => &[StdRole::Period],
+                            crate::schema::Periodicity::Recorder => {
+                                &[StdRole::Period, StdRole::Recorder]
+                            }
+                            crate::schema::Periodicity::Record => {
+                                &[StdRole::Period, StdRole::Recorder, StdRole::LineNumber]
+                            }
+                            crate::schema::Periodicity::Absent
+                            | crate::schema::Periodicity::Auto => &[],
+                        };
+                        for role in forced_roles {
+                            self.collector
+                                .role(Occurrence::Direct(binding.src), *id, *role)?;
+                        }
+                    }
                     for expression in args.iter().take(periods).flatten() {
                         match &expression.kind {
                             TKind::Const(crate::QValue::Date(d))
@@ -405,11 +423,12 @@ impl Typed<'_> {
                     .and_then(|(t, f)| self.collector.schema.field(t, f))
                     .and_then(|f| f.nested);
                 if let Some(table) = table {
+                    let mut nested_section = None;
                     if let TKind::Field {
                         level,
                         source,
+                        col,
                         derefs,
-                        ..
                     } = &item.expr.kind
                         && derefs.is_empty()
                         && let Some(owner) = Self::lookup(levels, *level, *source)
@@ -420,6 +439,9 @@ impl Typed<'_> {
                             owner_table,
                             StdRole::Ref,
                         )?;
+                        if let Col::Field(section_field) = col {
+                            nested_section = Some((owner.src, *section_field));
+                        }
                     }
                     let b = self.binding(Some(table), items.iter().any(|i| i.star))?;
                     for role in [StdRole::Ref, StdRole::LineNumber] {
@@ -428,7 +450,13 @@ impl Typed<'_> {
                     }
                     let mut nested = vec![vec![Some(b)]];
                     nested.extend(levels.iter().cloned());
-                    self.items(items, &nested)?;
+                    let prev_section = self.section;
+                    if let Some((owner_src, section_field)) = nested_section {
+                        self.section = Some((owner_src, section_field, b));
+                    }
+                    let res = self.items(items, &nested);
+                    self.section = prev_section;
+                    res?;
                 } else {
                     return Err(ExecError::Fatal(
                         "security nested source has no identity".into(),
@@ -545,10 +573,18 @@ impl Typed<'_> {
         {
             proof.disable();
         }
-        let arm_order = query.autoorder
-            && query.parts.len() > 1
+        let arm_order = query.parts.len() > 1
             && !query.order.is_empty()
-            && query.order.iter().all(|key| key.col.is_some());
+            && query.order.iter().all(|key| key.col.is_some())
+            && (query.autoorder
+                || query.order.iter().any(|key| {
+                    matches!(
+                        key.dir,
+                        query_syntax::ast::OrderDir::Hierarchy
+                            | query_syntax::ast::OrderDir::HierarchyDesc
+                    )
+                }));
+        let arm_auto_no_order = query.autoorder && query.parts.len() > 1 && query.order.is_empty();
         let mut first = None;
         for select in &query.parts {
             let levels = self.select(select, outer)?;
@@ -579,10 +615,35 @@ impl Typed<'_> {
                     parts: Vec::new(),
                     unions: Vec::new(),
                     order,
-                    autoorder: true,
+                    autoorder: query.autoorder,
                     totals: None,
                 };
                 self.order_with_proof(&arm, &levels)?;
+            } else if arm_auto_no_order {
+                let order: Vec<tir::OrderKey> = select
+                    .items
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, item)| {
+                        item.nested.is_none()
+                            && crate::ir::union_autoorder_col_orderable(&item.expr.ty)
+                    })
+                    .map(|(col, item)| tir::OrderKey {
+                        expr: item.expr.clone(),
+                        col: Some(col),
+                        dir: query_syntax::ast::OrderDir::Asc,
+                    })
+                    .collect();
+                if !order.is_empty() {
+                    let arm = tir::Query {
+                        parts: Vec::new(),
+                        unions: Vec::new(),
+                        order,
+                        autoorder: true,
+                        totals: None,
+                    };
+                    self.order_with_proof(&arm, &levels)?;
+                }
             }
             if first.is_none() {
                 first = Some(levels);
@@ -592,7 +653,7 @@ impl Typed<'_> {
         for key in &query.order {
             self.expr(&key.expr, &levels)?;
         }
-        if !arm_order {
+        if !arm_order && !arm_auto_no_order {
             self.order_with_proof(query, &levels)?;
         }
         if let Some(totals) = &query.totals {
@@ -631,8 +692,10 @@ impl Typed<'_> {
             && col == Col::Field(section_field)
             && let Some((first, rest)) = derefs.split_first()
         {
-            for &(_, field) in &first.targets {
-                self.field_expr(0, 0, Col::Field(field), rest, &vec![vec![Some(section)]])?;
+            for &(t, field) in &first.targets {
+                if section.table == Some(t) {
+                    self.field_expr(0, 0, Col::Field(field), rest, &vec![vec![Some(section)]])?;
+                }
             }
             return Ok(());
         }
@@ -901,8 +964,11 @@ pub(in crate::bind) fn preflight_with_admission(
     let mut drcr_unsupported = false;
     let mut turnovers_supplied = false;
     let mut balance_supplied = false;
+    let mut bt_supplied = false;
     let mut balance_unsupported = false;
     let mut turnovers_unsupported = false;
+    let mut bt_unsupported = false;
+    let mut base_unsupported = false;
     let mut deferred: Option<(u32, crate::tir::RecordsDeferred)> = None;
     let mut composition = false;
     crate::sema::stats::visit_table_sources(stmt, &mut |source| {
@@ -913,12 +979,18 @@ pub(in crate::bind) fn preflight_with_admission(
             accounting,
             accounting_dependencies,
             drcr,
+            base,
             span,
             ..
         } = source
         else {
             return;
         };
+        if ctx.schema.table(*id).kind == TableKind::Virtual(crate::VtKind::Base) {
+            base_unsupported |= base.as_ref().is_none_or(|b| {
+                b.deferred || b.main_dims_param.is_none() || b.base_dims_param.is_none()
+            });
+        }
         if let TableKind::Virtual(kind) = ctx.schema.table(*id).kind
             && super::calculation::code(kind).is_some()
         {
@@ -936,7 +1008,8 @@ pub(in crate::bind) fn preflight_with_admission(
             }
         }
         has_accounting |= crate::lower::is_accounting_balance(ctx.schema, *id)
-            || crate::lower::is_accounting_turnovers(ctx.schema, *id);
+            || crate::lower::is_accounting_turnovers(ctx.schema, *id)
+            || crate::lower::is_accounting_balance_and_turnovers(ctx.schema, *id);
         drcr_supplied |= drcr
             .as_ref()
             .is_some_and(|d| d.supplied.iter().any(|x| *x != 0));
@@ -947,10 +1020,14 @@ pub(in crate::bind) fn preflight_with_admission(
             crate::lower::is_accounting_balance(ctx.schema, *id) && !args.is_empty();
         turnovers_supplied |=
             crate::lower::is_accounting_turnovers(ctx.schema, *id) && !args.is_empty();
+        bt_supplied |=
+            crate::lower::is_accounting_balance_and_turnovers(ctx.schema, *id) && !args.is_empty();
         balance_unsupported |= crate::lower::is_accounting_balance(ctx.schema, *id)
-            && !accounting.is_some_and(|a| a.supports(args, 1));
+            && !accounting.is_some_and(|a| a.supports_balance(args));
         turnovers_unsupported |= crate::lower::is_accounting_turnovers(ctx.schema, *id)
-            && !accounting.is_some_and(|a| a.supports(args, 2));
+            && !accounting.is_some_and(|a| a.supports_turnovers(args));
+        bt_unsupported |= crate::lower::is_accounting_balance_and_turnovers(ctx.schema, *id)
+            && !accounting.is_some_and(|a| a.supports_balance_and_turnovers(args));
         if let Some(reason) = records.as_ref().and_then(|r| r.deferred) {
             composition |= reason == crate::tir::RecordsDeferred::Composition;
             let at = span.map_or(u32::MAX, |s| s.start);
@@ -978,8 +1055,11 @@ pub(in crate::bind) fn preflight_with_admission(
         && !drcr_supplied
         && !turnovers_supplied
         && !balance_supplied
+        && !bt_supplied
         && !balance_unsupported
         && !turnovers_unsupported
+        && !bt_unsupported
+        && !base_unsupported
     {
         return Ok(());
     }
@@ -1015,6 +1095,7 @@ pub(in crate::bind) fn preflight_with_admission(
                 return Err(super::calculation::refusal(what));
             }
             let balance = crate::lower::is_accounting_balance(ctx.schema, table.table)
+                || crate::lower::is_accounting_balance_and_turnovers(ctx.schema, table.table)
                 || matches!(key, Occurrence::BalanceChart(_));
             if matches!(access, Access::Restricted(_))
                 && (balance || crate::lower::is_accounting_turnovers(ctx.schema, table.table))
@@ -1038,10 +1119,22 @@ pub(in crate::bind) fn preflight_with_admission(
             stage: "Q6b",
         });
     }
+    if bt_unsupported {
+        return Err(ExecError::Later {
+            what: "Q6c-AccountingBalanceAndTurnoversArguments",
+            stage: "Q6c",
+        });
+    }
     if drcr_unsupported {
         return Err(ExecError::Later {
             what: "Q6b-DrCrTurnoversArguments",
             stage: "Q6b",
+        });
+    }
+    if base_unsupported {
+        return Err(ExecError::Later {
+            what: "Q6d-CalculationBaseArguments",
+            stage: "Q6d",
         });
     }
     if let Some((_, reason)) = deferred {

@@ -61,6 +61,41 @@ pub struct PointSpec {
     pub hierarchy: HierarchyMode,
     pub periods: Option<PeriodsSpec>,
     pub hier: Vec<HierTableSpec>,
+    pub dependent: Vec<DependentSpec>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DependentSpec {
+    pub column: usize,
+    pub hier: Option<HierDepSpec>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum HierDepSpec {
+    SelfRef,
+    Chain(Vec<HierDepStep>),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct HierDepStep {
+    pub branches: Vec<HierFieldRead>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HierFieldRead {
+    pub number: u32,
+    pub table: TableId,
+    pub field: FieldId,
+    pub only: Option<(FieldId, bool)>,
+    pub transform: HierFieldTransform,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HierFieldTransform {
+    Identity,
+    InvertBool,
+    NonZeroUuid,
+    RefSelf,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -404,6 +439,19 @@ pub struct PointS {
     pub hierarchy: HierarchyMode,
     pub periods: Option<PeriodsS>,
     pub hier: Vec<HierS>,
+    pub dependent: Vec<DependentS>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DependentS {
+    pub column: usize,
+    pub hier: Option<HierDepS>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum HierDepS {
+    SelfRef,
+    Chain(Vec<Vec<(QTableId, QFieldId)>>),
 }
 
 #[derive(Clone, Debug, PartialEq)]

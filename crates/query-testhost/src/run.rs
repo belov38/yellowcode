@@ -4,13 +4,14 @@ use crate::FailureChain;
 use crate::batch_memory::BatchMemory;
 use crate::exec_host::TestHost;
 use crate::host::{TestBase, project_root};
-use crate::params::{CaseParams, ParamErr, case_params};
-use crate::repr::repr_lang;
+use crate::params::{CaseParams, ParamErr, SessionParams, case_params};
+use crate::repr::repr_column_lang;
 use bsl_prim::Number;
 use query_exec::{
     BatchError, ExecHost, QueryResult, RunMode as ExecMode, StmtOutcome, TempTables, count_column,
     explain_last, run_batch_budgeted, run_batch_detailed,
 };
+use query_ir::host::SessionValues;
 use query_ir::ir::{BuildError, build_stmt};
 use query_ir::{
     AnalyzeMode, AnalyzeOptions, CompileError, ExecError, HostError, QValue, TempMap, analyze_stmt,
@@ -494,30 +495,33 @@ fn run_inner(host: &TestHost<'_>, case: &Value) -> Result<Value, Stop> {
             results.push(r);
             continue;
         }
-        let (columns, rows): (Vec<Value>, Vec<Vec<QValue>>) = match &run.outcome {
-            StmtOutcome::Dropped => {
-                results.push(Value::Null);
-                continue;
-            }
-            StmtOutcome::Count(n) => (
-                vec![count_column_json(schema, lang)],
-                vec![vec![QValue::Number(Number::from_u64(*n))]],
-            ),
-            StmtOutcome::Result(res) => {
-                let columns = res
-                    .columns
-                    .iter()
-                    .map(|c| {
-                        json!({
-                            "name": c.name,
-                            "type": query_testkit::repr::type_repr(schema, &c.ty, lang),
-                            "width": c.width,
+        let (columns, col_types, rows): (Vec<Value>, Vec<query_ir::QType>, Vec<Vec<QValue>>) =
+            match &run.outcome {
+                StmtOutcome::Dropped => {
+                    results.push(Value::Null);
+                    continue;
+                }
+                StmtOutcome::Count(n) => (
+                    vec![count_column_json(schema, lang)],
+                    vec![count_column(schema.script()).ty],
+                    vec![vec![QValue::Number(Number::from_u64(*n))]],
+                ),
+                StmtOutcome::Result(res) => {
+                    let columns = res
+                        .columns
+                        .iter()
+                        .map(|c| {
+                            json!({
+                                "name": c.name,
+                                "type": query_testkit::repr::type_repr(schema, &c.ty, lang),
+                                "width": c.width,
+                            })
                         })
-                    })
-                    .collect();
-                (columns, res.rows.clone())
-            }
-        };
+                        .collect();
+                    let col_types = res.columns.iter().map(|c| c.ty.clone()).collect();
+                    (columns, col_types, res.rows.clone())
+                }
+            };
         let n = columns.len();
         let rows: Vec<Value> = rows
             .iter()
@@ -525,7 +529,10 @@ fn run_inner(host: &TestHost<'_>, case: &Value) -> Result<Value, Stop> {
                 Value::Array(
                     row.iter()
                         .take(n)
-                        .map(|v| Value::String(repr_lang(v, base, lang)))
+                        .enumerate()
+                        .map(|(i, v)| {
+                            Value::String(repr_column_lang(v, col_types.get(i), base, lang))
+                        })
                         .collect(),
                 )
             })
@@ -623,9 +630,22 @@ pub fn run_text_cancel(
     mode: RunMode,
     cancel: &AtomicBool,
 ) -> Result<Vec<StmtRun>, RunFailure> {
+    let session = SessionParams::default();
+    run_text_cancel_with_session(base, text, params, &session, mode, cancel)
+}
+
+pub fn run_text_cancel_with_session(
+    base: &TestBase,
+    text: &str,
+    params: &CaseParams,
+    session: &dyn SessionValues,
+    mode: RunMode,
+    cancel: &AtomicBool,
+) -> Result<Vec<StmtRun>, RunFailure> {
     let lang = mode.lang;
     let host = TestHost::with_cancel(base, lang, cancel)
-        .map_err(|e| RunFailure::err(vec![format!("internal: {e}")]))?;
+        .map_err(|e| RunFailure::err(vec![format!("internal: {e}")]))?
+        .with_session(session);
     let exec = if mode.inter {
         ExecMode::Intermediate
     } else {
@@ -655,9 +675,23 @@ pub fn run_text_cancel_budgeted(
     cancel: &AtomicBool,
     memory: &BatchMemory,
 ) -> Result<Vec<StmtRun>, RunFailure> {
+    let session = SessionParams::default();
+    run_text_cancel_budgeted_with_session(base, text, params, &session, mode, cancel, memory)
+}
+
+pub fn run_text_cancel_budgeted_with_session(
+    base: &TestBase,
+    text: &str,
+    params: &CaseParams,
+    session: &dyn SessionValues,
+    mode: RunMode,
+    cancel: &AtomicBool,
+    memory: &BatchMemory,
+) -> Result<Vec<StmtRun>, RunFailure> {
     let lang = mode.lang;
     let host = TestHost::with_memory(base, lang, cancel, memory)
-        .map_err(|e| RunFailure::err(vec![format!("internal: {e}")]))?;
+        .map_err(|e| RunFailure::err(vec![format!("internal: {e}")]))?
+        .with_session(session);
     let exec = if mode.inter {
         ExecMode::Intermediate
     } else {
@@ -681,6 +715,18 @@ pub fn explain_text(
     base: &TestBase,
     text: &str,
     params: &CaseParams,
+    mode: RunMode,
+    cancel: &AtomicBool,
+) -> Result<ExplainRun, RunFailure> {
+    let session = SessionParams::default();
+    explain_text_with_session(base, text, params, &session, mode, cancel)
+}
+
+pub fn explain_text_with_session(
+    base: &TestBase,
+    text: &str,
+    params: &CaseParams,
+    session: &dyn SessionValues,
     mode: RunMode,
     cancel: &AtomicBool,
 ) -> Result<ExplainRun, RunFailure> {
@@ -715,7 +761,8 @@ pub fn explain_text(
         ir.push(query_ir::ir::print(&s, schema));
     }
     let host = TestHost::with_cancel(base, lang, cancel)
-        .map_err(|e| RunFailure::err(vec![format!("internal: {e}")]))?;
+        .map_err(|e| RunFailure::err(vec![format!("internal: {e}")]))?
+        .with_session(session);
     let mut temp = TempTables::new();
     let plan = explain_last(&host, text, params, &mut temp)
         .map_err(|e| batch_failure(e, text, lang, base))?;
@@ -730,6 +777,19 @@ pub fn explain_text_budgeted(
     base: &TestBase,
     text: &str,
     params: &CaseParams,
+    mode: RunMode,
+    cancel: &AtomicBool,
+    memory: &BatchMemory,
+) -> Result<ExplainRun, RunFailure> {
+    let session = SessionParams::default();
+    explain_text_budgeted_with_session(base, text, params, &session, mode, cancel, memory)
+}
+
+pub fn explain_text_budgeted_with_session(
+    base: &TestBase,
+    text: &str,
+    params: &CaseParams,
+    session: &dyn SessionValues,
     mode: RunMode,
     cancel: &AtomicBool,
     memory: &BatchMemory,
@@ -811,7 +871,8 @@ pub fn explain_text_budgeted(
         return Err(RunFailure::err(vec!["Выполнение прервано".into()]));
     }
     let host = TestHost::with_memory(base, mode.lang, cancel, memory)
-        .map_err(|error| RunFailure::err(vec![format!("internal: {error}")]))?;
+        .map_err(|error| RunFailure::err(vec![format!("internal: {error}")]))?
+        .with_session(session);
     let evictor: Arc<dyn memory_budget::Evictor + Send + Sync> = memory.evictor.clone();
     let mut temp = TempTables::with_lease(Arc::clone(&memory.exec), evictor);
     let last = batch.stmts.len().saturating_sub(1);
@@ -1010,7 +1071,15 @@ fn result_json(base: &TestBase, lang: Lang, res: &QueryResult, ordered: bool) ->
             Value::Array(
                 row.iter()
                     .take(n)
-                    .map(|v| Value::String(repr_lang(v, base, lang)))
+                    .enumerate()
+                    .map(|(i, v)| {
+                        Value::String(repr_column_lang(
+                            v,
+                            res.columns.get(i).map(|c| &c.ty),
+                            base,
+                            lang,
+                        ))
+                    })
                     .collect(),
             )
         })

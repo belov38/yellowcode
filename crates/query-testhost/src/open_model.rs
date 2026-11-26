@@ -45,6 +45,13 @@ impl HostInputs {
             }
         }
         for o in &cfg.objects {
+            if let Some((ru, en)) = crate::host::object_presentation_titles(o) {
+                inputs.named_refs = inputs.named_refs.saturating_add(1);
+                inputs.named_ref_bytes = inputs
+                    .named_ref_bytes
+                    .saturating_add(ru.as_ref().map_or(0, |s| s.len() as u64))
+                    .saturating_add(en.as_ref().map_or(0, |s| s.len() as u64));
+            }
             for v in o.enum_values() {
                 inputs.named_refs = inputs.named_refs.saturating_add(1);
                 inputs.named_ref_bytes = inputs.named_ref_bytes.saturating_add(v.name.len() as u64);

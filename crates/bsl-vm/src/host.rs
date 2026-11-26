@@ -107,6 +107,42 @@ pub trait AppSerializer: Send + Sync {
             "ПрочитатьXML",
         )))
     }
+    fn xdto_types(
+        &self,
+        _ex: &mut Execution,
+        _v: &ObjRef,
+        _root: &XdtoName,
+    ) -> Result<Option<Vec<AppXdtoTypeDef>>, Exception> {
+        Ok(None)
+    }
+    fn old_xml_write(
+        &self,
+        _ex: &mut Execution,
+        _v: &ObjRef,
+    ) -> Result<Option<Vec<AppXdtoProp>>, Exception> {
+        Ok(None)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum AppXdtoTypeDef {
+    Object {
+        name: XdtoName,
+        properties: Vec<AppXdtoPropDef>,
+    },
+    Value {
+        name: XdtoName,
+        base: XdtoName,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub struct AppXdtoPropDef {
+    pub name: String,
+    pub ty: XdtoName,
+    pub lower: u32,
+    pub upper: i64,
+    pub nillable: bool,
 }
 
 #[derive(Clone, Debug)]

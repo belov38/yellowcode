@@ -29,6 +29,7 @@ pub(crate) struct Parser<'t> {
     pub limit_error: Option<crate::PublicParseLimit>,
     toks: Vec<Token>,
     i: usize,
+    prev_i: Option<usize>,
     pub map: SourceMap,
     pub mode: ParseMode,
     depth: u32,
@@ -91,13 +92,14 @@ impl<'t> Parser<'t> {
         mode: ParseMode,
         memory: Option<&'t crate::resource::ParseScope>,
     ) -> PResult<Parser<'t>> {
-        let p = Parser {
+        let mut p = Parser {
             text,
             memory,
             public_limits: false,
             limit_error: None,
             toks,
             i: 0,
+            prev_i: None,
             map,
             mode,
             depth: 0,
@@ -109,6 +111,7 @@ impl<'t> Parser<'t> {
             hash_lead: false,
             hash_cont: false,
         };
+        p.skip_query_comments()?;
         p.check_lex()?;
         Ok(p)
     }
@@ -121,21 +124,104 @@ impl<'t> Parser<'t> {
         }
     }
 
+    fn is_braced_join(&self, idx: usize) -> bool {
+        let kw_at = |offset: usize, kw: Kw| {
+            self.toks
+                .get(offset)
+                .is_some_and(|t| matches!(t.kind, TokKind::Word { kws, .. } if kws.contains(kw)))
+        };
+        if kw_at(idx + 1, Kw::Join) {
+            return true;
+        }
+        if kw_at(idx + 1, Kw::Inner) {
+            return kw_at(idx + 2, Kw::Join);
+        }
+        if kw_at(idx + 1, Kw::Left) || kw_at(idx + 1, Kw::Right) || kw_at(idx + 1, Kw::Full) {
+            return kw_at(idx + 2, Kw::Join)
+                || (kw_at(idx + 2, Kw::Outer) && kw_at(idx + 3, Kw::Join));
+        }
+        false
+    }
+
+    fn skip_brace_comment(&self, idx: usize) -> Result<usize, u32> {
+        let open_end = self.toks.get(idx).map_or(0, |t| t.span.end);
+        let mut depth = 1u32;
+        let mut j = idx + 1;
+        while let Some(t) = self.toks.get(j) {
+            match t.kind {
+                TokKind::Punct(Punct::LBrace) => depth = depth.saturating_add(1),
+                TokKind::Punct(Punct::RBrace) => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Ok(j + 1);
+                    }
+                }
+                _ => {}
+            }
+            j += 1;
+        }
+        Err(open_end)
+    }
+
+    fn skip_query_comments(&mut self) -> PResult<()> {
+        if self.mode != ParseMode::Query {
+            return Ok(());
+        }
+        while self.tok().kind == TokKind::Punct(Punct::LBrace) && !self.is_braced_join(self.i) {
+            match self.skip_brace_comment(self.i) {
+                Ok(next) => self.i = next,
+                Err(open_end) => {
+                    return Err(self.err(MsgId::SELECT_ERROR_NOTENDEDCOMMENT, open_end));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn skip_query_comments_from(&self, mut idx: usize) -> usize {
+        while self
+            .toks
+            .get(idx)
+            .is_some_and(|t| t.kind == TokKind::Punct(Punct::LBrace))
+            && !self.is_braced_join(idx)
+        {
+            match self.skip_brace_comment(idx) {
+                Ok(next) => idx = next,
+                Err(_) => break,
+            }
+        }
+        idx
+    }
+
     pub fn tok(&self) -> Token {
         self.toks.get(self.i).copied().unwrap_or_else(|| self.eof())
     }
 
     pub fn nth(&self, k: usize) -> Token {
+        if k == 0 {
+            return self.tok();
+        }
+        if self.mode == ParseMode::Dcs {
+            return self
+                .toks
+                .get(self.i.saturating_add(k))
+                .or_else(|| self.toks.last())
+                .copied()
+                .unwrap_or_else(|| self.eof());
+        }
+        let mut idx = self.i;
+        for _ in 0..k {
+            idx = self.skip_query_comments_from(idx.saturating_add(1));
+        }
         self.toks
-            .get(self.i.saturating_add(k))
+            .get(idx)
             .or_else(|| self.toks.last())
             .copied()
             .unwrap_or_else(|| self.eof())
     }
 
     pub fn prev_end(&self) -> u32 {
-        self.i
-            .checked_sub(1)
+        self.prev_i
             .and_then(|j| self.toks.get(j))
             .map_or(0, |t| t.span.end)
     }
@@ -143,8 +229,10 @@ impl<'t> Parser<'t> {
     pub fn bump(&mut self) -> PResult<Token> {
         let t = self.tok();
         if self.i + 1 < self.toks.len() {
+            self.prev_i = Some(self.i);
             self.i += 1;
         }
+        self.skip_query_comments()?;
         self.check_lex()?;
         Ok(t)
     }

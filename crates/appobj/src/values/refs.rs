@@ -27,6 +27,7 @@ impl RefValue {
 }
 
 const INDEX_MEMBER: MemberId = MemberId(u32::MAX - 1);
+const NOT_INDEXED: &str = "bsl:IDS_RTE_NOTINDEXED";
 const ATTR_BASE: u32 = 1 << 20;
 const TAB_BASE: u32 = 1 << 21;
 
@@ -95,6 +96,26 @@ impl RefObject {
         };
         let me = ref_value(&self.app, self.r)?;
         Ok(bsl_stdlib::api::new_point_in_time(ex, date, &me)?)
+    }
+
+    fn index_name(&self, ex: &Execution, key: &Value) -> Result<String, HostError> {
+        let name = match key {
+            Value::String(name) => name,
+            Value::Number(_) | Value::Undefined => return Err(HostError::key(NOT_INDEXED).raw()),
+            _ => return Err(self.not_implemented("[ключ не строка]")),
+        };
+        let name = name.to_string_lossy();
+        let method = match ex.runtime().types().member(self.ty, &name) {
+            Some((_, MemberKind::Property { .. })) => false,
+            descriptor => match self.find_member(&name) {
+                Some(m) => matches!(self.member_kind(m), Some(MemberKind::Method { .. })),
+                None => matches!(descriptor, Some((_, MemberKind::Method { .. }))),
+            },
+        };
+        if method {
+            return Err(self.not_implemented(&format!("[{name}]")));
+        }
+        Ok(name)
     }
 
     fn no_field(name: &str) -> HostError {
@@ -258,6 +279,18 @@ impl HostObject for RefObject {
             .with_arg(name)
             .raw()
             .into())
+    }
+
+    fn index_get(&self, ex: &mut Execution, key: &Value) -> CallResult<Value> {
+        let name = self.index_name(ex, key)?;
+        let me = ref_value(&self.app, self.r)?;
+        Ok(ex.get_member(&me, &name)?)
+    }
+
+    fn index_set(&self, ex: &mut Execution, key: &Value, v: Value) -> CallResult<()> {
+        let name = self.index_name(ex, key)?;
+        let me = ref_value(&self.app, self.r)?;
+        Ok(ex.set_member(&me, &name, v)?)
     }
 
     fn call(&self, ex: &mut Execution, m: MemberId, args: &mut [Arg]) -> CallResult<Value> {

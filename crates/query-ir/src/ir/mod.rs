@@ -1,4 +1,5 @@
 mod from_tir;
+pub(crate) mod implicit_tabular;
 pub(crate) mod nested_union;
 mod running;
 pub use running::RunningBalanceS;
@@ -7,8 +8,14 @@ pub mod stats;
 
 pub use from_tir::build_stmt;
 pub(crate) use from_tir::visit_expr as visit_expr_in_place;
-pub(crate) use from_tir::{distinct_movement_presentation, uniform_movement_union_presentation};
-pub(crate) use from_tir::{hierarchy_union_shape, uniform_union_autoorder};
+pub(crate) use from_tir::visit_rel;
+pub(crate) use from_tir::{
+    UnionPresent, distinct_movement_presentation, distinct_paired_presentation, is_pure_ref_type,
+    union_presentation,
+};
+pub(crate) use from_tir::{
+    hierarchy_union_shape, uniform_union_autoorder, union_autoorder_col_orderable,
+};
 pub use print::print;
 
 use crate::schema::{QFieldId, QTableId, QuerySchema, ValuePath};
@@ -72,7 +79,6 @@ impl Drop for StmtS {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Qr8Param {
     Session { slot: u16, name: Option<String> },
-    Criterion { slot: u16, table: QTableId },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -168,6 +174,14 @@ pub struct AreaFilter {
     pub pred: Expr,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BaseSpecS {
+    pub main_dims_param: String,
+    pub base_dims_param: String,
+    pub breakdown_param: Option<String>,
+    pub breakdown: Vec<QFieldId>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct RegisterVtS {
     pub src: SrcId,
@@ -177,10 +191,12 @@ pub struct RegisterVtS {
     pub kind: crate::schema::VtKind,
     pub bounds: [Option<Expr>; 2],
     pub cond: Option<Expr>,
+    pub ext_dims_arg: Option<Expr>,
     pub order: Option<SortKey>,
     pub top: Option<u64>,
     pub periodicity: crate::schema::Periodicity,
     pub complement: Option<crate::schema::Complement>,
+    pub base: Option<BaseSpecS>,
     pub area: Option<AreaFilter>,
     pub access: Option<Expr>,
     pub span: Option<query_syntax::Span>,

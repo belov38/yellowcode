@@ -116,7 +116,7 @@ impl Lower<'_> {
                 Some(v) => PExpr::Lit(v.clone()),
                 None => return internal("a ЗНАЧЕНИЕ slot is not bound"),
             },
-            ExprKind::Col { src, col } => self.col(*src, *col)?,
+            ExprKind::Col { src, col } => self.col(*src, *col, row)?,
             ExprKind::Deref { base, steps } => self.deref_chain(row, base, steps)?,
             ExprKind::KeyRef(i) | ExprKind::LocalKey { key: i, .. } => {
                 if row.keys.is_none() {
@@ -387,7 +387,7 @@ impl Lower<'_> {
         })
     }
 
-    fn col(&mut self, src: SrcId, col: ColSel) -> R<PExpr> {
+    fn col(&mut self, src: SrcId, col: ColSel, row: &Row) -> R<PExpr> {
         let lvl = self
             .src_level
             .get(src.0 as usize)
@@ -397,6 +397,9 @@ impl Lower<'_> {
             return internal("a column of a source that is not lowered yet");
         }
         let depth = self.level - lvl;
+        if depth == 0 && row.keys.is_some() {
+            return internal("a source column above an aggregate");
+        }
         let base = self.offs.offset(src);
         let outer = if depth == 0 {
             None
@@ -411,7 +414,10 @@ impl Lower<'_> {
             })
         };
         match col {
-            ColSel::Column(i) => mk(base + i64::from(i)),
+            ColSel::Column(i) => {
+                let extra = self.slice_extra.get(&src).copied().unwrap_or(0) as i64;
+                mk(base + extra + i64::from(i))
+            }
             ColSel::Field(f)
                 if matches!(
                     self.stmt.sources.get(src.0 as usize).map(|s| &s.kind),
@@ -423,9 +429,12 @@ impl Lower<'_> {
                 else {
                     return internal("a virtual source");
                 };
-                let position = match self.slice_cols.get(&src) {
-                    Some(fields) => fields.iter().position(|c| *c == f),
-                    None => cols.iter().position(|c| *c == Some(f)),
+                let position = match self.vt_raw_cols.get(&src) {
+                    Some(fields) => fields.iter().position(|c| *c == Some(f)),
+                    None => match self.slice_cols.get(&src) {
+                        Some(fields) => fields.iter().position(|c| *c == f),
+                        None => cols.iter().position(|c| *c == Some(f)),
+                    },
                 };
                 match position {
                     Some(i) => mk(base + i as i64),

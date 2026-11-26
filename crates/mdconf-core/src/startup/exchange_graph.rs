@@ -55,13 +55,17 @@ impl ManagedConfigurationGraph {
             if let Some(why) = decoded.miss {
                 self.graph.diagnostics.miss(&["misc:content:", why])?;
             }
-            if let Some(items) = decoded.items {
+            if let (Some(items), Some(stream)) = (decoded.items, decoded.stream) {
                 self.graph.objects = self.graph.objects.install(
                     at,
-                    items,
-                    |object| object.parts.exchange_content.is_none(),
-                    |object, items| {
+                    items.try_zip(stream)?,
+                    |object| {
+                        object.parts.exchange_content.is_none()
+                            && object.parts.exchange_content_stream.is_none()
+                    },
+                    |object, (items, stream)| {
                         object.parts.exchange_content = Some(items);
+                        object.parts.exchange_content_stream = Some(stream);
                         None
                     },
                 )?;

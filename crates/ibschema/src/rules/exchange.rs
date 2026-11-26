@@ -1,4 +1,4 @@
-use super::catalog::{attributes, main_table, tabular_sections};
+use super::catalog::{attributes, indexed_attributes, main_table, tabular_sections};
 use super::common::{common_group, separators_group};
 use super::ctx::Ctx;
 use super::document::table_of;
@@ -128,7 +128,10 @@ pub(crate) fn exchange_plan(cx: &Ctx, names: &mut Names) -> Result<Vec<(Table, T
     b.std(StdField::SentNo, fields::numeric(f::SENT_NO, 10, 0));
     b.std(StdField::ReceivedNo, fields::numeric(f::RECEIVED_NO, 10, 0));
     b.std(StdField::PredefinedId, fields::predefined_id());
-    b.std(StdField::LastUpdate, fields::datetime(f::LAST_UPDATE));
+    let compat = cx.cfg.compatibility_mode().0;
+    if compat == 0 || compat >= 80323 {
+        b.std(StdField::LastUpdate, fields::datetime(f::LAST_UPDATE));
+    }
     attributes(&mut b, cx, names, false)?;
     common_group(&mut b, cx, names)?;
 
@@ -152,6 +155,14 @@ pub(crate) fn exchange_plan(cx: &Ctx, names: &mut Names) -> Result<Vec<(Table, T
             &[F(f::DESCRIPTION), F(f::ID)],
             None,
         )?;
+    }
+    for a in indexed_attributes(cx) {
+        let tmpl = if names.get(a.id, "ByField").is_some() {
+            "ByField{n}"
+        } else {
+            "ByField{F}"
+        };
+        b.rule(cx, names, tmpl, true, &[Tok::Attr, F(f::ID)], Some(a))?;
     }
     let mut out = vec![b.finish()];
     out.extend(tabular_sections(cx, names)?);

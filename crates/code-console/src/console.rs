@@ -155,6 +155,11 @@ impl CodeConsole {
             event_sink: Arc::new(evlog::NullSink),
             options: AppOptions {
                 file_system: None,
+                extension_model: appobj::ExtensionModel::of_open(
+                    ib.mode() == infobase::OpenMode::Raw,
+                    ib.extension_model_refusal(),
+                    ib.warnings().contains(&infobase::Warning::Extensions),
+                ),
                 ..AppOptions::default()
             },
         })

@@ -562,6 +562,7 @@ impl<'scope> Analyzer<'scope> {
             accounting_dependencies,
             drcr,
             breakdown,
+            base,
             vt_check,
         ) = match self.schema.table(id).kind {
             TableKind::Virtual(_) if self.rls => {
@@ -581,6 +582,7 @@ impl<'scope> Analyzer<'scope> {
                     v.accounting_dependencies,
                     v.drcr,
                     v.breakdown,
+                    v.base,
                     v.check,
                 )
             }
@@ -593,6 +595,7 @@ impl<'scope> Analyzer<'scope> {
                 mem::NativeOwned::none(self.memory),
                 mem::NativeOwned::none(self.memory),
                 mem::NativeVec::new(self.memory, 0)?.finish(),
+                mem::NativeOwned::none(self.memory),
                 None,
             ),
         };
@@ -609,22 +612,26 @@ impl<'scope> Analyzer<'scope> {
                     self.memory,
                     args.zip(breakdown)
                         .and_then(|pair| pair.zip(drcr))
-                        .and_then(|triple| triple.zip(accounting_dependencies)),
+                        .and_then(|triple| triple.zip(accounting_dependencies))
+                        .and_then(|quad| quad.zip(base)),
                 )?
-                .map(|(((args, breakdown), drcr), accounting_dependencies)| {
-                    tir::From::Table {
-                        id,
-                        args,
-                        records,
-                        accounting,
-                        accounting_dependencies,
-                        drcr,
-                        periodicity,
-                        complement,
-                        span: view_span,
-                        breakdown,
-                    }
-                }),
+                .map(
+                    |((((args, breakdown), drcr), accounting_dependencies), base)| {
+                        tir::From::Table {
+                            id,
+                            args,
+                            records,
+                            accounting,
+                            accounting_dependencies,
+                            drcr,
+                            periodicity,
+                            complement,
+                            span: view_span,
+                            breakdown,
+                            base,
+                        }
+                    },
+                ),
             ),
             default_alias,
             table: Some((id, parts.len())),

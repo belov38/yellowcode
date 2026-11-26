@@ -345,6 +345,7 @@ impl ObservationSession {
             | PExpr::Refs { l: x, .. }
             | PExpr::Cast { x, .. }
             | PExpr::TypeOf { x, .. }
+            | PExpr::PredefName { x, .. }
             | PExpr::StoredSize { x, .. } => self.expr(x, &child(path, 0)),
             PExpr::Arith { first, steps, .. } => self.expressions(
                 std::iter::once(first.as_ref()).chain(steps.iter().map(|(_, e, _)| e)),
@@ -357,6 +358,10 @@ impl ObservationSession {
                 period: l,
                 recorder: r,
                 ..
+            }
+            | PExpr::PointInTime {
+                date: l,
+                reference: r,
             }
             | PExpr::Compare(_, l, r)
             | PExpr::Like { l, pat: r, .. } => self.expressions([l.as_ref(), r.as_ref()], path),
@@ -498,9 +503,10 @@ impl ObservationSession {
                     &child(path, 1),
                 );
             }
-            Plan::CheckAccess { input, .. } | Plan::Distinct(input) | Plan::Limit { input, .. } => {
-                self.plan(input, &child(path, 0))
-            }
+            Plan::CheckAccess { input, .. }
+            | Plan::DefaultIfEmpty { input, .. }
+            | Plan::Distinct(input)
+            | Plan::Limit { input, .. } => self.plan(input, &child(path, 0)),
             Plan::Sort { input, keys }
             | Plan::TopN { input, keys, .. }
             | Plan::Hierarchy { input, keys, .. } => {

@@ -1,12 +1,13 @@
 mod content;
 mod dataid;
+mod decode;
 mod manager;
 mod versions;
 
 pub(crate) use manager::register;
 
 use crate::Application;
-use crate::model::{FieldRole, ObjDef, ObjId, ObjKind, Periodicity};
+use crate::model::{FieldRole, ObjDef, ObjId, ObjKind, Periodicity, Usage};
 use crate::txn::CallTxn;
 use bsl_vm::{CallResult, Execution, Value};
 use content::{Body, Change, Field, Header, Tab, Val};
@@ -26,6 +27,24 @@ use std::ops::Bound;
 const VERSION_INT_MAX: u64 = 0x3fff;
 
 const KEY_INT_MAX: u64 = 0x7fff_ffff;
+
+pub(crate) fn std_field(kind: ObjKind, n: i64) -> Option<StdField> {
+    Some(match (kind, n) {
+        (ObjKind::Catalog, -13) => StdField::PredefinedId,
+        (ObjKind::Catalog, -7) => StdField::Marked,
+        (ObjKind::Catalog, -6) => StdField::Folder,
+        (ObjKind::Catalog, -5) => StdField::OwnerId,
+        (ObjKind::Catalog, -4) => StdField::ParentId,
+        (ObjKind::Catalog, -3) => StdField::Description,
+        (ObjKind::Catalog, -2) => StdField::Code,
+        (ObjKind::InformationRegister, -2) => StdField::Period,
+        (ObjKind::Document, -7) => StdField::Posted,
+        (ObjKind::Document, -4) => StdField::Marked,
+        (ObjKind::Document, -3) => StdField::DateTime,
+        (ObjKind::Document, -2) => StdField::Number,
+        _ => return None,
+    })
+}
 
 pub(crate) fn kept(app: &Application, obj: ObjId) -> bool {
     let model = app.model();
@@ -60,7 +79,7 @@ impl Stamp {
         })
     }
 
-    fn header(&self, key: Vec<u8>) -> Header {
+    fn header(&self, key: Vec<u8>, changed_by_extension: bool) -> Header {
         Header {
             version: RefId::from_uuid(random_v4()).0,
             key,
@@ -69,6 +88,7 @@ impl Stamp {
             full_name: String::new(),
             utc_ticks: self.utc_ticks,
             txn: self.txn,
+            changed_by_extension,
         }
     }
 }
@@ -167,6 +187,7 @@ struct Tables<'a> {
     m_md: usize,
     m_actual: usize,
     m_content: usize,
+    m_ext: Option<usize>,
 }
 
 fn column(ti: &TableInfo, name: &str) -> Result<usize, String> {
@@ -203,6 +224,7 @@ impl<'a> Tables<'a> {
             m_md,
             m_actual: column(m, "IsActual")?,
             m_content: column(m, "Content")?,
+            m_ext: m.field_by_name("IsExtensions").map(|f| usize::from(f.0)),
         })
     }
 }
@@ -229,7 +251,29 @@ fn cell_bytes(v: Option<&FieldValue>) -> Option<&[u8]> {
     }
 }
 
-type Described = (Vec<Field>, Vec<Tab>);
+#[derive(Clone)]
+struct Described {
+    fields: Vec<Field>,
+    tabs: Vec<Tab>,
+    changed_by_extension: bool,
+}
+
+fn pick_description<'a>(
+    actual: &[(bool, Option<&'a [u8]>)],
+) -> Result<(bool, Option<&'a [u8]>), String> {
+    let of = |ext: bool| actual.iter().filter(move |(e, _)| *e == ext);
+    if of(true).count() > 1 || of(false).count() > 1 {
+        return Err("два актуальных описания метаданных истории".into());
+    }
+    match (of(true).next(), of(false).next()) {
+        (None, None) => Err("нет актуального описания метаданных истории".into()),
+        (Some(e), Some(p)) if e.1 != p.1 => {
+            Err("актуальные описания с расширениями и без них различаются".into())
+        }
+        (Some(e), _) => Ok(*e),
+        (None, Some(p)) => Ok(*p),
+    }
+}
 
 pub(crate) struct Queue<'a> {
     app: &'a Application,
@@ -267,8 +311,12 @@ impl<'a> Queue<'a> {
         let def = model.obj(obj);
         let checked = (|| -> Result<Queue<'a>, String> {
             match def.kind {
-                ObjKind::Catalog if def.tabular.is_empty() && !def.behavior.hierarchical => {}
-                ObjKind::Catalog => return Err("иерархия или табличные части".into()),
+                ObjKind::Catalog
+                    if def.behavior.hierarchical && !def.behavior.hierarchy_folders =>
+                {
+                    return Err("иерархия элементов".into());
+                }
+                ObjKind::Catalog => {}
                 ObjKind::Document => {}
                 ObjKind::InformationRegister => {
                     if def.behavior.write_mode != Some(crate::model::InfoRegWriteMode::Independent)
@@ -349,7 +397,7 @@ impl<'a> Queue<'a> {
         }
         let t = &self.tables;
         let key = [self.md_cell.clone()];
-        let mut found = None;
+        let mut rows = Vec::new();
         for item in r.range(
             t.meta,
             t.m_index,
@@ -363,23 +411,58 @@ impl<'a> Queue<'a> {
             {
                 continue;
             }
-            if found.is_some() {
-                return Ok(Err("два актуальных описания метаданных истории".into()));
-            }
-            found = Some(cell_bytes(row.get(t.m_content)).map(content::described));
+            let ext = t
+                .m_ext
+                .is_some_and(|at| row.get(at) == Some(&FieldValue::Bool(true)));
+            rows.push((ext, row));
         }
-        let fields = match found {
-            None => return Ok(Err("нет актуального описания метаданных истории".into())),
-            Some(None | Some(None)) => {
-                return Ok(Err("описание метаданных истории не разобрано".into()));
-            }
-            Some(Some(Some(f))) => f,
+        let actual: Vec<(bool, Option<&[u8]>)> = rows
+            .iter()
+            .map(|(ext, row)| (*ext, cell_bytes(row.get(t.m_content))))
+            .collect();
+        let (with_extensions, content) = match pick_description(&actual) {
+            Ok(d) => d,
+            Err(what) => return Ok(Err(what)),
         };
-        if !fields.1.is_empty() && self.def.kind != ObjKind::Document {
+        let changed_by_extension = match self.changed_by_extension(with_extensions) {
+            Ok(c) => c,
+            Err(what) => return Ok(Err(what)),
+        };
+        let Some((fields, tabs)) = content.and_then(content::described) else {
+            return Ok(Err("описание метаданных истории не разобрано".into()));
+        };
+        if !tabs.is_empty() && !matches!(self.def.kind, ObjKind::Document | ObjKind::Catalog) {
             return Ok(Err("табличные части в описании метаданных истории".into()));
         }
-        *self.fields.borrow_mut() = Some(fields.clone());
-        Ok(Ok(fields))
+        let described = Described {
+            fields,
+            tabs,
+            changed_by_extension,
+        };
+        *self.fields.borrow_mut() = Some(described.clone());
+        Ok(Ok(described))
+    }
+
+    fn changed_by_extension(&self, with_extensions: bool) -> Result<bool, String> {
+        let md = self
+            .app
+            .model()
+            .config
+            .object(self.def.md)
+            .ok_or("нет объекта метаданных")?;
+        match crate::extensions::changed_object(self.app, md) {
+            Err(why) => Err(format!("расширения: {why}")),
+            Ok(None) => Ok(false),
+            Ok(Some(true)) if self.def.kind == ObjKind::InformationRegister => {
+                Err("регистр сведений, изменённый расширением".into())
+            }
+            Ok(Some(true)) => Ok(true),
+            Ok(Some(false)) if with_extensions => Err(
+                "описание метаданных истории с расширениями у объекта, не изменённого расширением"
+                    .into(),
+            ),
+            Ok(Some(false)) => Ok(false),
+        }
     }
 
     fn position(&self, w: &dyn WriteTxn, data: &[u8; 20]) -> StoreResult<Result<i64, String>> {
@@ -414,6 +497,7 @@ impl<'a> Queue<'a> {
         header_key: Vec<u8>,
         change: Change,
         body: &Body<'_>,
+        changed_by_extension: bool,
     ) -> StoreResult<()> {
         let pos = match self.position(&*w, &data)? {
             Ok(p) => p,
@@ -423,7 +507,12 @@ impl<'a> Queue<'a> {
             }
         };
         let t = &self.tables;
-        let bytes = content::encode(&self.stamp.header(header_key), &self.md, change, body);
+        let bytes = content::encode(
+            &self.stamp.header(header_key, changed_by_extension),
+            &self.md,
+            change,
+            body,
+        );
         let mut row: Row = vec![FieldValue::Null; t.q.fields.len()];
         for (at, v) in [
             (t.q_md, self.md_cell.clone()),
@@ -445,7 +534,11 @@ impl<'a> Queue<'a> {
         row: Option<&Row>,
         is_new: bool,
     ) -> StoreResult<()> {
-        let (fields, tabs) = match self.fields(&*w)? {
+        let Described {
+            fields,
+            tabs,
+            changed_by_extension,
+        } = match self.fields(&*w)? {
             Ok(f) => f,
             Err(what) => {
                 self.refuse(&what);
@@ -453,6 +546,9 @@ impl<'a> Queue<'a> {
             }
         };
         let prepared = match row {
+            None if self.def.kind == ObjKind::Catalog && self.def.behavior.hierarchical => {
+                Err("удаление в иерархическом справочнике".to_string())
+            }
             None => Ok((Change::Deleted, Vec::new(), Vec::new())),
             Some(row) => self.values(&fields, row).and_then(|v| {
                 let lines = self.lines(&*w, id, &tabs)?;
@@ -472,7 +568,14 @@ impl<'a> Queue<'a> {
             values: &values,
             lines: &lines,
         };
-        self.put(w, dataid::object_id(id), id.0.to_vec(), change, &body)
+        self.put(
+            w,
+            dataid::object_id(id),
+            id.0.to_vec(),
+            change,
+            &body,
+            changed_by_extension,
+        )
     }
 
     fn lines(
@@ -541,9 +644,6 @@ impl<'a> Queue<'a> {
                 };
                 rows.push((n, row));
             }
-            if rows.is_empty() {
-                return Err("пустая табличная часть".into());
-            }
             rows.sort_by_key(|(n, _)| *n);
             let mut lines = Vec::with_capacity(rows.len());
             for (_, row) in &rows {
@@ -557,11 +657,14 @@ impl<'a> Queue<'a> {
             }
             out.push(lines);
         }
+        if several_with_an_empty(&out) {
+            return Err("несколько табличных частей, среди них без строк".into());
+        }
         Ok(out)
     }
 
     pub(crate) fn record(&self, w: &mut dyn WriteTxn, row: &Row) -> StoreResult<()> {
-        let fields = match self.fields(&*w)? {
+        let described = match self.fields(&*w)? {
             Ok(f) => f,
             Err(what) => {
                 self.refuse(&what);
@@ -570,7 +673,7 @@ impl<'a> Queue<'a> {
         };
         let prepared = self
             .key(row)
-            .and_then(|k| self.values(&fields.0, row).map(|v| (k, v)));
+            .and_then(|k| self.values(&described.fields, row).map(|v| (k, v)));
         let (key, values) = match prepared {
             Ok(x) => x,
             Err(what) => {
@@ -578,7 +681,11 @@ impl<'a> Queue<'a> {
                 return Ok(());
             }
         };
-        let (fields, tabs) = fields;
+        let Described {
+            fields,
+            tabs,
+            changed_by_extension,
+        } = described;
         if !tabs.is_empty() {
             self.refuse("табличные части в описании регистра");
             return Ok(());
@@ -590,7 +697,14 @@ impl<'a> Queue<'a> {
             values: &values,
             lines: &[],
         };
-        self.put(w, data, data.to_vec(), Change::New, &body)
+        self.put(
+            w,
+            data,
+            data.to_vec(),
+            Change::New,
+            &body,
+            changed_by_extension,
+        )
     }
 
     pub(crate) fn replaced(&self) {
@@ -598,20 +712,12 @@ impl<'a> Queue<'a> {
     }
 
     fn column_of(&self, f: &Field) -> Result<usize, String> {
-        let std = |s: StdField| self.main.field_by_std(s);
-        let found = match (self.def.kind, f) {
-            (ObjKind::Catalog, Field::Std(-13)) => std(StdField::PredefinedId),
-            (ObjKind::Catalog, Field::Std(-7)) => std(StdField::Marked),
-            (ObjKind::Catalog, Field::Std(-5)) => std(StdField::OwnerId),
-            (ObjKind::Catalog, Field::Std(-3)) => std(StdField::Description),
-            (ObjKind::Catalog, Field::Std(-2)) => std(StdField::Code),
-            (ObjKind::InformationRegister, Field::Std(-2)) => std(StdField::Period),
-            (ObjKind::Document, Field::Std(-7)) => std(StdField::Posted),
-            (ObjKind::Document, Field::Std(-4)) => std(StdField::Marked),
-            (ObjKind::Document, Field::Std(-3)) => std(StdField::DateTime),
-            (ObjKind::Document, Field::Std(-2)) => std(StdField::Number),
-            (_, Field::Std(n)) => return Err(format!("стандартное поле версии {n}")),
-            (_, Field::Item(u)) => {
+        let found = match f {
+            Field::Std(n) => match std_field(self.def.kind, *n) {
+                Some(s) => self.main.field_by_std(s),
+                None => return Err(format!("стандартное поле версии {n}")),
+            },
+            Field::Item(u) => {
                 let md = RefId(*u).to_uuid();
                 self.main
                     .fields
@@ -626,11 +732,39 @@ impl<'a> Queue<'a> {
     }
 
     fn values(&self, fields: &[Field], row: &Row) -> Result<Vec<Val>, String> {
+        let catalog = self.def.kind == ObjKind::Catalog;
+        let group = match self.main.field_by_std(StdField::Folder) {
+            Some(f) if catalog => match row.get(usize::from(f.0)) {
+                Some(FieldValue::Bool(b)) => Some(!*b),
+                _ => None,
+            },
+            _ => None,
+        };
         fields
             .iter()
             .map(|f| {
+                if catalog
+                    && matches!(f, Field::Std(-2))
+                    && self.def.behavior.code_length == 0
+                    && self.main.field_by_std(StdField::Code).is_none()
+                {
+                    return Ok(Val::Str(String::new()));
+                }
                 let at = self.column_of(f)?;
                 let cell = row.get(at).ok_or("короткая строка")?;
+                if catalog && matches!(f, Field::Std(-6)) {
+                    return group.map(Val::Bool).ok_or_else(|| "ЭтоГруппа".to_string());
+                }
+                if let (FieldValue::Null, Field::Item(u)) = (cell, f) {
+                    let md = RefId(*u).to_uuid();
+                    let usage = self
+                        .def
+                        .fields
+                        .iter()
+                        .find(|d| d.md == Some(md))
+                        .map(|d| d.usage);
+                    return unused_null(usage, group);
+                }
                 if matches!(f, Field::Std(-13)) {
                     return match cell {
                         FieldValue::Uuid(u) if u.is_nil() => Ok(Val::Str(String::new())),
@@ -647,6 +781,7 @@ impl<'a> Queue<'a> {
 
     fn value(&self, ti: &TableInfo, at: usize, cell: &FieldValue) -> Result<Val, String> {
         let document = self.def.kind == ObjKind::Document;
+        let catalog = self.def.kind == ObjKind::Catalog;
         let fraction = ti.fields.get(at).is_some_and(|fi| {
             fi.types
                 .iter()
@@ -655,7 +790,7 @@ impl<'a> Queue<'a> {
         if !document && fraction && matches!(cell, FieldValue::Number(n) if whole(n).is_some()) {
             return Err("целое значение в поле с дробной частью".into());
         }
-        if document
+        if (document || catalog)
             && let FieldValue::Ref { table, id } = cell
             && id.is_nil()
         {
@@ -733,6 +868,17 @@ impl<'a> Queue<'a> {
     }
 }
 
+fn several_with_an_empty(lines: &[Vec<Vec<Val>>]) -> bool {
+    lines.len() > 1 && lines.iter().any(|l| l.is_empty())
+}
+
+fn unused_null(usage: Option<Usage>, group: Option<bool>) -> Result<Val, String> {
+    match (usage, group) {
+        (Some(Usage::ForItem), Some(true)) => Ok(Val::Null),
+        _ => Err(type_name(&FieldValue::Null).to_string()),
+    }
+}
+
 fn plain_key(cell: &FieldValue) -> Result<KeyValue, String> {
     match cell {
         FieldValue::String(s) => Ok(KeyValue::Str(s.clone())),
@@ -788,6 +934,11 @@ fn type_name(v: &FieldValue) -> &'static str {
     }
 }
 
+const COMPRESSED_STORAGE: [u8; 18] = [
+    0x02, 0x01, 0x53, 0x4B, 0x6F, 0xF4, 0x88, 0x8D, 0xC1, 0x4E, 0xA0, 0xD5, 0xEB, 0xB6, 0xBD, 0xA0,
+    0xA7, 0x0D,
+];
+
 fn value_of(cell: &FieldValue) -> Result<Val, String> {
     match cell {
         FieldValue::Bool(b) => Ok(Val::Bool(*b)),
@@ -809,6 +960,11 @@ fn value_of(cell: &FieldValue) -> Result<Val, String> {
             table: *table,
         }),
         FieldValue::Storage(b) if b.as_slice() == crate::values::field::EMPTY_STORAGE => {
+            Ok(Val::Storage(b.clone()))
+        }
+        FieldValue::Storage(b)
+            if b.starts_with(&COMPRESSED_STORAGE) && b.len() > COMPRESSED_STORAGE.len() =>
+        {
             Ok(Val::Storage(b.clone()))
         }
         FieldValue::Storage(b) if !b.is_empty() => {

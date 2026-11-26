@@ -317,7 +317,6 @@ pub(crate) struct Ctx<'a> {
     pub base_dims: bool,
     pub docs: Vec<&'a MdObject>,
     pub bps: Vec<&'a MdObject>,
-    pub addressing: bool,
     pub ed: u32,
     pub coa: Option<&'a MdObject>,
     pub predefined: bool,
@@ -451,10 +450,6 @@ impl<'a> Ctx<'a> {
             base_dims: obj.dimensions().any(|d| d.flag("BaseDimension")),
             docs,
             bps,
-            addressing: obj
-                .children
-                .iter()
-                .any(|c| c.tag == ChildTag::AddressingAttribute),
             ed,
             coa,
             predefined: false,

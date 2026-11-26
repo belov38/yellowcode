@@ -1,12 +1,10 @@
 use crate::schema::{QFieldId, QTableId, QuerySchema, TableKind};
 use crate::tir::{self, Col, TKind};
-use query_syntax::ast::OrderDir;
 
 pub(crate) fn supported(schema: &QuerySchema, query: &tir::Query) -> bool {
     if query.parts.len() < 2
         || query.unions.len() != query.parts.len() - 1
         || query.unions.iter().any(|all| !all)
-        || query.autoorder
         || query.totals.is_some()
     {
         return false;
@@ -44,9 +42,6 @@ pub(crate) fn supported(schema: &QuerySchema, query: &tir::Query) -> bool {
 
 pub(crate) fn validate_order(query: &tir::Query) -> Result<(), &'static str> {
     for key in &query.order {
-        if !matches!(key.dir, OrderDir::Asc | OrderDir::Desc) {
-            return Err("ИЕРАРХИЯ в объединении");
-        }
         let Some(item) = key.col.and_then(|col| query.parts.first()?.items.get(col)) else {
             return Err("вложенная таблица в объединении");
         };

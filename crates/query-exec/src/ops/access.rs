@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 use std::ops::Bound;
+use std::sync::Arc;
 
 use ibschema::names::StdField;
 use ibschema::storage::{FieldId, IndexId, TableId};
@@ -102,6 +103,51 @@ impl<'a> Op<'a> for Scan<'a> {
         match it.next() {
             None => Ok(None),
             Some(r) => Ok(Some(project_fields(r?, &self.fields, cx)?)),
+        }
+    }
+}
+
+pub struct DefaultIfEmpty<'a> {
+    input: super::BoxOp<'a>,
+    row: Arc<[QValue]>,
+    seen: bool,
+    done: bool,
+}
+
+impl<'a> DefaultIfEmpty<'a> {
+    pub fn new(input: super::BoxOp<'a>, row: Arc<[QValue]>) -> DefaultIfEmpty<'a> {
+        DefaultIfEmpty {
+            input,
+            row,
+            seen: false,
+            done: false,
+        }
+    }
+}
+
+impl<'a> Op<'a> for DefaultIfEmpty<'a> {
+    fn close(&mut self, cx: &mut Cx<'a>) {
+        self.input.close(cx);
+    }
+
+    fn next(&mut self, cx: &mut Cx<'a>) -> Result<Option<Row>, ExecError> {
+        if self.done {
+            return Ok(None);
+        }
+        match self.input.next(cx)? {
+            Some(r) => {
+                self.seen = true;
+                Ok(Some(r))
+            }
+            None => {
+                self.done = true;
+                if self.seen {
+                    return Ok(None);
+                }
+                cx.tick()?;
+                cx.mem.grow_scratch(vec_block(self.row.len(), VALUE_SIZE))?;
+                Ok(Some(self.row.to_vec()))
+            }
         }
     }
 }

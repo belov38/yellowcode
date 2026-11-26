@@ -8,7 +8,7 @@ use query_ir::schema::VtKind;
 use query_ir::{ExecError, QValue};
 
 use super::accounting::{self, DrCrSelection};
-use super::{Cx, Op, accounting_balance, accounting_turnovers};
+use super::{Cx, Op, accounting_balance, accounting_balance_and_turnovers, accounting_turnovers};
 use crate::register::{RegisterKind, RegisterSettings};
 use crate::source::{Row, RowIter};
 
@@ -115,6 +115,7 @@ enum SelectedParts {
     Accounting(DrCrSelection),
     AccountingTurnoversMain,
     AccountingBalance,
+    AccountingBalanceAndTurnovers,
 }
 
 impl SelectedRegister {
@@ -133,7 +134,8 @@ impl SelectedRegister {
                 }
                 SelectedParts::Accounting(_)
                 | SelectedParts::AccountingTurnoversMain
-                | SelectedParts::AccountingBalance => 0,
+                | SelectedParts::AccountingBalance
+                | SelectedParts::AccountingBalanceAndTurnovers => 0,
             })
             .saturating_add(usize::try_from(values).unwrap_or(usize::MAX))
     }
@@ -147,16 +149,25 @@ impl SelectedRegister {
             ),
             RegisterRowsKindL::Accounting(_)
             | RegisterRowsKindL::AccountingTurnovers(_)
-            | RegisterRowsKindL::AccountingBalance(_) => (None, None, None),
+            | RegisterRowsKindL::AccountingBalance(_)
+            | RegisterRowsKindL::AccountingBalanceAndTurnovers(_) => (None, None, None),
         };
         let (parts, accounting) = match &self.parts {
-            SelectedParts::Accumulation(parts) => (parts.as_slice(), [None, None, None]),
+            SelectedParts::Accumulation(parts) => (parts.as_slice(), [None, None, None, None]),
             SelectedParts::AccountingTurnoversMain => {
-                let table = match &step.rows {
-                    RegisterRowsKindL::AccountingTurnovers(a) => Some(a.inputs.main),
-                    _ => None,
+                let tables = match &step.rows {
+                    RegisterRowsKindL::AccountingTurnovers(a) => [
+                        Some(a.inputs.main),
+                        a.ext_dims.as_ref().map(|e| e.section),
+                        a.ext_dims
+                            .as_ref()
+                            .and_then(|e| e.acc_rg_ed.as_ref())
+                            .map(|ed| ed.table),
+                        None,
+                    ],
+                    _ => [None, None, None, None],
                 };
-                (&[][..], [table, None, None])
+                (&[][..], tables)
             }
             SelectedParts::AccountingBalance => {
                 let tables = match &step.rows {
@@ -164,20 +175,36 @@ impl SelectedRegister {
                         Some(a.inputs.main),
                         Some(a.inputs.chart),
                         a.ext1.as_ref().map(|e| e.section),
+                        a.ext1.as_ref().and_then(|e| e.ed.map(|ed| ed.table)),
                     ],
-                    _ => [None, None, None],
+                    _ => [None, None, None, None],
+                };
+                (&[][..], tables)
+            }
+            SelectedParts::AccountingBalanceAndTurnovers => {
+                let tables = match &step.rows {
+                    RegisterRowsKindL::AccountingBalanceAndTurnovers(a) => [
+                        Some(a.inputs.main),
+                        Some(a.inputs.chart),
+                        a.ext_dims.as_ref().map(|e| e.section),
+                        a.ext_dims
+                            .as_ref()
+                            .and_then(|e| e.acc_rg_ed.as_ref())
+                            .map(|ed| ed.table),
+                    ],
+                    _ => [None, None, None, None],
                 };
                 (&[][..], tables)
             }
             SelectedParts::Accounting(mode) => {
                 let tables = match (&step.rows, mode) {
                     (RegisterRowsKindL::Accounting(a), DrCrSelection::Main) => {
-                        [Some(a.inputs.main), None, None]
+                        [Some(a.inputs.main), None, None, None]
                     }
                     (RegisterRowsKindL::Accounting(a), DrCrSelection::CtAndMain { .. }) => {
-                        [Some(a.inputs.ct), Some(a.inputs.main), None]
+                        [Some(a.inputs.ct), Some(a.inputs.main), None, None]
                     }
-                    _ => [None, None, None],
+                    _ => [None, None, None, None],
                 };
                 (&[][..], tables)
             }
@@ -203,6 +230,7 @@ pub struct RegisterRows<'a> {
     accounting: Option<accounting::Cursor<'a>>,
     turnovers: Option<accounting_turnovers::Cursor<'a>>,
     balance: Option<accounting_balance::Cursor<'a>>,
+    balance_and_turnovers: Option<accounting_balance_and_turnovers::Cursor<'a>>,
 }
 
 impl<'a> RegisterRows<'a> {
@@ -229,6 +257,7 @@ impl<'a> RegisterRows<'a> {
             accounting: None,
             turnovers: None,
             balance: None,
+            balance_and_turnovers: None,
         }
     }
 }
@@ -464,9 +493,14 @@ impl<'a> RegisterRows<'a> {
         if let Some(x) = row.get_mut(raw::component(
             match &self.step.rows {
                 RegisterRowsKindL::Accumulation(a) => a.dims.len(),
-                RegisterRowsKindL::Accounting(a) => a.keys.len(),
-                RegisterRowsKindL::AccountingTurnovers(a) => usize::from(a.account),
-                RegisterRowsKindL::AccountingBalance(a) => 2 + usize::from(a.ext1.is_some()),
+                RegisterRowsKindL::Accounting(a) => a.keys.len() + a.ext_dims.len(),
+                RegisterRowsKindL::AccountingTurnovers(a) => {
+                    usize::from(a.account) + a.ext_dims.as_ref().map_or(0, |e| e.slots.len())
+                }
+                RegisterRowsKindL::AccountingBalance(a) => 2 + a.ext_count(),
+                RegisterRowsKindL::AccountingBalanceAndTurnovers(a) => {
+                    2 + a.dims.len() + a.ext_count()
+                }
             },
             r,
             c,
@@ -637,6 +671,12 @@ pub(crate) fn totals_off() -> ExecError {
 
 impl<'a> Op<'a> for RegisterRows<'a> {
     fn next(&mut self, cx: &mut Cx<'a>) -> Result<Option<Row>, ExecError> {
+        if matches!(
+            &self.step.rows,
+            RegisterRowsKindL::AccountingBalanceAndTurnovers(_)
+        ) {
+            return self.next_balance_and_turnovers(cx);
+        }
         if matches!(&self.step.rows, RegisterRowsKindL::AccountingBalance(_)) {
             return self.next_balance(cx);
         }
@@ -684,7 +724,8 @@ impl<'a> Op<'a> for RegisterRows<'a> {
                         SelectedParts::Accumulation(parts) => parts.get(self.cursor),
                         SelectedParts::Accounting(_)
                         | SelectedParts::AccountingTurnoversMain
-                        | SelectedParts::AccountingBalance => None,
+                        | SelectedParts::AccountingBalance
+                        | SelectedParts::AccountingBalanceAndTurnovers => None,
                     })
                     .cloned()
                 else {
@@ -713,7 +754,8 @@ impl<'a> Op<'a> for RegisterRows<'a> {
                     },
                     RegisterRowsKindL::Accounting(_)
                     | RegisterRowsKindL::AccountingTurnovers(_)
-                    | RegisterRowsKindL::AccountingBalance(_) => None,
+                    | RegisterRowsKindL::AccountingBalance(_)
+                    | RegisterRowsKindL::AccountingBalanceAndTurnovers(_) => None,
                 },
                 Part::Turnovers { .. } => match &self.step.rows {
                     RegisterRowsKindL::Accumulation(st) => match &st.turnovers {
@@ -722,7 +764,8 @@ impl<'a> Op<'a> for RegisterRows<'a> {
                     },
                     RegisterRowsKindL::Accounting(_)
                     | RegisterRowsKindL::AccountingTurnovers(_)
-                    | RegisterRowsKindL::AccountingBalance(_) => None,
+                    | RegisterRowsKindL::AccountingBalance(_)
+                    | RegisterRowsKindL::AccountingBalanceAndTurnovers(_) => None,
                 },
             };
             if let Some(out) = out {
@@ -738,7 +781,14 @@ impl<'a> Op<'a> for RegisterRows<'a> {
         if let Some(cursor) = self.balance.as_mut() {
             cursor.close(cx);
         }
-        if matches!(&self.step.rows, RegisterRowsKindL::AccountingBalance(_)) {
+        if let Some(cursor) = self.balance_and_turnovers.as_mut() {
+            cursor.close(cx);
+        }
+        if matches!(
+            &self.step.rows,
+            RegisterRowsKindL::AccountingBalance(_)
+                | RegisterRowsKindL::AccountingBalanceAndTurnovers(_)
+        ) {
             self.selected = None;
         }
         if let Some(cursor) = self.turnovers.as_mut() {
@@ -752,6 +802,92 @@ impl<'a> Op<'a> for RegisterRows<'a> {
 }
 
 impl<'a> RegisterRows<'a> {
+    fn next_balance_and_turnovers(&mut self, cx: &mut Cx<'a>) -> Result<Option<Row>, ExecError> {
+        let RegisterRowsKindL::AccountingBalanceAndTurnovers(step) = &self.step.rows else {
+            return Err(fatal("accounting BalanceAndTurnovers: missing payload"));
+        };
+        if step.chart_input.is_some()
+            || (self.selected.is_none() && step.chart_layout.is_some() != self.chart.is_some())
+        {
+            return Err(fatal(
+                "accounting BalanceAndTurnovers: inconsistent chart child",
+            ));
+        }
+        if self.step.kind != VtKind::BalanceAndTurnovers || step.resources.is_empty() {
+            return Err(fatal(
+                "accounting BalanceAndTurnovers: invalid kind or resource layout",
+            ));
+        }
+        if self.selected.is_none() {
+            accounting::check_cancel(cx.env)?;
+            let mut bounds = [None, None];
+            for (slot, b) in bounds.iter_mut().zip(&step.bounds) {
+                *slot = match b {
+                    Some(e) => Some(super::eval(e, &[], cx)?),
+                    None => None,
+                };
+            }
+            let start = bound_of(bounds[0].as_ref());
+            let end = bound_of(bounds[1].as_ref());
+            if let (Some(s), Some(e)) = (date_of(start), date_of(end))
+                && s.ticks() > e.ticks()
+            {
+                return Err(ExecError::Runtime(query_ir::RuntimeError {
+                    chain: vec![query_syntax::QueryError::new(
+                        query_syntax::MsgId::INVALID_PERIOD,
+                        None,
+                    )],
+                }));
+            }
+            let (settings, observed_areas) = crate::register::read_accounting_balance_settings(
+                cx.src,
+                self.step.register,
+                &step.areas,
+                cx.observation.as_ref(),
+            )?;
+            accounting::check_cancel(cx.env)?;
+            if !settings.use_totals {
+                return Err(totals_off());
+            }
+            let bound_values = bounds
+                .iter()
+                .flatten()
+                .map(crate::model::value_model)
+                .try_fold(0u64, crate::model::size_add)?;
+            let base_bytes = u64::try_from(
+                std::mem::size_of::<SelectedRegister>()
+                    .checked_add(2 * std::mem::size_of::<usize>())
+                    .ok_or_else(|| fatal("accounting BalanceAndTurnovers: selection overflow"))?,
+            )
+            .map_err(|_| fatal("accounting BalanceAndTurnovers: selection overflow"))?;
+            let charge = cx
+                .mem
+                .hold_owned(crate::model::size_add(base_bytes, bound_values)?)?;
+            let selected = Rc::new(SelectedRegister {
+                bounds,
+                settings,
+                parts: SelectedParts::AccountingBalanceAndTurnovers,
+                _charge: Some(charge),
+            });
+            let cursor = accounting_balance_and_turnovers::Cursor::new(
+                step,
+                start,
+                end,
+                observed_areas,
+                cx,
+            )?;
+            if let (Some(observation), Some(session)) = (&self.observation, &cx.observation) {
+                observation.publish(session, &self.step, selected.clone());
+            }
+            self.selected = Some(selected);
+            self.balance_and_turnovers = Some(cursor);
+        }
+        self.balance_and_turnovers
+            .as_mut()
+            .ok_or_else(|| fatal("accounting BalanceAndTurnovers: missing cursor"))?
+            .next(step, &mut self.chart, cx)
+    }
+
     fn next_balance(&mut self, cx: &mut Cx<'a>) -> Result<Option<Row>, ExecError> {
         let RegisterRowsKindL::AccountingBalance(step) = &self.step.rows else {
             return Err(fatal("accounting Balance: missing payload"));
@@ -768,17 +904,16 @@ impl<'a> RegisterRows<'a> {
         }
         if self.selected.is_none() {
             accounting::check_cancel(cx.env)?;
-            let settings = crate::register::read_register_settings_with_observation(
+            let (settings, observed_areas) = crate::register::read_accounting_balance_settings(
                 cx.src,
                 self.step.register,
-                RegisterKind::Accounting,
+                &step.areas,
                 cx.observation.as_ref(),
             )?;
             accounting::check_cancel(cx.env)?;
             if !settings.use_totals {
                 return Err(totals_off());
             }
-            accounting_balance::check_balance_settings_shape(&settings)?;
             let bytes = std::mem::size_of::<SelectedRegister>()
                 .checked_add(2 * std::mem::size_of::<usize>())
                 .ok_or_else(|| fatal("accounting Balance: selection model overflow"))?;
@@ -792,7 +927,7 @@ impl<'a> RegisterRows<'a> {
                 parts: SelectedParts::AccountingBalance,
                 _charge: Some(charge),
             });
-            let cursor = accounting_balance::Cursor::new(step, cx)?;
+            let cursor = accounting_balance::Cursor::new(step, observed_areas, cx)?;
             if let (Some(observation), Some(session)) = (&self.observation, &cx.observation) {
                 observation.publish(session, &self.step, selected.clone());
             }
@@ -814,10 +949,10 @@ impl<'a> RegisterRows<'a> {
         }
         if self.selected.is_none() {
             accounting::check_cancel(cx.env)?;
-            let settings = crate::register::read_register_settings_with_observation(
+            let (settings, initial_areas) = crate::register::read_accounting_turnovers_settings(
                 cx.src,
                 self.step.register,
-                RegisterKind::Accounting,
+                step.areas.as_ref(),
                 cx.observation.as_ref(),
             )?;
             accounting::check_cancel(cx.env)?;
@@ -841,7 +976,7 @@ impl<'a> RegisterRows<'a> {
                 observation.publish(session, &self.step, selected.clone());
             }
             self.selected = Some(selected);
-            self.turnovers = Some(accounting_turnovers::Cursor::new(step, cx)?);
+            self.turnovers = Some(accounting_turnovers::Cursor::new(step, initial_areas, cx)?);
         }
         self.turnovers
             .as_mut()
@@ -855,8 +990,17 @@ impl<'a> RegisterRows<'a> {
                 "accounting DrCrTurnovers: missing accounting payload",
             ));
         };
+        let invalid_ext_dims = step.ext_dims.iter().enumerate().any(|(i, ext)| {
+            ext.index == 0
+                || step
+                    .ext_dims
+                    .iter()
+                    .take(i)
+                    .any(|prev| prev.side == ext.side && prev.index == ext.index)
+        });
         if self.step.kind != VtKind::DrCrTurnovers
             || step.resources.is_empty()
+            || invalid_ext_dims
             || !matches!(
                 step.keys.as_slice(),
                 [] | [query_ir::lower::DrCrSideL::Dr]
@@ -883,8 +1027,11 @@ impl<'a> RegisterRows<'a> {
             if !settings.use_totals {
                 return Err(totals_off());
             }
-            let mode =
-                accounting::selection(&settings, step.date_bounds.iter().any(Option::is_some))?;
+            let mode = accounting::selection(
+                &settings,
+                step.date_bounds.iter().any(Option::is_some),
+                !step.ext_dims.is_empty(),
+            )?;
             let bytes = std::mem::size_of::<SelectedRegister>()
                 .checked_add(2 * std::mem::size_of::<usize>())
                 .ok_or_else(|| fatal("accounting DrCrTurnovers: selection model overflow"))?;
@@ -918,19 +1065,43 @@ impl<'a> RegisterRows<'a> {
 }
 
 pub fn tables_read(step: &RegisterRowsL, s: &RegisterSettings) -> Vec<TableId> {
-    if let RegisterRowsKindL::AccountingBalance(a) = &step.rows {
-        return if s.use_totals && accounting_balance::check_balance_settings_shape(s).is_ok() {
-            match &a.ext1 {
-                None => vec![a.inputs.main, a.inputs.chart],
-                Some(ext) => vec![a.inputs.main, a.inputs.chart, ext.section],
+    if let RegisterRowsKindL::AccountingBalanceAndTurnovers(a) = &step.rows {
+        return if s.use_totals {
+            let mut out = vec![a.inputs.main, a.inputs.chart];
+            if let Some(ext) = &a.ext_dims {
+                out.push(ext.section);
+                if let Some(ed) = &ext.acc_rg_ed {
+                    out.push(ed.table);
+                }
             }
+            out
+        } else {
+            Vec::new()
+        };
+    }
+    if let RegisterRowsKindL::AccountingBalance(a) = &step.rows {
+        return if s.use_totals {
+            let mut out = vec![a.inputs.main, a.inputs.chart];
+            if let Some(ext) = &a.ext1 {
+                out.push(ext.section);
+                if let Some(ed) = ext.ed {
+                    out.push(ed.table);
+                }
+            }
+            out
         } else {
             Vec::new()
         };
     }
     if let RegisterRowsKindL::AccountingTurnovers(a) = &step.rows {
         return if s.use_totals {
-            vec![a.inputs.main]
+            match &a.ext_dims {
+                None => vec![a.inputs.main],
+                Some(ext) => match &ext.acc_rg_ed {
+                    None => vec![a.inputs.main, ext.section],
+                    Some(ed) => vec![a.inputs.main, ext.section, ed.table],
+                },
+            }
         } else {
             Vec::new()
         };
@@ -942,7 +1113,11 @@ pub fn tables_read(step: &RegisterRowsL, s: &RegisterSettings) -> Vec<TableId> {
         if !s.use_totals {
             return Vec::new();
         }
-        return match accounting::selection(s, a.date_bounds.iter().any(Option::is_some)) {
+        return match accounting::selection(
+            s,
+            a.date_bounds.iter().any(Option::is_some),
+            !a.ext_dims.is_empty(),
+        ) {
             Ok(DrCrSelection::Main) => vec![a.inputs.main],
             Ok(DrCrSelection::CtAndMain { .. }) => vec![a.inputs.ct, a.inputs.main],
             Err(_) => Vec::new(),

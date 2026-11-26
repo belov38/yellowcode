@@ -215,6 +215,10 @@ impl Printer<'_> {
                     self.w(" cond=");
                     self.expr(c);
                 }
+                if let Some(ext) = &v.ext_dims_arg {
+                    self.w(" ext_dims=");
+                    self.expr(ext);
+                }
                 if let Some(k) = &v.order {
                     self.w(if k.desc {
                         " order-desc="
@@ -225,6 +229,13 @@ impl Printer<'_> {
                 }
                 if let Some(n) = v.top {
                     let _ = write!(self.out, " top={n}");
+                }
+                if let Some(b) = &v.base {
+                    let _ = write!(
+                        self.out,
+                        " base=(&{}, &{})",
+                        b.main_dims_param, b.base_dims_param
+                    );
                 }
                 self.w(")");
             }

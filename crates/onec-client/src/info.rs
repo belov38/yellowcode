@@ -326,7 +326,7 @@ fn start_info(r: &Reader, info: &mut ServerInfo) -> Result<(), InfoError> {
     info.config.full_name = r.text(NS_APP, "fullConfName")?;
     info.config.code = r.text(NS_APP, "configCode")?;
     info.config.version = r.text(NS_APP, "configVersion")?;
-    info.config.license_check = r.text(NS_APP, "configLicenseInfo")?;
+    info.config.license_check = r.text_same(NS_APP, "configLicenseInfo")?;
     info.user.name = r.text(NS_APP, "userName")?;
     info.user.full_name = r.text(NS_APP, "fullUserName")?;
     let s = &mut info.server;

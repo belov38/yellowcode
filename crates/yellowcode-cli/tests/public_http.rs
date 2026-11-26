@@ -240,8 +240,12 @@ fn http_limits_errors_and_timeout_are_explicit() {
     assert_eq!(j["error"]["phase"], "params");
     service.available();
     let (status, j) = service.post(json!({"text":"SELECT G.Barcodes FROM Catalog.Goods AS G"}));
-    assert_eq!(status, 422);
-    assert!(j["error"].as_str().unwrap().contains("nested"));
+    assert_eq!(status, 200, "{j}");
+    assert_eq!(j["statements"][0]["columns"][0]["kind"], "nested");
+    assert_eq!(j["statements"][0]["total"], 0);
+    assert_eq!(j["statements"][0]["kept"], 0);
+    assert_eq!(j["statements"][0]["truncated"], false);
+    assert_eq!(j["statements"][0]["rows"], json!([]));
     service.available();
     let seed = (2..=8)
         .map(|n| format!(" UNION ALL SELECT {n}"))
@@ -255,6 +259,34 @@ fn http_limits_errors_and_timeout_are_explicit() {
     assert_eq!(j["cancelled"], true);
     assert_eq!(j["timedOut"], true);
     service.available();
+}
+
+#[test]
+fn http_query_returns_populated_and_empty_nested_tables() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = base::create(tmp.path());
+    base::populate(&dir, "Goods", 2, false);
+    base::populate_goods_barcodes(&dir, "Goods", &[(1, "ёж-1", 5), (1, "й-2", 8)]);
+    let service = Service::start(&dir);
+    let (status, j) = service.post(json!({
+        "text": "SELECT G.Code, G.Barcodes.(Barcode, Qty) AS Barcodes FROM Catalog.Goods AS G ORDER BY G.Code"
+    }));
+    assert_eq!(status, 200, "{j}");
+    assert_eq!(j["error"], Value::Null);
+    let rows = j["statements"][0]["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0][1]["k"], "nested");
+    assert_eq!(rows[0][1]["nested"]["total"], 2);
+    assert_eq!(rows[0][1]["nested"]["kept"], 2);
+    assert_eq!(rows[0][1]["nested"]["truncated"], false);
+    assert_eq!(rows[0][1]["nested"]["rows"][0][0]["t"], "\"ёж-1\"");
+    assert_eq!(rows[0][1]["nested"]["rows"][0][1]["t"], "5");
+    assert_eq!(rows[0][1]["nested"]["rows"][1][0]["t"], "\"й-2\"");
+    assert_eq!(rows[0][1]["nested"]["rows"][1][1]["t"], "8");
+    assert_eq!(rows[1][1]["nested"]["total"], 0);
+    assert_eq!(rows[1][1]["nested"]["kept"], 0);
+    assert_eq!(rows[1][1]["nested"]["truncated"], false);
+    assert_eq!(rows[1][1]["nested"]["rows"], json!([]));
 }
 
 #[test]
@@ -859,4 +891,42 @@ fn http_resource_refusal_and_next_success_emit_bounded_private_diagnostics() {
             assert!(line.contains(&format!("{category}_peak=")), "{line}");
         }
     }
+}
+
+#[test]
+fn tcp_readiness_probe_and_sequential_requests_succeed_without_503() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = base::create(tmp.path());
+    let service = Service::start(&base);
+    let query = Service::post_raw(json!({"text": "ВЫБРАТЬ 1 КАК Один"}));
+
+    for attempt in 0..10 {
+        let probe = TcpStream::connect_timeout(&service.1, Duration::from_secs(30)).unwrap();
+        drop(probe);
+        let (status, body) = service.request_once(&query);
+        assert_eq!(status, 200, "after TCP probe #{attempt}: {body}");
+        assert_eq!(body["schemaVersion"], 1);
+        assert_eq!(body["error"], Value::Null);
+        assert_eq!(
+            body["statements"][0]["rows"][0][0],
+            json!({"k": "number", "t": "1"})
+        );
+    }
+
+    for attempt in 0..10 {
+        let (status, body) = service.request_once(&query);
+        assert_eq!(status, 200, "sequential request #{attempt}: {body}");
+        assert_eq!(body["statements"][0]["rows"][0][0]["t"], "1");
+    }
+
+    let silent = TcpStream::connect_timeout(&service.1, Duration::from_secs(30)).unwrap();
+    let (status, busy) = service.request_once(&query);
+    assert_eq!(status, 503, "held silent connection must refuse: {busy}");
+    assert_eq!(busy["error"], "query service is busy");
+    drop(silent);
+    let (status, body) = service.post(json!({"text": "ВЫБРАТЬ 1 КАК Один"}));
+    assert_eq!(
+        status, 200,
+        "service must recover after silent peer closes: {body}"
+    );
 }

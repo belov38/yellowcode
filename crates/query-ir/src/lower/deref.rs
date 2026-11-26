@@ -24,6 +24,10 @@ pub(super) enum Plan {
     SysEnum(Sf, platform_catalog::TypeIdx),
     PredefName(Sf, Vec<([u8; 16], String)>),
     RefType(Sf, Vec<(u32, crate::types::RefAtom)>),
+    PointInTime {
+        date: Sf,
+        reference: Sf,
+    },
     Only {
         inner: Box<Plan>,
         folder: Sf,
@@ -48,6 +52,10 @@ impl Plan {
             | Plan::SysEnum(s, _)
             | Plan::PredefName(s, _)
             | Plan::RefType(s, _) => out.push(*s),
+            Plan::PointInTime { date, reference } => {
+                out.push(*date);
+                out.push(*reference);
+            }
             Plan::Only { inner, folder, .. } => {
                 inner.needs(out);
                 out.push(*folder);
@@ -73,20 +81,16 @@ pub(super) fn plan_expr(plan: &Plan, mk: &mut dyn FnMut(Sf) -> R<PExpr>) -> R<PE
             refs: refs.clone(),
             route_points: Vec::new(),
         },
-        Plan::PredefName(s, names) => PExpr::Case {
-            operand: Some(Box::new(mk(*s)?)),
-            whens: names
+        Plan::PointInTime { date, reference } => PExpr::PointInTime {
+            date: Box::new(mk(*date)?),
+            reference: Box::new(mk(*reference)?),
+        },
+        Plan::PredefName(s, names) => PExpr::PredefName {
+            x: Box::new(mk(*s)?),
+            names: names
                 .iter()
-                .map(|(id, name)| {
-                    (
-                        PExpr::Lit(QValue::Binary(Arc::<[u8]>::from(id.as_slice()).into())),
-                        PExpr::Lit(QValue::String(crate::value::QStr::from_str(name))),
-                    )
-                })
+                .map(|(id, name)| (*id, crate::value::QStr::from_str(name)))
                 .collect(),
-            else_: Some(Box::new(PExpr::Lit(QValue::String(
-                crate::value::QStr::from_str(""),
-            )))),
         },
         Plan::SysEnum(s, ty) => {
             let num = |n: i64| QValue::Number(bsl_prim::Number::from_scaled_i64(n, 0));
@@ -266,6 +270,36 @@ impl Lower<'_> {
                 }
             }
             if fld.role == FieldRole::Virtual {
+                if t.kind == TableKind::Object(mdschema::MdKind::Document)
+                    && fld.name_ru == "МоментВремени"
+                {
+                    let date = t
+                        .fields
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, x)| matches!(x.role, FieldRole::Std(StdRole::Date)))
+                        .find_map(|(i, _)| {
+                            self.storage.field(qt, QFieldId(u16::try_from(i).ok()?))
+                        });
+                    let reference = t
+                        .fields
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, x)| matches!(x.role, FieldRole::Std(StdRole::Ref)))
+                        .find_map(|(i, _)| {
+                            self.storage.field(qt, QFieldId(u16::try_from(i).ok()?))
+                        });
+                    if let (Some(df), Some(rf)) = (date, reference) {
+                        return Ok(Plan::PointInTime {
+                            date: (tid, df),
+                            reference: (tid, rf),
+                        });
+                    }
+                    return fatal(format!(
+                        "поле {}.{} не имеет хранения",
+                        t.name_ru, fld.name_ru
+                    ));
+                }
                 return later(
                     "вычисляемое поле",
                     if fld.name_ru == "Представление" {

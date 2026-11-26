@@ -878,7 +878,8 @@ pub(crate) fn check_unique(ex: &mut Execution, ctx: &WriteCtx<'_>) -> CallResult
     let Some(i) = layout.code else {
         return Ok(());
     };
-    if ctx.loading || !layout.def.behavior.check_unique {
+    let always = layout.def.kind == crate::model::ObjKind::ExchangePlan;
+    if ctx.loading || !(always || layout.def.behavior.check_unique) {
         return Ok(());
     }
     let value = inst.attr(ex, i)?;

@@ -106,8 +106,8 @@ fn write_inner<W: Write, R: Read>(
     mut resolver: Option<&mut Resolver<'_>>,
     framing: Framing<'_, R>,
 ) -> Result<u64, Error> {
-    if head.source != Source::DataBase {
-        return Err(Error::Unsupported("expected DataBase table"));
+    if !matches!(head.source, Source::DataBase | Source::Extension(_)) {
+        return Err(Error::Unsupported("expected DataBase or Extension table"));
     }
     if year_offset < 0 {
         return Err(Error::Unsupported("negative year offset"));

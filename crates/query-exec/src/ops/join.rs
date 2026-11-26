@@ -92,6 +92,22 @@ impl<'a> NestedLoopJoin<'a> {
             tail: None,
         }
     }
+
+    fn build(&mut self, cx: &mut Cx<'a>) -> Result<(), ExecError> {
+        let mut rows = Vec::new();
+        while let Some(row) = self.r.next(cx)? {
+            cx.tick()?;
+            let release = keep_row(&rows, &row, rows.capacity(), cx, &mut self.held)?;
+            rows.push(row);
+            grew(release, cx, &mut self.held);
+        }
+        let flags = block(rows.len() as u64);
+        cx.mem.grow(flags)?;
+        self.held += flags;
+        self.matched = vec![false; rows.len()];
+        self.right = Some(rows);
+        Ok(())
+    }
 }
 
 impl<'a> Op<'a> for NestedLoopJoin<'a> {
@@ -103,19 +119,12 @@ impl<'a> Op<'a> for NestedLoopJoin<'a> {
 
     fn next(&mut self, cx: &mut Cx<'a>) -> Result<Option<Row>, ExecError> {
         check_kind(self.kind)?;
-        if self.right.is_none() {
-            let mut rows = Vec::new();
-            while let Some(row) = self.r.next(cx)? {
-                cx.tick()?;
-                let release = keep_row(&rows, &row, rows.capacity(), cx, &mut self.held)?;
-                rows.push(row);
-                grew(release, cx, &mut self.held);
-            }
-            let flags = block(rows.len() as u64);
-            cx.mem.grow(flags)?;
-            self.held += flags;
-            self.matched = vec![false; rows.len()];
-            self.right = Some(rows);
+        if self.right.is_none()
+            && self.kind == JoinKind::Full
+            && let Err(e) = self.build(cx)
+        {
+            self.finish(cx);
+            return Err(e);
         }
         loop {
             if let Some(p) = self.tail {
@@ -132,8 +141,12 @@ impl<'a> Op<'a> for NestedLoopJoin<'a> {
                 return Ok(None);
             }
             if self.cur.is_none() {
-                match self.l.next(cx)? {
-                    None => {
+                match self.l.next(cx) {
+                    Err(e) => {
+                        self.finish(cx);
+                        return Err(e);
+                    }
+                    Ok(None) => {
                         if self.kind == JoinKind::Full {
                             self.tail = Some(0);
                             continue;
@@ -141,7 +154,13 @@ impl<'a> Op<'a> for NestedLoopJoin<'a> {
                         self.finish(cx);
                         return Ok(None);
                     }
-                    Some(row) => {
+                    Ok(Some(row)) => {
+                        if self.right.is_none()
+                            && let Err(e) = self.build(cx)
+                        {
+                            self.finish(cx);
+                            return Err(e);
+                        }
                         self.cur = Some(row);
                         self.pos = 0;
                         self.cur_matched = false;
@@ -176,6 +195,7 @@ impl<'a> Op<'a> for NestedLoopJoin<'a> {
 
 impl NestedLoopJoin<'_> {
     fn finish(&mut self, cx: &mut Cx<'_>) {
+        self.cur = None;
         self.right = Some(Vec::new());
         self.matched = Vec::new();
         cx.mem.shrink(std::mem::take(&mut self.held));
@@ -523,6 +543,8 @@ impl<'a> HashJoin<'a> {
     }
 
     fn finish(&mut self, cx: &mut Cx<'a>) {
+        self.cur = None;
+        self.built = true;
         self.drop_cands(cx);
         self.rows = Vec::new();
         self.table = HashMap::new();
@@ -540,8 +562,12 @@ impl<'a> Op<'a> for HashJoin<'a> {
 
     fn next(&mut self, cx: &mut Cx<'a>) -> Result<Option<Row>, ExecError> {
         check_kind(self.kind)?;
-        if !self.built {
-            self.build(cx)?;
+        if !self.built
+            && self.kind == JoinKind::Full
+            && let Err(e) = self.build(cx)
+        {
+            self.finish(cx);
+            return Err(e);
         }
         loop {
             if let Some(mut p) = self.tail {
@@ -557,8 +583,12 @@ impl<'a> Op<'a> for HashJoin<'a> {
                 return Ok(None);
             }
             if self.cur.is_none() {
-                match self.l.next(cx)? {
-                    None => {
+                match self.l.next(cx) {
+                    Err(e) => {
+                        self.finish(cx);
+                        return Err(e);
+                    }
+                    Ok(None) => {
                         if self.kind == JoinKind::Full {
                             self.tail = Some(0);
                             continue;
@@ -566,7 +596,13 @@ impl<'a> Op<'a> for HashJoin<'a> {
                         self.finish(cx);
                         return Ok(None);
                     }
-                    Some(row) => {
+                    Ok(Some(row)) => {
+                        if !self.built
+                            && let Err(e) = self.build(cx)
+                        {
+                            self.finish(cx);
+                            return Err(e);
+                        }
                         cx.tick()?;
                         self.drop_cands(cx);
                         let found = match keys_of(&self.l_keys, &row, cx)? {

@@ -283,6 +283,12 @@ struct_clone!(crate::temp::TempSchema {
     open
 });
 struct_clone!(crate::params::ParamInfo { name, ty });
+struct_clone!(crate::tir::BaseArguments {
+    main_dims_param,
+    base_dims_param,
+    breakdown_param,
+    deferred
+});
 impl ManagedClone for crate::tir::ControlPoint {
     fn graph_depth(&self, remaining: u16) -> AResult<u16> {
         match self {
@@ -328,6 +334,7 @@ impl ManagedClone for crate::tir::From {
                 complement,
                 span,
                 breakdown,
+                base,
             } => fields!(
                 arena,
                 Self::Table {
@@ -340,7 +347,8 @@ impl ManagedClone for crate::tir::From {
                     periodicity,
                     complement,
                     span,
-                    breakdown
+                    breakdown,
+                    base
                 }
             ),
             Self::Param { name, schema } => fields!(arena, Self::Param { name, schema }),

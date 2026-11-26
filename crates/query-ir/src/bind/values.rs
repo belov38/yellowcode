@@ -16,6 +16,7 @@ pub(super) fn resolve<'s>(
     ctx: &BindCtx<'_>,
     phase: super::PhaseContext<'_>,
 ) -> Result<Bound<'s>, ExecError> {
+    let base_dims = resolve_base_dims(stmt, ctx)?;
     let (tables, constants) = storage_tables(stmt, ctx, phase)?;
     for t in &tables {
         ctx.host.touch_table(*t).map_err(ExecError::Host)?;
@@ -24,6 +25,18 @@ pub(super) fn resolve<'s>(
     let params = bind_params(stmt, ctx, &usage)?;
     let values = bind_values(stmt, ctx)?;
     with_deep_stack(stmt.max_depth, || fold_stmt(stmt, &params, &values))?;
+    let has_separated_constant = stmt.tables.iter().any(|q| {
+        let t = ctx.schema.table(*q);
+        t.kind == TableKind::Object(mdschema::MdKind::Constant)
+            && t.fields
+                .iter()
+                .any(|f| f.role == crate::schema::FieldRole::Common)
+    });
+    let constant_separators = if has_separated_constant {
+        ctx.security.session.separators().map_err(ExecError::Host)?
+    } else {
+        Vec::new()
+    };
     Ok(Bound {
         security: Default::default(),
         stmt,
@@ -31,7 +44,141 @@ pub(super) fn resolve<'s>(
         values,
         tables,
         constants,
+        constant_separators,
+        base_dims,
     })
+}
+
+fn base_arg_later() -> ExecError {
+    ExecError::Later {
+        what: "Q6d-CalculationBaseArguments",
+        stage: "Q6d",
+    }
+}
+
+fn decode_utf16_str(s: &crate::QStr) -> String {
+    char::decode_utf16(s.0.iter().copied())
+        .map(|r| r.unwrap_or(char::REPLACEMENT_CHARACTER))
+        .collect()
+}
+
+fn base_dims_compatible(a: &crate::QType, b: &crate::QType) -> bool {
+    a == b
+        || (a.only_number() && b.only_number())
+        || (a.only_string() && b.only_string())
+        || (a.only_date() && b.only_date())
+        || (a.only_bool() && b.only_bool())
+}
+
+fn collect_base_views<'a>(rel: &'a Rel, out: &mut Vec<&'a crate::ir::RegisterVtS>) {
+    match rel {
+        Rel::RegisterVt(v) if v.kind == crate::VtKind::Base => out.push(v),
+        Rel::Subquery { input, .. }
+        | Rel::Filter { input, .. }
+        | Rel::Aggregate { input, .. }
+        | Rel::Project { input, .. }
+        | Rel::Distinct(input)
+        | Rel::Sort { input, .. }
+        | Rel::Top { input, .. }
+        | Rel::Hierarchy { input, .. } => collect_base_views(input, out),
+        Rel::Join { l, r, .. } => {
+            collect_base_views(l, out);
+            collect_base_views(r, out);
+        }
+        Rel::Union { parts, .. } => {
+            for p in parts {
+                collect_base_views(p, out);
+            }
+        }
+        Rel::Empty
+        | Rel::Scan { .. }
+        | Rel::TempScan { .. }
+        | Rel::ParamScan { .. }
+        | Rel::RegisterVt(_)
+        | Rel::Slice(_)
+        | Rel::RunningBalance(_) => {}
+    }
+}
+
+fn resolve_base_dims(
+    stmt: &StmtS,
+    ctx: &BindCtx<'_>,
+) -> Result<
+    std::collections::HashMap<
+        crate::ir::SrcId,
+        Vec<(crate::schema::QFieldId, crate::schema::QFieldId)>,
+    >,
+    ExecError,
+> {
+    let views = with_deep_stack(stmt.max_depth, || {
+        let mut views = Vec::new();
+        collect_base_views(&stmt.root, &mut views);
+        for rows in stmt.nested.iter().filter_map(|n| n.rows.as_ref()) {
+            collect_base_views(&rows.scan, &mut views);
+        }
+        visit_stmt(stmt, &mut |e, _| match &e.kind {
+            ExprKind::InQuery { q, .. } => collect_base_views(q, &mut views),
+            ExprKind::SectionAgg { rel, .. } => collect_base_views(rel, &mut views),
+            _ => {}
+        });
+        views
+    });
+    let mut out = std::collections::HashMap::new();
+    for v in views {
+        let Some(spec) = v.base.as_ref() else {
+            return Err(base_arg_later());
+        };
+        let facts = ctx
+            .schema
+            .calculation_base(v.table)
+            .ok_or_else(|| ExecError::Fatal("CalculationBase: metadata facts are absent".into()))?;
+        let Some(ParamValue::List(main_list)) = ctx.params.get(&spec.main_dims_param) else {
+            return Err(base_arg_later());
+        };
+        let Some(ParamValue::List(base_list)) = ctx.params.get(&spec.base_dims_param) else {
+            return Err(base_arg_later());
+        };
+        if main_list.len() != base_list.len() {
+            return Err(base_arg_later());
+        }
+        let mut pairs = Vec::with_capacity(main_list.len());
+        for (mv, bv) in main_list.iter().zip(&base_list) {
+            let (QValue::String(ms), QValue::String(bs)) = (mv, bv) else {
+                return Err(base_arg_later());
+            };
+            let m_key = bsl_prim::fold_name(&decode_utf16_str(ms));
+            let b_key = bsl_prim::fold_name(&decode_utf16_str(bs));
+            let Some(mf) = ctx.schema.find_field_folded(facts.owner, &m_key) else {
+                return Err(base_arg_later());
+            };
+            let Some(bf) = ctx.schema.find_field_folded(facts.base, &b_key) else {
+                return Err(base_arg_later());
+            };
+            let Some(m_info) = ctx.schema.field(facts.owner, mf) else {
+                return Err(base_arg_later());
+            };
+            let Some(b_info) = ctx.schema.field(facts.base, bf) else {
+                return Err(base_arg_later());
+            };
+            if m_info.role != crate::schema::FieldRole::Dimension
+                || b_info.role != crate::schema::FieldRole::Dimension
+                || !base_dims_compatible(&m_info.ty, &b_info.ty)
+            {
+                return Err(base_arg_later());
+            }
+            pairs.push((mf, bf));
+        }
+        if let Some(bp) = &spec.breakdown_param {
+            let Some(ParamValue::List(vs)) = ctx.params.get(bp) else {
+                return Err(base_arg_later());
+            };
+            if !vs.iter().all(|v| matches!(v, QValue::String(_))) {
+                return Err(base_arg_later());
+            }
+        }
+        out.insert(v.src, pairs);
+    }
+    Ok(out)
 }
 
 fn unbound(ctx: &BindCtx<'_>, t: crate::schema::QTableId) -> ExecError {
@@ -59,18 +206,58 @@ fn storage_tables(
             constants.clone()
         } else if crate::lower::is_accounting_balance(ctx.schema, *q) {
             let inputs = crate::lower::balance_inputs(ctx.schema, ctx.storage, ctx.map, *q)?;
+            let mut ids = vec![inputs.main, inputs.options];
             if let Some(section) = phase.section(stmt, ctx.schema, *q) {
                 dependency = Some(
                     ctx.storage
                         .table(section)
                         .ok_or_else(|| unbound(ctx, section))?,
                 );
+                if let Some(ed_table) = crate::lower::balance_ext_ed_table(ctx.schema, ctx.map, *q)?
+                {
+                    ids.push(ed_table);
+                }
             }
-            vec![inputs.main, inputs.options]
+            ids
+        } else if crate::lower::is_accounting_balance_and_turnovers(ctx.schema, *q) {
+            let (inputs, _) =
+                crate::lower::accounting_bt_inputs(ctx.schema, ctx.storage, ctx.map, *q)?;
+            let mut ids = vec![inputs.main, inputs.options];
+            if crate::lower::accounting_bt_uses_ext_dims(stmt, ctx.schema, *q) {
+                if let Some(section) =
+                    crate::lower::accounting_bt_ext_section_identity(ctx.schema, *q)
+                {
+                    dependency = Some(
+                        ctx.storage
+                            .table(section)
+                            .ok_or_else(|| unbound(ctx, section))?,
+                    );
+                }
+                if let Some(ed_table) =
+                    crate::lower::accounting_bt_ext_ed_table(ctx.schema, ctx.map, *q)?
+                {
+                    ids.push(ed_table);
+                }
+            }
+            ids
         } else if crate::lower::is_accounting_turnovers(ctx.schema, *q) {
-            let inputs =
-                crate::lower::turnovers_inputs(ctx.schema, ctx.storage, ctx.map, *q).resolve()?;
-            vec![inputs.main, inputs.options]
+            let resolver = crate::lower::turnovers_inputs(ctx.schema, ctx.storage, ctx.map, *q);
+            let inputs = resolver.resolve()?;
+            let mut ids = vec![inputs.main, inputs.options];
+            if crate::lower::turnovers_uses_ext_dims(stmt, ctx.schema, *q) {
+                if let Some(section) = crate::lower::turnovers_ext_section_identity(ctx.schema, *q)
+                {
+                    dependency = Some(
+                        ctx.storage
+                            .table(section)
+                            .ok_or_else(|| unbound(ctx, section))?,
+                    );
+                }
+                if let Some(ed) = resolver.acc_rg_ed_table(&inputs)? {
+                    ids.push(ed);
+                }
+            }
+            ids
         } else if t.kind == TableKind::Virtual(crate::VtKind::DrCrTurnovers) {
             let inputs =
                 crate::lower::drcr_inputs(ctx.schema, ctx.storage, ctx.map, *q).resolve()?;
@@ -79,6 +266,8 @@ fn storage_tables(
             crate::lower::schedule_inputs(ctx.schema, ctx.storage, ctx.map, *q)?
                 .tables()
                 .to_vec()
+        } else if t.kind == TableKind::Virtual(crate::VtKind::Base) {
+            crate::lower::base_inputs(ctx.schema, ctx.storage, ctx.map, *q)?.tables()
         } else if t.kind == TableKind::Virtual(crate::VtKind::ActualActionPeriod) {
             let (main, act) = crate::lower::actual_inputs(ctx.schema, ctx.storage, ctx.map, *q)?;
             vec![main, act]
@@ -93,7 +282,7 @@ fn storage_tables(
             }
         }
     }
-    if !stmt.present.is_empty() {
+    if !stmt.present.is_empty() || crate::lower::has_inline_present(stmt) {
         for t in crate::lower::present_targets(stmt, ctx.schema, ctx.storage, ctx.map) {
             if !t.route_point && seen.insert(t.storage) {
                 out.push(t.storage);
@@ -147,6 +336,7 @@ struct Usage {
     set: bool,
     other: bool,
     source: bool,
+    base_list: bool,
 }
 
 fn param_usage(stmt: &StmtS) -> Vec<Usage> {
@@ -159,9 +349,15 @@ fn param_usage(stmt: &StmtS) -> Vec<Usage> {
         }
     }
     let mut sub_scans = Vec::new();
+    let mut base_views = Vec::new();
+    collect_base_views(&stmt.root, &mut base_views);
+    for rows in stmt.nested.iter().filter_map(|n| n.rows.as_ref()) {
+        collect_base_views(&rows.scan, &mut base_views);
+    }
     visit_stmt(stmt, &mut |e, in_set| {
         if let ExprKind::InQuery { q: rel, .. } | ExprKind::SectionAgg { rel, .. } = &e.kind {
             visit_scans(rel, &mut |p| sub_scans.push(p));
+            collect_base_views(rel, &mut base_views);
         }
         if let ExprKind::Param(i) = &e.kind
             && let Some(s) = u.get_mut(usize::from(*i))
@@ -176,6 +372,23 @@ fn param_usage(stmt: &StmtS) -> Vec<Usage> {
     for p in sub_scans {
         if let Some(s) = u.get_mut(usize::from(p)) {
             s.source = true;
+        }
+    }
+    for v in base_views {
+        if let Some(spec) = &v.base {
+            for pname in [&spec.main_dims_param, &spec.base_dims_param]
+                .into_iter()
+                .chain(spec.breakdown_param.iter())
+            {
+                let folded = bsl_prim::fold_name(pname);
+                for (idx, stored) in stmt.params.iter().enumerate() {
+                    if bsl_prim::fold_name(stored) == folded
+                        && let Some(s) = u.get_mut(idx)
+                    {
+                        s.base_list = true;
+                    }
+                }
+            }
         }
     }
     u
@@ -223,6 +436,9 @@ fn vt_bound_params(r: &Rel, out: &mut BoundParamUsage) {
                 vt_bound_expr_params(b, true, out);
             }
             if let Some(e) = &v.cond {
+                vt_bound_expr_params(e, false, out);
+            }
+            if let Some(e) = &v.ext_dims_arg {
                 vt_bound_expr_params(e, false, out);
             }
             if let Some(k) = &v.order {
@@ -332,7 +548,7 @@ fn bind_params(stmt: &StmtS, ctx: &BindCtx<'_>, usage: &[Usage]) -> Result<Vec<P
         let u = usage.get(i).copied().unwrap_or_default();
         let session = stmt.qr8.iter().find_map(|p| match p {
             crate::ir::Qr8Param::Session { slot, name } if usize::from(*slot) == i => Some(name),
-            _ => None,
+            crate::ir::Qr8Param::Session { .. } => None,
         });
         let v = match session {
             Some(Some(name)) => ParamValue::Value(
@@ -344,30 +560,6 @@ fn bind_params(stmt: &StmtS, ctx: &BindCtx<'_>, usage: &[Usage]) -> Result<Vec<P
             Some(None) => ParamValue::Value(QValue::Undefined),
             None => ctx.params.get(name).ok_or_else(|| not_set(name))?,
         };
-        for check in &stmt.qr8 {
-            if let crate::ir::Qr8Param::Criterion { slot, table } = check
-                && usize::from(*slot) == i
-            {
-                let valid = match &v {
-                    ParamValue::Value(QValue::Ref { table: number, .. }) => ctx
-                        .schema
-                        .meta(*table)
-                        .and_then(|m| m.criterion.as_ref())
-                        .is_some_and(|c| {
-                            c.ty.refs
-                                .iter()
-                                .any(|r| ctx.storage.ref_number(*r) == Some(*number))
-                        }),
-                    _ => false,
-                };
-                if !valid {
-                    return Err(ExecError::Later {
-                        what: "Q7d-CriterionParameterType",
-                        stage: "Q7d",
-                    });
-                }
-            }
-        }
         if moment_like(&v)
             && (!vt_bounds.bounds.contains(&(i as u16)) || vt_bounds.outside.contains(&(i as u16)))
         {
@@ -379,7 +571,9 @@ fn bind_params(stmt: &StmtS, ctx: &BindCtx<'_>, usage: &[Usage]) -> Result<Vec<P
         let b = match v {
             ParamValue::Value(x) if u.set && !u.other => PBound::Set(set_of(vec![x])),
             ParamValue::Value(x) => PBound::Value(x),
-            ParamValue::List(xs) if u.set => PBound::Set(set_of(xs)),
+            ParamValue::List(xs) if u.set || (u.base_list && !u.other && !u.source) => {
+                PBound::Set(set_of(xs))
+            }
             ParamValue::Table { columns, rows } if u.source || u.set => {
                 if u.other {
                     return Err(ExecError::Fatal(format!(
@@ -629,6 +823,9 @@ pub(crate) fn visit_rel<'e>(r: &'e Rel, f: &mut dyn FnMut(&'e Expr, bool)) {
                 .chain(v.access.iter())
                 .chain(v.order.iter().map(|k| &k.expr))
                 .for_each(|c| visit_expr(c, false, f));
+            if let Some(ext) = &v.ext_dims_arg {
+                visit_expr(ext, true, f);
+            }
         }
         Rel::Subquery { input, .. } | Rel::Distinct(input) | Rel::Top { input, .. } => {
             visit_rel(input, f)

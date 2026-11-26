@@ -190,12 +190,19 @@ impl Settings {
 }
 
 pub fn process_root() -> Result<&'static MemoryBudget, BudgetError> {
-    static ROOT: std::sync::OnceLock<MemoryBudget> = std::sync::OnceLock::new();
-    if let Some(root) = ROOT.get() {
-        return Ok(root);
+    #[cfg(test)]
+    {
+        Ok(crate::viewer::memory::test_process().budget())
     }
-    let candidate = MemoryBudget::try_new(memory_budget::Limits::new(u64::MAX))?;
-    Ok(ROOT.get_or_init(|| candidate))
+    #[cfg(not(test))]
+    {
+        static ROOT: std::sync::OnceLock<MemoryBudget> = std::sync::OnceLock::new();
+        if let Some(root) = ROOT.get() {
+            return Ok(root);
+        }
+        let candidate = MemoryBudget::try_new(memory_budget::Limits::new(u64::MAX))?;
+        Ok(ROOT.get_or_init(|| candidate))
+    }
 }
 
 pub(crate) fn extension_info_budgets() -> Result<(MemoryBudget, MemoryBudget), BudgetError> {

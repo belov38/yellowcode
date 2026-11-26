@@ -19,9 +19,6 @@ pub(crate) fn check(inst: &ObjectInstance, posted: bool, marked: bool) -> CallRe
     if !posted && !inst.state.borrow().is_new {
         return Err(refuse(inst, "проведение записанного документа"));
     }
-    if posted && inst.state.borrow().modified.get() {
-        return Err(refuse(inst, "перепроведение изменённого документа"));
-    }
     if posted && crate::regread::sets_touched(inst)? {
         return Err(refuse(inst, "перепроведение с прочитанными движениями"));
     }
@@ -53,8 +50,12 @@ pub(crate) fn post(
     mode: &Value,
     r: RefValue,
 ) -> CallResult<Vec<Value>> {
-    let app = inst.app.clone();
-    let privileged = app.model().obj(inst.obj).behavior.post_in_privileged_mode;
+    let privileged = inst
+        .app
+        .model()
+        .obj(inst.obj)
+        .behavior
+        .post_in_privileged_mode;
     let movements = inst.movements_of(ex)?;
     let repost = !inst
         .state
@@ -62,7 +63,7 @@ pub(crate) fn post(
         .written
         .as_ref()
         .is_some_and(|w| w.was_new);
-    crate::regread::posting_begin(&app, &movements, r, repost)?;
+    crate::regread::posting_begin(inst, &movements, r, repost)?;
     let handled = crate::events::posting(ex, inst, mode, privileged);
     crate::regread::posting_end(&movements, handled.is_err());
     handled?;

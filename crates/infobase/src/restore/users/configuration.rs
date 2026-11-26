@@ -1,12 +1,10 @@
 use super::*;
 use crate::config::{ManagedConfigTxnSource, MeteredConfigSource, OpenLease, metered::model};
-use mdconf::{
-    Configuration, ConfigurationExt, EntryMeta, EntrySource, Inflated, LoadMeter, LoadOptions,
-    LoadProfile, MdKind, MeterRefusal, Stages,
-};
-use memory_budget::{BudgetError, Evictor, Limits};
-use std::collections::BTreeSet;
-use std::sync::{Arc, Mutex};
+use mdconf::{Configuration, ConfigurationExt, EntrySource, LoadOptions, LoadProfile, MdKind};
+use memory_budget::{BudgetError, BudgetedVec, Evictor, Limits};
+use std::sync::Arc;
+
+const ADMINISTRATION_RIGHT_GUID: &str = "900e3c92-6e18-4874-846a-b28780b5b54c";
 
 fn memory(error: memory_budget::MemoryLimit) -> Error {
     Error::Memory(BudgetError::Limit(error))
@@ -14,236 +12,192 @@ fn memory(error: memory_budget::MemoryLimit) -> Error {
 fn config_error(error: mdconf::Error) -> Error {
     match error {
         mdconf::Error::Memory(m) => memory(m),
-        mdconf::Error::Format { what, .. } if what.starts_with("users RIGHTS") => bad(what),
         _ => bad("invalid CONFIG for users reconstruction"),
     }
 }
-fn format_error() -> mdconf::Error {
-    mdconf::Error::Format {
-        entry: "CONFIG".into(),
-        what: "users RIGHTS of unsupported shape".into(),
-    }
+fn invalid_rights() -> Error {
+    bad("invalid CONFIG rights for users reconstruction")
 }
-fn size_error() -> mdconf::Error {
-    mdconf::Error::Format {
-        entry: "CONFIG".into(),
-        what: "users RIGHTS over 512 MiB of decoded rights".into(),
-    }
+fn unsupported_shape() -> Error {
+    bad("users RIGHTS of unsupported shape")
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-struct RightsShape {
-    objects: u64,
-    pairs: u64,
-    restrictions: u64,
-    fields: u64,
-    condition_bytes: u64,
-    template_bytes: u64,
-    templates: u64,
+fn list(node: Option<&brace::Node>) -> Result<&[brace::Node]> {
+    node.and_then(brace::Node::as_list)
+        .ok_or_else(invalid_rights)
 }
-impl RightsShape {
-    const OBJECT: u64 = 1024;
-    const PAIR: u64 = 256;
-    const RESTRICTION: u64 = 512;
-    const FIELD: u64 = 128;
-    const TEMPLATE: u64 = 256;
-    const FIXED: u64 = 64 * 1024;
-
-    fn allowance(&self, max_name: u64) -> Option<u64> {
-        let name = max_name.checked_add(128)?;
-        let objects = self
-            .objects
-            .checked_mul(Self::OBJECT.checked_add(name.checked_mul(2)?)?)?;
-        let pairs = self.pairs.checked_mul(Self::PAIR)?;
-        let restrictions = self
-            .restrictions
-            .checked_mul(Self::RESTRICTION)?
-            .checked_add(self.condition_bytes.checked_mul(2)?)?;
-        let fields = self
-            .fields
-            .checked_mul(Self::FIELD.checked_add(name.checked_mul(2)?)?)?;
-        let templates = self
-            .templates
-            .checked_mul(Self::TEMPLATE)?
-            .checked_add(self.template_bytes.checked_mul(2)?)?;
-        [objects, pairs, restrictions, fields, templates]
-            .into_iter()
-            .try_fold(Self::FIXED, u64::checked_add)
+fn count(node: Option<&brace::Node>) -> Result<usize> {
+    node.and_then(brace::Node::text)
+        .and_then(|t| t.trim().parse::<i64>().ok())
+        .and_then(|n| usize::try_from(n).ok())
+        .ok_or_else(invalid_rights)
+}
+fn counted_exact(nodes: &[brace::Node]) -> Result<&[brace::Node]> {
+    let n = count(nodes.first())?;
+    let end = n.checked_add(1).ok_or_else(invalid_rights)?;
+    if nodes.len() != end {
+        return Err(invalid_rights());
     }
+    nodes.get(1..end).ok_or_else(invalid_rights)
+}
+fn bool3(node: Option<&brace::Node>) -> Result<bool> {
+    match node.and_then(brace::Node::text) {
+        Some("1") => Ok(true),
+        Some("0" | "-1" | "4294967295") => Ok(false),
+        _ => Err(invalid_rights()),
+    }
+}
+fn check_unique_guids(guids: &mut BudgetedVec<Uuid16>) -> Result<()> {
+    guids.sort_unstable();
+    if guids.windows(2).any(|w| matches!(w, [a, b] if a == b)) {
+        return Err(unsupported_shape());
+    }
+    Ok(())
 }
 
-struct RightsMeter {
-    query: Arc<OpenLease>,
-    roles: Vec<String>,
-    max_name: u64,
-    retained: Mutex<(std::collections::HashMap<String, u64>, u64)>,
-}
-impl RightsMeter {
-    fn lock(&self) -> std::sync::MutexGuard<'_, (std::collections::HashMap<String, u64>, u64)> {
-        self.retained
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-}
-impl LoadMeter for RightsMeter {
-    fn admit(&self, entry: &str, inflated: u64) -> std::result::Result<(), MeterRefusal> {
-        self.query.admit(entry, inflated)?;
-        if self.roles.iter().any(|role| role == entry) {
-            let bytes = self
-                .lock()
-                .0
-                .get(entry)
-                .copied()
-                .unwrap_or_else(|| inflated.saturating_mul(4096 + 4 * (self.max_name + 128)));
-            self.query.grow(bytes, false).map_err(MeterRefusal)?;
-        }
-        Ok(())
-    }
-    fn hold(&self, entry: &str, bytes: u64) -> std::result::Result<(), MeterRefusal> {
-        self.query.hold(entry, bytes)
-    }
-    fn release(&self, bytes: u64) {
-        self.query.release(bytes);
-    }
-    fn admit_copy(&self, entry: &str, bytes: u64) -> std::result::Result<(), MeterRefusal> {
-        self.query.admit_copy(entry, bytes)
-    }
-}
-struct RightsSource<'a> {
-    inner: MeteredConfigSource<'a>,
-    meter: Arc<RightsMeter>,
-    budget: MemoryBudget,
-}
-impl EntrySource for RightsSource<'_> {
-    fn list(&self) -> mdconf::Result<Vec<EntryMeta>> {
-        self.inner.list()
-    }
-    fn stored(&self, name: &str) -> mdconf::Result<Option<Vec<u8>>> {
-        self.inner.stored(name)
-    }
-    fn stored_bounded(&self, name: &str, limit: usize) -> mdconf::Result<Option<Vec<u8>>> {
-        self.inner.stored_bounded(name, limit)
-    }
-    fn stored_inflated_bounded(&self, name: &str, limit: u64) -> mdconf::Result<Option<Inflated>> {
-        let Some(data) = self.inner.stored_inflated_bounded(name, limit)? else {
-            return Ok(None);
-        };
-        if self.meter.roles.iter().any(|role| role == name) {
-            let len = data.bytes.len() as u64;
-            let scratch = len
-                .checked_mul(128)
-                .and_then(|n| n.checked_add(MIB))
-                .ok_or_else(size_error)?;
-            let _lease = self
-                .budget
-                .try_reserve(Category::Metadata, scratch)
-                .map_err(mdconf::Error::Memory)?;
-            let tree = brace::parse_bytes(&data.bytes).map_err(|_| format_error())?;
-            let allowance = rights_shape(&tree)?
-                .allowance(self.meter.max_name)
-                .ok_or_else(size_error)?;
-            let mut retained = self.meter.lock();
-            let previous = retained.0.get(name).copied().unwrap_or(0);
-            let total = retained
-                .1
-                .checked_sub(previous)
-                .and_then(|t| t.checked_add(allowance))
-                .filter(|n| *n <= 512 * MIB)
-                .ok_or_else(size_error)?;
-            retained.0.insert(name.to_string(), allowance);
-            retained.1 = total;
-        }
-        Ok(Some(data))
-    }
-}
-
-fn list(node: Option<&brace::Node>) -> mdconf::Result<&[brace::Node]> {
-    node.and_then(brace::Node::as_list).ok_or_else(format_error)
-}
-fn count(node: Option<&brace::Node>) -> mdconf::Result<usize> {
-    node.and_then(brace::Node::as_u32)
-        .map(|n| n as usize)
-        .ok_or_else(format_error)
-}
-fn unique<'a>(nodes: impl Iterator<Item = &'a brace::Node>) -> mdconf::Result<u64> {
-    let mut keys = BTreeSet::new();
-    for node in nodes {
-        let id = node
+fn parse_root_pairs(
+    pairs: &[brace::Node],
+    admin_right: Uuid16,
+    budget: &MemoryBudget,
+) -> Result<Option<bool>> {
+    let mut seen = BudgetedVec::try_with_capacity(budget, Category::Metadata, pairs.len() / 2)
+        .map_err(Error::Memory)?;
+    let mut admin = None;
+    for [key, val] in pairs.as_chunks::<2>().0 {
+        let id = key
             .text()
             .and_then(Uuid16::parse)
-            .ok_or_else(format_error)?;
-        if !keys.insert(id) {
-            return Err(format_error());
+            .ok_or_else(unsupported_shape)?;
+        let value = bool3(Some(val))?;
+        seen.try_push(id).map_err(Error::Memory)?;
+        if id == admin_right {
+            admin = Some(value);
         }
     }
-    Ok(keys.len() as u64)
+    check_unique_guids(&mut seen)?;
+    Ok(admin)
 }
-fn text_len(node: Option<&brace::Node>) -> u64 {
-    node.and_then(brace::Node::text)
-        .map_or(0, |t| t.len() as u64)
-}
-fn rights_shape(tree: &brace::Node) -> mdconf::Result<RightsShape> {
-    let mut shape = RightsShape::default();
-    let objects = list(tree.at(1))?;
-    let n = count(objects.first())?;
-    let objects = objects
-        .get(1..n.checked_add(1).ok_or_else(format_error)?)
-        .ok_or_else(format_error)?;
-    shape.objects = n as u64;
-    for object in objects {
-        let rights = list(object.at(1))?;
-        if rights.first().and_then(brace::Node::text) == Some("0") {
-            shape.pairs += unique(rights.iter().skip(1).step_by(2))?;
-        } else {
-            let end = count(rights.get(1))?
+
+fn parse_root_rightlist(
+    rl: &[brace::Node],
+    admin_right: Uuid16,
+    budget: &MemoryBudget,
+) -> Result<Option<bool>> {
+    match rl.first().and_then(brace::Node::text) {
+        Some("0") => {
+            let tail = rl.get(1..).ok_or_else(invalid_rights)?;
+            if !tail.len().is_multiple_of(2) {
+                return Err(invalid_rights());
+            }
+            parse_root_pairs(tail, admin_right, budget)
+        }
+        Some("1") => {
+            let n = count(rl.get(1))?;
+            let end = n
                 .checked_mul(2)
-                .and_then(|n| n.checked_add(2))
-                .ok_or_else(format_error)?;
-            shape.pairs += unique(
-                rights
-                    .get(2..end)
-                    .ok_or_else(format_error)?
-                    .iter()
-                    .step_by(2),
-            )?;
-            let rest = rights.get(end..).ok_or_else(format_error)?;
+                .and_then(|x| x.checked_add(2))
+                .ok_or_else(invalid_rights)?;
+            let pairs = rl.get(2..end).ok_or_else(invalid_rights)?;
+            let admin = parse_root_pairs(pairs, admin_right, budget)?;
+            let rest = rl.get(end..).ok_or_else(invalid_rights)?;
             if !rest.is_empty() {
-                let end = count(rest.first())?
-                    .checked_add(1)
-                    .ok_or_else(format_error)?;
-                let associations = rest.get(1..end).ok_or_else(format_error)?;
-                let mut keys = BTreeSet::new();
+                let associations = counted_exact(rest)?;
+                let mut seen =
+                    BudgetedVec::try_with_capacity(budget, Category::Metadata, associations.len())
+                        .map_err(Error::Memory)?;
                 for item in associations {
+                    let item = list(Some(item))?;
                     let id = item
-                        .at(0)
+                        .first()
                         .and_then(brace::Node::text)
                         .and_then(Uuid16::parse)
-                        .ok_or_else(format_error)?;
-                    if !keys.insert(id) {
-                        return Err(format_error());
-                    }
-                    let items = item
-                        .at(1)
-                        .and_then(brace::Node::as_list)
-                        .unwrap_or_default();
-                    shape.restrictions += (items.len().saturating_sub(1) as u64).max(1);
-                    for rls in items.iter().skip(1) {
-                        let rls = rls.as_list().unwrap_or_default();
-                        shape.condition_bytes += text_len(rls.get(1));
-                        shape.fields += rls.len().saturating_sub(3) as u64;
-                    }
+                        .ok_or_else(unsupported_shape)?;
+                    let _rls = counted_exact(list(item.get(1))?)?;
+                    seen.try_push(id).map_err(Error::Memory)?;
                 }
+                check_unique_guids(&mut seen)?;
             }
+            Ok(admin)
         }
+        _ => Err(invalid_rights()),
     }
-    if let Some(templates) = tree.at(2).and_then(brace::Node::as_list) {
-        for template in templates.iter().skip(1) {
-            let template = template.as_list().unwrap_or_default();
-            shape.templates += 1;
-            shape.template_bytes += text_len(template.first()) + text_len(template.get(1));
+}
+
+fn root_administration(
+    tree: &brace::Node,
+    cfg_id: Uuid16,
+    admin_right: Uuid16,
+    budget: &MemoryBudget,
+) -> Result<bool> {
+    let root = list(Some(tree))?;
+    let objects = counted_exact(list(root.get(1))?)?;
+    let _templates = counted_exact(list(root.get(2))?)?;
+    let set_for_new_objects = bool3(root.get(3))?;
+    let _set_for_attributes_by_default = bool3(root.get(4))?;
+    let _independent_rights_of_child_objects = bool3(root.get(5))?;
+    let mut saw_root = false;
+    let mut admin = None;
+    for object in objects {
+        let pair = list(Some(object))?;
+        let objref = list(pair.first())?;
+        let rightlist = list(pair.get(1))?;
+        let id = objref
+            .get(1)
+            .and_then(brace::Node::text)
+            .and_then(Uuid16::parse)
+            .ok_or_else(invalid_rights)?;
+        let standard = match objref.get(2).and_then(brace::Node::text) {
+            Some("0") => false,
+            Some("1") => true,
+            _ => return Err(invalid_rights()),
+        };
+        if id != cfg_id || standard {
+            continue;
         }
+        if saw_root {
+            return Err(unsupported_shape());
+        }
+        saw_root = true;
+        admin = parse_root_rightlist(rightlist, admin_right, budget)?;
     }
-    Ok(shape)
+    Ok(admin.unwrap_or(set_for_new_objects))
+}
+
+fn role_has_administration(
+    source: &MeteredConfigSource<'_>,
+    budget: &MemoryBudget,
+    name: &str,
+    cfg_id: Uuid16,
+    admin_right: Uuid16,
+) -> Result<bool> {
+    let Some(inflated) = source
+        .stored_inflated_bounded(name, zraw::DEFAULT_LIMIT)
+        .map_err(|e| match e {
+            mdconf::Error::Memory(m) => memory(m),
+            _ => invalid_rights(),
+        })?
+    else {
+        return Ok(false);
+    };
+    if !inflated.was_deflated || v8cont::is_container(&inflated.bytes) {
+        return Err(invalid_rights());
+    }
+    let body = inflated
+        .bytes
+        .strip_prefix(b"\xef\xbb\xbf")
+        .unwrap_or(&inflated.bytes);
+    if body.first() != Some(&b'{') {
+        return Err(invalid_rights());
+    }
+    let tree =
+        brace::parse_bytes_budgeted(&inflated.bytes, budget, Category::Metadata).map_err(|e| {
+            match e {
+                brace::ManagedParseError::Memory(m) => Error::Memory(m),
+                brace::ManagedParseError::Parse(_) => invalid_rights(),
+            }
+        })?;
+    drop(inflated);
+    root_administration(&tree, cfg_id, admin_right, budget)
 }
 
 fn separated(object: &mdconf::MdObject, property: &str) -> bool {
@@ -256,32 +210,56 @@ pub(in crate::restore) fn facts(path: &Path, supplied: Option<&MemoryBudget>) ->
     let budget = supplied
         .cloned()
         .unwrap_or_else(|| MemoryBudget::new(Limits::new(1024 * MIB)));
+    let fixed = OpenLease::reserve_fixed(&budget)?;
+    let db = Arc::new(
+        Database::open(
+            path,
+            onecd::OpenOptions {
+                memory_budget: Some(budget.clone()),
+                locking: Locking::None,
+                ..onecd::OpenOptions::read_only()
+            },
+        )
+        .map_err(|e| match e {
+            onecd::Error::Memory(e) => Error::Memory(e),
+            other => Error::Engine(other),
+        })?,
+    );
+    let weak: std::sync::Weak<dyn Evictor + Send> = Arc::<Database>::downgrade(&db);
+    let budget = budget.try_with_evictor(weak)?;
+    let lease = Arc::new(OpenLease::new(
+        fixed,
+        Arc::clone(&db) as Arc<dyn Evictor + Send>,
+    ));
+    let txn = db.read();
+    let managed = ManagedConfigTxnSource::read_in(&txn, "CONFIG", &budget)?;
+    if managed.is_empty() {
+        return Ok(Facts::without_configuration());
+    }
+    lease
+        .grow(
+            scaled(
+                managed.list().len() as u64,
+                model::PER_ENTRY,
+                model::CONFIG_FIXED,
+            )?,
+            false,
+        )
+        .map_err(memory)?;
+    let source = MeteredConfigSource::new(managed, budget.clone());
+
     let mut facts = Facts::default();
-    let (roles, max_name, _bounds_lease) = load(path, &budget, None, |cfg| {
-        let Some(cfg) = cfg else {
-            return Ok((Vec::new(), 0, None));
-        };
-        let max_name = cfg
-            .index
-            .names
-            .values()
-            .map(String::len)
-            .chain(std::iter::once(
-                "Configuration.".len() + cfg.settings.name.len(),
-            ))
-            .max()
-            .unwrap_or(0);
-        if max_name > 4096 {
-            return Err(bad("users resolved name limit"));
-        }
-        if mdschema::forms::std_attrs()
-            .map_err(|_| bad("standard attribute schema"))?
-            .iter()
-            .flat_map(|(_, items)| items)
-            .any(|(_, name)| ".StandardAttribute.".len() + name.len() > 128)
-        {
-            return Err(bad("users standard attribute name limit"));
-        }
+    let (cfg_id, roles) = {
+        let cfg = Configuration::load(
+            &source,
+            &LoadOptions {
+                keep_source: false,
+                profile: LoadProfile::Query,
+                meter: Some(lease.clone()),
+                ..Default::default()
+            },
+        )
+        .map_err(config_error)?;
         let role_count = cfg
             .objects
             .iter()
@@ -312,133 +290,27 @@ pub(in crate::restore) fn facts(path: &Path, supplied: Option<&MemoryBudget>) ->
             .any(|o| separated(o, "UsersSeparation") || separated(o, "AuthenticationSeparation"));
         facts.names = names.map(|o| o.name.clone()).collect();
         facts.administration = Some(Vec::with_capacity(role_count));
-        let bounds_lease = reserve(Some(&budget), scaled(role_count as u64, 128, KIB64)?)?;
-        let roles = cfg
-            .objects
-            .iter()
-            .filter(|o| o.kind == MdKind::Role)
-            .map(|o| format!("{}.0", o.id))
-            .collect();
-        Ok((roles, max_name as u64, bounds_lease))
-    })?;
-    if facts.administration.is_none() {
-        facts.administration = Some(Vec::new());
-        return Ok(facts);
-    }
-    let right = mdconf::parts::Right::from_guid(
-        Uuid16::parse("900e3c92-6e18-4874-846a-b28780b5b54c")
-            .ok_or_else(|| bad("Administration right"))?,
-    )
-    .ok_or_else(|| bad("Administration right schema"))?;
-    load(path, &budget, Some((roles, max_name)), |cfg| {
-        let cfg = cfg.ok_or_else(|| bad("CONFIG vanished"))?;
-        if cfg
-            .diagnostics
-            .misses
-            .keys()
-            .any(|key| key.starts_with("rights:"))
-        {
-            return Err(bad("invalid CONFIG rights for users reconstruction"));
-        }
+        let mut roles = BudgetedVec::try_with_capacity(&budget, Category::Metadata, role_count)
+            .map_err(Error::Memory)?;
         for role in cfg.objects.iter().filter(|o| o.kind == MdKind::Role) {
-            if role
-                .rights()
-                .is_some_and(|r| r.value(&mdconf::parts::RightTarget::Configuration, right))
-            {
-                facts
-                    .administration
-                    .as_mut()
-                    .ok_or_else(|| bad("users Administration facts"))?
-                    .push(role.id);
-            }
+            roles.try_push(role.id).map_err(Error::Memory)?;
         }
-        Ok(())
-    })?;
-    Ok(facts)
-}
+        (cfg.id, roles)
+    };
+    let transient = lease.bytes().saturating_sub(lease.retained());
+    lease.shrink(transient).map_err(memory)?;
 
-fn load<T>(
-    path: &Path,
-    budget: &MemoryBudget,
-    rights: Option<(Vec<String>, u64)>,
-    extract: impl FnOnce(Option<&Configuration>) -> Result<T>,
-) -> Result<T> {
-    let fixed = OpenLease::reserve_fixed(budget)?;
-    let db = Arc::new(
-        Database::open(
-            path,
-            onecd::OpenOptions {
-                memory_budget: Some(budget.clone()),
-                locking: Locking::None,
-                ..onecd::OpenOptions::read_only()
-            },
-        )
-        .map_err(|e| match e {
-            onecd::Error::Memory(e) => Error::Memory(e),
-            other => Error::Engine(other),
-        })?,
-    );
-    let weak: std::sync::Weak<dyn Evictor + Send> = Arc::<Database>::downgrade(&db);
-    let budget = budget.try_with_evictor(weak)?;
-    let lease = Arc::new(OpenLease::new(
-        fixed,
-        Arc::clone(&db) as Arc<dyn Evictor + Send>,
-    ));
-    let txn = db.read();
-    let source = ManagedConfigTxnSource::read_in(&txn, "CONFIG", &budget)?;
-    if source.is_empty() {
-        return extract(None);
+    let admin_right =
+        Uuid16::parse(ADMINISTRATION_RIGHT_GUID).ok_or_else(|| bad("Administration right"))?;
+    for &role_id in roles.iter() {
+        let name = format!("{role_id}.0");
+        if role_has_administration(&source, &budget, &name, cfg_id, admin_right)? {
+            facts
+                .administration
+                .as_mut()
+                .ok_or_else(|| bad("users Administration facts"))?
+                .push(role_id);
+        }
     }
-    lease
-        .grow(
-            scaled(
-                source.list().len() as u64,
-                model::PER_ENTRY,
-                model::CONFIG_FIXED,
-            )?,
-            false,
-        )
-        .map_err(memory)?;
-    let source = MeteredConfigSource::new(source, budget.clone());
-    let extra = if rights.is_some() {
-        Stages::RIGHTS
-    } else {
-        Stages::NONE
-    };
-    let cfg = if let Some((roles, max_name)) = rights {
-        let meter = Arc::new(RightsMeter {
-            query: lease.clone(),
-            roles,
-            max_name,
-            retained: Mutex::new(Default::default()),
-        });
-        let source = RightsSource {
-            inner: source,
-            meter: meter.clone(),
-            budget: budget.clone(),
-        };
-        Configuration::load(
-            &source,
-            &LoadOptions {
-                keep_source: false,
-                profile: LoadProfile::Query,
-                extra_stages: extra,
-                meter: Some(meter),
-                ..Default::default()
-            },
-        )
-        .map_err(config_error)?
-    } else {
-        Configuration::load(
-            &source,
-            &LoadOptions {
-                keep_source: false,
-                profile: LoadProfile::Query,
-                meter: Some(lease.clone()),
-                ..Default::default()
-            },
-        )
-        .map_err(config_error)?
-    };
-    extract(Some(&cfg))
+    Ok(facts)
 }

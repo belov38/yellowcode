@@ -7,6 +7,7 @@ use crate::value::Uuid;
 pub(crate) const NS_WS: &str = "http://v8.1c.ru/8.2/mngsrv/ws";
 pub(crate) const NS_APP: &str = "http://v8.1c.ru/8.2/managed-application/core";
 pub(crate) const NS_MODULES: &str = "http://v8.1c.ru/8.2/managed-application/modules";
+pub(crate) const NS_LF: &str = "http://v8.1c.ru/8.2/managed-application/logform";
 pub(crate) const NS_CMI: &str = "http://v8.1c.ru/8.2/managed-application/cmi";
 pub(crate) const NS_VRS: &str = "http://v8.1c.ru/8.2/virtual-resource-system";
 pub(crate) const NS_CORE: &str = "http://v8.1c.ru/8.1/data/core";
@@ -159,6 +160,23 @@ impl<'a, 'i> Reader<'a, 'i> {
         local: &'static str,
     ) -> Result<Option<String>, AnswerError> {
         Ok(self.one(ns, local)?.and_then(text_of))
+    }
+
+    pub(crate) fn text_same(
+        &self,
+        ns: &'static str,
+        local: &'static str,
+    ) -> Result<Option<String>, AnswerError> {
+        let all = self.children(ns, local);
+        let mut texts = all.iter().map(|n| text_of(*n));
+        let first = texts.next().flatten();
+        if texts.any(|t| t != first) {
+            return Err(AnswerError::Duplicate {
+                answer: self.answer,
+                field: local.to_string(),
+            });
+        }
+        Ok(first)
     }
 
     pub(crate) fn parsed<T>(

@@ -25,10 +25,14 @@ pub fn argument(
     sent: &Param,
 ) -> Converted<Value> {
     if sent.nil {
-        return Ok(if nillable {
+        return Ok(if !nillable {
+            Err(Unimplemented("xsi:nil on a parameter without Nillable"))
+        } else if *xdto == XdtoType::SubscriberId {
             Ok(Value::Undefined)
         } else {
-            Err(Unimplemented("xsi:nil on a parameter without Nillable"))
+            Err(Unimplemented(
+                "xsi:nil on a parameter of a type other than DeliverableNotificationSubscriberID",
+            ))
         });
     }
     let t = match xdto {
@@ -45,7 +49,7 @@ pub fn argument(
                 _ => Err(NOT_CONVERTED),
             });
         }
-        XdtoType::Other(_) => {
+        XdtoType::Other(_) | XdtoType::SubscriberId => {
             return Ok(Err(Unimplemented(
                 "a SOAP parameter of an XDTO type the replica does not serve",
             )));
@@ -66,7 +70,7 @@ pub fn answer(ex: &mut Execution, xdto: &XdtoType, value: &Value) -> Converted<S
         XdtoType::Boolean => matches!(value, Value::Bool(_)),
         XdtoType::DateTime => matches!(value, Value::Date(_)),
         XdtoType::ValueStorage => bsl_stdlib::value_storage_bytes(value).is_some(),
-        XdtoType::Other(_) => false,
+        XdtoType::Other(_) | XdtoType::SubscriberId => false,
     };
     if !fits {
         return Ok(Err(Unimplemented(

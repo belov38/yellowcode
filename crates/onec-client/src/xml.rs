@@ -122,9 +122,21 @@ pub struct CallValues {
     pub params: Vec<Value>,
 }
 
-pub fn parse_call_result(body: &[u8]) -> Result<CallValues, XmlError> {
+pub(crate) fn value_text(body: &[u8]) -> String {
     let raw = String::from_utf8_lossy(strip_bom(body));
-    let text = keep_carriage_returns(&raw);
+    keep_carriage_returns(&raw).into_owned()
+}
+
+pub(crate) fn typed_value(n: Node, implied: Option<&TypeName>) -> Result<Value, XmlError> {
+    value_in(n, 0, implied)
+}
+
+pub(crate) fn has_xsi_type(n: Node) -> bool {
+    n.attribute((NS_XSI, "type")).is_some() || n.attribute((NS_XSI, "nil")).is_some()
+}
+
+pub fn parse_call_result(body: &[u8]) -> Result<CallValues, XmlError> {
+    let text = value_text(body);
     let doc = Document::parse(&text)?;
     let mut out = CallValues::default();
     for n in doc.root_element().children() {
@@ -486,6 +498,17 @@ xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" ",
     Ok(r.into_bytes())
 }
 
+pub(crate) fn params_xml(params: &[Value]) -> Result<String, XmlError> {
+    if !params.iter().all(fits_depth) {
+        return Err(XmlError::TooDeep);
+    }
+    let mut r = String::new();
+    for p in params {
+        push_param(&mut r, p);
+    }
+    Ok(r)
+}
+
 fn push_param(r: &mut String, v: &Value) {
     push_value(r, "m:param", v);
 }
@@ -559,14 +582,14 @@ fn qname_of(ty: &TypeName, prefix: &str) -> (String, String) {
     }
 }
 
-fn escape_text(s: &str) -> String {
+pub(crate) fn escape_text(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('\r', "&#13;")
 }
 
-fn escape_attr(s: &str) -> String {
+pub(crate) fn escape_attr(s: &str) -> String {
     escape_text(s)
         .replace('"', "&quot;")
         .replace('\n', "&#10;")

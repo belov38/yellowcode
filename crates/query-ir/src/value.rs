@@ -196,7 +196,7 @@ pub enum QValue {
     Boundary(Box<Boundary>),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Moment {
     pub date: bsl_prim::BslDate,
     pub reference: Option<(u32, RefId)>,

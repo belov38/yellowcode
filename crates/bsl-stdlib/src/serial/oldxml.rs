@@ -7,7 +7,9 @@ use crate::xml::{
 };
 use bsl_lib::xml::XmlEvent;
 use bsl_prim::Str;
-use bsl_vm::{Arg, CallResult, Execution, TypeId, Value};
+use bsl_vm::{
+    AppXdtoProp, AppXdtoValue, Arg, CallResult, Execution, HostError, HostObject, TypeId, Value,
+};
 
 pub(crate) fn register(reg: &mut bsl_vm::Registry) {
     global(reg, "ЗаписатьXML", "WriteXML", write_xml);
@@ -34,6 +36,7 @@ struct Plan {
     nil: bool,
     type_value: Option<(String, String)>,
     description: bool,
+    body: Option<Vec<AppXdtoProp>>,
 }
 
 fn plan(ex: &mut Execution, v: &Value) -> CallResult<Plan> {
@@ -45,6 +48,7 @@ fn plan(ex: &mut Execution, v: &Value) -> CallResult<Plan> {
             nil: true,
             type_value: None,
             description: false,
+            body: None,
         });
     }
     if let Value::Type(t) = v {
@@ -56,6 +60,7 @@ fn plan(ex: &mut Execution, v: &Value) -> CallResult<Plan> {
             nil: false,
             type_value: Some(named),
             description: false,
+            body: None,
         });
     }
     if let Some(td) = v.as_object().and_then(|o| {
@@ -72,6 +77,7 @@ fn plan(ex: &mut Execution, v: &Value) -> CallResult<Plan> {
             nil: false,
             type_value: None,
             description: true,
+            body: None,
         });
     }
     let (ns, name) = xml_type_of(ex, v.type_id()).ok_or_else(not_serializable)?;
@@ -83,10 +89,17 @@ fn plan(ex: &mut Execution, v: &Value) -> CallResult<Plan> {
         NS_DATA => Family::Data,
         _ => Family::Applied,
     };
-    let text = if matches!(v, Value::Object(_)) {
-        crate::serial::xmlvalue::xml_string(ex, v)?.ok_or_else(not_serializable)?
-    } else {
-        crate::serial::xmlvalue::to_xml_string(ex, v)?
+    let mut body = None;
+    let text = match v {
+        Value::Object(o) => match crate::serial::xmlvalue::xml_string(ex, v)? {
+            Some(text) => text,
+            None if family == Family::Applied => {
+                body = Some(applied_body(ex, o)?.ok_or_else(not_serializable)?);
+                String::new()
+            }
+            None => return Err(not_serializable()),
+        },
+        _ => crate::serial::xmlvalue::to_xml_string(ex, v)?,
     };
     Ok(Plan {
         family,
@@ -95,7 +108,104 @@ fn plan(ex: &mut Execution, v: &Value) -> CallResult<Plan> {
         nil: false,
         type_value: None,
         description: false,
+        body,
     })
+}
+
+fn applied_body(ex: &mut Execution, o: &bsl_vm::ObjRef) -> CallResult<Option<Vec<AppXdtoProp>>> {
+    if ex
+        .runtime()
+        .types()
+        .app_type(HostObject::type_id(&**o))
+        .is_none()
+    {
+        return Ok(None);
+    }
+    let app = ex.runtime().app().clone();
+    let Some(serializer) = app.serializer() else {
+        return Ok(None);
+    };
+    Ok(serializer.old_xml_write(ex, o)?)
+}
+
+fn body_refused(what: &str) -> bsl_vm::CallError {
+    HostError::not_implemented("ЗаписатьXML", what).into()
+}
+
+fn body_texts(
+    ex: &mut Execution,
+    props: &[AppXdtoProp],
+    guard: &mut crate::serial::depth::DepthGuard,
+    out: &mut Vec<String>,
+    retained: &mut u64,
+) -> CallResult<()> {
+    if guard.enter().is_err() {
+        return Err(crate::serial::cycle_fatal(ex).into());
+    }
+    for prop in props {
+        ex.charge(1)?;
+        if prop.ns.as_deref().is_some_and(|ns| !ns.is_empty()) || !crate::xml::is_ncname(&prop.name)
+        {
+            return Err(body_refused(
+                "свойство в пространстве имён или с недопустимым именем",
+            ));
+        }
+        match &prop.value {
+            AppXdtoValue::Value {
+                value,
+                typed: false,
+            } => {
+                let text = match value {
+                    Value::Object(_) => crate::serial::xmlvalue::xml_string(ex, value)?
+                        .ok_or_else(|| xml_error(msg::XML_CONVERSION))?,
+                    _ => crate::serial::xmlvalue::to_xml_string(ex, value)?,
+                };
+                crate::xml::check_chars(&text)?;
+                *retained = retained.saturating_add((text.len() as u64).saturating_mul(3));
+                ex.reserve(*retained)?;
+                out.push(text);
+            }
+            AppXdtoValue::Object(children) => body_texts(ex, children, guard, out, retained)?,
+            AppXdtoValue::Nil => {}
+            AppXdtoValue::Value { typed: true, .. } | AppXdtoValue::Text(_) => {
+                return Err(type_mismatch(2).into());
+            }
+        }
+    }
+    guard.leave();
+    Ok(())
+}
+
+fn emit_body(
+    st: &mut XmlWriterState,
+    ex: &mut Execution,
+    props: &[AppXdtoProp],
+    texts: &mut std::vec::IntoIter<String>,
+    guard: &mut crate::serial::depth::DepthGuard,
+) -> CallResult<()> {
+    if guard.enter().is_err() {
+        return Err(crate::serial::cycle_fatal(ex).into());
+    }
+    for prop in props {
+        st.start_element(ex, &prop.name, None)?;
+        match &prop.value {
+            AppXdtoValue::Value { .. } => {
+                let text = texts.next().ok_or_else(|| type_mismatch(2))?;
+                if !text.is_empty() {
+                    st.text(ex, &text)?;
+                }
+            }
+            AppXdtoValue::Object(children) => emit_body(st, ex, children, texts, guard)?,
+            AppXdtoValue::Nil => {
+                ensure_prefix(st, ex, NS_XSI, "xsi")?;
+                st.attribute(ex, "nil", Some(NS_XSI), "true")?;
+            }
+            AppXdtoValue::Text(_) => return Err(type_mismatch(2).into()),
+        }
+        st.end_element(ex)?;
+    }
+    guard.leave();
+    Ok(())
 }
 
 fn ensure_prefix(
@@ -194,6 +304,34 @@ fn write_xml(ex: &mut Execution, args: &mut [Arg]) -> CallResult<Value> {
     };
     if p.description && (custom.is_some() || explicit) {
         return Err(not_serializable());
+    }
+    if let Some(body) = &p.body {
+        if custom.is_some() || explicit {
+            return Err(body_refused(
+                "имя, пространство имён или явное назначение типа",
+            ));
+        }
+        if st.lookup_uri("").is_some_and(|uri| !uri.is_empty()) {
+            return Err(body_refused("пространство имён по умолчанию у записи"));
+        }
+        let mut texts = Vec::new();
+        body_texts(
+            ex,
+            body,
+            &mut crate::serial::depth::DepthGuard::new(),
+            &mut texts,
+            &mut 0,
+        )?;
+        st.start_element(ex, &p.name, None)?;
+        emit_body(
+            &mut st,
+            ex,
+            body,
+            &mut texts.into_iter(),
+            &mut crate::serial::depth::DepthGuard::new(),
+        )?;
+        st.end_element(ex)?;
+        return Ok(Value::Undefined);
     }
     emit(&mut st, ex, &p, custom, explicit)?;
     Ok(Value::Undefined)

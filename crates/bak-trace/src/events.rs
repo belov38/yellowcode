@@ -11,6 +11,7 @@ pub struct RunShape<'a> {
     pub lifecycle_timeout_secs: Option<u64>,
     pub memory_limit_given: bool,
     pub raw: Option<bool>,
+    pub ignore_extra_tables: Option<bool>,
     pub trace_requested: bool,
     pub source: &'a str,
     pub output: &'a str,
@@ -30,6 +31,7 @@ impl fmt::Debug for RunShape<'_> {
             .field("lifecycle_timeout_secs", &self.lifecycle_timeout_secs)
             .field("memory_limit_given", &self.memory_limit_given)
             .field("raw", &self.raw)
+            .field("ignore_extra_tables", &self.ignore_extra_tables)
             .field("trace_requested", &self.trace_requested)
             .finish_non_exhaustive()
     }

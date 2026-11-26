@@ -36,6 +36,7 @@ pub struct ObjectParts {
     pub picture: Option<Picture>,
     pub schedule: Option<Schedule>,
     pub exchange_content: Option<Vec<ContentItem>>,
+    pub exchange_content_stream: Option<Vec<u32>>,
     pub style: Option<Style>,
     pub binary_modules: Vec<(String, Vec<u8>)>,
     pub ws_definition: Vec<(String, Vec<u8>)>,

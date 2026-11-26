@@ -1,5 +1,6 @@
 use crate::Application;
 use crate::meta::{arg_value, member_name, no_field, type_mismatch};
+use bsl_prim::fold_name;
 use bsl_vm::{
     Arg, CallResult, Execution, HostError, HostObject, MemberId, Registry, TypeId, Value,
 };
@@ -342,11 +343,17 @@ impl HostObject for ExtensionObj {
             None => Err(no_field(&m.0.to_string()).into()),
         }
     }
-    fn call(&self, _: &mut Execution, m: MemberId, _: &mut [Arg]) -> CallResult<Value> {
+    fn call(&self, ex: &mut Execution, m: MemberId, _: &mut [Arg]) -> CallResult<Value> {
         match member_name(catalog(), self.ty, m) {
-            Some((true, ru, "GetData")) => {
-                Err(extension_refusal(&format!("{ru}: данные расширения не собираются")).into())
-            }
+            Some((true, ru, "GetData")) => match &self.facts.data {
+                Ok(bytes) => {
+                    let len = bytes.len() as u64;
+                    ex.charge(len / 64)?;
+                    ex.reserve(len)?;
+                    Ok(bsl_stdlib::values::new_binary_data(bytes.to_vec()))
+                }
+                Err(why) => Err(extension_refusal(&format!("{ru}: {why}")).into()),
+            },
             Some((true, ru, _)) => Err(extension_refusal(ru).into()),
             _ => Err(no_field(&m.0.to_string()).into()),
         }
@@ -418,6 +425,54 @@ pub(crate) fn metadata_facts(
         })
         .collect::<std::result::Result<Vec<_>, String>>()
         .map(Some)
+}
+
+pub(crate) fn changed_object(
+    app: &Application,
+    md: &md_model::MdObject,
+) -> std::result::Result<Option<bool>, String> {
+    let Some(facts) = metadata_facts(app)? else {
+        return Ok(None);
+    };
+    let config = &app.model().config;
+    let changed = || facts.iter().flat_map(|(_, s)| &s.changed);
+    if let Some((k, n)) = changed().find(|(k, n)| {
+        !config
+            .objects
+            .iter()
+            .any(|o| o.kind.as_str() == k.as_str() && fold_name(&o.name) == fold_name(n))
+    }) {
+        return Err(format!(
+            "заимствованный объект {k}.{n} не найден в конфигурации"
+        ));
+    }
+    let (kind, name) = (md.kind.as_str(), fold_name(&md.name));
+    Ok(Some(
+        changed().any(|(k, n)| k.as_str() == kind && fold_name(n) == name),
+    ))
+}
+
+pub(crate) fn manager_gate(app: &Application) -> std::result::Result<bool, String> {
+    if app.options().extensions.is_empty() {
+        return match app.extensions() {
+            Presence::Present => {
+                Err("в базе есть расширения, а факты расширений не переданы".into())
+            }
+            Presence::Absent | Presence::Unknown(_) => Ok(false),
+        };
+    }
+    let Some(facts) = metadata_facts(app)? else {
+        return Ok(false);
+    };
+    for (e, _) in facts {
+        if let Err(why) = &e.row {
+            return Err(format!("строка расширения «{}»: {why}", e.name));
+        }
+        if let Err(why) = &e.managers {
+            return Err(format!("модули менеджеров расширения «{}»: {why}", e.name));
+        }
+    }
+    Ok(true)
 }
 
 pub(crate) const MAX_NODES: usize = 20_000;
@@ -683,6 +738,7 @@ struct Index {
     by_name: std::collections::HashMap<String, usize>,
     exports: std::collections::HashMap<String, Vec<usize>>,
     targets: std::collections::HashMap<(usize, String), (String, String, String)>,
+    extension_exports: std::collections::HashMap<String, String>,
 }
 
 const NOT_A_CALL: &[&str] = &[
@@ -776,11 +832,25 @@ impl Index {
                 );
             }
         }
+        let mut extension_exports = std::collections::HashMap::new();
+        for m in app.modules().extension_modules() {
+            let Some((_, extension)) = app.modules().extension_of(m) else {
+                continue;
+            };
+            for method in app.modules().extension_methods(m)?.iter() {
+                if method.export {
+                    extension_exports
+                        .entry(method.folded.clone())
+                        .or_insert_with(|| extension.to_string());
+                }
+            }
+        }
         Ok(Index {
             modules,
             by_name,
             exports,
             targets,
+            extension_exports,
         })
     }
 
@@ -857,6 +927,11 @@ impl Index {
                         out.push((target, name.clone()));
                         continue;
                     }
+                }
+                if let Some(extension) = self.extension_exports.get(name) {
+                    return Err(format!(
+                        "вызов {name} модуля менеджера расширения «{extension}» в {module_name}.{method}"
+                    ));
                 }
                 for &target in self.exports.get(name).into_iter().flatten() {
                     out.push((target, name.clone()));

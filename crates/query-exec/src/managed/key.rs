@@ -85,6 +85,7 @@ pub fn try_key_of(
             std::mem::size_of_val(&ty.0) + std::mem::size_of_val(&index),
         ),
         ValueRef::Nested(_) => (13, 0),
+        ValueRef::PointInTime(moment) => (14, if moment.reference.is_some() { 29 } else { 9 }),
         ValueRef::String(_) | ValueRef::Number(_) | ValueRef::Type(_) => {
             return Err(BudgetError::Overflow.into());
         }
@@ -106,6 +107,17 @@ pub fn try_key_of(
         ValueRef::SysEnum(ty, index) => {
             key.try_extend_from_slice(&ty.0.to_be_bytes())?;
             key.try_extend_from_slice(&index.to_be_bytes())?;
+        }
+        ValueRef::PointInTime(moment) => {
+            key.try_extend_from_slice(&((moment.date.ticks() as u64) ^ (1 << 63)).to_be_bytes())?;
+            match &moment.reference {
+                None => key.try_push(0)?,
+                Some((table, id)) => {
+                    key.try_push(1)?;
+                    key.try_extend_from_slice(&table.to_be_bytes())?;
+                    key.try_extend_from_slice(id)?;
+                }
+            }
         }
         _ => {}
     }

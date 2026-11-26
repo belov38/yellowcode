@@ -154,6 +154,10 @@ pub(crate) fn create_item(ex: &mut Execution, app: &Application, obj: ObjId) -> 
     Ok(Value::Object(new_instance(ex, app, obj, false)?))
 }
 
+pub(crate) fn create_node(ex: &mut Execution, app: &Application, obj: ObjId) -> CallResult<Value> {
+    Ok(Value::Object(new_instance(ex, app, obj, false)?))
+}
+
 pub(crate) fn create_group(ex: &mut Execution, app: &Application, obj: ObjId) -> CallResult<Value> {
     let def = app.model().obj(obj);
     let folders = def.behavior.hierarchy_folders
@@ -746,6 +750,30 @@ impl ObjectInstance {
         Ok(())
     }
 
+    fn assign_node(&self, ex: &mut Execution, index: usize, v: Value) -> CallResult<()> {
+        let def = self.app.model().obj(self.obj);
+        let field = def
+            .fields
+            .get(index)
+            .ok_or_else(|| internal("no such object field"))?;
+        match field.std {
+            Some(StdAttr::Code | StdAttr::Description | StdAttr::SentNo | StdAttr::ReceivedNo) => {
+                self.assign(ex, index, v)
+            }
+            Some(StdAttr::DeletionMark) if matches!(v, Value::Bool(false)) => {
+                self.assign(ex, index, v)
+            }
+            Some(StdAttr::DeletionMark) => {
+                Err(self.not_implemented("ПометкаУдаления: Истина").into())
+            }
+            Some(StdAttr::Ref | StdAttr::ThisNode) => Err(not_writable(&field.name).into()),
+            Some(_) => Err(self.not_implemented(&field.name).into()),
+            None => Err(self
+                .not_implemented(&format!("{}: реквизит плана обмена", field.name))
+                .into()),
+        }
+    }
+
     fn check_predefined_name(&self, v: &Value) -> Result<(), HostError> {
         let name = match v {
             Value::String(s) => s.to_string_lossy(),
@@ -1297,6 +1325,9 @@ impl HostObject for ObjectInstance {
                 .ok_or_else(|| internal("no such object field"))?;
             let document_attr =
                 def.kind == ObjKind::Document && matches!(field.std, None | Some(StdAttr::Date));
+            if def.kind == ObjKind::ExchangePlan {
+                return self.assign_node(ex, index, v);
+            }
             if def.kind != ObjKind::Catalog && !document_attr {
                 return Err(self.not_implemented(&field.name).into());
             }
@@ -1332,6 +1363,10 @@ impl HostObject for ObjectInstance {
                     }
                     _ => Err(not_writable(ru).into()),
                 },
+            },
+            Some((false, ru)) if def.kind == ObjKind::ExchangePlan => match field_index(def, ru) {
+                Some(i) => self.assign_node(ex, i, v),
+                None => Err(not_writable(ru).into()),
             },
             Some((false, ru)) if def.kind == ObjKind::Document => match field_index(def, ru) {
                 Some(i)
@@ -1377,6 +1412,7 @@ impl HostObject for ObjectInstance {
         }
         let catalog = kind == ObjKind::Catalog;
         let document = kind == ObjKind::Document;
+        let node = kind == ObjKind::ExchangePlan;
         match member {
             Some((true, "Записать")) if document => {
                 crate::write::write_document(ex, &self.rc()?, args)?;
@@ -1402,7 +1438,7 @@ impl HostObject for ObjectInstance {
                     .ok_or_else(|| internal("no Метаданные context"))?;
                 Ok(value_of(&cx, ex, MdKey::Path(MdPath::Object(self.obj))))
             }
-            Some((true, "Записать")) if catalog => {
+            Some((true, "Записать")) if catalog || node => {
                 crate::write::write(ex, &self.rc()?)?;
                 Ok(Value::Undefined)
             }

@@ -1,4 +1,4 @@
-use super::data::{XdtoData, XdtoWriteFlags, data_to_value};
+use super::data::{Factory, FactoryRef, XdtoData, XdtoWriteFlags, data_to_value};
 use super::factory::{data_of, explicit_arg, factory_ref, is_platform_model, platform_factory};
 use super::io_json::{read_json_mode, read_serializer_json, write_serializer_json};
 use super::io_xml::{ReadMode, read_serializer_xml, write_serializer_xml};
@@ -8,11 +8,15 @@ use crate::bind::{arg_value, is_given, msg, type_mismatch};
 use crate::collections::{method_name, not_implemented, property_name};
 use crate::enums::as_enum_value;
 use crate::xml::{xml_reader, xml_writer};
-use bsl_lib::xdto::QName;
+use bsl_lib::xdto::{
+    Facets, Form, ObjectType, Package, Property, QName, TypeDef, ValueType, Variety,
+};
 use bsl_prim::Str;
+use bsl_vm::host::AppXdtoTypeDef;
 use bsl_vm::{
     Arg, CallResult, Execution, HostError, HostObject, MemberId, Registry, TypeId, TypeImpl, Value,
 };
+use platform_catalog::XdtoName;
 use std::any::Any;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -80,6 +84,56 @@ impl Serializer {
         Ok(WriteArgs { root, explicit })
     }
 
+    fn write_factory(
+        &self,
+        ex: &mut Execution,
+        item: &Value,
+        param: usize,
+    ) -> CallResult<FactoryRef> {
+        if !is_platform_model(&self.f.model) {
+            return Ok(self.f.clone());
+        }
+        let Some(o) = item.as_object() else {
+            return Ok(self.f.clone());
+        };
+        let Some(root) = ex
+            .runtime()
+            .types()
+            .app_type(HostObject::type_id(&**o))
+            .and_then(|a| a.xdto.clone())
+        else {
+            return Ok(self.f.clone());
+        };
+        if self
+            .model()
+            .type_def(&QName::new(&root.namespace, &root.name))
+            .is_some()
+        {
+            return Ok(self.f.clone());
+        }
+        let app = ex.runtime().app().clone();
+        let Some(serializer) = app.serializer() else {
+            return Ok(self.f.clone());
+        };
+        let Some(defs) = serializer.xdto_types(ex, o, &root)? else {
+            return Ok(self.f.clone());
+        };
+        let types = self
+            .model()
+            .packages
+            .iter()
+            .fold(0u64, |n, p| n.saturating_add(p.types.len() as u64));
+        ex.charge(types)?;
+        ex.reserve(
+            package_bytes(&defs)
+                .saturating_add(types.saturating_mul(std::mem::size_of::<usize>() as u64)),
+        )?;
+        let package = host_package(&root, defs).ok_or_else(|| type_mismatch(param))?;
+        Ok(Rc::new(Factory::new(Arc::new(
+            self.model().with(vec![package]),
+        ))))
+    }
+
     #[allow(
         clippy::too_many_arguments,
         reason = "writer accounting is scoped to this invocation"
@@ -87,6 +141,7 @@ impl Serializer {
     fn data(
         &self,
         ex: &mut Execution,
+        f: &FactoryRef,
         v: &Value,
         param: usize,
         xml_write: bool,
@@ -94,7 +149,7 @@ impl Serializer {
         json_prefix: u64,
         xml_table_writer: Option<&Value>,
     ) -> CallResult<(XdtoData, u64)> {
-        let mut ctx = XdtoCtx::new(self.f.clone(), param);
+        let mut ctx = XdtoCtx::new(f.clone(), param);
         ctx.xml_write(xml_write);
         ctx.json_write(json_write, json_prefix);
         if let Some(writer) = xml_table_writer {
@@ -104,7 +159,7 @@ impl Serializer {
             Ok(d) => {
                 if let XdtoData::Value { ty, .. } | XdtoData::Object { ty, .. } = &d
                     && ty.ns == super::value_map::NS_CORE
-                    && self.model().type_def(ty).is_none()
+                    && f.model.type_def(ty).is_none()
                 {
                     let e = ctx.mismatch(ex);
                     return Err(ctx.call_error(e));
@@ -181,7 +236,8 @@ impl Serializer {
                 0
             }
         };
-        let (d, live) = self.data(ex, &item, 2, true, false, prefix, table.then_some(&wv))?;
+        let f = self.write_factory(ex, &item, 2)?;
+        let (d, live) = self.data(ex, &f, &item, 2, true, false, prefix, table.then_some(&wv))?;
         let mut st = xml_writer(ex, &wv)?;
         if table {
             let current = st.retained_prefix_bytes(ex)?;
@@ -189,7 +245,7 @@ impl Serializer {
         }
         write_serializer_xml(
             ex,
-            self.model(),
+            &f.model,
             &mut st,
             a.root.as_ref(),
             &d,
@@ -213,7 +269,7 @@ impl Serializer {
         } else {
             0
         };
-        let (d, live) = self.data(ex, &item, 2, false, platform, prefix, None)?;
+        let (d, live) = self.data(ex, &self.f, &item, 2, false, platform, prefix, None)?;
         let live = if platform {
             crate::serial::valuelist_json::data_envelope(ex, &item, &d, live, prefix)?
         } else {
@@ -276,7 +332,8 @@ impl Serializer {
 
     fn write_xdto(&self, ex: &mut Execution, args: &[Arg]) -> CallResult<Value> {
         let v = arg_value(ex, args.first())?;
-        let (d, _) = match self.data(ex, &v, 1, false, false, 0, None) {
+        let f = self.write_factory(ex, &v, 1)?;
+        let (d, _) = match self.data(ex, &f, &v, 1, false, false, 0, None) {
             Err(bsl_vm::CallError::Host(e)) if matches!(&e.msg, bsl_vm::MsgRef::Key(k) if k.key == msg::TYPE_MISMATCH) =>
             {
                 let name = type_qname(ex, v.type_id()).name;
@@ -285,7 +342,7 @@ impl Serializer {
             }
             result => result?,
         };
-        Ok(data_to_value(ex, &self.f, d)?)
+        Ok(data_to_value(ex, &f, d)?)
     }
 
     fn read_xdto(&self, ex: &mut Execution, args: &[Arg]) -> CallResult<Value> {
@@ -344,6 +401,85 @@ impl Serializer {
             _ => Value::Undefined,
         })
     }
+}
+
+fn package_bytes(defs: &[AppXdtoTypeDef]) -> u64 {
+    let name = |n: &XdtoName| (n.namespace.len() + n.name.len()) as u64;
+    defs.iter().fold(0u64, |bytes, def| {
+        bytes.saturating_add(match def {
+            AppXdtoTypeDef::Object {
+                name: n,
+                properties,
+            } => properties.iter().fold(
+                name(n).saturating_add(std::mem::size_of::<TypeDef>() as u64),
+                |b, p| {
+                    b.saturating_add(p.name.len() as u64)
+                        .saturating_add(name(&p.ty))
+                        .saturating_add(std::mem::size_of::<Property>() as u64)
+                },
+            ),
+            AppXdtoTypeDef::Value { name: n, base } => name(n)
+                .saturating_add(name(base))
+                .saturating_add(std::mem::size_of::<TypeDef>() as u64),
+        })
+    })
+}
+
+fn host_package(root: &XdtoName, defs: Vec<AppXdtoTypeDef>) -> Option<Package> {
+    let qname = |n: &XdtoName| QName::new(&n.namespace, &n.name);
+    match defs.first() {
+        Some(AppXdtoTypeDef::Object { name, .. }) if name == root => {}
+        _ => return None,
+    }
+    let mut types: Vec<TypeDef> = Vec::with_capacity(defs.len());
+    for def in defs {
+        let name = match &def {
+            AppXdtoTypeDef::Object { name, .. } | AppXdtoTypeDef::Value { name, .. } => name,
+        };
+        if name.namespace != root.namespace || types.iter().any(|t| t.name().name == name.name) {
+            return None;
+        }
+        types.push(match def {
+            AppXdtoTypeDef::Object { name, properties } => TypeDef::Object(ObjectType {
+                name: qname(&name),
+                base: None,
+                open: false,
+                abstract_: false,
+                mixed: false,
+                sequenced: false,
+                ordered: true,
+                properties: properties
+                    .into_iter()
+                    .map(|p| Property {
+                        name: p.name,
+                        ty: qname(&p.ty),
+                        lower: p.lower,
+                        upper: p.upper,
+                        nillable: p.nillable,
+                        form: Form::Element,
+                        qualified: true,
+                        default: None,
+                        local_name: None,
+                        fixed: None,
+                    })
+                    .collect(),
+            }),
+            AppXdtoTypeDef::Value { name, base } => TypeDef::Value(ValueType {
+                name: qname(&name),
+                base: Some(qname(&base)),
+                variety: Variety::Atomic,
+                facets: Facets::default(),
+            }),
+        });
+    }
+    Some(Package {
+        ns: root.namespace.clone(),
+        element_qualified: true,
+        attribute_qualified: false,
+        types,
+        anonymous_types: Vec::new(),
+        globals: Vec::new(),
+    })
 }
 
 impl HostObject for Serializer {

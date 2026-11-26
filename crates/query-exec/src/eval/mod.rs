@@ -64,6 +64,94 @@ pub(crate) fn str_value(units: Vec<u16>) -> QValue {
     QValue::String(QStr(units.into()))
 }
 
+pub(crate) fn format_orphaned_predef_id(raw: &[u8; 16]) -> [u16; 37] {
+    let hex = |n: u8| u16::from(if n < 10 { b'0' + n } else { b'a' + (n - 10) });
+    let hi = |b: u8| hex(b >> 4);
+    let lo = |b: u8| hex(b & 0x0f);
+    let [
+        b0,
+        b1,
+        b2,
+        b3,
+        b4,
+        b5,
+        b6,
+        b7,
+        b8,
+        b9,
+        b10,
+        b11,
+        b12,
+        b13,
+        b14,
+        b15,
+    ] = *query_ir::uuid_of(raw).as_bytes();
+    [
+        u16::from(b'#'),
+        hi(b0),
+        lo(b0),
+        hi(b1),
+        lo(b1),
+        hi(b2),
+        lo(b2),
+        hi(b3),
+        lo(b3),
+        u16::from(b'-'),
+        hi(b4),
+        lo(b4),
+        hi(b5),
+        lo(b5),
+        u16::from(b'-'),
+        hi(b6),
+        lo(b6),
+        hi(b7),
+        lo(b7),
+        u16::from(b'-'),
+        hi(b8),
+        lo(b8),
+        hi(b9),
+        lo(b9),
+        u16::from(b'-'),
+        hi(b10),
+        lo(b10),
+        hi(b11),
+        lo(b11),
+        hi(b12),
+        lo(b12),
+        hi(b13),
+        lo(b13),
+        hi(b14),
+        lo(b14),
+        hi(b15),
+        lo(b15),
+    ]
+}
+
+pub(crate) fn predef_name_value(
+    v: &QValue,
+    names: &[([u8; 16], QStr)],
+    mem: &MemBudget<'_>,
+) -> Result<QValue, ExecError> {
+    match v {
+        QValue::Null => Ok(QValue::Null),
+        QValue::Binary(b) => {
+            let Ok(raw) = <[u8; 16]>::try_from(b.as_ref()) else {
+                return Ok(QValue::String(QStr::from_str("")));
+            };
+            if raw == [0u8; 16] {
+                return Ok(QValue::String(QStr::from_str("")));
+            }
+            if let Some((_, name)) = names.iter().find(|(id, _)| *id == raw) {
+                return Ok(QValue::String(name.clone()));
+            }
+            let units = format_orphaned_predef_id(&raw);
+            charge_string(units.len() as u64, mem)?;
+            Ok(QValue::String(QStr(units.as_slice().into())))
+        }
+        _ => Ok(QValue::String(QStr::from_str(""))),
+    }
+}
+
 pub fn type_of_value(v: &QValue, refs: &[(u32, RefAtom)]) -> Result<QValue, ExecError> {
     let t = match v {
         QValue::Null => QType::null_only(),

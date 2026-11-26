@@ -2,7 +2,7 @@
 name = "onec-client"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.99.1"
+rust-version = "1.100.0"
 license = "MIT OR Apache-2.0"
 autotests = false
 autoexamples = false
@@ -18,6 +18,7 @@ roxmltree = "0.21"
 sha1 = "0.10"
 sha2 = "0.10"
 thiserror = "2"
+brace = { path = "../brace" }
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 
 [lints.clippy]

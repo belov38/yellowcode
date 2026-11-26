@@ -22,6 +22,8 @@ struct Builder<'c, 'a, 'r, 'w, 't> {
     schema: &'t QuerySchema,
     sources: ScratchVec<NativeOwned<'a, ir::SourceS>>,
     levels: ScratchVec<ScratchVec<ir::SrcId>>,
+    implicit_sections: Index<ir::implicit_tabular::ImplicitSectionKey, ir::SrcId>,
+    implicit_joins: Index<ir::SrcId, ScratchVec<(ir::ColSel, ir::SrcId, crate::QTableId)>>,
     params: ScratchVec<NativeOwned<'a, String>>,
     param_slot: Index<NameKey, u16>,
     values: ScratchVec<NativeOwned<'a, crate::ValuePath>>,
@@ -31,16 +33,19 @@ struct Builder<'c, 'a, 'r, 'w, 't> {
     nested_from: Option<&'t tir::Select>,
     nested_outputs: &'t [tir::Item],
     nested_source: Option<(ir::SrcId, ScratchVec<NativeOwned<'a, ir::NestedS>>)>,
+    nested_owner: Option<nested::NestedOwner>,
     present: ScratchVec<NativeOwned<'a, u16>>,
+    in_select_item: bool,
     aggs: ScratchVec<NativeOwned<'a, ir::AggCall>>,
     agg_index: Index<u64, ScratchVec<u16>>,
     allowed: bool,
     query_depth: u32,
     temp_out: bool,
     single_part: bool,
-    union_present: Option<(u16, u16)>,
+    union_present: Option<ir::UnionPresent>,
 }
 struct Declared<'a, 't> {
+    src: ir::SrcId,
     rel: NativeOwned<'a, ir::Rel>,
     joins: ScratchVec<(JoinKind, Declared<'a, 't>, &'t tir::TExpr)>,
 }
@@ -74,6 +79,8 @@ impl<'c, 'a, 'r, 'w, 't> Builder<'c, 'a, 'r, 'w, 't> {
             schema,
             sources: ctx.scratch(0)?,
             levels: ctx.scratch(0)?,
+            implicit_sections: Index::new(),
+            implicit_joins: Index::new(),
             params: ctx.scratch(0)?,
             param_slot: Index::new(),
             values: ctx.scratch(0)?,
@@ -83,7 +90,9 @@ impl<'c, 'a, 'r, 'w, 't> Builder<'c, 'a, 'r, 'w, 't> {
             nested_from,
             nested_outputs,
             nested_source: None,
+            nested_owner: None,
             present: ctx.scratch(0)?,
+            in_select_item: false,
             aggs: ctx.scratch(0)?,
             agg_index: Index::new(),
             allowed: false,
@@ -238,16 +247,12 @@ impl<'c, 'a, 'r, 'w, 't> Builder<'c, 'a, 'r, 'w, 't> {
         query: &'t tir::Query,
     ) -> BuildResult<(NativeOwned<'a, ir::Rel>, NativeOwned<'a, Vec<crate::QType>>)> {
         let ctx = self.ctx;
-        let union_auto = if query.autoorder && query.parts.len() > 1 {
-            match ir::uniform_union_autoorder(query, self.schema) {
-                Some(desc) if self.query_depth == 1 && !self.temp_out => Some(desc),
-                _ => {
-                    return Err(BuildProblem::Later {
-                        what: "АВТОУПОРЯДОЧИВАНИЕ объединения",
-                        stage: "Q3",
-                    });
-                }
-            }
+        let union_auto = if query.autoorder
+            && query.parts.len() > 1
+            && self.query_depth == 1
+            && !self.temp_out
+        {
+            ir::uniform_union_autoorder(query, self.schema)
         } else {
             None
         };
@@ -261,7 +266,7 @@ impl<'c, 'a, 'r, 'w, 't> Builder<'c, 'a, 'r, 'w, 't> {
             self.union_present = if self.temp_out {
                 None
             } else {
-                ir::uniform_movement_union_presentation(query)
+                ir::union_presentation(query, self.schema)
             };
         }
         let Some(first) = query.parts.first() else {
@@ -320,31 +325,8 @@ impl<'c, 'a, 'r, 'w, 't> Builder<'c, 'a, 'r, 'w, 't> {
         let (mut root, hierarchy) = self.hierarchy_union(query, root, types.trusted_borrow())?;
         if let Some(keys) = auto_sort {
             root = ctx.sort(root, keys.finish(), None)?;
-        } else if !hierarchy && !query.order.is_empty() {
-            let mut keys = ctx.vector(query.order.len())?;
-            for key in &query.order {
-                let desc = match key.dir {
-                    query_syntax::ast::OrderDir::Asc => false,
-                    query_syntax::ast::OrderDir::Desc => true,
-                    _ => {
-                        return Err(BuildProblem::Later {
-                            what: "ИЕРАРХИЯ в объединении",
-                            stage: "Q3",
-                        });
-                    }
-                };
-                let column = key.col.ok_or(BuildProblem::Internal(
-                    "an order key of a union outside the select list",
-                ))?;
-                let ty = match types.trusted_borrow().get(column) {
-                    Some(ty) => ctx.copy(ty)?,
-                    None => ctx.copy(&crate::QType::default())?,
-                };
-                let expr = self.out(column, ty)?;
-                ctx.parent_depth(std::iter::once(expr.depth()))?;
-                ctx.push(&mut keys, expr.map(|expr| ir::SortKey { expr, desc }))?;
-            }
-            root = ctx.sort(root, keys.finish(), None)?;
+        } else if !hierarchy && (!query.order.is_empty() || query.autoorder) {
+            root = self.order_union(query, first, root, types.trusted_borrow())?;
         }
         Ok((root, types))
     }
@@ -398,14 +380,136 @@ impl<'c, 'a, 'r, 'w, 't> Builder<'c, 'a, 'r, 'w, 't> {
             let source = self.declare(source, &mut ids)?;
             ctx.scratch_push(&mut declared, source)?;
         }
+        self.collect_implicit_sections(select, order, &mut ids)?;
         ctx.scratch_push(&mut self.levels, ids)?;
         let outer_aggs = std::mem::replace(&mut self.aggs, ctx.scratch(0)?);
         let outer_index = std::mem::take(&mut self.agg_index);
+        let outer_select_item = std::mem::replace(&mut self.in_select_item, false);
         let result = self.select_body(select, order, auto, declared);
+        self.in_select_item = outer_select_item;
         self.aggs = outer_aggs;
         self.agg_index = outer_index;
         self.levels.pop();
         result
+    }
+    fn collect_implicit_sections(
+        &mut self,
+        select: &'t tir::Select,
+        order: Option<&'t [tir::OrderKey]>,
+        ids: &mut ScratchVec<ir::SrcId>,
+    ) -> BuildResult<()> {
+        use crate::ir::implicit_tabular::{
+            ImplicitWork, match_implicit_section, push_select_work, step_work,
+        };
+        let ctx = self.ctx;
+        let tir_count = ids.len();
+        let mut work: ScratchVec<ImplicitWork<'t>> = ctx.scratch(0)?;
+        push_select_work(select, order, &[], 0, &mut |item| {
+            ctx.scratch_push(&mut work, item)
+        })?;
+        while let Some(item) = work.pop() {
+            ctx.checkpoint()?;
+            step_work(
+                item,
+                &mut |next| ctx.scratch_push(&mut work, next),
+                &mut |source, col, derefs| {
+                    let index = usize::from(source);
+                    if index >= tir_count {
+                        return Ok(());
+                    }
+                    let Some(&owner_src) = ids.get(index) else {
+                        return Ok(());
+                    };
+                    let owner_table = match self
+                        .sources
+                        .get(owner_src.0 as usize)
+                        .map(|s| &s.trusted_borrow().kind)
+                    {
+                        Some(ir::SrcKind::Table(table)) => Some(*table),
+                        _ => None,
+                    };
+                    let col_sel = match col {
+                        tir::Col::Field(id) => ir::ColSel::Field(id),
+                        tir::Col::Column(index) => ir::ColSel::Column(index),
+                    };
+                    let Some(access) = match_implicit_section(
+                        self.schema,
+                        owner_src,
+                        owner_table,
+                        col_sel,
+                        derefs,
+                    ) else {
+                        return Ok(());
+                    };
+                    if self.implicit_sections.get(&access.key).is_some() {
+                        return Ok(());
+                    }
+                    let tab_src = self.section_source(access.key.tab_table, false)?;
+                    ctx.managed(self.implicit_sections.insert(
+                        Some(ctx.arena),
+                        access.key,
+                        tab_src,
+                    ))?;
+                    if self.implicit_joins.get(&owner_src).is_none() {
+                        let bucket = ctx.scratch(0)?;
+                        ctx.managed(self.implicit_joins.insert(
+                            Some(ctx.arena),
+                            owner_src,
+                            bucket,
+                        ))?;
+                    }
+                    let bucket =
+                        self.implicit_joins
+                            .get_mut(&owner_src)
+                            .ok_or(BuildProblem::Internal(
+                                "missing implicit tabular join bucket",
+                            ))?;
+                    ctx.scratch_push(
+                        bucket,
+                        (access.key.owner_col, tab_src, access.key.tab_table),
+                    )?;
+                    ctx.scratch_push(ids, tab_src)?;
+                    Ok(())
+                },
+            )?;
+        }
+        Ok(())
+    }
+    fn attach_implicit_joins(
+        &mut self,
+        owner_src: ir::SrcId,
+        mut rel: NativeOwned<'a, ir::Rel>,
+    ) -> BuildResult<NativeOwned<'a, ir::Rel>> {
+        let Some(entries) = self.implicit_joins.get(&owner_src) else {
+            return Ok(rel);
+        };
+        let ctx = self.ctx;
+        let mut pending = ctx.scratch(entries.len())?;
+        for &entry in entries.iter() {
+            ctx.scratch_push(&mut pending, entry)?;
+        }
+        for &(owner_col, tab_src, tab_table) in &pending {
+            let depth = ctx.parent_depth(std::iter::empty())?;
+            let scan = ctx
+                .scalar((tab_src, tab_table))
+                .map(|(src, table)| ir::Rel::Scan { src, table })
+                .set_depth(depth);
+            let lhs = self.section_col(tab_src, tab_table, crate::schema::StdRole::Ref)?;
+            let rhs_ty = self.column_type(owner_src, owner_col)?;
+            let rhs = ctx.expr(
+                ctx.scalar((owner_src, owner_col))
+                    .map(|(src, col)| ir::ExprKind::Col { src, col }),
+                rhs_ty,
+            )?;
+            let lhs = ctx.boxed(lhs)?;
+            let rhs = ctx.boxed(rhs)?;
+            let on_kind = ctx
+                .allocated(lhs.zip(rhs))?
+                .map(|(a, b)| ir::ExprKind::Compare(query_syntax::ast::CmpOp::Eq, a, b));
+            let on = ctx.expr(on_kind, ctx.copy(&crate::QType::boolean())?)?;
+            rel = ctx.join(JoinKind::Left, rel, scan, on)?;
+        }
+        Ok(rel)
     }
     fn select_body(
         &mut self,
@@ -445,6 +549,7 @@ impl<'c, 'a, 'r, 'w, 't> Builder<'c, 'a, 'r, 'w, 't> {
                 .nested_from
                 .is_some_and(|inner| std::ptr::eq(inner, select));
         let mut exprs = ctx.vector(select.items.len())?;
+        let prev_select_item = std::mem::replace(&mut self.in_select_item, true);
         for (col, item) in select.items.iter().enumerate() {
             let expr = if item.nested.is_some() {
                 let retain = !forwarding
@@ -455,12 +560,7 @@ impl<'c, 'a, 'r, 'w, 't> Builder<'c, 'a, 'r, 'w, 't> {
                 self.nested_item(item, col, retain)?
             } else if let Some(expr) = self.forward_nested(item, col)? {
                 expr
-            } else if let Some(expr) = self.presentation_item(
-                select,
-                item,
-                col,
-                !auto && order.is_none_or(<[_]>::is_empty),
-            )? {
+            } else if let Some(expr) = self.presentation_item(select, item, col)? {
                 expr
             } else {
                 self.expr(&item.expr)?
@@ -468,6 +568,7 @@ impl<'c, 'a, 'r, 'w, 't> Builder<'c, 'a, 'r, 'w, 't> {
             ctx.parent_depth(std::iter::once(expr.depth()))?;
             ctx.push(&mut exprs, expr)?;
         }
+        self.in_select_item = prev_select_item;
         let mut exprs = exprs.finish();
         let mut having = match &select.having {
             Some(h) => Some(self.expr(h)?),
@@ -540,6 +641,15 @@ impl<'c, 'a, 'r, 'w, 't> Builder<'c, 'a, 'r, 'w, 't> {
                         }
                         if u16::try_from(col).is_ok_and(|col| {
                             self.present.iter().any(|c| *c.trusted_borrow() == col)
+                        }) || exprs.trusted_borrow().get(col).is_some_and(|e| {
+                            matches!(
+                                e.kind,
+                                ir::ExprKind::Func {
+                                    f: query_syntax::Func::Presentation
+                                        | query_syntax::Func::RefPresentation,
+                                    ..
+                                }
+                            )
                         }) {
                             return Err(BuildProblem::Later {
                                 what: "сортировка по представлению",
@@ -628,6 +738,22 @@ impl<'c, 'a, 'r, 'w, 't> Builder<'c, 'a, 'r, 'w, 't> {
                     }
                     continue;
                 }
+                if let Some(order_expr) = self.chart_code_order_expr(base.trusted_borrow())? {
+                    let order_expr = if aggregated {
+                        let ty = ctx.copy(&order_expr.trusted_borrow().ty)?;
+                        let call = self.aggregate_call(
+                            query_syntax::Func::Min,
+                            false,
+                            Some(order_expr),
+                            ty.trusted_borrow(),
+                        )?;
+                        let idx = self.agg(call)?;
+                        ctx.expr(ctx.scalar(idx).map(ir::ExprKind::AggRef), ty)?
+                    } else {
+                        order_expr
+                    };
+                    self.hidden_sort(&mut hidden, &mut sort, select.items.len(), order_expr, desc)?;
+                }
                 let ty = ctx.copy(&base.trusted_borrow().ty)?;
                 let col = match col {
                     Some(col) => col,
@@ -640,7 +766,7 @@ impl<'c, 'a, 'r, 'w, 't> Builder<'c, 'a, 'r, 'w, 't> {
         } else if auto && !aggregated && !select.distinct {
             let source = self.levels.last().and_then(|ids| ids.first()).copied();
             if let Some(src) = source
-                && let Some(mut main) = self.main_order(src)?
+                && let Some(mut main) = self.main_order(src, select)?
             {
                 if let Some((id, parent)) = main.hier {
                     hier = Some((
@@ -693,28 +819,116 @@ impl<'c, 'a, 'r, 'w, 't> Builder<'c, 'a, 'r, 'w, 't> {
         if aggregated {
             let mut keys = ctx.scratch(0)?;
             let mut index = Index::new();
-            let mut sets = ctx.vector(select.group.as_ref().map_or(0, Vec::len))?;
+            let mut ref_index: Index<u64, ScratchVec<(u16, usize)>> = Index::new();
+            let mut raw_sets: ScratchVec<ScratchVec<u16>> =
+                ctx.scratch(select.group.as_ref().map_or(0, Vec::len))?;
             if let Some(group) = &select.group {
                 for set in group {
-                    let mut slots = ctx.vector(set.len())?;
+                    let mut slots = ctx.scratch(set.len())?;
                     for key in set {
                         let e = self.expr(key)?;
                         let slot = push_key(ctx, &mut keys, &mut index, e)?;
-                        ctx.push(&mut slots, ctx.scalar(slot))?;
+                        ctx.scratch_push(&mut slots, slot)?;
                     }
-                    ctx.push(&mut sets, slots.finish())?;
+                    ctx.scratch_push(&mut raw_sets, slots)?;
                 }
             }
+            let explicit_keys = keys.len();
             let own = self.levels.last().map_or(&[][..], |ids| &ids[..]);
+            let mut ref_grouped: Index<ir::SrcId, u16> = Index::new();
+            for (slot, key) in keys.iter().enumerate() {
+                let Ok(slot) = u16::try_from(slot) else {
+                    continue;
+                };
+                let key = key.trusted_borrow();
+                if let ir::ExprKind::Col {
+                    src,
+                    col: ir::ColSel::Field(f),
+                } = &key.kind
+                    && own.contains(src)
+                    && let Some(ir::SrcKind::Table(qt)) = self
+                        .sources
+                        .get(src.0 as usize)
+                        .map(|s| &s.trusted_borrow().kind)
+                    && matches!(
+                        self.schema.table(*qt).kind,
+                        crate::schema::TableKind::Object(_)
+                    )
+                    && self.schema.field(*qt, *f).is_some_and(|field| {
+                        field.role == crate::schema::FieldRole::Std(crate::schema::StdRole::Ref)
+                    })
+                    && ref_grouped.get(src).is_none()
+                {
+                    ctx.managed(ref_grouped.insert(Some(ctx.arena), *src, slot))?;
+                }
+                if key.ty.refs.is_empty() {
+                    continue;
+                }
+                let ir::ExprKind::Deref { steps, .. } = &key.kind else {
+                    continue;
+                };
+                let mut len = steps.len();
+                while len > 0
+                    && steps
+                        .get(len - 1)
+                        .is_some_and(|step| crate::sema::select::is_ref_deref(self.schema, step))
+                {
+                    len -= 1;
+                    if let Some(hash) = hash::deref_prefix(key, len) {
+                        bucket_push(ctx, &mut ref_index, hash, (slot, len))?;
+                    }
+                }
+            }
+            if !ref_grouped.is_empty() {
+                let mut pending: ScratchVec<(u16, &ir::Expr)> = ctx.scratch(0)?;
+                let mut err: Option<BuildProblem> = None;
+                for e in exprs
+                    .trusted_borrow()
+                    .iter()
+                    .chain(having.iter().map(NativeOwned::trusted_borrow))
+                    .chain(hidden.iter().map(NativeOwned::trusted_borrow))
+                {
+                    ir::visit_expr_in_place(e, true, &mut |n| {
+                        if err.is_some() {
+                            return;
+                        }
+                        if let ir::ExprKind::Col {
+                            src,
+                            col: ir::ColSel::Field(_),
+                        } = &n.kind
+                            && let Some(&ref_slot) = ref_grouped.get(src)
+                            && let Err(problem) = ctx.scratch_push(&mut pending, (ref_slot, n))
+                        {
+                            err = Some(problem);
+                        }
+                    });
+                }
+                if let Some(problem) = err {
+                    return Err(problem);
+                }
+                for &(ref_slot, col_expr) in &pending[..] {
+                    let copied = self.copy_expr(col_expr)?;
+                    let dep_slot = push_key(ctx, &mut keys, &mut index, copied)?;
+                    if usize::from(dep_slot) >= explicit_keys {
+                        for set in &mut raw_sets[..] {
+                            if set.contains(&ref_slot) && !set.contains(&dep_slot) {
+                                ctx.scratch_push(set, dep_slot)?;
+                            }
+                        }
+                    }
+                }
+            }
             let rekey = super::rebuild::Rebuild {
                 ctx,
                 keys: &keys,
                 index: &index,
+                ref_index: &ref_index,
                 own,
                 anchor: own.first().copied(),
                 in_sub: false,
                 replace: true,
                 allow_prefix: select.group.as_ref().is_some_and(|group| group.len() == 1),
+                explicit_keys,
             };
             exprs = rekey.exprs(exprs.trusted_borrow())?;
             if let Some(old) = &having {
@@ -740,12 +954,15 @@ impl<'c, 'a, 'r, 'w, 't> Builder<'c, 'a, 'r, 'w, 't> {
                 if old.f != query_syntax::Func::GroupedBy {
                     continue;
                 }
-                let slot = old.arg.as_ref().and_then(|arg| rekey.find(arg)).ok_or(
-                    BuildProblem::Later {
+                let slot = old
+                    .arg
+                    .as_ref()
+                    .and_then(|arg| rekey.find(arg))
+                    .filter(|&slot| usize::from(slot) < explicit_keys)
+                    .ok_or(BuildProblem::Later {
                         what: "СГРУППИРОВАНОПО по выражению вне группировки",
                         stage: "Q3",
-                    },
-                )?;
+                    })?;
                 let arg = ctx
                     .expr(
                         ctx.scalar(()).map(|()| {
@@ -768,10 +985,19 @@ impl<'c, 'a, 'r, 'w, 't> Builder<'c, 'a, 'r, 'w, 't> {
                     ty,
                 });
             }
-            let sets = if select.group.as_ref().is_some_and(|group| group.len() > 1) {
+            let sets = if raw_sets.len() > 1 {
+                let mut sets = ctx.vector(raw_sets.len())?;
+                for set in &raw_sets[..] {
+                    let mut slots = ctx.vector(set.len())?;
+                    for &slot in &set[..] {
+                        ctx.push(&mut slots, ctx.scalar(slot))?;
+                    }
+                    ctx.push(&mut sets, slots.finish())?;
+                }
+                drop(raw_sets);
                 sets.finish().map(Some)
             } else {
-                drop(sets);
+                drop(raw_sets);
                 ctx.scalar(()).map(|()| None)
             };
             let keys = ctx.finish(&mut keys)?;
@@ -946,7 +1172,11 @@ impl<'c, 'a, 'r, 'w, 't> Builder<'c, 'a, 'r, 'w, 't> {
             let right = self.declare(&join.right, ids)?;
             ctx.scratch_push(&mut joins, (join.kind, right, &join.on))?;
         }
-        Ok(Declared { rel, joins })
+        Ok(Declared {
+            src: id,
+            rel,
+            joins,
+        })
     }
     fn temp_columns(
         &self,
@@ -972,7 +1202,12 @@ impl<'c, 'a, 'r, 'w, 't> Builder<'c, 'a, 'r, 'w, 't> {
         Ok(stored.finish())
     }
     fn assemble(&mut self, source: Declared<'a, 't>) -> BuildResult<NativeOwned<'a, ir::Rel>> {
-        let Declared { mut rel, mut joins } = source;
+        let Declared {
+            src,
+            rel,
+            mut joins,
+        } = source;
+        let mut rel = self.attach_implicit_joins(src, rel)?;
         joins.reverse();
         while let Some((kind, right, on)) = joins.pop() {
             let right = self.assemble(right)?;
@@ -989,7 +1224,22 @@ impl<'c, 'a, 'r, 'w, 't> Builder<'c, 'a, 'r, 'w, 't> {
         col: tir::Col,
         derefs: &[tir::Deref],
     ) -> BuildResult<NativeOwned<'a, ir::Expr>> {
+        if let Some(rewritten) = self.rewrite_nested_owner_field(ty, level, source, col, derefs)? {
+            return Ok(rewritten);
+        }
         let ctx = self.ctx;
+        if self.in_select_item
+            && let Some(ref_expr) = self.presentation_of_field(level, source, col, derefs)?
+        {
+            let mut args = ctx.vector(1)?;
+            ctx.parent_depth(std::iter::once(ref_expr.depth()))?;
+            ctx.push(&mut args, ref_expr)?;
+            let kind = args.finish().map(|args| ir::ExprKind::Func {
+                f: query_syntax::Func::Presentation,
+                args,
+            });
+            return ctx.expr(kind, ctx.copy(ty)?);
+        }
         let ids = self
             .levels
             .len()
@@ -1006,6 +1256,35 @@ impl<'c, 'a, 'r, 'w, 't> Builder<'c, 'a, 'r, 'w, 't> {
             tir::Col::Field(id) => ir::ColSel::Field(id),
             tir::Col::Column(index) => ir::ColSel::Column(index),
         };
+        let owner_table = match self
+            .sources
+            .get(src.0 as usize)
+            .map(|s| &s.trusted_borrow().kind)
+        {
+            Some(ir::SrcKind::Table(table)) => Some(*table),
+            _ => None,
+        };
+        if let Some(access) =
+            ir::implicit_tabular::match_implicit_section(self.schema, src, owner_table, col, derefs)
+            && let Some(&tab_src) = self.implicit_sections.get(&access.key)
+        {
+            let rest = derefs.get(access.rest_start..).unwrap_or_default();
+            let tab_col = ir::ColSel::Field(access.tab_field);
+            let base_ty = if rest.is_empty() {
+                ctx.copy(ty)?
+            } else {
+                self.column_type(tab_src, tab_col)?
+            };
+            let base = ctx.expr(
+                ctx.scalar((tab_src, tab_col))
+                    .map(|(src, col)| ir::ExprKind::Col { src, col }),
+                base_ty,
+            )?;
+            if rest.is_empty() {
+                return Ok(base);
+            }
+            return self.wrap_deref(base, rest, ty);
+        }
         let base_ty = if derefs.is_empty() {
             ctx.copy(ty)?
         } else {
@@ -1353,10 +1632,15 @@ impl<'c, 'a, 'r, 'w, 't> Builder<'c, 'a, 'r, 'w, 't> {
             tir::TKind::Func { f, args } => {
                 match f {
                     query_syntax::Func::Presentation | query_syntax::Func::RefPresentation => {
-                        return Err(BuildProblem::Later {
-                            what: "ПРЕДСТАВЛЕНИЕ",
-                            stage: "Q3",
-                        });
+                        if !self.in_select_item {
+                            return Err(BuildProblem::Later {
+                                what: "ПРЕДСТАВЛЕНИЕ",
+                                stage: "Q3",
+                            });
+                        }
+                        if args.len() != 1 {
+                            return Err(BuildProblem::Internal("ПРЕДСТАВЛЕНИЕ takes one argument"));
+                        }
                     }
                     query_syntax::Func::StoredDataSize => {
                         return Err(BuildProblem::Later {
@@ -1405,11 +1689,13 @@ impl<'c, 'a, 'r, 'w, 't> Builder<'c, 'a, 'r, 'w, 't> {
                 arg,
                 nested: false,
             } => {
+                let prev = std::mem::replace(&mut self.in_select_item, false);
                 let arg = match arg {
-                    Some(arg) => Some(self.expr(arg)?),
-                    None => None,
+                    Some(arg) => self.expr(arg).map(Some),
+                    None => Ok(None),
                 };
-                let call = self.aggregate_call(*f, *distinct, arg, &input.ty)?;
+                self.in_select_item = prev;
+                let call = self.aggregate_call(*f, *distinct, arg?, &input.ty)?;
                 ctx.scalar(self.agg(call)?).map(ir::ExprKind::AggRef)
             }
         };

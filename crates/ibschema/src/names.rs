@@ -93,6 +93,7 @@ std_fields! {
     BpDateTill = BP_DATE_TILL, "BPDateTill", "EndOfBasePeriod";
     Storno = STORNO, "Storno", "ReversingEntry";
     Splitter = SPLITTER, "Splitter", "";
+    DimHash = DIM_HASH, "DimHash", "";
     Node = NODE, "Node", "Node";
     MessageNo = MESSAGE_NO, "MessageNo", "MessageNo";
     ConstId = CONST_ID, "ConstID", "";

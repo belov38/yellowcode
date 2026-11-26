@@ -18,12 +18,14 @@ use std::hash::{Hash, Hasher};
 mod autoorder;
 mod autoorder_union;
 mod hierarchy_union;
+mod present_union;
 mod qr8;
 mod totals;
 
 use autoorder_union::UnionAutoorder;
 pub(crate) use autoorder_union::uniform_union_autoorder;
-pub(crate) use hierarchy_union::hierarchy_union_shape;
+pub(crate) use hierarchy_union::{hierarchy_union_shape, union_autoorder_col_orderable};
+pub(crate) use present_union::{UnionPresent, is_pure_ref_type, union_presentation};
 
 type R<T> = Result<T, BuildError>;
 
@@ -88,6 +90,214 @@ pub(crate) fn distinct_movement_presentation(
                     if raw_source == source && raw_field == field && derefs.is_empty()
             )
     })
+}
+
+fn same_tir_expr(a: &TExpr, b: &TExpr) -> bool {
+    match (&a.kind, &b.kind) {
+        (TKind::Const(x), TKind::Const(y)) => x == y,
+        (TKind::Param(x), TKind::Param(y)) => fold_name(x) == fold_name(y),
+        (TKind::Value(x), TKind::Value(y)) => x == y,
+        (TKind::Unit(x), TKind::Unit(y)) => x == y,
+        (
+            TKind::Field {
+                level: l1,
+                source: s1,
+                col: c1,
+                derefs: d1,
+            },
+            TKind::Field {
+                level: l2,
+                source: s2,
+                col: c2,
+                derefs: d2,
+            },
+        ) => l1 == l2 && s1 == s2 && c1 == c2 && d1 == d2,
+        (TKind::Neg(x), TKind::Neg(y)) | (TKind::Not(x), TKind::Not(y)) => same_tir_expr(x, y),
+        (
+            TKind::Arith {
+                first: f1,
+                steps: s1,
+            },
+            TKind::Arith {
+                first: f2,
+                steps: s2,
+            },
+        ) => {
+            same_tir_expr(f1, f2)
+                && s1.len() == s2.len()
+                && s1
+                    .iter()
+                    .zip(s2)
+                    .all(|(x, y)| x.op == y.op && same_tir_expr(&x.rhs, &y.rhs))
+        }
+        (TKind::And(x), TKind::And(y)) | (TKind::Or(x), TKind::Or(y)) => {
+            x.len() == y.len() && x.iter().zip(y).all(|(x, y)| same_tir_expr(x, y))
+        }
+        (TKind::Compare(o1, l1, r1), TKind::Compare(o2, l2, r2)) => {
+            o1 == o2 && same_tir_expr(l1, l2) && same_tir_expr(r1, r2)
+        }
+        (TKind::IsNull { l: l1, not: n1 }, TKind::IsNull { l: l2, not: n2 }) => {
+            n1 == n2 && same_tir_expr(l1, l2)
+        }
+        (TKind::Refs { l: l1, table: t1 }, TKind::Refs { l: l2, table: t2 }) => {
+            t1 == t2 && same_tir_expr(l1, l2)
+        }
+        (
+            TKind::Case {
+                operand: o1,
+                whens: w1,
+                else_: e1,
+            },
+            TKind::Case {
+                operand: o2,
+                whens: w2,
+                else_: e2,
+            },
+        ) => {
+            o1.as_deref()
+                .zip(o2.as_deref())
+                .map_or(o1.is_none() && o2.is_none(), |(x, y)| same_tir_expr(x, y))
+                && w1.len() == w2.len()
+                && w1
+                    .iter()
+                    .zip(w2)
+                    .all(|((c1, r1), (c2, r2))| same_tir_expr(c1, c2) && same_tir_expr(r1, r2))
+                && e1
+                    .as_deref()
+                    .zip(e2.as_deref())
+                    .map_or(e1.is_none() && e2.is_none(), |(x, y)| same_tir_expr(x, y))
+        }
+        (
+            TKind::Cast {
+                e: e1,
+                to: t1,
+                derefs: d1,
+                num: n1,
+            },
+            TKind::Cast {
+                e: e2,
+                to: t2,
+                derefs: d2,
+                num: n2,
+            },
+        ) => t1 == t2 && d1 == d2 && n1 == n2 && same_tir_expr(e1, e2),
+        (TKind::Func { f: f1, args: a1 }, TKind::Func { f: f2, args: a2 }) => {
+            f1 == f2 && a1.len() == a2.len() && a1.iter().zip(a2).all(|(x, y)| same_tir_expr(x, y))
+        }
+        (
+            TKind::Agg {
+                f: f1,
+                distinct: d1,
+                arg: a1,
+                nested: n1,
+            },
+            TKind::Agg {
+                f: f2,
+                distinct: d2,
+                arg: a2,
+                nested: n2,
+            },
+        ) => {
+            f1 == f2
+                && d1 == d2
+                && n1 == n2
+                && a1
+                    .as_deref()
+                    .zip(a2.as_deref())
+                    .map_or(a1.is_none() && a2.is_none(), |(x, y)| same_tir_expr(x, y))
+        }
+        _ => false,
+    }
+}
+
+pub(crate) fn distinct_paired_presentation(
+    schema: &QuerySchema,
+    select: &Select,
+    item: &tir::Item,
+    source_table: impl Fn(u16) -> Option<QTableId>,
+) -> bool {
+    match &item.expr.kind {
+        TKind::Func {
+            f: Func::Presentation | Func::RefPresentation,
+            args,
+        } => {
+            let [arg] = args.as_slice() else {
+                return false;
+            };
+            select.items.iter().any(|other| {
+                other.nested.is_none()
+                    && !matches!(
+                        other.expr.kind,
+                        TKind::Func {
+                            f: Func::Presentation | Func::RefPresentation,
+                            ..
+                        }
+                    )
+                    && same_tir_expr(&other.expr, arg)
+            })
+        }
+        TKind::Field {
+            level,
+            source,
+            col,
+            derefs,
+        } => {
+            if let Some((last, head)) = derefs.split_last() {
+                if last.targets.is_empty()
+                    || !last
+                        .targets
+                        .iter()
+                        .all(|(t, f)| schema.is_presentation_field(*t, *f))
+                {
+                    return false;
+                }
+                return select.items.iter().any(|other| {
+                    other.nested.is_none()
+                        && matches!(
+                            &other.expr.kind,
+                            TKind::Field {
+                                level: ol,
+                                source: os,
+                                col: oc,
+                                derefs: od,
+                            } if ol == level && os == source && oc == col && od.as_slice() == head
+                        )
+                });
+            }
+            let (0, Col::Field(field)) = (*level, *col) else {
+                return false;
+            };
+            let Some(table) = source_table(*source) else {
+                return false;
+            };
+            if !schema.is_presentation_field(table, field) {
+                return false;
+            }
+            let Some(ref_field) = schema
+                .table(table)
+                .fields
+                .iter()
+                .position(|f| f.role == FieldRole::Std(StdRole::Ref))
+                .and_then(|i| u16::try_from(i).ok())
+                .map(QFieldId)
+            else {
+                return false;
+            };
+            select.items.iter().any(|other| {
+                other.nested.is_none()
+                    && matches!(
+                        &other.expr.kind,
+                        TKind::Field {
+                            level: 0,
+                            source: os,
+                            col: Col::Field(of),
+                            derefs: od,
+                        } if os == source && *of == ref_field && od.is_empty()
+                    )
+            })
+        }
+        _ => false,
+    }
 }
 
 pub(crate) fn uniform_movement_union_presentation(query: &Query) -> Option<(u16, u16)> {
@@ -249,6 +459,7 @@ pub fn build_stmt(c: &CompiledStmt, schema: &QuerySchema) -> Result<StmtS, Build
 }
 
 struct Declared<'a> {
+    src: SrcId,
     rel: Rel,
     joins: Vec<(JoinKind, Declared<'a>, &'a TExpr)>,
 }
@@ -258,6 +469,8 @@ struct Builder<'a> {
     schema: &'a QuerySchema,
     sources: Vec<SourceS>,
     levels: Vec<Vec<SrcId>>,
+    implicit_sections: HashMap<super::implicit_tabular::ImplicitSectionKey, SrcId>,
+    implicit_joins: HashMap<SrcId, Vec<(ColSel, SrcId, QTableId)>>,
     params: Vec<String>,
     param_slot: HashMap<String, u16>,
     values: Vec<ValuePath>,
@@ -272,12 +485,14 @@ struct Builder<'a> {
     nested_outputs: &'a [tir::Item],
     nested_source: Option<(SrcId, Vec<NestedS>)>,
     present: Vec<u16>,
+    in_select_item: bool,
     single_part: bool,
-    union_present: Option<(u16, u16)>,
+    union_present: Option<UnionPresent>,
     query_depth: u32,
     pending_auto: bool,
     temp_out: bool,
     section: Option<SectionMap>,
+    nested_owner: Option<NestedOwner>,
     totals: Option<crate::totals::TotalsS>,
     totals_open: bool,
     totals_extra: Vec<&'a TExpr>,
@@ -285,6 +500,8 @@ struct Builder<'a> {
     totals_extra_built: Vec<Expr>,
     root_sort: Vec<SortMeta>,
     col_names: Vec<String>,
+    virtual_extra: HashMap<SrcId, Vec<QType>>,
+    vt_account_remap: Option<(SrcId, QFieldId)>,
 }
 
 struct SortMeta {
@@ -300,6 +517,16 @@ struct SectionMap {
     owner_src: SrcId,
     field: QFieldId,
     src: SrcId,
+}
+
+#[derive(Clone, Copy)]
+struct NestedOwner {
+    owner_src: SrcId,
+    owner_table: Option<QTableId>,
+    owner_field: QFieldId,
+    section_table: QTableId,
+    section_ref_field: QFieldId,
+    section_depth: usize,
 }
 
 impl<'a> Builder<'a> {
@@ -326,6 +553,8 @@ impl<'a> Builder<'a> {
             schema,
             sources: Vec::new(),
             levels: Vec::new(),
+            implicit_sections: HashMap::new(),
+            implicit_joins: HashMap::new(),
             params: Vec::new(),
             param_slot: HashMap::new(),
             values: Vec::new(),
@@ -340,12 +569,16 @@ impl<'a> Builder<'a> {
             nested_outputs,
             nested_source: None,
             present: Vec::new(),
+            in_select_item: false,
+            virtual_extra: HashMap::new(),
+            vt_account_remap: None,
             single_part: false,
             union_present: None,
             query_depth: 0,
             pending_auto: false,
             temp_out: c.temp_out.is_some(),
             section: None,
+            nested_owner: None,
             totals: None,
             totals_open: false,
             totals_extra: Vec::new(),
@@ -401,14 +634,12 @@ impl<'a> Builder<'a> {
     }
 
     fn query_inner(&mut self, q: &'a Query) -> R<(Rel, Vec<QType>)> {
-        let union_auto = if q.autoorder && q.parts.len() > 1 {
-            match uniform_union_autoorder(q, self.schema) {
-                Some(desc) if self.query_depth == 1 && !self.temp_out => Some(desc),
-                _ => return later("АВТОУПОРЯДОЧИВАНИЕ объединения", "Q3"),
-            }
-        } else {
-            None
-        };
+        let union_auto =
+            if q.autoorder && q.parts.len() > 1 && self.query_depth == 1 && !self.temp_out {
+                uniform_union_autoorder(q, self.schema)
+            } else {
+                None
+            };
         let Some(first) = q.parts.first() else {
             return internal("a query without parts");
         };
@@ -436,7 +667,7 @@ impl<'a> Builder<'a> {
             self.union_present = if self.temp_out {
                 None
             } else {
-                uniform_movement_union_presentation(q)
+                union_presentation(q, self.schema)
             };
         }
         let mut types: Vec<QType> = first.items.iter().map(|i| i.expr.ty.clone()).collect();
@@ -488,23 +719,8 @@ impl<'a> Builder<'a> {
                 input: Box::new(rel),
                 keys: auto_sort,
             };
-        } else if !hierarchy && !q.order.is_empty() {
-            let mut keys = Vec::with_capacity(q.order.len());
-            for k in &q.order {
-                let desc = order_desc(k.dir)?;
-                let Some(col) = k.col else {
-                    return internal("an order key of a union outside the select list");
-                };
-                let ty = types.get(col).cloned().unwrap_or_default();
-                keys.push(SortKey {
-                    expr: out(col, ty)?,
-                    desc,
-                });
-            }
-            rel = Rel::Sort {
-                input: Box::new(rel),
-                keys,
-            };
+        } else if !hierarchy && (!q.order.is_empty() || q.autoorder) {
+            rel = self.order_union(q, first, rel, &types)?;
         }
         Ok((rel, types))
     }
@@ -530,7 +746,9 @@ impl<'a> Builder<'a> {
         }
         let outer_aggs = std::mem::take(&mut self.aggs);
         let outer_index = std::mem::take(&mut self.agg_index);
+        let outer_select_item = std::mem::replace(&mut self.in_select_item, false);
         let res = self.select_inner(sel, order, auto);
+        self.in_select_item = outer_select_item;
         self.aggs = outer_aggs;
         self.agg_index = outer_index;
         res
@@ -547,10 +765,115 @@ impl<'a> Builder<'a> {
         for s in &sel.sources {
             declared.push(self.declare(s, &mut ids)?);
         }
+        self.collect_implicit_sections(sel, order, &mut ids)?;
         self.levels.push(ids);
         let res = self.select_body(sel, order, auto, declared);
         self.levels.pop();
         res
+    }
+
+    fn collect_implicit_sections(
+        &mut self,
+        sel: &'a Select,
+        order: Option<&'a [tir::OrderKey]>,
+        ids: &mut Vec<SrcId>,
+    ) -> R<()> {
+        use super::implicit_tabular::{
+            ImplicitWork, match_implicit_section, push_select_work, step_work,
+        };
+        let tir_count = ids.len();
+        let mut work: Vec<ImplicitWork<'a>> = Vec::new();
+        let extra: Vec<&'a TExpr> = if self.query_depth == 1 && self.totals_open {
+            self.totals_extra.clone()
+        } else {
+            Vec::new()
+        };
+        push_select_work(sel, order, &extra, 0, &mut |item| {
+            work.push(item);
+            Ok(())
+        })?;
+        while let Some(item) = work.pop() {
+            step_work(
+                item,
+                &mut |next| {
+                    work.push(next);
+                    Ok(())
+                },
+                &mut |source, col, derefs| {
+                    let index = usize::from(source);
+                    if index >= tir_count {
+                        return Ok(());
+                    }
+                    let Some(&owner_src) = ids.get(index) else {
+                        return Ok(());
+                    };
+                    let owner_table = match self.sources.get(owner_src.0 as usize).map(|s| &s.kind)
+                    {
+                        Some(SrcKind::Table(table)) => Some(*table),
+                        _ => None,
+                    };
+                    let col_sel = match col {
+                        Col::Field(f) => ColSel::Field(f),
+                        Col::Column(i) => ColSel::Column(i),
+                    };
+                    let Some(access) = match_implicit_section(
+                        self.schema,
+                        owner_src,
+                        owner_table,
+                        col_sel,
+                        derefs,
+                    ) else {
+                        return Ok(());
+                    };
+                    if self.implicit_sections.contains_key(&access.key) {
+                        return Ok(());
+                    }
+                    let Some(tab_src) = self.section_source(access.key.tab_table, false)? else {
+                        return internal("a tabular section without a source");
+                    };
+                    self.implicit_sections.insert(access.key, tab_src);
+                    self.implicit_joins.entry(owner_src).or_default().push((
+                        access.key.owner_col,
+                        tab_src,
+                        access.key.tab_table,
+                    ));
+                    ids.push(tab_src);
+                    Ok(())
+                },
+            )?;
+        }
+        Ok(())
+    }
+
+    fn attach_implicit_joins(&mut self, owner_src: SrcId, mut rel: Rel) -> R<Rel> {
+        let Some(entries) = self.implicit_joins.remove(&owner_src) else {
+            return Ok(rel);
+        };
+        for (owner_col, tab_src, tab_table) in entries {
+            let lhs = self.section_col(tab_src, tab_table, StdRole::Ref)?;
+            let rhs = Expr {
+                kind: ExprKind::Col {
+                    src: owner_src,
+                    col: owner_col,
+                },
+                ty: self.column_type(owner_src, owner_col),
+            };
+            let on = Expr {
+                kind: ExprKind::Compare(query_syntax::ast::CmpOp::Eq, Box::new(lhs), Box::new(rhs)),
+                ty: QType::boolean(),
+            };
+            self.joins = self.joins.saturating_add(1);
+            rel = Rel::Join {
+                kind: JoinKind::Left,
+                l: Box::new(rel),
+                r: Box::new(Rel::Scan {
+                    src: tab_src,
+                    table: tab_table,
+                }),
+                on,
+            };
+        }
+        Ok(rel)
     }
 
     fn select_body(
@@ -589,6 +912,7 @@ impl<'a> Builder<'a> {
                 .nested_from
                 .is_some_and(|inner| std::ptr::eq(inner, sel));
         let mut items = Vec::with_capacity(sel.items.len());
+        let prev_select_item = std::mem::replace(&mut self.in_select_item, true);
         for i in &sel.items {
             let e = if i.nested.is_some() {
                 let retain = !forwarding
@@ -599,18 +923,14 @@ impl<'a> Builder<'a> {
                 self.nested_item(i, items.len(), retain)?
             } else if let Some(expr) = self.forward_nested(i, items.len())? {
                 expr
-            } else if let Some(arg) = self.presentation_item(
-                sel,
-                i,
-                items.len(),
-                !auto && order.is_none_or(<[_]>::is_empty),
-            )? {
+            } else if let Some(arg) = self.presentation_item(sel, i, items.len())? {
                 arg
             } else {
                 self.expr(&i.expr)?
             };
             items.push(e);
         }
+        self.in_select_item = prev_select_item;
         let mut having = match &sel.having {
             Some(h) => Some(self.expr(h)?),
             None => None,
@@ -661,7 +981,17 @@ impl<'a> Builder<'a> {
                         if it.nested.is_some() {
                             return later("сортировка по вложенной таблице", "Q3");
                         }
-                        if u16::try_from(c).is_ok_and(|c| self.present.contains(&c)) {
+                        if u16::try_from(c).is_ok_and(|c| self.present.contains(&c))
+                            || items.get(c).is_some_and(|e| {
+                                matches!(
+                                    e.kind,
+                                    ExprKind::Func {
+                                        f: Func::Presentation | Func::RefPresentation,
+                                        ..
+                                    }
+                                )
+                            })
+                        {
                             return later("сортировка по представлению", "Q3");
                         }
                         let Some(x) = items.get(c) else {
@@ -731,6 +1061,34 @@ impl<'a> Builder<'a> {
                     }
                     continue;
                 }
+                if let Some(order_expr) = self.chart_code_order_expr(&base) {
+                    let order_expr = if aggregated {
+                        let ty = order_expr.ty.clone();
+                        let idx = self.agg(AggCall {
+                            f: Func::Min,
+                            distinct: false,
+                            arg: Some(order_expr),
+                            ty: ty.clone(),
+                        })?;
+                        Expr {
+                            kind: ExprKind::AggRef(idx),
+                            ty,
+                        }
+                    } else {
+                        order_expr
+                    };
+                    let order_ty = order_expr.ty.clone();
+                    let meta_order = order_expr.clone();
+                    let i = push_hidden(&mut hidden, items.len(), order_expr)?;
+                    sort.push((out(usize::from(i), order_ty)?, desc));
+                    sort_meta.push(SortMeta {
+                        col: usize::from(i),
+                        desc,
+                        base_col: col,
+                        base: base.clone(),
+                        key: meta_order,
+                    });
+                }
                 let ty = base.ty.clone();
                 let meta_base = base.clone();
                 let c = match col {
@@ -749,7 +1107,7 @@ impl<'a> Builder<'a> {
         } else if auto && !aggregated && !sel.distinct {
             let first = self.levels.last().and_then(|ids| ids.first()).copied();
             if let Some(main) = match first {
-                Some(src) => self.main_order(src)?,
+                Some(src) => self.main_order(src, sel)?,
                 None => None,
             } {
                 if let Some((id, parent)) = main.hier {
@@ -838,6 +1196,7 @@ impl<'a> Builder<'a> {
             let anchor = self.levels.last().and_then(|ids| ids.first()).copied();
             let mut keys: Vec<Expr> = Vec::new();
             let mut index: HashMap<u64, Vec<u16>> = HashMap::new();
+            let mut ref_index: HashMap<u64, Vec<(u16, usize)>> = HashMap::new();
             let mut sets: Vec<Vec<u16>> = Vec::new();
             if let Some(group) = &sel.group {
                 for set in group {
@@ -849,13 +1208,68 @@ impl<'a> Builder<'a> {
                     sets.push(s);
                 }
             }
+            let explicit_keys = keys.len();
+            for (slot, key) in keys.iter().enumerate() {
+                if let Ok(slot) = u16::try_from(slot) {
+                    index_ref_prefixes(self.schema, key, slot, &mut ref_index);
+                }
+            }
+            let allow_prefix = sets.len() == 1;
+            let mut ref_grouped: HashMap<SrcId, u16> = HashMap::new();
+            for (slot, key) in keys.iter().enumerate() {
+                let Ok(slot) = u16::try_from(slot) else {
+                    continue;
+                };
+                if let ExprKind::Col {
+                    src,
+                    col: ColSel::Field(f),
+                } = &key.kind
+                    && own.contains(src)
+                    && let Some(SrcKind::Table(qt)) =
+                        self.sources.get(src.0 as usize).map(|s| &s.kind)
+                    && matches!(self.schema.table(*qt).kind, TableKind::Object(_))
+                    && self
+                        .schema
+                        .field(*qt, *f)
+                        .is_some_and(|field| field.role == FieldRole::Std(StdRole::Ref))
+                {
+                    ref_grouped.entry(*src).or_insert(slot);
+                }
+            }
+            if !ref_grouped.is_empty() {
+                let mut pending: Vec<(u16, Expr)> = Vec::new();
+                for e in items.iter().chain(having.iter()).chain(hidden.iter()) {
+                    visit_expr(e, true, &mut |n| {
+                        if let ExprKind::Col {
+                            src,
+                            col: ColSel::Field(_),
+                        } = &n.kind
+                            && let Some(&ref_slot) = ref_grouped.get(src)
+                        {
+                            pending.push((ref_slot, n.clone()));
+                        }
+                    });
+                }
+                for (ref_slot, col_expr) in pending {
+                    let dep_slot = find_or_push(&mut keys, &mut index, col_expr)?;
+                    if usize::from(dep_slot) >= explicit_keys {
+                        for s in &mut sets {
+                            if s.contains(&ref_slot) && !s.contains(&dep_slot) {
+                                s.push(dep_slot);
+                            }
+                        }
+                    }
+                }
+            }
             let ki = KeyIndex {
                 keys: &keys,
                 index: &index,
+                ref_index: &ref_index,
                 own: &own,
                 anchor,
                 in_sub: false,
-                allow_prefix: sets.len() == 1,
+                allow_prefix,
+                explicit_keys,
             };
             items = items.into_iter().map(|e| ki.rekey(e)).collect();
             having = having.map(|e| ki.rekey(e));
@@ -876,7 +1290,12 @@ impl<'a> Builder<'a> {
                 if a.f != Func::GroupedBy {
                     continue;
                 }
-                let Some(i) = a.arg.as_ref().and_then(|x| ki.find(x)) else {
+                let Some(i) = a
+                    .arg
+                    .as_ref()
+                    .and_then(|x| ki.find(x))
+                    .filter(|&i| usize::from(i) < explicit_keys)
+                else {
                     return later("СГРУППИРОВАНОПО по выражению вне группировки", "Q3");
                 };
                 a.arg = Some(Expr {
@@ -985,6 +1404,8 @@ impl<'a> Builder<'a> {
         let outer_aggs = std::mem::take(&mut self.aggs);
         let outer_index = std::mem::take(&mut self.agg_index);
         self.levels.push(vec![tab_src]);
+        let next_nested_owner = self.nested_owner_context(&owner_ref, &owner, tab);
+        let prev_nested_owner = std::mem::replace(&mut self.nested_owner, next_nested_owner);
         let mut exprs = Vec::with_capacity(nested.len());
         let mut res = Ok(());
         for n in nested {
@@ -992,13 +1413,7 @@ impl<'a> Builder<'a> {
                 res = later("вложенная таблица во вложенной", "Q3");
                 break;
             }
-            let expression = self
-                .nested_owner_field(&n.expr, &owner_ref, &owner)
-                .and_then(|field| match field {
-                    Some(field) => Ok(field),
-                    None => self.expr(&n.expr),
-                });
-            match expression {
+            match self.expr(&n.expr) {
                 Ok(e) => exprs.push(e),
                 Err(e) => {
                     res = Err(e);
@@ -1006,6 +1421,7 @@ impl<'a> Builder<'a> {
                 }
             }
         }
+        self.nested_owner = prev_nested_owner;
         self.levels.pop();
         let had_aggs = !self.aggs.is_empty();
         self.aggs = outer_aggs;
@@ -1046,66 +1462,201 @@ impl<'a> Builder<'a> {
         Ok(owner_ref)
     }
 
-    fn nested_owner_field(
-        &mut self,
-        expr: &'a TExpr,
+    fn nested_owner_context(
+        &self,
         owner_ref: &Expr,
         section_owner: &Expr,
-    ) -> R<Option<Expr>> {
+        section_table: QTableId,
+    ) -> Option<NestedOwner> {
         let (
-            TKind::Field {
-                level,
-                source,
-                col: Col::Field(field),
-                derefs,
-            },
             ExprKind::Col {
                 src: owner_src,
                 col: ColSel::Field(owner_field),
             },
             ExprKind::Col {
-                col: ColSel::Field(section_field),
+                col: ColSel::Field(section_ref_field),
                 ..
             },
-        ) = (&expr.kind, &owner_ref.kind, &section_owner.kind)
+        ) = (&owner_ref.kind, &section_owner.kind)
         else {
-            return Ok(None);
+            return None;
         };
-        let source = self
-            .levels
-            .len()
-            .checked_sub(1 + usize::from(*level))
-            .and_then(|index| self.levels.get(index))
-            .and_then(|ids| ids.get(usize::from(*source)))
-            .copied();
-        if source != Some(*owner_src) || field != owner_field || derefs.len() > 1 {
-            return Ok(None);
-        }
-        let Some(SrcKind::Table(table)) = self
+        let owner_table = match self
             .sources
             .get(owner_src.0 as usize)
             .map(|source| &source.kind)
+        {
+            Some(SrcKind::Table(table))
+                if self
+                    .schema
+                    .field(*table, *owner_field)
+                    .is_some_and(|field| field.role == FieldRole::Std(StdRole::Ref)) =>
+            {
+                Some(*table)
+            }
+            _ => None,
+        };
+        Some(NestedOwner {
+            owner_src: *owner_src,
+            owner_table,
+            owner_field: *owner_field,
+            section_table,
+            section_ref_field: *section_ref_field,
+            section_depth: self.levels.len(),
+        })
+    }
+
+    fn rewrite_nested_owner_field(
+        &mut self,
+        e_ty: &QType,
+        level: u16,
+        source: u16,
+        col: Col,
+        derefs: &[tir::Deref],
+    ) -> R<Option<Expr>> {
+        let Some(no) = self.nested_owner else {
+            return Ok(None);
+        };
+        let Col::Field(field) = col else {
+            return Ok(None);
+        };
+        let resolved_src = self
+            .levels
+            .len()
+            .checked_sub(1 + usize::from(level))
+            .and_then(|index| self.levels.get(index))
+            .and_then(|ids| ids.get(usize::from(source)))
+            .copied();
+        if resolved_src != Some(no.owner_src) {
+            return Ok(None);
+        }
+        let Some(section_level) = self
+            .levels
+            .len()
+            .checked_sub(no.section_depth)
+            .and_then(|delta| u16::try_from(delta).ok())
         else {
             return Ok(None);
         };
-        if !self
-            .schema
-            .field(*table, *owner_field)
-            .is_some_and(|field| field.role == FieldRole::Std(StdRole::Ref))
-            || derefs
-                .iter()
-                .flat_map(|step| &step.targets)
-                .any(|(table, field)| {
+        let has_nested_deref = |steps: &[tir::Deref]| {
+            steps.iter().flat_map(|step| &step.targets).any(|(t, f)| {
+                self.schema
+                    .field(*t, *f)
+                    .is_none_or(|field| field.nested.is_some())
+            })
+        };
+        if field == no.owner_field {
+            if let Some((tab_step, after_tab)) = derefs.split_first()
+                && !tab_step.targets.is_empty()
+                && tab_step.targets.iter().all(|(t, f)| {
                     self.schema
-                        .field(*table, *field)
-                        .is_none_or(|field| field.nested.is_some())
-                        || self.schema.is_presentation_field(*table, *field)
+                        .field(*t, *f)
+                        .is_some_and(|fi| fi.nested == Some(no.section_table))
                 })
-        {
+            {
+                let Some((sec_step, rest)) = after_tab.split_first() else {
+                    return Ok(None);
+                };
+                let &[(t, sec_field)] = sec_step.targets.as_slice() else {
+                    return Ok(None);
+                };
+                if t != no.section_table || has_nested_deref(rest) {
+                    return Ok(None);
+                }
+                let saved = self.nested_owner.take();
+                let result = self.field(e_ty, section_level, 0, Col::Field(sec_field), rest);
+                self.nested_owner = saved;
+                return result.map(Some);
+            }
+            if has_nested_deref(derefs) {
+                return Ok(None);
+            }
+            let saved = self.nested_owner.take();
+            let result = self.field(
+                e_ty,
+                section_level,
+                0,
+                Col::Field(no.section_ref_field),
+                derefs,
+            );
+            self.nested_owner = saved;
+            return result.map(Some);
+        }
+        if has_nested_deref(derefs) {
             return Ok(None);
         }
-        self.field(&expr.ty, 0, 0, Col::Field(*section_field), derefs)
-            .map(Some)
+        let Some(owner_table) = no.owner_table else {
+            return Ok(None);
+        };
+        let Some(field_info) = self.schema.field(owner_table, field) else {
+            return Ok(None);
+        };
+        if field_info.nested == Some(no.section_table) {
+            let Some((first, rest)) = derefs.split_first() else {
+                return Ok(None);
+            };
+            let &[(t, sec_field)] = first.targets.as_slice() else {
+                return Ok(None);
+            };
+            if t != no.section_table {
+                return Ok(None);
+            }
+            let saved = self.nested_owner.take();
+            let result = self.field(e_ty, section_level, 0, Col::Field(sec_field), rest);
+            self.nested_owner = saved;
+            return result.map(Some);
+        }
+        if field_info.nested.is_some() {
+            return Ok(None);
+        }
+        if derefs.is_empty() && self.schema.is_presentation_field(owner_table, field) {
+            if !self.in_select_item {
+                return Ok(None);
+            }
+            let owner_ref_ty = self
+                .schema
+                .field(owner_table, no.owner_field)
+                .map(|f| f.ty.clone())
+                .unwrap_or_default();
+            let saved = self.nested_owner.take();
+            let ref_expr = self.field(
+                &owner_ref_ty,
+                section_level,
+                0,
+                Col::Field(no.section_ref_field),
+                &[],
+            );
+            self.nested_owner = saved;
+            let ref_expr = ref_expr?;
+            return Ok(Some(Expr {
+                kind: ExprKind::Func {
+                    f: Func::Presentation,
+                    args: vec![ref_expr],
+                },
+                ty: e_ty.clone(),
+            }));
+        }
+        let step_name = if !field_info.name_en.is_empty() {
+            field_info.name_en.clone()
+        } else {
+            field_info.name_ru.clone()
+        };
+        let mut steps = Vec::with_capacity(1 + derefs.len());
+        steps.push(tir::Deref {
+            name: step_name,
+            targets: vec![(owner_table, field)],
+        });
+        steps.extend_from_slice(derefs);
+        let saved = self.nested_owner.take();
+        let result = self.field(
+            e_ty,
+            section_level,
+            0,
+            Col::Field(no.section_ref_field),
+            &steps,
+        );
+        self.nested_owner = saved;
+        result.map(Some)
     }
 
     fn section_agg(
@@ -1381,6 +1932,8 @@ impl<'a> Builder<'a> {
                 periodicity,
                 complement,
                 span,
+                breakdown,
+                base,
                 ..
             } if self.schema.supports_register_vt(*t) => self.register_vt(
                 id,
@@ -1389,6 +1942,8 @@ impl<'a> Builder<'a> {
                 records.as_ref(),
                 *accounting,
                 drcr.as_ref(),
+                base.as_deref(),
+                breakdown,
                 (*periodicity, *complement),
                 *span,
             )?,
@@ -1483,11 +2038,15 @@ impl<'a> Builder<'a> {
             self.joins = self.joins.saturating_add(1);
             joins.push((j.kind, right, &j.on));
         }
-        Ok(Declared { rel, joins })
+        Ok(Declared {
+            src: id,
+            rel,
+            joins,
+        })
     }
 
     fn assemble(&mut self, d: Declared<'a>) -> R<Rel> {
-        let mut rel = d.rel;
+        let mut rel = self.attach_implicit_joins(d.src, d.rel)?;
         for (kind, right, on) in d.joins {
             let r = self.assemble(right)?;
             let on = self.expr(on)?;
@@ -1683,9 +2242,21 @@ impl<'a> Builder<'a> {
             }
             TKind::Func { f, args } => {
                 if matches!(f, Func::Presentation | Func::RefPresentation) {
-                    return Err(BuildError::Later {
-                        what: "ПРЕДСТАВЛЕНИЕ",
-                        stage: "Q3",
+                    if !self.in_select_item {
+                        return Err(BuildError::Later {
+                            what: "ПРЕДСТАВЛЕНИЕ",
+                            stage: "Q3",
+                        });
+                    }
+                    let [arg] = args.as_slice() else {
+                        return internal("ПРЕДСТАВЛЕНИЕ takes one argument");
+                    };
+                    return Ok(Expr {
+                        kind: ExprKind::Func {
+                            f: *f,
+                            args: vec![self.expr(arg)?],
+                        },
+                        ty,
                     });
                 }
                 match f {
@@ -1724,18 +2295,25 @@ impl<'a> Builder<'a> {
                 distinct,
                 arg,
                 nested: true,
-            } => return self.section_agg(*f, *distinct, arg.as_deref(), ty),
+            } => {
+                let prev = std::mem::replace(&mut self.in_select_item, false);
+                let res = self.section_agg(*f, *distinct, arg.as_deref(), ty);
+                self.in_select_item = prev;
+                return res;
+            }
             TKind::Agg {
                 f, distinct, arg, ..
             } => {
+                let prev = std::mem::replace(&mut self.in_select_item, false);
                 let arg = match arg {
-                    Some(a) => Some(self.expr(a)?),
-                    None => None,
+                    Some(a) => self.expr(a).map(Some),
+                    None => Ok(None),
                 };
+                self.in_select_item = prev;
                 let call = AggCall {
                     f: *f,
                     distinct: *distinct,
-                    arg,
+                    arg: arg?,
                     ty: ty.clone(),
                 };
                 ExprKind::AggRef(self.agg(call)?)
@@ -1760,6 +2338,22 @@ impl<'a> Builder<'a> {
         col: Col,
         derefs: &[tir::Deref],
     ) -> R<Expr> {
+        if let Some(rewritten) =
+            self.rewrite_nested_owner_field(e_ty, level, source, col, derefs)?
+        {
+            return Ok(rewritten);
+        }
+        if self.in_select_item
+            && let Some(ref_expr) = self.presentation_of_field(level, source, col, derefs)?
+        {
+            return Ok(Expr {
+                kind: ExprKind::Func {
+                    f: Func::Presentation,
+                    args: vec![ref_expr],
+                },
+                ty: e_ty.clone(),
+            });
+        }
         let Some(ids) = self
             .levels
             .len()
@@ -1773,6 +2367,16 @@ impl<'a> Builder<'a> {
         };
         let sel = match col {
             Col::Field(f) => ColSel::Field(f),
+            Col::Column(0 | 1)
+                if self
+                    .vt_account_remap
+                    .is_some_and(|(remap_src, _)| remap_src == src) =>
+            {
+                let Some((_, account_field)) = self.vt_account_remap else {
+                    return internal("missing account remap");
+                };
+                ColSel::Field(account_field)
+            }
             Col::Column(i) => ColSel::Column(i),
         };
         if let (Some(m), ColSel::Field(f), Some(first)) = (self.section, sel, derefs.first())
@@ -1805,6 +2409,44 @@ impl<'a> Builder<'a> {
             self.touch_derefs(rest);
             return Ok(deref_of(base, rest));
         }
+        let owner_table = match self.sources.get(src.0 as usize).map(|s| &s.kind) {
+            Some(SrcKind::Table(table)) => Some(*table),
+            _ => None,
+        };
+        if let Some(access) = super::implicit_tabular::match_implicit_section(
+            self.schema,
+            src,
+            owner_table,
+            sel,
+            derefs,
+        ) && let Some(&tab_src) = self.implicit_sections.get(&access.key)
+        {
+            let rest = derefs.get(access.rest_start..).unwrap_or_default();
+            let tab_col = ColSel::Field(access.tab_field);
+            let base_ty = if rest.is_empty() {
+                e_ty.clone()
+            } else {
+                self.column_type(tab_src, tab_col)
+            };
+            let base = Expr {
+                kind: ExprKind::Col {
+                    src: tab_src,
+                    col: tab_col,
+                },
+                ty: base_ty,
+            };
+            if rest.is_empty() {
+                return Ok(base);
+            }
+            self.touch_derefs(rest);
+            return Ok(Expr {
+                kind: ExprKind::Deref {
+                    base: Box::new(base),
+                    steps: rest.to_vec(),
+                },
+                ty: e_ty.clone(),
+            });
+        }
         let base_ty = if derefs.is_empty() {
             e_ty.clone()
         } else {
@@ -1832,7 +2474,6 @@ impl<'a> Builder<'a> {
         sel: &'a Select,
         it: &'a tir::Item,
         col: usize,
-        unordered: bool,
     ) -> R<Option<Expr>> {
         let arg = match &it.expr.kind {
             TKind::Func {
@@ -1856,34 +2497,37 @@ impl<'a> Builder<'a> {
         if arg.is_none() && field.is_none() {
             return Ok(None);
         }
-        if self.query_depth != 1
-            || (!self.single_part
-                && !(self
-                    .union_present
-                    .is_some_and(|(present, _)| usize::from(present) == col)
+        let union_ok = match self.union_present {
+            Some(UnionPresent::Movement { present, .. }) => {
+                usize::from(present) == col
                     && distinct_movement_presentation(self.schema, sel, it, |source| {
                         let src = self.levels.last()?.get(usize::from(source))?;
                         match self.sources.get(src.0 as usize)?.kind {
                             SrcKind::Table(table) => Some(table),
                             _ => None,
                         }
-                    })))
-        {
-            return later("ПРЕДСТАВЛЕНИЕ в подзапросе или в объединении", "Q3");
+                    })
+            }
+            Some(UnionPresent::Ref) => true,
+            None => false,
+        };
+        if self.query_depth != 1 || (!self.single_part && !union_ok) {
+            return Ok(None);
         }
-        if sel.distinct
-            && !(unordered
-                && !self.temp_out
-                && !self.totals_open
-                && distinct_movement_presentation(self.schema, sel, it, |source| {
-                    let src = self.levels.last()?.get(usize::from(source))?;
-                    match self.sources.get(src.0 as usize)?.kind {
-                        SrcKind::Table(table) => Some(table),
-                        _ => None,
-                    }
-                }))
-        {
-            return later("ПРЕДСТАВЛЕНИЕ при РАЗЛИЧНЫЕ", "Q3");
+        if sel.distinct {
+            if self.totals_open {
+                return later("ПРЕДСТАВЛЕНИЕ при РАЗЛИЧНЫЕ", "Q3");
+            }
+            let paired = distinct_paired_presentation(self.schema, sel, it, |source| {
+                let src = self.levels.last()?.get(usize::from(source))?;
+                match self.sources.get(src.0 as usize)?.kind {
+                    SrcKind::Table(table) => Some(table),
+                    _ => None,
+                }
+            });
+            if !paired {
+                return Ok(None);
+            }
         }
         let Ok(c) = u16::try_from(col) else {
             return internal("too many columns");
@@ -1985,6 +2629,8 @@ impl<'a> Builder<'a> {
         records: Option<&tir::RecordsOptions>,
         accounting: Option<tir::AccountingArguments>,
         drcr: Option<&'a tir::DrCrSource>,
+        base: Option<&'a tir::BaseArguments>,
+        breakdown: &'a [QFieldId],
         period: (
             crate::schema::Periodicity,
             Option<crate::schema::Complement>,
@@ -1993,17 +2639,24 @@ impl<'a> Builder<'a> {
     ) -> R<Rel> {
         let (periodicity, complement) = period;
         let accounting_balance = crate::lower::is_accounting_balance(self.schema, t);
-        if accounting_balance && !accounting.is_some_and(|a| a.supports(args, 1)) {
+        if accounting_balance && !accounting.is_some_and(|a| a.supports_balance(args)) {
             return Err(BuildError::Later {
                 what: "Q6a-AccountingBalanceArguments",
                 stage: "Q6a",
             });
         }
         let accounting_turnovers = crate::lower::is_accounting_turnovers(self.schema, t);
-        if accounting_turnovers && !accounting.is_some_and(|a| a.supports(args, 2)) {
+        if accounting_turnovers && !accounting.is_some_and(|a| a.supports_turnovers(args)) {
             return Err(BuildError::Later {
                 what: "Q6b-TurnoversArguments",
                 stage: "Q6b",
+            });
+        }
+        let accounting_bt = crate::lower::is_accounting_balance_and_turnovers(self.schema, t);
+        if accounting_bt && !accounting.is_some_and(|a| a.supports_balance_and_turnovers(args)) {
+            return Err(BuildError::Later {
+                what: "Q6c-AccountingBalanceAndTurnoversArguments",
+                stage: "Q6c",
             });
         }
         if self.schema.table(t).kind == TableKind::Virtual(VtKind::DrCrTurnovers) {
@@ -2041,6 +2694,50 @@ impl<'a> Builder<'a> {
         let TableKind::Virtual(kind) = table.kind else {
             return internal("not a virtual table");
         };
+        let base_spec = if kind == VtKind::Base {
+            let Some(base_args) = base else {
+                return Err(BuildError::Later {
+                    what: "Q6d-CalculationBaseArguments",
+                    stage: "Q6d",
+                });
+            };
+            if base_args.deferred {
+                return Err(BuildError::Later {
+                    what: "Q6d-CalculationBaseArguments",
+                    stage: "Q6d",
+                });
+            }
+            let (Some(main_dims_param), Some(base_dims_param)) = (
+                base_args.main_dims_param.as_ref(),
+                base_args.base_dims_param.as_ref(),
+            ) else {
+                return Err(BuildError::Later {
+                    what: "Q6d-CalculationBaseArguments",
+                    stage: "Q6d",
+                });
+            };
+            let base_table = self.schema.calculation_base(t).map_or(t, |f| f.base);
+            let extra_types: Vec<QType> = breakdown
+                .iter()
+                .map(|f| {
+                    self.schema
+                        .field(base_table, *f)
+                        .map(|x| x.ty.clone().with_null())
+                        .unwrap_or_default()
+                })
+                .collect();
+            if !extra_types.is_empty() {
+                self.virtual_extra.insert(src, extra_types);
+            }
+            Some(crate::ir::BaseSpecS {
+                main_dims_param: main_dims_param.clone(),
+                base_dims_param: base_dims_param.clone(),
+                breakdown_param: base_args.breakdown_param.clone(),
+                breakdown: breakdown.to_vec(),
+            })
+        } else {
+            None
+        };
         let slice = matches!(kind, VtKind::SliceLast | VtKind::SliceFirst);
         let shape = crate::lower::vt_shape(self.schema, t);
         let all: Vec<Option<QFieldId>> = (0..table.fields.len())
@@ -2065,6 +2762,7 @@ impl<'a> Builder<'a> {
                 VtKind::RecordsWithExtDimensions
                     | VtKind::ActualActionPeriod
                     | VtKind::ScheduleData
+                    | VtKind::Base
             )
         {
             inner_cols = (0..table.fields.len())
@@ -2085,7 +2783,17 @@ impl<'a> Builder<'a> {
         });
         let mut bounds: [Option<Expr>; 2] = [None, None];
         let mut next = 0usize;
-        let mut cond = None;
+        let mut cond: Option<Expr> = None;
+        let mut ext_dims_arg: Option<Expr> = None;
+        let combine_cond = |acc: &mut Option<Expr>, next_cond: Expr| {
+            *acc = Some(match acc.take() {
+                None => next_cond,
+                Some(prev) => Expr {
+                    kind: ExprKind::And(vec![prev, next_cond]),
+                    ty: QType::boolean().with_null(),
+                },
+            });
+        };
         for (p, a) in table.params.iter().zip(args) {
             match p.kind {
                 VtParamKind::Period => {
@@ -2097,12 +2805,38 @@ impl<'a> Builder<'a> {
                     }
                     next += 1;
                 }
+                VtParamKind::AccountCondition => {
+                    if let Some(e) = a {
+                        let account_field = table
+                            .fields
+                            .iter()
+                            .enumerate()
+                            .find(|(_, f)| f.role == FieldRole::Std(StdRole::Account))
+                            .and_then(|(idx, _)| u16::try_from(idx).ok().map(QFieldId))
+                            .ok_or_else(|| {
+                                BuildError::Internal(
+                                    "accounting virtual table missing Account field".into(),
+                                )
+                            })?;
+                        let prev_remap = self.vt_account_remap.replace((inner, account_field));
+                        self.levels.push(vec![inner]);
+                        let c = self.expr(e);
+                        self.levels.pop();
+                        self.vt_account_remap = prev_remap;
+                        combine_cond(&mut cond, c?);
+                    }
+                }
+                VtParamKind::ExtDimensions if accounting_balance || accounting_bt => {
+                    if let Some(e) = a {
+                        ext_dims_arg = Some(self.expr(e)?);
+                    }
+                }
                 VtParamKind::Condition => {
                     if let Some(e) = a {
                         self.levels.push(vec![inner]);
                         let c = self.expr(e);
                         self.levels.pop();
-                        cond = Some(c?);
+                        combine_cond(&mut cond, c?);
                     }
                 }
                 _ => {}
@@ -2133,10 +2867,14 @@ impl<'a> Builder<'a> {
         self.touch(
             if accounting_balance
                 || accounting_turnovers
+                || accounting_bt
                 || records.is_some()
                 || matches!(
                     kind,
-                    VtKind::ActualActionPeriod | VtKind::ScheduleData | VtKind::DrCrTurnovers
+                    VtKind::ActualActionPeriod
+                        | VtKind::ScheduleData
+                        | VtKind::Base
+                        | VtKind::DrCrTurnovers
                 )
             {
                 t
@@ -2148,6 +2886,10 @@ impl<'a> Builder<'a> {
             let chart = crate::lower::balance_chart(self.schema, t)
                 .map_err(|e| BuildError::Internal(e.to_string()))?;
             self.touch(chart);
+        } else if accounting_bt {
+            let chart = crate::lower::accounting_bt_chart(self.schema, t)
+                .map_err(|e| BuildError::Internal(e.to_string()))?;
+            self.touch(chart);
         }
         let v = Box::new(crate::ir::RegisterVtS {
             src,
@@ -2157,17 +2899,20 @@ impl<'a> Builder<'a> {
             kind,
             bounds,
             cond,
+            ext_dims_arg,
             order,
             top: records.and_then(|r| r.top),
             periodicity,
             complement,
+            base: base_spec,
             area: None,
             access: None,
             span,
         });
         Ok(if slice {
             Rel::Slice(v)
-        } else if kind == crate::schema::VtKind::BalanceAndTurnovers
+        } else if !accounting_bt
+            && kind == crate::schema::VtKind::BalanceAndTurnovers
             && !matches!(
                 periodicity,
                 crate::schema::Periodicity::Absent | crate::schema::Periodicity::Auto
@@ -2193,6 +2938,12 @@ impl<'a> Builder<'a> {
                 .schema
                 .field(*t, f)
                 .map(|x| x.ty.clone())
+                .unwrap_or_default(),
+            (SrcKind::Virtual { .. }, ColSel::Column(i)) => self
+                .virtual_extra
+                .get(&src)
+                .and_then(|cols| cols.get(usize::from(i)))
+                .cloned()
                 .unwrap_or_default(),
             (SrcKind::Subquery { columns } | SrcKind::Temp { columns, .. }, ColSel::Column(i)) => {
                 columns.get(usize::from(i)).cloned().unwrap_or_default()
@@ -2247,17 +2998,6 @@ fn push_hidden(hidden: &mut Vec<Expr>, items: usize, e: Expr) -> R<u16> {
     match u16::try_from(items + hidden.len() - 1) {
         Ok(i) => Ok(i),
         Err(_) => internal("too many columns"),
-    }
-}
-
-fn order_desc(d: OrderDir) -> R<bool> {
-    match d {
-        OrderDir::Asc => Ok(false),
-        OrderDir::Desc => Ok(true),
-        OrderDir::Hierarchy | OrderDir::HierarchyDesc => Err(BuildError::Later {
-            what: "ИЕРАРХИЯ в объединении",
-            stage: "Q3",
-        }),
     }
 }
 
@@ -2502,6 +3242,7 @@ pub(crate) fn visit_rel<'e>(r: &'e Rel, f: &mut dyn FnMut(&'e Expr)) {
                 .for_each(|b| visit_expr(b, true, f));
             v.cond
                 .iter()
+                .chain(v.ext_dims_arg.iter())
                 .chain(v.area.iter().map(|a| &a.pred))
                 .chain(v.access.iter())
                 .chain(v.order.iter().map(|k| &k.expr))
@@ -2547,14 +3288,54 @@ fn find_or_push(keys: &mut Vec<Expr>, index: &mut HashMap<u64, Vec<u16>>, e: Exp
     Ok(i)
 }
 
+fn index_ref_prefixes(
+    schema: &QuerySchema,
+    key: &Expr,
+    slot: u16,
+    ref_index: &mut HashMap<u64, Vec<(u16, usize)>>,
+) {
+    let ExprKind::Deref { base, steps } = &key.kind else {
+        return;
+    };
+    if key.ty.refs.is_empty() {
+        return;
+    }
+    let mut len = steps.len();
+    while len > 0
+        && steps
+            .get(len - 1)
+            .is_some_and(|step| crate::sema::select::is_ref_deref(schema, step))
+    {
+        len -= 1;
+        let hash = shallow_deref_prefix(key, base, steps.get(..len).unwrap_or_default());
+        ref_index.entry(hash).or_default().push((slot, len));
+    }
+}
+
+fn shallow_deref_prefix(deref_expr: &Expr, base: &Expr, steps: &[tir::Deref]) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    if steps.is_empty() {
+        shallow_d(base, &mut h, SHALLOW_DEPTH);
+    } else {
+        std::mem::discriminant(&deref_expr.kind).hash(&mut h);
+        shallow_d(base, &mut h, SHALLOW_DEPTH);
+        for step in steps {
+            step.name.hash(&mut h);
+        }
+    }
+    h.finish()
+}
+
 #[derive(Clone, Copy)]
 struct KeyIndex<'k> {
     keys: &'k [Expr],
     index: &'k HashMap<u64, Vec<u16>>,
+    ref_index: &'k HashMap<u64, Vec<(u16, usize)>>,
     own: &'k HashSet<SrcId>,
     anchor: Option<SrcId>,
     in_sub: bool,
     allow_prefix: bool,
+    explicit_keys: usize,
 }
 
 fn reads_own(e: &Expr, own: &HashSet<SrcId>) -> bool {
@@ -2590,8 +3371,32 @@ impl KeyIndex<'_> {
         let ExprKind::Deref { base, steps } = &e.kind else {
             return None;
         };
+        if steps.is_empty() {
+            return None;
+        }
         let mut found = None;
+        if !self.ref_index.is_empty() && self.find(base).is_none() {
+            let hash = shallow_deref_prefix(e, base, &[]);
+            if let Some(bucket) = self.ref_index.get(&hash) {
+                for &(i, key_len) in bucket {
+                    if key_len != 0 {
+                        continue;
+                    }
+                    let Some(key) = self.keys.get(usize::from(i)) else {
+                        continue;
+                    };
+                    if let ExprKind::Deref { base: key_base, .. } = &key.kind
+                        && !key.ty.refs.is_empty()
+                        && key_base == base
+                    {
+                        found = Some((i, 0));
+                        break;
+                    }
+                }
+            }
+        }
         shallow_deref_prefixes(e, |len, hash| {
+            let mut matched = None;
             if let Some(bucket) = self.index.get(&hash) {
                 for &i in bucket {
                     let Some(key) = self.keys.get(usize::from(i)) else {
@@ -2605,10 +3410,38 @@ impl KeyIndex<'_> {
                         && key_base == base
                         && key_steps.as_slice().iter().eq(steps.iter().take(len))
                     {
-                        found = Some((i, len));
+                        matched = Some((i, len));
                         break;
                     }
                 }
+            }
+            if matched.is_none()
+                && let Some(bucket) = self.ref_index.get(&hash)
+            {
+                for &(i, key_len) in bucket {
+                    if key_len != len {
+                        continue;
+                    }
+                    let Some(key) = self.keys.get(usize::from(i)) else {
+                        continue;
+                    };
+                    if let ExprKind::Deref {
+                        base: key_base,
+                        steps: key_steps,
+                    } = &key.kind
+                        && !key.ty.refs.is_empty()
+                        && key_base == base
+                        && key_steps
+                            .get(..len)
+                            .is_some_and(|prefix| prefix.iter().eq(steps.iter().take(len)))
+                    {
+                        matched = Some((i, len));
+                        break;
+                    }
+                }
+            }
+            if let Some(m) = matched {
+                found = Some(m);
             }
         });
         found
@@ -2622,6 +3455,7 @@ impl KeyIndex<'_> {
                 let [a, b] = std::mem::take(&mut v.bounds);
                 v.bounds = [a.map(|e| self.rekey(e)), b.map(|e| self.rekey(e))];
                 v.cond = v.cond.take().map(|e| self.rekey(e));
+                v.ext_dims_arg = v.ext_dims_arg.take().map(|e| self.rekey(e));
                 v.order = v.order.take().map(|k| SortKey {
                     expr: self.rekey(k.expr),
                     desc: k.desc,
@@ -2636,6 +3470,7 @@ impl KeyIndex<'_> {
                 let [a, b] = std::mem::take(&mut v.bounds);
                 v.bounds = [a.map(|e| self.rekey(e)), b.map(|e| self.rekey(e))];
                 v.cond = v.cond.take().map(|e| self.rekey(e));
+                v.ext_dims_arg = v.ext_dims_arg.take().map(|e| self.rekey(e));
                 v.order = v.order.take().map(|k| SortKey {
                     expr: self.rekey(k.expr),
                     desc: k.desc,
@@ -2650,6 +3485,7 @@ impl KeyIndex<'_> {
                 let [a, b] = std::mem::take(&mut v.bounds);
                 v.bounds = [a.map(|e| self.rekey(e)), b.map(|e| self.rekey(e))];
                 v.cond = v.cond.take().map(|e| self.rekey(e));
+                v.ext_dims_arg = v.ext_dims_arg.take().map(|e| self.rekey(e));
                 v.order = v.order.take().map(|k| SortKey {
                     expr: self.rekey(k.expr),
                     desc: k.desc,
@@ -2739,6 +3575,16 @@ impl KeyIndex<'_> {
     fn rekey(&self, e: Expr) -> Expr {
         if let Some(i) = self.find(&e) {
             if !self.in_sub {
+                if usize::from(i) >= self.explicit_keys {
+                    let ty = e.ty.clone();
+                    return Expr {
+                        kind: ExprKind::LocalKey {
+                            key: i,
+                            orig: Box::new(e),
+                        },
+                        ty,
+                    };
+                }
                 return Expr {
                     kind: ExprKind::KeyRef(i),
                     ty: e.ty,
@@ -2766,10 +3612,14 @@ impl KeyIndex<'_> {
                 {
                     let suffix = steps.split_off(len);
                     let key_ty = key.ty.clone();
-                    let orig = Box::new(Expr {
-                        kind: ExprKind::Deref { base, steps },
-                        ty: key_ty.clone(),
-                    });
+                    let orig = if len == 0 {
+                        base
+                    } else {
+                        Box::new(Expr {
+                            kind: ExprKind::Deref { base, steps },
+                            ty: key_ty.clone(),
+                        })
+                    };
                     let kind = if let (true, Some(src)) = (self.in_sub, self.anchor) {
                         ExprKind::OuterKey { src, key: i, orig }
                     } else {

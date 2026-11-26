@@ -1,7 +1,9 @@
 use md_model::{Child, ChildTag, MdKind, MdObject, Recalculation};
 
-use super::catalog::{attributes, indexed_attributes, main_table, tabular_sections};
-use super::common::common_group;
+use super::catalog::{
+    attributes, indexed_attributes, main_table, presentation_field, tabular_sections,
+};
+use super::common::{common_group, separators_group};
 use super::ctx::{Ctx, Props, tag_name};
 use super::document::table_of;
 use super::exchange;
@@ -45,8 +47,13 @@ pub(crate) fn chart_of_calculation_types(
         let toks = [F(f::DESCRIPTION), F(f::ID)];
         b.rule(cx, names, "Descr", true, &toks, None)?;
     }
+    let present = presentation_field(cx);
     for a in indexed_attributes(cx) {
-        let toks = [Tok::Attr, F(f::ID)];
+        let mut toks = vec![Tok::Attr];
+        if let Some(p) = present {
+            toks.push(Tok::AddOrder(p));
+        }
+        toks.push(F(f::ID));
         b.rule(cx, names, "ByField{n}", true, &toks, Some(a))?;
     }
     let mut out = vec![b.finish()];
@@ -166,6 +173,7 @@ fn displacement_order(cx: &Ctx, names: &mut Names) -> Result<(Table, TableRole)>
         StdField::DisplNumber,
         fields::numeric(f::DISPL_NUMBER, 10, 0),
     );
+    separators_group(&mut b, cx, names)?;
     b.rule(cx, names, "ByRef", true, &[Tok::F(f::CK_REF)], None)?;
     let toks = [Tok::F(f::DISPL_NUMBER)];
     b.rule(cx, names, "ByDisplNumber", false, &toks, None)?;

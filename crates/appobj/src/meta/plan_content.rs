@@ -9,19 +9,64 @@ use bsl_vm::{
 };
 use platform_catalog::{TypeIdx, catalog};
 use std::any::Any;
+use std::cell::OnceCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
 type Item = (MdPath, bool);
 
+const WALK_MAX: usize = 512;
+const BUCKETS: usize = 8;
+
+fn container_walk(keys: &[u32]) -> Vec<usize> {
+    struct Container {
+        buckets: Vec<Vec<usize>>,
+        order: Vec<usize>,
+    }
+    impl Container {
+        fn new(buckets: usize) -> Container {
+            Container {
+                buckets: vec![Vec::new(); buckets],
+                order: Vec::new(),
+            }
+        }
+        fn insert(&mut self, key: u32, at: usize) {
+            let b = key as usize & (self.buckets.len() - 1);
+            if let Some(chain) = self.buckets.get_mut(b) {
+                if chain.is_empty() {
+                    self.order.push(b);
+                }
+                chain.insert(0, at);
+            }
+        }
+        fn walk(&self) -> Vec<usize> {
+            self.order
+                .iter()
+                .filter_map(|b| self.buckets.get(*b))
+                .flatten()
+                .copied()
+                .collect()
+        }
+    }
+    let mut c = Container::new(BUCKETS);
+    for (at, &key) in keys.iter().enumerate() {
+        if at >= c.buckets.len() {
+            let walk = c.walk();
+            c = Container::new(c.buckets.len() * BUCKETS);
+            for again in walk {
+                if let Some(&k) = keys.get(again) {
+                    c.insert(k, again);
+                }
+            }
+        }
+        c.insert(key, at);
+    }
+    c.walk()
+}
+
 fn items(cx: &MdCtx, plan: ObjId) -> CallResult<Vec<Item>> {
     let refuse = || not_implemented("Состав");
-    let md = cx.model().obj(plan).md;
-    let object = cx
-        .cfg_index
-        .get(&md)
-        .and_then(|i| cx.model().config.objects.get(*i))
-        .ok_or_else(refuse)?;
+    let object = plan_object(cx, plan).ok_or_else(refuse)?;
     let list = object.exchange_content().ok_or_else(refuse)?;
     let mut out = Vec::with_capacity(list.len());
     for item in list {
@@ -29,6 +74,51 @@ fn items(cx: &MdCtx, plan: ObjId) -> CallResult<Vec<Item>> {
         out.push((path, item.auto_record));
     }
     Ok(out)
+}
+
+fn plan_object(cx: &MdCtx, plan: ObjId) -> Option<&md_model::MdObject> {
+    let md = cx.model().obj(plan).md;
+    cx.cfg_index
+        .get(&md)
+        .and_then(|i| cx.model().config.objects.get(*i))
+}
+
+fn walk_order(cx: &MdCtx, plan: ObjId) -> Result<Vec<usize>, String> {
+    let object = plan_object(cx, plan).ok_or("нет плана в модели")?;
+    let (Some(list), Some(stream)) = (
+        object.exchange_content(),
+        object.exchange_content_stream_order(),
+    ) else {
+        return Err("нет порядка потока состава".into());
+    };
+    if list.len() > WALK_MAX {
+        return Err(format!("более {WALK_MAX} элементов"));
+    }
+    let mut keys = Vec::with_capacity(stream.len());
+    for &at in stream {
+        let id = usize::try_from(at)
+            .ok()
+            .and_then(|at| list.get(at))
+            .and_then(|item| item.object.id)
+            .ok_or("нет порядка потока состава")?;
+        let b = id.as_bytes();
+        keys.push(u32::from_be_bytes([b[0], b[1], b[2], b[3]]));
+    }
+    let mut sorted = keys.clone();
+    sorted.sort_unstable();
+    if sorted.windows(2).any(|w| w.first() == w.last()) {
+        return Err("совпадение Data1 у элементов".into());
+    }
+    match crate::extensions::changed_object(&cx.app, object) {
+        Ok(None | Some(false)) => {}
+        Ok(Some(true)) => return Err("план изменён расширением".into()),
+        Err(why) => return Err(format!("расширения: {why}")),
+    }
+    Ok(container_walk(&keys)
+        .into_iter()
+        .filter_map(|j| stream.get(j))
+        .filter_map(|&at| usize::try_from(at).ok())
+        .collect())
 }
 
 pub(super) fn content(cx: &Arc<MdCtx>, plan: ObjId) -> CallResult<Value> {
@@ -41,6 +131,8 @@ pub(super) fn content(cx: &Arc<MdCtx>, plan: ObjId) -> CallResult<Value> {
     Ok(Value::Object(Rc::new(PlanContent {
         cx: cx.clone(),
         items: items(cx, plan)?,
+        plan,
+        walk: OnceCell::new(),
         ty,
         item_ty,
     })))
@@ -49,6 +141,8 @@ pub(super) fn content(cx: &Arc<MdCtx>, plan: ObjId) -> CallResult<Value> {
 struct PlanContent {
     cx: Arc<MdCtx>,
     items: Vec<Item>,
+    plan: ObjId,
+    walk: OnceCell<Result<Vec<usize>, String>>,
     ty: TypeIdx,
     item_ty: TypeIdx,
 }
@@ -98,7 +192,13 @@ impl PlanContent {
 
 impl HostObject for PlanContent {
     fn retained_memory(&self, visit: &mut dyn RetainedMemory) -> Result<bool, Exception> {
-        let bytes = self.items.len() as u64 * std::mem::size_of::<Item>() as u64;
+        let walk = self
+            .walk
+            .get()
+            .and_then(|w| w.as_ref().ok())
+            .map_or(0, Vec::len);
+        let bytes = self.items.len() as u64 * std::mem::size_of::<Item>() as u64
+            + walk as u64 * std::mem::size_of::<usize>() as u64;
         visit.bytes(bytes)?;
         Ok(true)
     }
@@ -130,8 +230,16 @@ impl HostObject for PlanContent {
     fn iter_len(&self, _: &mut Execution) -> Option<usize> {
         Some(self.items.len())
     }
-    fn iter_get(&self, _: &mut Execution, _: usize) -> CallResult<Value> {
-        Err(not_implemented("Состав: обход").into())
+    fn iter_get(&self, _: &mut Execution, i: usize) -> CallResult<Value> {
+        let order = self
+            .walk
+            .get_or_init(|| walk_order(&self.cx, self.plan))
+            .as_ref()
+            .map_err(|why| not_implemented(&format!("Состав: обход, {why}")))?;
+        order
+            .get(i)
+            .and_then(|&at| self.item(at))
+            .ok_or_else(|| not_implemented("Состав: обход").into())
     }
 }
 

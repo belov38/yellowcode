@@ -18,6 +18,20 @@ pub(crate) struct Names {
 }
 
 impl Names {
+    pub(crate) fn reserve_aliases(
+        &mut self,
+        memory: Option<&CompileArena>,
+        items: &[ast::SelectItem],
+    ) -> R<()> {
+        for item in items {
+            if let Some(alias) = &item.alias {
+                self.seen
+                    .insert(memory, mem::NameKey::folded(memory, &alias.name.text)?, ())?;
+            }
+        }
+        Ok(())
+    }
+
     fn alias(&mut self, memory: Option<&CompileArena>, name: &str) -> R<mem::NameKey> {
         self.seen
             .insert(memory, mem::NameKey::folded(memory, name)?, ())?;
@@ -125,9 +139,13 @@ impl<'scope> Analyzer<'scope> {
                     self.levels
                         .push(self.memory, Level::of_table(self.memory, tid)?)?;
                     let mut inner_names = Names::default();
-                    let r = fields
-                        .iter()
-                        .try_for_each(|field| self.item_owned(field, &mut inner, &mut inner_names));
+                    let r = inner_names
+                        .reserve_aliases(self.memory, fields)
+                        .and_then(|()| {
+                            fields.iter().try_for_each(|field| {
+                                self.item_owned(field, &mut inner, &mut inner_names)
+                            })
+                        });
                     self.levels.pop();
                     r?;
                 }
@@ -275,16 +293,23 @@ impl<'scope> Analyzer<'scope> {
     }
 
     fn unnamed_key(&self, names: &mut Names) -> R<mem::NameKey> {
-        let Some(next) = names.unnamed.checked_add(1) else {
-            return mem::allocation_error(self.memory, memory_budget::BudgetError::Overflow);
-        };
-        names.unnamed = next;
         let word = match self.schema.script() {
             ScriptVariant::Russian => "Поле",
             ScriptVariant::English => "Field",
         };
-        let base = mem::NameKey::numbered(self.memory, word, names.unnamed)?;
-        names.derived(self.memory, &base)
+        loop {
+            crate::probe::hit();
+            let Some(next) = names.unnamed.checked_add(1) else {
+                return mem::allocation_error(self.memory, memory_budget::BudgetError::Overflow);
+            };
+            names.unnamed = next;
+            let candidate = mem::NameKey::numbered(self.memory, word, names.unnamed)?;
+            let key = mem::NameKey::folded(self.memory, &candidate)?;
+            if names.seen.get(key.as_str()).is_none() {
+                names.seen.insert(self.memory, key, ())?;
+                return Ok(candidate);
+            }
+        }
     }
 
     fn item_name_key(
@@ -306,6 +331,7 @@ impl<'scope> Analyzer<'scope> {
                     .map(|part| mem::NameKey::raw(self.memory, &part.text))
                     .transpose()?,
             },
+            (ExprKind::Param(p), _) => Some(mem::NameKey::raw(self.memory, &p.name.text)?),
             (ExprKind::Func { .. }, TKind::Agg { arg: Some(a), .. }) => self.field_name(a)?,
             _ => None,
         };

@@ -1,3 +1,15 @@
+pub(crate) mod tags {
+    pub(crate) const NULL: u64 = 11;
+    pub(crate) const BOOL: u64 = 12;
+    pub(crate) const INT: u64 = 13;
+    pub(crate) const STR: u64 = 14;
+    pub(crate) const DATE: u64 = 15;
+    pub(crate) const UUID: u64 = 16;
+    pub(crate) const DECIMAL: u64 = 17;
+    pub(crate) const REF: u64 = 18;
+    pub(crate) const STORAGE: u64 = 19;
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Change {
     New = 0,
@@ -17,10 +29,12 @@ pub(crate) enum Val {
     Int(u64),
     Str(String),
     Date(u64),
+    Uuid([u8; 16]),
     Decimal(String),
     Ref { id: [u8; 16], table: u32 },
     EmptyRef { table: u32 },
     Storage(Vec<u8>),
+    Null,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -38,6 +52,7 @@ pub(crate) struct Header {
     pub full_name: String,
     pub utc_ticks: u64,
     pub txn: [u8; 16],
+    pub changed_by_extension: bool,
 }
 
 fn varint(out: &mut Vec<u8>, mut n: u64) {
@@ -76,6 +91,9 @@ fn header(h: &Header) -> Vec<u8> {
     bytes(&mut node, 1, &[0; 16]);
     number(&mut node, 2, 0);
     bytes(&mut out, 8, &node);
+    if h.changed_by_extension {
+        number(&mut out, 11, 1);
+    }
     number(&mut out, 14, 0);
     out
 }
@@ -83,23 +101,25 @@ fn header(h: &Header) -> Vec<u8> {
 fn value(v: &Val) -> Vec<u8> {
     let mut out = Vec::new();
     match v {
-        Val::Bool(b) => number(&mut out, 12, u64::from(*b)),
-        Val::Int(n) => number(&mut out, 13, *n),
-        Val::Str(s) => bytes(&mut out, 14, s.as_bytes()),
-        Val::Date(t) => number(&mut out, 15, *t),
-        Val::Decimal(s) => bytes(&mut out, 17, s.as_bytes()),
+        Val::Bool(b) => number(&mut out, tags::BOOL, u64::from(*b)),
+        Val::Int(n) => number(&mut out, tags::INT, *n),
+        Val::Str(s) => bytes(&mut out, tags::STR, s.as_bytes()),
+        Val::Date(t) => number(&mut out, tags::DATE, *t),
+        Val::Uuid(u) => bytes(&mut out, tags::UUID, u),
+        Val::Decimal(s) => bytes(&mut out, tags::DECIMAL, s.as_bytes()),
         Val::Ref { id, table } => {
             let mut r = Vec::with_capacity(24);
             bytes(&mut r, 1, id);
             number(&mut r, 2, u64::from(*table));
-            bytes(&mut out, 18, &r);
+            bytes(&mut out, tags::REF, &r);
         }
         Val::EmptyRef { table } => {
             let mut r = Vec::with_capacity(4);
             number(&mut r, 2, u64::from(*table));
-            bytes(&mut out, 18, &r);
+            bytes(&mut out, tags::REF, &r);
         }
-        Val::Storage(b) => bytes(&mut out, 19, b),
+        Val::Storage(b) => bytes(&mut out, tags::STORAGE, b),
+        Val::Null => number(&mut out, tags::NULL, 1),
     }
     out
 }
@@ -160,7 +180,7 @@ pub(crate) fn encode(h: &Header, md: &[u8; 16], change: Change, body: &Body<'_>)
     out
 }
 
-enum Wire<'a> {
+pub(crate) enum Wire<'a> {
     Varint(u64),
     Bytes(&'a [u8]),
 }
@@ -178,7 +198,7 @@ fn read_varint(b: &[u8], at: &mut usize) -> Option<u64> {
     None
 }
 
-fn fields_of(b: &[u8]) -> Option<Vec<(u64, Wire<'_>)>> {
+pub(crate) fn fields_of(b: &[u8]) -> Option<Vec<(u64, Wire<'_>)>> {
     let mut out = Vec::new();
     let mut at = 0;
     while at < b.len() {

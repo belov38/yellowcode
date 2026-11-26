@@ -160,7 +160,10 @@ fn check(
     let ext1_pending = if phase.enabled()
         && accesses.iter().any(|(source, fields)| {
             crate::lower::is_accounting_balance(ctx.schema, source.table)
-                && fields.standard.contains(&crate::StdRole::ExtDimension(1))
+                && fields
+                    .standard
+                    .iter()
+                    .any(|&role| crate::lower::is_balance_ext_dimension(role))
         }) {
         accounting::balance_ext1_pending(
             accesses,
@@ -176,10 +179,29 @@ fn check(
     };
     for (index, ((table, fields), decision)) in accesses.iter().zip(&decisions).enumerate() {
         let balance = crate::lower::is_accounting_balance(ctx.schema, table.table);
-        if (balance || matches!(keys.get(index), Some(Occurrence::BalanceChart(_))))
+        let accounting_bt =
+            crate::lower::is_accounting_balance_and_turnovers(ctx.schema, table.table);
+        if (balance
+            || accounting_bt
+            || matches!(keys.get(index), Some(Occurrence::BalanceChart(_))))
             && matches!(decision, Access::Restricted(_))
         {
-            accounting::validate(decision, table.table, !balance, true, ctx)?;
+            accounting::validate(
+                decision,
+                table.table,
+                !(balance || accounting_bt),
+                true,
+                ctx,
+            )?;
+        }
+        if accounting_bt {
+            let (inputs, _) =
+                crate::lower::accounting_bt_inputs(ctx.schema, ctx.storage, ctx.map, table.table)?;
+            crate::lower::balance_validate_areas_static(
+                ctx.schema,
+                ctx.map,
+                &[inputs.main, inputs.options, inputs.chart],
+            )?;
         }
         if balance {
             crate::lower::balance_form(
@@ -190,7 +212,11 @@ fn check(
                 &fields.fields,
                 phase,
             )?;
-            if phase.enabled() && fields.standard.contains(&crate::StdRole::ExtDimension(1)) {
+            let has_ext = fields
+                .standard
+                .iter()
+                .any(|&role| crate::lower::is_balance_ext_dimension(role));
+            if phase.enabled() && has_ext {
                 match ext1_pending {
                     accounting::BalanceExt1Pending::Shape => {
                         return Err(ExecError::Later {
@@ -206,15 +232,19 @@ fn check(
             }
             let inputs =
                 crate::lower::balance_inputs(ctx.schema, ctx.storage, ctx.map, table.table)?;
-            if [inputs.main, inputs.options, inputs.chart]
-                .iter()
-                .any(|id| !ctx.map.table(*id).separators.is_empty())
-            {
-                return Err(ExecError::Later {
-                    what: "Q6a-AccountingBalanceAreas",
-                    stage: "Q7c",
-                });
-            }
+            crate::lower::balance_validate_areas_static(
+                ctx.schema,
+                ctx.map,
+                &[inputs.main, inputs.options, inputs.chart],
+            )?;
+            crate::lower::balance_dims(
+                ctx.schema,
+                ctx.storage,
+                ctx.map,
+                table.table,
+                &inputs,
+                &fields.fields,
+            )?;
             crate::lower::balance_resources(
                 ctx.schema,
                 ctx.map,
@@ -222,13 +252,14 @@ fn check(
                 &inputs,
                 &fields.fields,
             )?;
-            if phase.enabled() && fields.standard.contains(&crate::StdRole::ExtDimension(1)) {
+            if phase.enabled() && has_ext {
                 crate::lower::balance_ext1_static_inputs(
                     ctx.schema,
                     ctx.storage,
                     ctx.map,
                     table.table,
                     &inputs,
+                    &fields.standard,
                     &fields.fields,
                 )?;
             }
@@ -245,6 +276,21 @@ fn check(
                 stage: "Q7c",
             });
         }
+        if matches!(
+            keys.get(index),
+            Some(
+                Occurrence::BaseRegister(_)
+                    | Occurrence::BaseChart(_)
+                    | Occurrence::BaseSection(_)
+                    | Occurrence::BaseSchedule(_)
+            )
+        ) && matches!(decision, Access::Restricted(_))
+        {
+            return Err(ExecError::Later {
+                what: "Q6d-CalculationBaseRls",
+                stage: "Q7b",
+            });
+        }
         let (rls, areas) = match table.part {
             TablePart::Virtual(VtKind::ExtDimensions) => {
                 ("Q6a-ExtDimensionsRls", "Q6a-ExtDimensionsAreas")
@@ -258,6 +304,9 @@ fn check(
             }
             TablePart::Virtual(VtKind::ActualActionPeriod) => {
                 ("Q6c-ActualActionPeriodRls", "Q6c-ActualActionPeriodAreas")
+            }
+            TablePart::Virtual(VtKind::Base) => {
+                ("Q6d-CalculationBaseRls", "Q6d-CalculationBaseAreas")
             }
             _ => continue,
         };
@@ -289,6 +338,18 @@ fn check(
             let (main, act) =
                 crate::lower::actual_inputs(ctx.schema, ctx.storage, ctx.map, table.table)?;
             if [main, act]
+                .iter()
+                .any(|id| !ctx.map.table(*id).separators.is_empty())
+            {
+                return Err(ExecError::Later {
+                    what: areas,
+                    stage: "Q7c",
+                });
+            }
+        } else if table.part == TablePart::Virtual(VtKind::Base) {
+            let inputs = crate::lower::base_inputs(ctx.schema, ctx.storage, ctx.map, table.table)?;
+            if inputs
+                .tables()
                 .iter()
                 .any(|id| !ctx.map.table(*id).separators.is_empty())
             {
@@ -388,14 +449,16 @@ fn check(
         for ((table, _), access) in turnovers.clone() {
             accounting::validate(access, table.table, false, false, ctx)?;
         }
-        if turnovers.into_iter().any(|((table, _), _)| {
-            crate::lower::turnovers_inputs(ctx.schema, ctx.storage, ctx.map, table.table)
-                .has_physical_separators()
-        }) {
-            return Err(ExecError::Later {
-                what: "Q6b-TurnoversAreas",
-                stage: "Q7c",
-            });
+        for ((table, fields), _) in turnovers {
+            let with_ext_dims = fields
+                .standard
+                .iter()
+                .any(|role| matches!(role, crate::StdRole::ExtDimension(_)));
+            let inputs =
+                crate::lower::turnovers_inputs(ctx.schema, ctx.storage, ctx.map, table.table);
+            if inputs.has_physical_separators(with_ext_dims) {
+                inputs.area_mapping(with_ext_dims)?;
+            }
         }
     }
     Ok(decisions)
@@ -470,8 +533,13 @@ impl Security {
 enum Occurrence {
     Direct(crate::ir::SrcId),
     Schedule(Box<Occurrence>),
+    BaseRegister(Box<Occurrence>),
+    BaseChart(Box<Occurrence>),
+    BaseSection(Box<Occurrence>),
+    BaseSchedule(Box<Occurrence>),
     BalanceChart(Box<Occurrence>),
     BalanceExtDimensionTypes(Box<Occurrence>),
+    TurnoversExtDimensionTypes(Box<Occurrence>),
     Target(Path, QTableId),
     Presentation(Path, QTableId),
     HierarchyTarget(Path, QTableId),
@@ -493,8 +561,11 @@ struct Collector<'a, 'p> {
     index: std::collections::HashMap<Occurrence, usize>,
     opaque: u64,
     aliases: std::collections::HashMap<SrcId, SrcId>,
+    balance_with_ext_arg: std::collections::HashSet<SrcId>,
     record_bounds: Vec<(SrcId, QTableId)>,
     record_bounds_seen: std::collections::HashSet<(SrcId, QTableId)>,
+    turnovers_roles: Vec<(SrcId, QTableId, crate::schema::StdRole)>,
+    turnovers_roles_seen: std::collections::HashSet<(SrcId, QTableId, crate::schema::StdRole)>,
     accounting_params: Vec<(SrcId, QTableId, String)>,
     temp_scan_seen: bool,
     proof: Option<&'p mut provenance::Proof>,
@@ -510,8 +581,11 @@ impl<'a, 'p> Collector<'a, 'p> {
             index: std::collections::HashMap::new(),
             opaque: 0,
             aliases: Default::default(),
+            balance_with_ext_arg: Default::default(),
             record_bounds: Vec::new(),
             record_bounds_seen: Default::default(),
+            turnovers_roles: Vec::new(),
+            turnovers_roles_seen: Default::default(),
             accounting_params: Vec::new(),
             temp_scan_seen: false,
             proof: None,
@@ -535,10 +609,22 @@ impl<'a, 'p> Collector<'a, 'p> {
         }
     }
 
+    fn turnovers_role(&mut self, src: SrcId, table: QTableId, role: crate::schema::StdRole) {
+        if self.turnovers_roles_seen.insert((src, table, role)) {
+            self.turnovers_roles.push((src, table, role));
+        }
+    }
+
     fn virtual_aliases(&mut self, rel: &Rel, stmt: &StmtS) {
         match rel {
             Rel::RegisterVt(v) | Rel::Slice(v) | Rel::RunningBalance(v) => {
                 self.aliases.insert(v.inner, v.src);
+                if (crate::lower::is_accounting_balance(self.schema, v.table)
+                    || crate::lower::is_accounting_balance_and_turnovers(self.schema, v.table))
+                    && v.ext_dims_arg.is_some()
+                {
+                    self.balance_with_ext_arg.insert(v.src);
+                }
                 if v.kind == VtKind::RecordsWithExtDimensions
                     && v.bounds.iter().any(Option::is_some)
                 {
@@ -546,7 +632,31 @@ impl<'a, 'p> Collector<'a, 'p> {
                 }
                 if crate::lower::is_accounting_balance(self.schema, v.table)
                     || crate::lower::is_accounting_turnovers(self.schema, v.table)
+                    || crate::lower::is_accounting_balance_and_turnovers(self.schema, v.table)
                 {
+                    if crate::lower::is_accounting_turnovers(self.schema, v.table)
+                        || crate::lower::is_accounting_balance_and_turnovers(self.schema, v.table)
+                    {
+                        let forced_roles: &[crate::schema::StdRole] = match v.periodicity {
+                            crate::schema::Periodicity::Unit(_) => {
+                                &[crate::schema::StdRole::Period]
+                            }
+                            crate::schema::Periodicity::Recorder => &[
+                                crate::schema::StdRole::Period,
+                                crate::schema::StdRole::Recorder,
+                            ],
+                            crate::schema::Periodicity::Record => &[
+                                crate::schema::StdRole::Period,
+                                crate::schema::StdRole::Recorder,
+                                crate::schema::StdRole::LineNumber,
+                            ],
+                            crate::schema::Periodicity::Absent
+                            | crate::schema::Periodicity::Auto => &[],
+                        };
+                        for role in forced_roles {
+                            self.turnovers_role(v.src, v.table, *role);
+                        }
+                    }
                     for expression in v.bounds.iter().flatten() {
                         match &expression.kind {
                             crate::ir::ExprKind::Lit(crate::QValue::Date(d))
@@ -663,8 +773,9 @@ impl<'a, 'p> Collector<'a, 'p> {
                 }
             }
         }
-        let balance_key =
-            crate::lower::is_accounting_balance(self.schema, table).then(|| key.clone());
+        let balance_key = (crate::lower::is_accounting_balance(self.schema, table)
+            || crate::lower::is_accounting_balance_and_turnovers(self.schema, table))
+        .then(|| key.clone());
         if self.schema.table(table).kind == TableKind::Virtual(VtKind::ScheduleData) {
             let roles = self.schema.schedule_roles(table);
             let facts = self.schema.schedule(table).cloned();
@@ -683,11 +794,104 @@ impl<'a, 'p> Collector<'a, 'p> {
             if let Some(facts) = facts
                 && let Some(graph) = facts.graph
             {
-                let dep = self.register(Occurrence::Schedule(Box::new(key)), graph, false)?;
+                let dep =
+                    self.register(Occurrence::Schedule(Box::new(key.clone())), graph, false)?;
                 if let Some(used) = dep.and_then(|n| self.uses.get_mut(n)) {
                     for field in &facts.graph_fields {
                         if used.metadata.insert(*field) {
                             used.fields.fields.push(*field);
+                        }
+                    }
+                }
+            }
+        }
+        if self.schema.table(table).kind == TableKind::Virtual(VtKind::Base) {
+            let facts = self.schema.calculation_base(table).cloned();
+            if let Some(used) = self.uses.get_mut(i) {
+                for role in [
+                    crate::StdRole::Recorder,
+                    crate::StdRole::LineNumber,
+                    crate::StdRole::RegistrationPeriod,
+                    crate::StdRole::CalculationType,
+                ] {
+                    if used.standard.insert(role) {
+                        used.fields.standard.push(role);
+                    }
+                }
+                if let Some(f) = &facts {
+                    if f.owner_base_period {
+                        for role in [
+                            crate::StdRole::BegOfBasePeriod,
+                            crate::StdRole::EndOfBasePeriod,
+                        ] {
+                            if used.standard.insert(role) {
+                                used.fields.standard.push(role);
+                            }
+                        }
+                    }
+                    if f.owner_action_period {
+                        for role in [
+                            crate::StdRole::BegOfActionPeriod,
+                            crate::StdRole::EndOfActionPeriod,
+                        ] {
+                            if used.standard.insert(role) {
+                                used.fields.standard.push(role);
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(facts) = facts {
+                if facts.base != facts.owner {
+                    let dep = Occurrence::BaseRegister(Box::new(key.clone()));
+                    for role in [
+                        crate::StdRole::Recorder,
+                        crate::StdRole::LineNumber,
+                        crate::StdRole::RegistrationPeriod,
+                        crate::StdRole::CalculationType,
+                        crate::StdRole::Active,
+                    ] {
+                        self.role(dep.clone(), facts.base, role)?;
+                    }
+                    if facts.base_action_period {
+                        for role in [
+                            crate::StdRole::ActionPeriod,
+                            crate::StdRole::BegOfActionPeriod,
+                            crate::StdRole::EndOfActionPeriod,
+                        ] {
+                            self.role(dep.clone(), facts.base, role)?;
+                        }
+                    }
+                }
+                if let Some(chart) = facts.chart {
+                    self.role(
+                        Occurrence::BaseChart(Box::new(key.clone())),
+                        chart,
+                        crate::StdRole::Ref,
+                    )?;
+                }
+                if let Some(section) = facts.base_section
+                    && !self.schema.is_unstored(section)
+                {
+                    let dep = Occurrence::BaseSection(Box::new(key.clone()));
+                    self.role(dep.clone(), section, crate::StdRole::Ref)?;
+                    self.role(dep, section, crate::StdRole::CalculationType)?;
+                }
+                if facts.dependence
+                    == Some(crate::schema::calculation_base::BaseDependence::OnActionPeriod)
+                    && let Some(sched) = self.schema.schedule_of_register(facts.base).cloned()
+                    && let Some(graph) = sched.graph
+                {
+                    let dep = self.register(
+                        Occurrence::BaseSchedule(Box::new(key.clone())),
+                        graph,
+                        false,
+                    )?;
+                    if let Some(used) = dep.and_then(|n| self.uses.get_mut(n)) {
+                        for field in &sched.graph_fields {
+                            if used.metadata.insert(*field) {
+                                used.fields.fields.push(*field);
+                            }
                         }
                     }
                 }
@@ -705,7 +909,11 @@ impl<'a, 'p> Collector<'a, 'p> {
                     }
                 }
             }
-            let chart = crate::lower::balance_chart(self.schema, table)?;
+            let chart = if crate::lower::is_accounting_balance_and_turnovers(self.schema, table) {
+                crate::lower::accounting_bt_chart(self.schema, table)?
+            } else {
+                crate::lower::balance_chart(self.schema, table)?
+            };
             let dependency = Occurrence::BalanceChart(Box::new(key));
             self.role(dependency.clone(), chart, crate::StdRole::Ref)?;
             self.role(dependency, chart, crate::StdRole::Type)?;
@@ -754,8 +962,10 @@ impl<'a, 'p> Collector<'a, 'p> {
         }
         let md = f.md.filter(|_| {
             f.nested.is_none()
-                && !(self.schema.table(table).kind == TableKind::Virtual(VtKind::ScheduleData)
-                    && f.role == FieldRole::Virtual)
+                && !(matches!(
+                    self.schema.table(table).kind,
+                    TableKind::Virtual(VtKind::ScheduleData | VtKind::Base)
+                ) && f.role == FieldRole::Virtual)
         });
         let role = f.role;
         if let Some(i) = self.register(key.clone(), table, false)?
@@ -771,16 +981,57 @@ impl<'a, 'p> Collector<'a, 'p> {
             {
                 used.fields.standard.push(role);
             }
+            if self.schema.table(table).kind == TableKind::Object(mdschema::MdKind::Document)
+                && role == FieldRole::Virtual
+                && f.name_ru == "МоментВремени"
+            {
+                for dep_role in [StdRole::Date, StdRole::Ref] {
+                    if used.standard.insert(dep_role) {
+                        used.fields.standard.push(dep_role);
+                    }
+                }
+            }
+            if (crate::lower::is_accounting_turnovers(self.schema, table)
+                || crate::lower::is_accounting_balance_and_turnovers(self.schema, table))
+                && let Some(period) = f.period
+            {
+                let period_role = match period {
+                    crate::schema::PeriodField::Period | crate::schema::PeriodField::Unit(_) => {
+                        StdRole::Period
+                    }
+                    crate::schema::PeriodField::Recorder => StdRole::Recorder,
+                    crate::schema::PeriodField::LineNumber => StdRole::LineNumber,
+                };
+                if used.standard.insert(period_role) {
+                    used.fields.standard.push(period_role);
+                }
+            }
         }
-        if self.phase.enabled()
-            && crate::lower::is_accounting_balance(self.schema, table)
-            && role == FieldRole::Std(StdRole::ExtDimension(1))
-            && let Some(section) = crate::lower::balance_ext1_section_identity(self.schema, table)
+        if ((self.phase.enabled() && crate::lower::is_accounting_balance(self.schema, table))
+            || crate::lower::is_accounting_balance_and_turnovers(self.schema, table))
+            && matches!(role, FieldRole::Std(std_role) if crate::lower::is_balance_ext_dimension(std_role))
+            && let Some(section) =
+                if crate::lower::is_accounting_balance_and_turnovers(self.schema, table) {
+                    crate::lower::accounting_bt_ext_section_identity(self.schema, table)
+                } else {
+                    crate::lower::balance_ext1_section_identity(self.schema, table)
+                }
         {
-            let dependency = Occurrence::BalanceExtDimensionTypes(Box::new(key));
+            let dependency = Occurrence::BalanceExtDimensionTypes(Box::new(key.clone()));
             self.role(dependency.clone(), section, StdRole::Ref)?;
             self.role(dependency.clone(), section, StdRole::LineNumber)?;
+            if matches!(key, Occurrence::Direct(src) if self.balance_with_ext_arg.contains(&src)) {
+                self.role(dependency.clone(), section, StdRole::ExtDimensionType(0))?;
+            }
             self.role(dependency, section, StdRole::TurnoversOnly)?;
+        }
+        if crate::lower::is_accounting_turnovers(self.schema, table)
+            && matches!(role, FieldRole::Std(StdRole::ExtDimension(_)))
+            && let Some(section) = crate::lower::turnovers_ext_section_identity(self.schema, table)
+        {
+            let dependency = Occurrence::TurnoversExtDimensionTypes(Box::new(key));
+            self.role(dependency.clone(), section, StdRole::Ref)?;
+            self.role(dependency, section, StdRole::LineNumber)?;
         }
         Ok(())
     }
@@ -829,11 +1080,16 @@ impl<'a, 'p> Collector<'a, 'p> {
                         Some(SrcKind::Table(table) | SrcKind::Virtual { table, .. }),
                         ColSel::Field(field),
                     ) => Some((*table, *field)),
-                    (Some(SrcKind::Virtual { table, cols }), ColSel::Column(i)) => cols
-                        .get(usize::from(*i))
-                        .copied()
-                        .flatten()
-                        .map(|field| (*table, field)),
+                    (Some(SrcKind::Virtual { table, cols }), ColSel::Column(i)) => {
+                        if self.schema.table(*table).kind == TableKind::Virtual(VtKind::Base) {
+                            None
+                        } else {
+                            cols.get(usize::from(*i))
+                                .copied()
+                                .flatten()
+                                .map(|field| (*table, field))
+                        }
+                    }
                     _ => None,
                 };
                 if let Some((table, field)) = identity {
@@ -912,8 +1168,19 @@ impl<'a, 'p> Collector<'a, 'p> {
         storage: &crate::StorageBinding,
     ) -> Result<(), ExecError> {
         for &col in &stmt.present {
-            let e = crate::lower::presentation_expr(stmt, col)
+            let exprs = crate::lower::presentation_exprs(stmt, col)
                 .ok_or_else(|| ExecError::Fatal("missing presentation expression".into()))?;
+            for e in exprs {
+                let path = self.ir_path(e);
+                self.present(
+                    path,
+                    &e.ty,
+                    crate::lower::unconstrained_presentation(stmt, e),
+                    storage,
+                )?;
+            }
+        }
+        for e in crate::lower::inline_presentation_exprs(stmt) {
             let path = self.ir_path(e);
             self.present(
                 path,
@@ -973,12 +1240,84 @@ impl<'a, 'p> Collector<'a, 'p> {
                         self.field(key.clone(), h.table, field)?;
                     }
                 }
+                for dep in &point.dependent {
+                    if let Some(crate::totals::HierDepS::Chain(steps)) = &dep.hier {
+                        for step in steps {
+                            for &(table, field) in step {
+                                let key = Occurrence::Hierarchy(i, table);
+                                self.role(key.clone(), table, StdRole::Ref)?;
+                                self.field(key.clone(), table, field)?;
+                                if self
+                                    .schema
+                                    .field(table, field)
+                                    .is_some_and(|f| f.only != crate::schema::Only::Any)
+                                    && self
+                                        .schema
+                                        .table(table)
+                                        .fields
+                                        .iter()
+                                        .any(|f| f.role == FieldRole::Std(StdRole::IsFolder))
+                                {
+                                    self.role(key, table, StdRole::IsFolder)?;
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
         Ok(())
     }
 
-    fn finish(self, ctx: &BindCtx<'_>) -> Result<Discovered, ExecError> {
+    fn finish(mut self, ctx: &BindCtx<'_>) -> Result<Discovered, ExecError> {
+        {
+            let mut add_dim_kind = Vec::new();
+            for (key, &idx) in &self.index {
+                let Occurrence::BalanceExtDimensionTypes(inner) = key else {
+                    continue;
+                };
+                let Some(&owner_idx) = self.index.get(inner.as_ref()) else {
+                    continue;
+                };
+                let Some(owner_use) = self.uses.get(owner_idx) else {
+                    continue;
+                };
+                let has_ed = if crate::lower::is_accounting_balance_and_turnovers(
+                    ctx.schema,
+                    owner_use.source.table,
+                ) {
+                    crate::lower::accounting_bt_ext_ed_table(
+                        ctx.schema,
+                        ctx.map,
+                        owner_use.source.table,
+                    )
+                    .ok()
+                    .flatten()
+                    .is_some()
+                } else if self.phase.enabled() {
+                    crate::lower::balance_ext_ed_table(ctx.schema, ctx.map, owner_use.source.table)
+                        .ok()
+                        .flatten()
+                        .is_some()
+                } else {
+                    false
+                };
+                if has_ed {
+                    add_dim_kind.push(idx);
+                }
+            }
+            for idx in add_dim_kind {
+                if let Some(used) = self.uses.get_mut(idx)
+                    && used
+                        .standard
+                        .insert(crate::schema::StdRole::ExtDimensionType(0))
+                {
+                    used.fields
+                        .standard
+                        .push(crate::schema::StdRole::ExtDimensionType(0));
+                }
+            }
+        }
         let accesses: Vec<_> = self
             .uses
             .into_iter()
@@ -1110,11 +1449,28 @@ fn drcr_ir_guards(
             let field_id = crate::QFieldId(u16::try_from(index).map_err(|_| {
                 ExecError::Fatal("accounting DrCrTurnovers: field index overflow".into())
             })?);
-            if used.get(&view.src).is_some_and(|u| u.contains(&field_id))
-                && let Some(md) = field.md
-            {
-                match resolver.resource(&inputs, md, field_id) {
-                    Ok(_) => {}
+            if used.get(&view.src).is_some_and(|u| u.contains(&field_id)) {
+                let checked = if let Some(md) = field.md {
+                    resolver.resource(&inputs, md, field_id).map(|_| ())
+                } else if let crate::schema::FieldRole::Std(
+                    crate::schema::StdRole::ExtDimensionDr(n),
+                ) = field.role
+                {
+                    resolver
+                        .ext_dim(&inputs, crate::lower::DrCrSideL::Dr, n, field_id)
+                        .map(|_| ())
+                } else if let crate::schema::FieldRole::Std(
+                    crate::schema::StdRole::ExtDimensionCr(n),
+                ) = field.role
+                {
+                    resolver
+                        .ext_dim(&inputs, crate::lower::DrCrSideL::Cr, n, field_id)
+                        .map(|_| ())
+                } else {
+                    Ok(())
+                };
+                match checked {
+                    Ok(()) => {}
                     Err(
                         e @ ExecError::Later {
                             what: "Q6b-DrCrTurnoversStorageShape",
@@ -1216,7 +1572,8 @@ fn turnovers_ir_guards(
         | "Q6b-TurnoversNonBalancedExtDimensionFlag"
         | "Q6b-TurnoversNonBalancedFlagBinding" => 3,
         "Q6b-TurnoversColumns" => 4,
-        _ => 5,
+        "Q6b-TurnoversNoResource" => 5,
+        _ => 6,
     };
     let mut refusal = None;
     for view in &views {
@@ -1238,11 +1595,19 @@ fn turnovers_ir_guards(
     for view in views {
         let resolver = crate::lower::turnovers_inputs(schema, storage, map, view.table);
         let inputs = resolver.resolve()?;
-        for field in used.get(&view.src).into_iter().flatten() {
-            if let Some(metadata) = schema.field(view.table, *field).and_then(|field| field.md) {
+        let view_used = used.get(&view.src).map_or(&[][..], Vec::as_slice);
+        for field in view_used {
+            let Some(info) = schema.field(view.table, *field) else {
+                continue;
+            };
+            if info.role == crate::FieldRole::Dimension {
+                resolver.dimension(&inputs, *field)?;
+            } else if let Some(metadata) = info.md {
                 resolver.resource(&inputs, metadata)?;
             }
         }
+        resolver.resolve_period_fields(&inputs, view.periodicity, view_used)?;
+        resolver.resolve_ext_dims(&inputs, view_used)?;
     }
     Ok(())
 }
@@ -1307,6 +1672,9 @@ fn discover(
                     crate::schema::StdRole::Recorder,
                 )?;
             }
+        }
+        for (src, table, role) in c.turnovers_roles.clone() {
+            c.role(Occurrence::Direct(src), table, role)?;
         }
         let mut result = Ok(());
         super::visit_stmt(stmt, &mut |e, _| {

@@ -731,6 +731,169 @@ fn open_infobase(path: &Path, opts: &LoadOptions) -> Result<Configuration> {
     })
 }
 
+struct BoundedCacheSource<'a> {
+    inner: &'a dyn mdconf::EntrySource,
+    capacity: std::num::NonZeroUsize,
+}
+
+impl<'a> BoundedCacheSource<'a> {
+    fn new(inner: &'a dyn mdconf::EntrySource, capacity: std::num::NonZeroUsize) -> Self {
+        Self { inner, capacity }
+    }
+}
+
+impl mdconf::EntrySource for BoundedCacheSource<'_> {
+    fn decoded_cache_capacity(&self) -> Option<std::num::NonZeroUsize> {
+        Some(
+            self.inner
+                .decoded_cache_capacity()
+                .map_or(self.capacity, |c| c.min(self.capacity)),
+        )
+    }
+    fn list(&self) -> mdconf::Result<Vec<mdconf::EntryMeta>> {
+        self.inner.list()
+    }
+    fn list_checked(
+        &self,
+        check: &dyn Fn() -> mdconf::Result<()>,
+    ) -> mdconf::Result<Vec<mdconf::EntryMeta>> {
+        self.inner.list_checked(check)
+    }
+    fn stored(&self, name: &str) -> mdconf::Result<Option<Vec<u8>>> {
+        self.inner.stored(name)
+    }
+    fn list_owned(&self) -> mdconf::Result<mdconf::EntryList> {
+        self.inner.list_owned()
+    }
+    fn list_owned_checked(
+        &self,
+        check: &dyn Fn() -> mdconf::Result<()>,
+    ) -> mdconf::Result<mdconf::EntryList> {
+        self.inner.list_owned_checked(check)
+    }
+    fn list_prepaid_checked(
+        &self,
+        budget: &memory_budget::MemoryBudget,
+        check: &dyn Fn() -> mdconf::Result<()>,
+    ) -> mdconf::Result<mdconf::EntryList> {
+        self.inner.list_prepaid_checked(budget, check)
+    }
+    fn stored_owned(&self, name: &str) -> mdconf::Result<Option<mdconf::StoredBytes>> {
+        self.inner.stored_owned(name)
+    }
+    fn stored_owned_bounded(
+        &self,
+        name: &str,
+        limit: usize,
+    ) -> mdconf::Result<Option<mdconf::StoredBytes>> {
+        self.inner.stored_owned_bounded(name, limit)
+    }
+    fn stored_range_owned(
+        &self,
+        name: &str,
+        offset: u64,
+        len: usize,
+    ) -> mdconf::Result<Option<mdconf::StoredBytes>> {
+        self.inner.stored_range_owned(name, offset, len)
+    }
+    fn stored_bounded(&self, name: &str, limit: usize) -> mdconf::Result<Option<Vec<u8>>> {
+        self.inner.stored_bounded(name, limit)
+    }
+    fn stored_inflated_bounded(
+        &self,
+        name: &str,
+        limit: u64,
+    ) -> mdconf::Result<Option<mdconf::Inflated>> {
+        self.inner.stored_inflated_bounded(name, limit)
+    }
+    fn stored_inflated_checked(
+        &self,
+        name: &str,
+        limit: u64,
+        check: &dyn Fn() -> mdconf::Result<()>,
+    ) -> mdconf::Result<Option<mdconf::Inflated>> {
+        self.inner.stored_inflated_checked(name, limit, check)
+    }
+    fn stored_len(&self, name: &str) -> mdconf::Result<Option<u64>> {
+        self.inner.stored_len(name)
+    }
+}
+
+pub(crate) fn open_with_entries_and_memory<T>(
+    path: &Path,
+    opts: &LoadOptions,
+    cache_capacity: Option<std::num::NonZeroUsize>,
+    memory: &OpenMemory,
+    post: impl FnOnce(&mut Configuration, &dyn mdconf::EntrySource) -> Result<T>,
+) -> Result<(Configuration, T)> {
+    let path = &resolve(path);
+    let load_from =
+        |src: &dyn mdconf::EntrySource, opts: &LoadOptions| -> mdconf::Result<Configuration> {
+            match cache_capacity {
+                Some(cap) => Configuration::load(&BoundedCacheSource::new(src, cap), opts),
+                None => Configuration::load(src, opts),
+            }
+        };
+    match detect(path)? {
+        SourceKind::Cf => {
+            let cf = {
+                let _phase = memory_budget::profile::phase(memory_budget::profile::Phase::CfOpen);
+                CfFile::open(path).map_err(|e| format!("{}: {e}", path.display()))?
+            };
+            let mut cfg = load_from(&cf, opts).map_err(|e| format!("{}: {e}", path.display()))?;
+            let extra = post(&mut cfg, &cf)?;
+            Ok((cfg, extra))
+        }
+        SourceKind::Dt => {
+            let spool = dt::extract_with_memory(path, memory, &mut |_| Ok(()))?;
+            let mut cfg = {
+                let _phase = memory_budget::profile::phase(memory_budget::profile::Phase::Metadata);
+                load_from(&spool, opts).map_err(|e| dt::memory_hint(e.into()))?
+            };
+            let extra = post(&mut cfg, &spool).map_err(dt::memory_hint)?;
+            Ok((cfg, extra))
+        }
+        SourceKind::Infobase => {
+            use memory_budget::profile::{Phase, phase};
+            let mut o = OpenOptions::read_only();
+            o.locking = Locking::None;
+            let ib = {
+                let _phase = phase(Phase::InfobaseOpen);
+                RawIb::open_with(path, o).map_err(|e| format!("{}: {e}", path.display()))?
+            };
+            let src = {
+                let _phase = phase(Phase::ConfigRead);
+                infobase::config::ConfigSource::read(&ib, "CONFIG")
+                    .map_err(|e| format!("{}: {e}", path.display()))?
+            };
+            let mut cfg = if src.is_empty() {
+                Configuration::default()
+            } else {
+                load_from(&src, &infobase_options(opts)).map_err(|e| {
+                    let e = infobase::Error::ConfigTable {
+                        table: "CONFIG".to_string(),
+                        source: e,
+                    };
+                    format!("{}: {e}", path.display())
+                })?
+            };
+            let extra = post(&mut cfg, &src)?;
+            Ok((cfg, extra))
+        }
+        SourceKind::XmlDir => Err("XML sources need stage C8 (load_xml)".into()),
+    }
+}
+
+pub(crate) fn open_with_memory_bounded(
+    path: &Path,
+    opts: &LoadOptions,
+    cache_capacity: Option<std::num::NonZeroUsize>,
+    memory: &OpenMemory,
+) -> Result<Configuration> {
+    open_with_entries_and_memory(path, opts, cache_capacity, memory, |_, _| Ok(()))
+        .map(|(cfg, ())| cfg)
+}
+
 pub fn with_config_entries<T>(
     path: &Path,
     consume: impl FnOnce(&dyn mdconf::EntrySource) -> Result<T>,

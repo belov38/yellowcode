@@ -2836,6 +2836,7 @@ version = "0.1.0"
 dependencies = [
  "aes",
  "base64 0.22.1",
+ "brace",
  "crc32fast",
  "flate2",
  "getrandom 0.3.4",
@@ -2848,7 +2849,7 @@ dependencies = [
 
 [[package]]
 name = "onec-desktop"
-version = "0.1.0-alpha.26"
+version = "0.1.0-alpha.27"
 dependencies = [
  "cf-fixtures",
  "dunce",
@@ -3213,6 +3214,7 @@ dependencies = [
  "md-model",
  "memory-budget",
  "onecd",
+ "query-exec",
  "query-ir",
  "query-syntax",
  "query-testhost",

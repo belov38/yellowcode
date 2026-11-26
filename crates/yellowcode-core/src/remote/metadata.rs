@@ -1,5 +1,8 @@
 use onec_client::Step;
-use onec_client::metadata::{EnumValue, MdSection, MdType, Metadata};
+use onec_client::metadata::{
+    EnumValue, ListColumn, MdAttributes, MdObject, MdSection, MdType, Metadata,
+};
+use onec_client::{FormField, FormTable};
 use serde_json::{Value as Json, json};
 
 pub(super) fn metadata_lines(m: &Metadata) -> Vec<String> {
@@ -19,6 +22,16 @@ pub(super) fn metadata_lines(m: &Metadata) -> Vec<String> {
         for d in &t.dims {
             l.push(format!("  dim: {} {}", d.name, shown(&d.type_name)));
         }
+        if let Some(a) = &t.attributes {
+            attribute_lines(m, a, &NAVIGATION, &mut l);
+        }
+    }
+    l.push(format!("[objects] ({})", m.objects.len()));
+    if m.objects.is_empty() {
+        l.push("-".into());
+    }
+    for o in &m.objects {
+        object_lines(m, o, &mut l);
     }
     l.push("[sections]".into());
     if m.sections.is_empty() {
@@ -60,6 +73,113 @@ fn type_line(t: &MdType) -> String {
     )
 }
 
+struct Source {
+    none: &'static str,
+    many: &'static str,
+}
+
+const NAVIGATION: Source = Source {
+    none: "no navigation command names the object",
+    many: "navigation commands give different ids",
+};
+const STANDARD: Source = Source {
+    none: "no standard command gives the id of the object",
+    many: "standard commands give different ids",
+};
+
+fn object_lines(m: &Metadata, o: &MdObject, l: &mut Vec<String>) {
+    let ids = match o.uuids.as_slice() {
+        [] => "no id".to_string(),
+        [one] => format!("id {one}"),
+        many => format!("ids {}", many.join(", ")),
+    };
+    l.push(format!(
+        "{}.{}: {} ({ids})",
+        o.kind.en(),
+        o.name,
+        shown(&o.view)
+    ));
+    for c in &o.commands {
+        let panel = if c.command.in_panel() {
+            ", function panel"
+        } else {
+            ""
+        };
+        l.push(format!(
+            "  command: {} -> {} in {} [{}{panel}]",
+            shown(&c.command.text),
+            shown(&c.command.url),
+            shown(&c.section_text),
+            shown(&c.command.group)
+        ));
+    }
+    if let Some(a) = &o.attributes {
+        attribute_lines(m, a, &STANDARD, l);
+    }
+}
+
+fn column_text(m: &Metadata, c: &ListColumn) -> String {
+    let mut s = c.name.clone();
+    if let Some(p) = &c.path {
+        s.push_str(&format!(" ({p})"));
+    }
+    s.push_str(&format!(": {}", m.xml_type_text(&c.ty)));
+    if c.hidden {
+        s.push_str(", hidden");
+    }
+    s
+}
+
+fn attribute_lines(m: &Metadata, a: &MdAttributes, source: &Source, l: &mut Vec<String>) {
+    match a {
+        MdAttributes::NoCommand => l.push(format!("  attributes: - ({})", source.none)),
+        MdAttributes::Columns { form_id, columns } => {
+            l.push(format!(
+                "  attributes: {form_id} (columns of the list form)"
+            ));
+            for c in columns {
+                l.push(format!("    column: {}", column_text(m, c)));
+            }
+        }
+        MdAttributes::Ambiguous { uuids } => l.push(format!(
+            "  attributes: - ({}: {})",
+            source.many,
+            uuids.join(", ")
+        )),
+        MdAttributes::Failed { form_id, error } => {
+            l.push(format!("  attributes: {form_id} failed: {error}"));
+        }
+        MdAttributes::Read { form_id, data } => {
+            l.push(format!("  attributes: {form_id} ({})", data.object));
+            for f in &data.fields {
+                l.push(format!("    attribute: {}", field_text(m, f, true)));
+            }
+            for t in &data.tables {
+                l.push(format!("    table: {}", field_text(m, &t.field, false)));
+                for c in &t.columns {
+                    l.push(format!("      column: {}", field_text(m, c, true)));
+                }
+            }
+        }
+    }
+}
+
+fn field_text(m: &Metadata, f: &FormField, typed: bool) -> String {
+    let mut s = f.display_name().to_string();
+    if let (Some(_), Some(en)) = (&f.name_ru, &f.name) {
+        s.push_str(&format!(" ({en})"));
+    }
+    if typed {
+        s.push_str(&format!(": {}", m.type_text(&f.ty)));
+    }
+    if f.read_only {
+        s.push_str(", read-only");
+    } else if f.no_edit {
+        s.push_str(", no right to change");
+    }
+    s
+}
+
 fn section_lines(s: &MdSection, depth: usize, l: &mut Vec<String>) {
     let pad = "  ".repeat(depth);
     let hidden = if s.include == Some(false) {
@@ -74,8 +194,9 @@ fn section_lines(s: &MdSection, depth: usize, l: &mut Vec<String>) {
         s.id
     ));
     for c in &s.commands {
+        let panel = if c.in_panel() { ", function panel" } else { "" };
         l.push(format!(
-            "{pad}  command: {} -> {} [{}]",
+            "{pad}  command: {} -> {} [{}{panel}]",
             shown(&c.text),
             shown(&c.url),
             shown(&c.group)
@@ -92,7 +213,7 @@ pub(super) fn metadata_json(
     enum_synonyms_error: Option<&str>,
 ) -> Json {
     let mut j = json!({
-        "types": m.types.iter().map(|t| json!({
+        "types": m.types.iter().map(|t| with_attributes(m, t, json!({
             "kind": t.kind.en(),
             "kind_ru": t.kind.ru(),
             "name": t.name,
@@ -104,7 +225,8 @@ pub(super) fn metadata_json(
             "recorder": t.recorder,
             "periodic": t.periodic,
             "dims": t.dims.iter().map(|d| json!({"name": d.name, "type": d.type_name})).collect::<Vec<_>>(),
-        })).collect::<Vec<_>>(),
+        }))).collect::<Vec<_>>(),
+        "objects": m.objects.iter().map(|o| object_json(m, o)).collect::<Vec<_>>(),
         "sections": m.sections.iter().map(section_json).collect::<Vec<_>>(),
         "unrecognized": m.unrecognized.iter().map(|x| json!({"answer": x.answer, "name": x.name})).collect::<Vec<_>>(),
     });
@@ -124,6 +246,107 @@ pub(super) fn metadata_json(
     j
 }
 
+fn with_attributes(m: &Metadata, t: &MdType, mut j: Json) -> Json {
+    if let (Some(a), Some(o)) = (&t.attributes, j.as_object_mut()) {
+        o.insert("attributes".into(), attributes_json(m, a));
+    }
+    j
+}
+
+fn object_json(m: &Metadata, o: &MdObject) -> Json {
+    let mut j = json!({
+        "kind": o.kind.en(),
+        "kind_ru": o.kind.ru(),
+        "name": o.name,
+        "view": o.view,
+        "uuids": o.uuids,
+        "commands": o.commands.iter().map(|c| {
+            let mut j = command_json(&c.command);
+            if let Some(x) = j.as_object_mut() {
+                x.insert("section".into(), json!(c.section));
+                x.insert("section_text".into(), json!(c.section_text));
+            }
+            j
+        }).collect::<Vec<_>>(),
+    });
+    if let (Some(a), Some(x)) = (&o.attributes, j.as_object_mut()) {
+        x.insert("attributes".into(), attributes_json(m, a));
+    }
+    j
+}
+
+fn attributes_json(m: &Metadata, a: &MdAttributes) -> Json {
+    match a {
+        MdAttributes::Columns { form_id, columns } => json!({
+            "state": "columns",
+            "form_id": form_id,
+            "columns": columns.iter().map(|c| json!({
+                "name": c.name,
+                "path": c.path,
+                "type": m.xml_type_text(&c.ty),
+                "types": c.ty.names,
+                "length": c.ty.length,
+                "digits": c.ty.digits,
+                "fraction": c.ty.fraction,
+                "nonnegative": c.ty.nonnegative,
+                "date_fractions": c.ty.date_fractions,
+                "hidden": c.hidden,
+            })).collect::<Vec<_>>(),
+        }),
+        MdAttributes::NoCommand => json!({"state": "no_command"}),
+        MdAttributes::Ambiguous { uuids } => json!({"state": "ambiguous", "uuids": uuids}),
+        MdAttributes::Failed { form_id, error } => {
+            json!({"state": "failed", "form_id": form_id, "error": error})
+        }
+        MdAttributes::Read { form_id, data } => json!({
+            "state": "read",
+            "form_id": form_id,
+            "object": data.object,
+            "fields": data.fields.iter().map(|f| field_json(m, f)).collect::<Vec<_>>(),
+            "tables": data.tables.iter().map(|t| table_json(m, t)).collect::<Vec<_>>(),
+        }),
+    }
+}
+
+fn table_json(m: &Metadata, t: &FormTable) -> Json {
+    let mut j = field_json(m, &t.field);
+    if let Some(o) = j.as_object_mut() {
+        o.insert(
+            "columns".into(),
+            t.columns
+                .iter()
+                .map(|c| field_json(m, c))
+                .collect::<Vec<_>>()
+                .into(),
+        );
+    }
+    j
+}
+
+fn field_json(m: &Metadata, f: &FormField) -> Json {
+    json!({
+        "id": f.id,
+        "name": f.name,
+        "name_ru": f.name_ru,
+        "type": m.type_text(&f.ty),
+        "types": f.ty.ids.iter().map(|id| {
+            let names = m.type_names(id);
+            json!({
+                "id": id,
+                "name": names.as_ref().map(|(en, _)| en),
+                "name_ru": names.as_ref().map(|(_, ru)| ru),
+            })
+        }).collect::<Vec<_>>(),
+        "length": f.ty.length,
+        "digits": f.ty.digits,
+        "fraction": f.ty.fraction,
+        "nonnegative": f.ty.nonnegative,
+        "date_fraction": f.ty.date_fraction,
+        "read_only": f.read_only,
+        "no_edit": f.no_edit,
+    })
+}
+
 fn value_json(v: &EnumValue) -> Json {
     let mut o = serde_json::Map::new();
     o.insert("id".into(), json!(v.id));
@@ -140,16 +363,21 @@ fn section_json(s: &MdSection) -> Json {
         "name": s.name,
         "text": s.text,
         "include": s.include,
-        "commands": s.commands.iter().map(|c| json!({
-            "id": c.id,
-            "name": c.name,
-            "name_ru": c.name_ru,
-            "md": c.md,
-            "url": c.url,
-            "text": c.text,
-            "group": c.group,
-        })).collect::<Vec<_>>(),
+        "commands": s.commands.iter().map(command_json).collect::<Vec<_>>(),
         "children": s.children.iter().map(section_json).collect::<Vec<_>>(),
+    })
+}
+
+fn command_json(c: &onec_client::metadata::Command) -> Json {
+    json!({
+        "id": c.id,
+        "name": c.name,
+        "name_ru": c.name_ru,
+        "md": c.md,
+        "url": c.url,
+        "text": c.text,
+        "group": c.group,
+        "category": c.category,
     })
 }
 

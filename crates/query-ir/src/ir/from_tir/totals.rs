@@ -1,12 +1,13 @@
 use std::collections::HashMap;
 
 use super::{Builder, R, SortMeta, internal, later};
+use crate::ir::from_tir::is_pure_ref_type;
 use crate::ir::{ColSel, Expr, ExprKind, SrcKind};
-use crate::schema::{QTableId, TableKind};
+use crate::schema::{FieldRole, QFieldId, QTableId, StdRole, TableKind};
 use crate::tir::{self, ControlPoint, Query, TExpr, TKind, TotalsHierarchy};
 use crate::totals::{
-    AggArg, AggFunc, AggSpec, ArithOp, HierS, HierarchyMode, KeySource, OrderKey, PeriodsS, PointS,
-    TotalsExpr, TotalsS,
+    AggArg, AggFunc, AggSpec, ArithOp, DependentS, HierDepS, HierS, HierarchyMode, KeySource,
+    OrderKey, PeriodsS, PointS, TotalsExpr, TotalsS,
 };
 use crate::types::QType;
 use crate::{QValue, QuerySchema};
@@ -255,6 +256,190 @@ fn arith_op(op: BinOp) -> R<ArithOp> {
     })
 }
 
+fn entity_tables(select: &tir::Select, schema: &QuerySchema) -> Vec<Option<QTableId>> {
+    let mut sources = Vec::new();
+    let mut pending: Vec<_> = select.sources.iter().rev().collect();
+    while let Some(source) = pending.pop() {
+        let table = match &source.from {
+            tir::From::Table { id, .. } => {
+                let info = schema.table(*id);
+                (matches!(info.kind, TableKind::Object(_)) && info.reference.is_some())
+                    .then_some(*id)
+            }
+            _ => None,
+        };
+        sources.push(table);
+        pending.extend(source.joins.iter().rev().map(|join| &join.right));
+    }
+    sources
+}
+
+struct PointOrigin<'a> {
+    source: u16,
+    col: tir::Col,
+    derefs: &'a [tir::Deref],
+    entity_table: Option<QTableId>,
+}
+
+fn deref_step_eq(a: &tir::Deref, b: &tir::Deref) -> bool {
+    a.targets == b.targets
+        && (!a.targets.is_empty() || bsl_prim::fold_name(&a.name) == bsl_prim::fold_name(&b.name))
+}
+
+fn field_depends_on(
+    level: u16,
+    source: u16,
+    col: tir::Col,
+    derefs: &[tir::Deref],
+    origin: &PointOrigin<'_>,
+) -> bool {
+    if level != 0 || source != origin.source {
+        return false;
+    }
+    if col == origin.col
+        && derefs.len() >= origin.derefs.len()
+        && origin
+            .derefs
+            .iter()
+            .zip(derefs)
+            .all(|(a, b)| deref_step_eq(a, b))
+    {
+        return true;
+    }
+    origin.entity_table.is_some()
+}
+
+fn expr_depends_on(expr: &TExpr, origin: &PointOrigin<'_>) -> bool {
+    let mut has_leaf = false;
+    let mut stack = vec![expr];
+    while let Some(cur) = stack.pop() {
+        match &cur.kind {
+            TKind::InQuery { .. } | TKind::Agg { .. } => return false,
+            TKind::Cast { e, derefs, .. } => {
+                if !derefs.is_empty() {
+                    return false;
+                }
+                stack.push(e);
+            }
+            TKind::Field {
+                level,
+                source,
+                col,
+                derefs,
+            } => {
+                if !field_depends_on(*level, *source, *col, derefs, origin) {
+                    return false;
+                }
+                has_leaf = true;
+            }
+            _ => stack.extend(kids(cur)),
+        }
+    }
+    has_leaf
+}
+
+fn hier_dep_for_field(
+    expr: &TExpr,
+    origin: &PointOrigin<'_>,
+    schema: &QuerySchema,
+) -> Option<HierDepS> {
+    let TKind::Field {
+        level: 0,
+        source,
+        col,
+        derefs,
+    } = &expr.kind
+    else {
+        return None;
+    };
+    if *source != origin.source {
+        return None;
+    }
+    if *col == origin.col
+        && derefs.len() >= origin.derefs.len()
+        && origin
+            .derefs
+            .iter()
+            .zip(derefs)
+            .all(|(a, b)| deref_step_eq(a, b))
+    {
+        let tail = derefs.get(origin.derefs.len()..).unwrap_or(&[]);
+        let steps_slice = if let Some((last, head)) = tail.split_last()
+            && !last.targets.is_empty()
+            && last
+                .targets
+                .iter()
+                .all(|(t, f)| schema.is_presentation_field(*t, *f))
+        {
+            head
+        } else {
+            tail
+        };
+        if steps_slice.is_empty() {
+            return Some(HierDepS::SelfRef);
+        }
+        return Some(HierDepS::Chain(
+            steps_slice.iter().map(|d| d.targets.clone()).collect(),
+        ));
+    }
+    let entity_tid = origin.entity_table?;
+    let tir::Col::Field(fid) = col else {
+        return None;
+    };
+    if derefs.is_empty() {
+        if schema.is_presentation_field(entity_tid, *fid)
+            || schema
+                .field(entity_tid, *fid)
+                .is_some_and(|fld| fld.role == FieldRole::Std(StdRole::Ref))
+        {
+            return Some(HierDepS::SelfRef);
+        }
+        return Some(HierDepS::Chain(vec![vec![(entity_tid, *fid)]]));
+    }
+    let tail_slice = if let Some((last, head)) = derefs.split_last()
+        && !last.targets.is_empty()
+        && last
+            .targets
+            .iter()
+            .all(|(t, f)| schema.is_presentation_field(*t, *f))
+    {
+        head
+    } else {
+        derefs.as_slice()
+    };
+    let mut steps: Vec<Vec<(QTableId, QFieldId)>> = Vec::with_capacity(1 + tail_slice.len());
+    steps.push(vec![(entity_tid, *fid)]);
+    for d in tail_slice {
+        steps.push(d.targets.clone());
+    }
+    Some(HierDepS::Chain(steps))
+}
+
+fn hier_dep_for_item(
+    expr: &TExpr,
+    is_present: bool,
+    origin: &PointOrigin<'_>,
+    schema: &QuerySchema,
+) -> Option<HierDepS> {
+    if let TKind::Func {
+        f: Func::Presentation | Func::RefPresentation,
+        args,
+    } = &expr.kind
+    {
+        if !is_present {
+            return None;
+        }
+        let [arg] = args.as_slice() else {
+            return None;
+        };
+        if !is_pure_ref_type(&arg.ty) {
+            return None;
+        }
+        return hier_dep_for_field(arg, origin, schema);
+    }
+    hier_dep_for_field(expr, origin, schema)
+}
+
 fn deref_key(key: &Expr, base: &Expr) -> Option<(Vec<(QTableId, crate::schema::QFieldId)>, bool)> {
     let (inner, not) = match &key.kind {
         ExprKind::Not(x) => (x.as_ref(), true),
@@ -349,8 +534,10 @@ impl<'a> Builder<'a> {
         };
         let width = first.items.len();
         let hits = hit_spans(t);
+        let entities = entity_tables(first, self.schema);
         let mut points: Vec<PointS> = Vec::with_capacity(t.points.len());
         let mut point_exprs: Vec<Option<&'a TExpr>> = Vec::with_capacity(t.points.len());
+        let mut point_origins: Vec<Option<PointOrigin<'a>>> = Vec::with_capacity(t.points.len());
         let mut seen: HashMap<String, usize> = HashMap::new();
         for p in &t.points {
             let ControlPoint::Field(f) = p else {
@@ -360,8 +547,10 @@ impl<'a> Builder<'a> {
                     hierarchy: HierarchyMode::No,
                     periods: None,
                     hier: Vec::new(),
+                    dependent: Vec::new(),
                 });
                 point_exprs.push(None);
+                point_origins.push(None);
                 continue;
             };
             let selected = tir::totals_point_column(f, &first.items);
@@ -389,6 +578,34 @@ impl<'a> Builder<'a> {
             let source = match selected {
                 Some(c) => first.items.get(c).map(|i| &i.expr),
                 None => Some(&f.expr),
+            };
+            let origin = match source.map(|e| &e.kind) {
+                Some(TKind::Field {
+                    level: 0,
+                    source,
+                    col,
+                    derefs,
+                }) => {
+                    let entity_table = if derefs.is_empty()
+                        && let tir::Col::Field(fid) = col
+                        && let Some(tid) = entities.get(usize::from(*source)).copied().flatten()
+                        && self
+                            .schema
+                            .field(tid, *fid)
+                            .is_some_and(|fld| fld.role == FieldRole::Std(StdRole::Ref))
+                    {
+                        Some(tid)
+                    } else {
+                        None
+                    };
+                    Some(PointOrigin {
+                        source: *source,
+                        col: *col,
+                        derefs,
+                        entity_table,
+                    })
+                }
+                _ => None,
             };
             let is_field = source.is_some_and(|e| matches!(e.kind, TKind::Field { .. }));
             let hierarchy = match f.hierarchy {
@@ -432,8 +649,46 @@ impl<'a> Builder<'a> {
                 hierarchy,
                 periods,
                 hier,
+                dependent: Vec::new(),
             });
             point_exprs.push(Some(&f.expr));
+            point_origins.push(origin);
+        }
+        let mut dep_tables: Vec<QTableId> = Vec::new();
+        for (c, item) in first.items.iter().enumerate() {
+            if item.nested.is_some() {
+                continue;
+            }
+            let is_present = u16::try_from(c).is_ok_and(|col| self.present.contains(&col));
+            for (p_idx, point) in points.iter_mut().enumerate() {
+                if point.column == Some(c) {
+                    break;
+                }
+                let Some(origin) = point_origins.get(p_idx).and_then(Option::as_ref) else {
+                    continue;
+                };
+                if !expr_depends_on(&item.expr, origin) {
+                    continue;
+                }
+                let hier = if point.hierarchy != HierarchyMode::No {
+                    let h = hier_dep_for_item(&item.expr, is_present, origin, self.schema);
+                    if let Some(HierDepS::Chain(steps)) = &h {
+                        for step in steps {
+                            for &(table, _) in step {
+                                dep_tables.push(table);
+                            }
+                        }
+                    }
+                    h
+                } else {
+                    None
+                };
+                point.dependent.push(DependentS { column: c, hier });
+                break;
+            }
+        }
+        for table in dep_tables {
+            self.touch(table);
         }
         let context = TotalsContext::new(q, hits, self.schema);
         let mut aggs: Vec<AggSpec> = Vec::new();
