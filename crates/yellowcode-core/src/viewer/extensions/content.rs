@@ -310,7 +310,10 @@ fn root_error(error: ExtensionReadError) -> Code {
         E::Configuration(
             mdconf::parts::extension_configuration::ConfigurationError::UnsupportedRootVersion
             | mdconf::parts::extension_configuration::ConfigurationError::UnsupportedPartVersion
-            | mdconf::parts::extension_configuration::ConfigurationError::UnsupportedBodyVersion,
+            | mdconf::parts::extension_configuration::ConfigurationError::UnsupportedBodyVersion {
+                ..
+            }
+            | mdconf::parts::extension_configuration::ConfigurationError::UnexpectedValue { .. },
         )
         | E::Manifest(mdconf::configinfo::ConfigInfoError::UnsupportedVersion(_))
         | E::Manifest(mdconf::configinfo::ConfigInfoError::Invalid("supported root descriptor")) => {

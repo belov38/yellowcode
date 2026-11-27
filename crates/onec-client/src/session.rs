@@ -70,10 +70,12 @@ pub enum SessionError {
     },
     #[error(transparent)]
     List(#[from] crate::dlist::ListError),
-    #[error("password rejected (round 2 returned empty cred)")]
+    #[error("login refused: wrong user name or password")]
     PasswordRejected,
     #[error(transparent)]
     Object(#[from] crate::object::ObjectError),
+    #[error(transparent)]
+    Form(#[from] crate::formcall::FormError),
     #[error("{0}")]
     Protocol(String),
 }
@@ -138,9 +140,37 @@ pub struct MetadataView {
 #[derive(Debug, Clone, Copy)]
 pub struct ReportOptions<'a> {
     pub form: &'a str,
+    pub open_params: &'a [(String, Value)],
+    pub init: Option<(&'a str, &'a [Value])>,
+    pub attributes: &'a [crate::write::Assign],
+    pub before: &'a [String],
     pub call: Option<(&'a str, &'a [Value])>,
+    pub poll: Option<Poll<'a>>,
     pub limits: SheetLimits,
     pub dcs: Option<DcsOptions<'a>>,
+}
+
+impl<'a> ReportOptions<'a> {
+    pub fn form(form: &'a str, limits: SheetLimits) -> Self {
+        Self {
+            form,
+            open_params: &[],
+            init: None,
+            attributes: &[],
+            before: &[],
+            call: None,
+            poll: None,
+            limits,
+            dcs: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Poll<'a> {
+    pub procedure: &'a str,
+    pub running: Option<&'a str>,
+    pub timeout: std::time::Duration,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -170,9 +200,33 @@ pub struct ReportView {
     pub attributes: Vec<FormAttribute>,
     pub sheets: Vec<ReportSheet>,
     pub dcs: Option<DcsView>,
+    pub init: Option<FormCall>,
+    pub calls: Vec<FormCall>,
+    pub messages: Vec<crate::write::UserMessage>,
+    pub warnings: Vec<String>,
+    pub states: Vec<String>,
 }
 
-type ReportParts = (Vec<FormAttribute>, Vec<ReportSheet>, Option<DcsView>);
+#[derive(Debug, Clone, PartialEq)]
+pub struct FormCall {
+    pub procedure: String,
+    pub returned: Option<Value>,
+}
+
+#[derive(Default)]
+struct ReportParts {
+    attributes: Vec<FormAttribute>,
+    sheets: Vec<ReportSheet>,
+    dcs: Option<DcsView>,
+    calls: Vec<FormCall>,
+    messages: Vec<crate::write::UserMessage>,
+    warnings: Vec<String>,
+    states: Vec<String>,
+}
+
+const POLL_FIRST: std::time::Duration = std::time::Duration::from_secs(1);
+const POLL_FACTOR: f64 = 1.4;
+const POLL_MAX: std::time::Duration = std::time::Duration::from_secs(15);
 
 const ROWS_PER_REQUEST: usize = 1000;
 const DETAILS_PER_REQUEST: u32 = 1000;
@@ -189,6 +243,7 @@ pub struct Session<R: RandomSource = OsRandom> {
     steps: Vec<Step>,
     pub(crate) version: String,
     auto_version: bool,
+    sleep: fn(std::time::Duration),
 }
 
 pub(crate) struct Prologue {
@@ -219,7 +274,12 @@ impl<R: RandomSource> Session<R> {
             steps: Vec::new(),
             version: VERSION.to_string(),
             auto_version: true,
+            sleep: std::thread::sleep,
         }
+    }
+
+    pub fn set_sleep(&mut self, sleep: fn(std::time::Duration)) {
+        self.sleep = sleep;
     }
 
     pub fn set_version(&mut self, build: &str) {
@@ -725,6 +785,17 @@ impl<R: RandomSource> Session<R> {
         cold: bool,
     ) -> Result<CallResult, SessionError> {
         let pro = self.prologue(cold)?;
+        let result = self.module_call(&pro, call, params)?;
+        self.about()?;
+        Ok(result)
+    }
+
+    fn module_call(
+        &mut self,
+        pro: &Prologue,
+        call: &str,
+        params: &[Value],
+    ) -> Result<CallResult, SessionError> {
         let conf = pro.conf.as_str();
         let modules = xml::parse_server_modules(&pro.defs)?;
         let (module, func) = match call.rsplit_once('.') {
@@ -759,9 +830,6 @@ impl<R: RandomSource> Session<R> {
         )?;
         let values = xml::parse_call_result(&Self::decoded(&resp)?)?;
         let (ret, params) = (values.ret, values.params);
-
-        self.about()?;
-
         Ok(CallResult {
             members,
             ret,
@@ -1155,12 +1223,24 @@ impl<R: RandomSource> Session<R> {
 
     pub fn run_report(&mut self, opts: ReportOptions) -> Result<ReportView, SessionError> {
         let pro = self.prologue(true)?;
+        let init = match opts.init {
+            Some((call, params)) => Some(FormCall {
+                procedure: call.to_string(),
+                returned: self.module_call(&pro, call, params)?.ret,
+            }),
+            None => None,
+        };
         let roles = self
             .info
             .as_ref()
             .and_then(|i| i.roles_id.clone())
             .unwrap_or_else(|| "0".to_string());
-        let (mut form, mut body) = self.open_report_form(opts.form, &[])?;
+        let (mut form, mut body) = if opts.open_params.is_empty() {
+            self.open_report_form(opts.form, &[])?
+        } else {
+            let request = report::query_request_values(opts.form, opts.open_params)?;
+            self.open_form_with(&request)?
+        };
         if let Some(name) = opts.dcs.and_then(|d| d.variant) {
             let wanted = dcs::read_variants(&body).and_then(|(current, list)| {
                 let v = dcs::find_variant(&list, name)?;
@@ -1192,13 +1272,18 @@ impl<R: RandomSource> Session<R> {
         }
         let outcome = self.report_of(&form, &body, &pro.conf, &roles, opts);
         let closed = self.close_form(&form.fid);
-        let (attributes, sheets, dcs) = outcome?;
+        let parts = outcome?;
         closed?;
         Ok(ReportView {
             form,
-            attributes,
-            sheets,
-            dcs,
+            attributes: parts.attributes,
+            sheets: parts.sheets,
+            dcs: parts.dcs,
+            init,
+            calls: parts.calls,
+            messages: parts.messages,
+            warnings: parts.warnings,
+            states: parts.states,
         })
     }
 
@@ -1207,7 +1292,11 @@ impl<R: RandomSource> Session<R> {
         key: &str,
         params: &[(&str, &str)],
     ) -> Result<(OpenedForm, Vec<u8>), SessionError> {
-        let body = body::zstd_compress(&report::query_request_with(key, params));
+        self.open_form_with(&report::query_request_with(key, params))
+    }
+
+    fn open_form_with(&mut self, request: &[u8]) -> Result<(OpenedForm, Vec<u8>), SessionError> {
+        let body = body::zstd_compress(request);
         let h = self.headers("application/xml", true, true);
         let resp = self.step(
             "logForm/query",
@@ -1251,39 +1340,158 @@ impl<R: RandomSource> Session<R> {
             &[200],
         )?;
         let descr = Self::decoded(&resp)?;
-        let attributes = report::read_attributes(&descr)?;
+        let mut attributes = report::read_attributes(&descr)?;
         if let Some(d) = opts.dcs {
             let dcs_form = match dcs::read_form(query, &descr, &attributes) {
                 Ok(f) => f,
                 Err(dcs::DcsError::NoComposer) if !d.generate => {
-                    return Ok((attributes, Vec::new(), None));
+                    return Ok(ReportParts {
+                        attributes,
+                        ..Default::default()
+                    });
                 }
                 Err(e) => return Err(e.into()),
             };
             if !d.generate {
-                return Ok((
+                return Ok(ReportParts {
                     attributes,
-                    Vec::new(),
-                    Some(DcsView {
+                    dcs: Some(DcsView {
                         form: dcs_form,
                         details: Vec::new(),
                     }),
-                ));
+                    ..Default::default()
+                });
             }
             let (sheets, details) = self.compose(form, &dcs_form, d, opts.limits)?;
-            return Ok((
+            return Ok(ReportParts {
                 attributes,
                 sheets,
-                Some(DcsView {
+                dcs: Some(DcsView {
                     form: dcs_form,
                     details,
                 }),
-            ));
+                ..Default::default()
+            });
         }
-        let Some((procedure, params)) = opts.call else {
-            return Ok((attributes, Vec::new(), None));
+        let mut warnings = Vec::new();
+        let opened = self.opened_sheets(query, &mut attributes, opts.limits);
+        let mut sheets = match (opened, opts.call.is_some()) {
+            (Ok(s), _) => s,
+            (Err(e), false) => return Err(e),
+            (Err(e), true) => {
+                warnings.push(format!(
+                    "the documents of the opened form were not read: {e}"
+                ));
+                Vec::new()
+            }
         };
-        let body = body::zstd_compress(&report::call_request(form, procedure, params)?);
+        let Some((procedure, params)) = opts.call else {
+            let messages = self.messages_or_warning(&mut warnings);
+            return Ok(ReportParts {
+                attributes,
+                sheets,
+                messages,
+                warnings,
+                ..Default::default()
+            });
+        };
+        let edits = if opts.attributes.is_empty() {
+            Vec::new()
+        } else {
+            let types = self.session_types("the values of the attributes of the form")?;
+            report::attribute_edits(&attributes, opts.attributes, &types)?
+        };
+        let mut pchs = Some(report::attributes_pchs(&edits));
+        let mut calls = Vec::new();
+        let mut states = Vec::new();
+        for b in opts.before {
+            let p = pchs
+                .take()
+                .unwrap_or_else(|| report::EMPTY_PCHS.to_string());
+            let (returned, _) =
+                self.form_call(form, b, &[], &p, opts.limits, &mut sheets, &mut states)?;
+            calls.push(FormCall {
+                procedure: b.clone(),
+                returned,
+            });
+        }
+        let p = pchs
+            .take()
+            .unwrap_or_else(|| report::EMPTY_PCHS.to_string());
+        let (returned, changed) = self.form_call(
+            form,
+            procedure,
+            params,
+            &p,
+            opts.limits,
+            &mut sheets,
+            &mut states,
+        )?;
+        let started = !matches!(returned, Some(Value::Bool(false))) && !changed;
+        calls.push(FormCall {
+            procedure: procedure.to_string(),
+            returned,
+        });
+        if let (Some(poll), true) = (opts.poll, started) {
+            self.poll_form(
+                form,
+                poll,
+                opts.limits,
+                &mut sheets,
+                &mut calls,
+                &mut states,
+            )?;
+        }
+        let messages = self.messages_or_warning(&mut warnings);
+        Ok(ReportParts {
+            attributes,
+            sheets,
+            dcs: None,
+            calls,
+            messages,
+            warnings,
+            states,
+        })
+    }
+
+    fn opened_sheets(
+        &mut self,
+        query: &[u8],
+        attributes: &mut Vec<FormAttribute>,
+        limits: SheetLimits,
+    ) -> Result<Vec<ReportSheet>, SessionError> {
+        let added = report::read_added_attributes(query, attributes.len())?;
+        attributes.extend(added);
+        let mut count = CellCount::default();
+        let opened = report::read_opened_sheets(query, attributes, limits, &mut count)?;
+        self.fill_sheets(opened, limits, &mut count)
+    }
+
+    fn messages_or_warning(
+        &mut self,
+        warnings: &mut Vec<String>,
+    ) -> Vec<crate::write::UserMessage> {
+        match self.user_messages() {
+            Ok(m) => m,
+            Err(e) => {
+                warnings.push(format!("the messages to the user were not read: {e}"));
+                Vec::new()
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn form_call(
+        &mut self,
+        form: &OpenedForm,
+        procedure: &str,
+        params: &[Value],
+        pchs: &str,
+        limits: SheetLimits,
+        sheets: &mut Vec<ReportSheet>,
+        states: &mut Vec<String>,
+    ) -> Result<(Option<Value>, bool), SessionError> {
+        let body = body::zstd_compress(&report::call_request_with(form, procedure, params, pchs)?);
         let h = self.headers("application/xml", true, true);
         let resp = self.step(
             "logForm/call",
@@ -1293,8 +1501,65 @@ impl<R: RandomSource> Session<R> {
             &body,
             &[200],
         )?;
-        let sheets = self.sheets_of(&Self::decoded(&resp)?, opts.limits)?;
-        Ok((attributes, sheets, None))
+        let answer = Self::decoded(&resp)?;
+        let returned = report::read_call_return(&answer)?;
+        *states = report::read_states(&answer);
+        let changed = self.sheets_of(&answer, limits)?;
+        let any = !changed.is_empty();
+        for sheet in changed {
+            match sheets.iter_mut().find(|s| s.position == sheet.position) {
+                Some(old) => *old = sheet,
+                None => sheets.push(sheet),
+            }
+        }
+        Ok((returned, any))
+    }
+
+    fn poll_form(
+        &mut self,
+        form: &OpenedForm,
+        poll: Poll,
+        limits: SheetLimits,
+        sheets: &mut Vec<ReportSheet>,
+        calls: &mut Vec<FormCall>,
+        states: &mut Vec<String>,
+    ) -> Result<(), SessionError> {
+        let started = std::time::Instant::now();
+        let mut waited = std::time::Duration::ZERO;
+        let mut pause = POLL_FIRST;
+        let mut polls = 0usize;
+        loop {
+            if waited.max(started.elapsed()) + pause > poll.timeout {
+                return Err(ReportError::PollTimeout {
+                    procedure: poll.procedure.to_string(),
+                    seconds: poll.timeout.as_secs(),
+                    calls: polls,
+                }
+                .into());
+            }
+            (self.sleep)(pause);
+            waited += pause;
+            pause = pause.mul_f64(POLL_FACTOR).min(POLL_MAX);
+            polls += 1;
+            let (returned, changed) = self.form_call(
+                form,
+                poll.procedure,
+                &[],
+                report::EMPTY_PCHS,
+                limits,
+                sheets,
+                states,
+            )?;
+            let running =
+                !changed && report::poll_running(poll.procedure, returned.as_ref(), poll.running)?;
+            calls.push(FormCall {
+                procedure: poll.procedure.to_string(),
+                returned,
+            });
+            if !running {
+                return Ok(());
+            }
+        }
     }
 
     fn compose(
@@ -1389,6 +1654,15 @@ impl<R: RandomSource> Session<R> {
     ) -> Result<Vec<ReportSheet>, SessionError> {
         let mut count = CellCount::default();
         let changed = report::read_call(answer, limits, &mut count)?;
+        self.fill_sheets(changed, limits, &mut count)
+    }
+
+    fn fill_sheets(
+        &mut self,
+        changed: Vec<report::ChangedSheet>,
+        limits: SheetLimits,
+        count: &mut CellCount,
+    ) -> Result<Vec<ReportSheet>, SessionError> {
         let mut sheets = Vec::with_capacity(changed.len());
         for c in changed {
             let (sheet, rows_asked) = match c.changes {
@@ -1412,7 +1686,7 @@ impl<R: RandomSource> Session<R> {
                             batch,
                             &mut sheet,
                             limits,
-                            &mut count,
+                            count,
                         )
                         .map_err(ReportError::from)?;
                     }

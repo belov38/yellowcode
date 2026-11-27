@@ -18,6 +18,10 @@ impl ObjectRef {
     pub fn parse(arg: &str) -> std::result::Result<ObjectRef, String> {
         onec_client::object::parse_ref(arg).map(ObjectRef)
     }
+
+    pub fn into_ref(self) -> Ref {
+        self.0
+    }
 }
 
 #[derive(Debug, Clone)]

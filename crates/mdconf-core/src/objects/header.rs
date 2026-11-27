@@ -116,6 +116,7 @@ impl<'a> ExtensionHeader<'a> {
     }
 }
 
+#[derive(Debug)]
 pub struct InstalledHeader<'a> {
     pub id: Guid,
     pub name: &'a str,
@@ -123,6 +124,7 @@ pub struct InstalledHeader<'a> {
     pub comment: &'a str,
     pub wire_belonging: WireInteger<'a>,
     pub extended_object: Option<Guid>,
+    source: &'a Node,
     pairs: &'a [Node],
 }
 
@@ -131,7 +133,7 @@ impl<'a> InstalledHeader<'a> {
         Self::parse(node, true)
     }
 
-    fn parse(node: &'a Node, installed: bool) -> Result<Self, HeaderError> {
+    pub(crate) fn parse(node: &'a Node, installed: bool) -> Result<Self, HeaderError> {
         let Some(
             [
                 version,
@@ -193,12 +195,17 @@ impl<'a> InstalledHeader<'a> {
             comment,
             wire_belonging,
             extended_object,
+            source: node,
             pairs,
         })
     }
 
     pub fn belonging(&self) -> ObjectBelonging {
         belonging_code(self.wire_belonging)
+    }
+
+    pub fn source(&self) -> &'a Node {
+        self.source
     }
 
     pub fn property_states(

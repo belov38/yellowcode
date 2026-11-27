@@ -75,6 +75,7 @@ pub struct RestoreLimits {
     pub row_bytes: u64,
     pub atom_bytes: u64,
     pub schema_nodes: u64,
+    pub metadata_bytes: u64,
 }
 
 impl RestoreLimits {
@@ -87,6 +88,7 @@ impl RestoreLimits {
             row_bytes: row,
             atom_bytes: row.min(ROW_ATOM_CAP),
             schema_nodes: (b / 100 * 25 / 100).min(SCHEMA_NODES_CAP),
+            metadata_bytes: b / 4 / MIB * MIB,
         }
     }
 }
@@ -158,6 +160,13 @@ pub struct OpenWarning {
 
 fn bad(what: impl std::fmt::Display) -> Error {
     Error::Unsupported(format!("DT restore: {what}"))
+}
+
+fn pending_owner(name: &str) -> Result<brace::Guid> {
+    name.split_once("__")
+        .filter(|(_, element)| !element.is_empty())
+        .and_then(|(id, _)| brace::Guid::parse(id))
+        .ok_or_else(|| bad("a ConfigCASSave file name is not <extension ID>__<element>"))
 }
 fn io<T>(result: io::Result<T>) -> Result<T> {
     result.map_err(|e| Error::Inconsistent(format!("DT restore I/O: {e}")))
@@ -1453,6 +1462,7 @@ fn stream<R: Read>(
     let mut users_dropped = 0u64;
     let mut key_bytes = 0usize;
     let collate = onecd::IcuCollate;
+    let mut pending_owners: HashSet<brace::Guid> = HashSet::new();
     let mut next = reader.next_event()?;
     for folder_name in FOLDERS {
         let head = TableHead::system(&Source::Folder(folder_name.into()))
@@ -1475,12 +1485,6 @@ fn stream<R: Read>(
         let (header_share, header_limits) = folder_header_limits(&limits, row_limits);
         reader.set_read_limits(header_limits);
         while let Some(metadata) = folder_header(reader, &head)? {
-            if !matches!(
-                head.phys_name.as_str(),
-                "CONFIG" | "PARAMS" | "FILES" | "DEPOTFILES" | "CONFIGCAS"
-            ) {
-                return Err(bad("nonempty pending configuration folder"));
-            }
             let [
                 ColumnValue::Str(name),
                 ColumnValue::DateTime(creation),
@@ -1491,6 +1495,9 @@ fn stream<R: Read>(
             else {
                 return Err(bad("folder transfer columns"));
             };
+            if head.phys_name == "CONFIGCASSAVE" {
+                pending_owners.insert(pending_owner(name)?);
+            }
             let length = folder_length(&metadata)?;
             let f = FolderFile {
                 name: name.clone(),
@@ -1812,6 +1819,12 @@ fn stream<R: Read>(
                 Some(Event::TableEnd) => break,
                 Some(Event::Row(row)) => {
                     check_row(&head, &row)?;
+                    if head.phys_name.eq_ignore_ascii_case("_EXTENSIONSINFO")
+                        && let Some(ColumnValue::Bytes(id)) = row.first()
+                        && let Ok(id) = <[u8; 16]>::try_from(id.as_slice())
+                    {
+                        pending_owners.remove(&ibschema::values::RefId(id).to_uuid());
+                    }
                     let tx =
                         batches.unit(plan.estimate(&row), &format!("a row of {}", plan.table))?;
                     let row = plan.row(row)?;
@@ -1836,6 +1849,11 @@ fn stream<R: Read>(
             )));
         }
         counts.push(count);
+    }
+    if let Some(owner) = pending_owners.iter().min() {
+        return Err(bad(format!(
+            "ConfigCASSave has saved changes of extension {owner}, which _ExtensionsInfo does not list"
+        )));
     }
     let extension = match reader.next_event()? {
         Some(Event::DataBaseEnd) if partial.plans.len() == partial.schema.walk().len() => {
@@ -1897,7 +1915,10 @@ fn open_check(path: &Path, opts: &RestoreOptions<'_>) -> Result<Infobase> {
     )?;
     for w in ib.warnings() {
         match w {
-            Warning::SchemaMismatch(_) | Warning::UnsupportedObjects(_) | Warning::Extensions => {}
+            Warning::SchemaMismatch(_)
+            | Warning::UnsupportedObjects(_)
+            | Warning::Extensions
+            | Warning::PendingConfiguration => {}
             other => return Err(bad(format!("open warning: {other:?}"))),
         }
     }
@@ -1918,6 +1939,10 @@ fn open_warnings(ib: &Infobase) -> Vec<OpenWarning> {
             }),
             Warning::Extensions => Some(OpenWarning {
                 kind: "Extensions",
+                items: 1,
+            }),
+            Warning::PendingConfiguration => Some(OpenWarning {
+                kind: "PendingConfiguration",
                 items: 1,
             }),
             _ => None,

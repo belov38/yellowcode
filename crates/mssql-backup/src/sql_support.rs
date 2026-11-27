@@ -229,12 +229,6 @@ fn read_support_public(
         return Err(Error::Unsupported("invalid extension presence flags"));
     }
     let mut found = common_findings(&flags);
-    if flags.config_cas_save != 0 {
-        found.push(
-            "в базе есть неприменённые изменения расширений конфигурации (таблица ConfigCASSave не пуста)"
-                .to_owned(),
-        );
-    }
     if has_extension_storage && flags.config_cas == 0 {
         found.push(
             "в базе есть схема хранения расширений (SchemaStorage SchemaID 1), но таблица ConfigCAS пуста"

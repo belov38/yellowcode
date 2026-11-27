@@ -30,8 +30,8 @@ pub struct ConfigInfo {
 pub enum ConfigInfoError {
     #[error("configinfo: {0}")]
     Source(#[source] crate::Error),
-    #[error("configinfo: {0}")]
-    Brace(#[source] brace::Error),
+    #[error("configinfo: {0}{1}")]
+    Brace(#[source] brace::Error, BraceContext),
     #[error("unsupported configinfo structure version {0}")]
     UnsupportedVersion(u32),
     #[error("configinfo: expected {0}")]
@@ -46,6 +46,114 @@ pub enum ConfigInfoError {
     Inflate(#[from] zraw::ManagedInflateError),
 }
 type Result<T> = std::result::Result<T, ConfigInfoError>;
+
+const CONTEXT_BYTES: usize = 32;
+const CONTEXT_ATOM: usize = 24;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BraceContext(String);
+
+impl BraceContext {
+    pub fn new(input: &[u8], offset: usize) -> Self {
+        use std::fmt::Write as _;
+        let offset = offset.min(input.len());
+        let start = offset.saturating_sub(CONTEXT_BYTES);
+        let end = offset.saturating_add(CONTEXT_BYTES).min(input.len());
+        let mut window = String::new();
+        let mut quoted = false;
+        let mut bytes = input.get(..end).unwrap_or_default().iter().enumerate();
+        if start > 0 {
+            window.push('…');
+        }
+        while let Some((index, &byte)) = bytes.next() {
+            let shown = index >= start;
+            if index == start && start > 0 && quoted {
+                window.push_str("\"…");
+            }
+            if index == offset {
+                window.push_str("<<HERE>>");
+            }
+            if quoted {
+                if byte == b'"' {
+                    if input.get(index + 1) == Some(&b'"') {
+                        bytes.next();
+                        continue;
+                    }
+                    quoted = false;
+                    if shown {
+                        window.push('"');
+                    }
+                }
+                continue;
+            }
+            if byte == b'"' {
+                quoted = true;
+                if shown {
+                    window.push_str("\"…");
+                }
+                continue;
+            }
+            if shown {
+                escape_byte(&mut window, byte);
+            }
+        }
+        if offset == end {
+            window.push_str("<<HERE>>");
+        }
+        if end < input.len() {
+            window.push('…');
+        }
+        let token = match input.get(offset) {
+            None => "end of input".to_owned(),
+            Some(b'"') => "a quoted string".to_owned(),
+            Some(&byte @ (b'{' | b'}' | b',')) => format!("'{}'", byte as char),
+            Some(&byte) if brace_space(byte) => "whitespace".to_owned(),
+            Some(_) => {
+                let atom = input
+                    .get(offset..)
+                    .unwrap_or_default()
+                    .iter()
+                    .take_while(|&&byte| !brace_space(byte) && !b"{},\"".contains(&byte));
+                let mut text = String::new();
+                for (count, &byte) in atom.enumerate() {
+                    if count == CONTEXT_ATOM {
+                        text.push('…');
+                        break;
+                    }
+                    escape_byte(&mut text, byte);
+                }
+                format!("atom `{text}`")
+            }
+        };
+        let mut out = String::new();
+        let _ = write!(out, "; found {token}; context: `{window}`");
+        Self(out)
+    }
+}
+
+impl std::fmt::Display for BraceContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+fn escape_byte(out: &mut String, byte: u8) {
+    use std::fmt::Write as _;
+    match byte {
+        b'\r' => out.push_str("\\r"),
+        b'\n' => out.push_str("\\n"),
+        b'\t' => out.push_str("\\t"),
+        b'`' | b'\\' => {
+            out.push('\\');
+            out.push(byte as char);
+        }
+        0x20..=0x7e => out.push(byte as char),
+        _ => {
+            let _ = write!(out, "\\x{byte:02x}");
+        }
+    }
+}
+
 fn invalid(what: &'static str) -> ConfigInfoError {
     ConfigInfoError::Invalid(what)
 }
@@ -279,7 +387,6 @@ fn preflight(input: &[u8], budget: &MemoryBudget) -> Result<()> {
 
 pub(crate) struct RetainedConfigInfo {
     pub(crate) value: ConfigInfo,
-    pub(crate) six_parts: bool,
     _hold: Reservation,
 }
 
@@ -321,14 +428,6 @@ impl ConfigInfo {
         input: &[u8],
         budget: &MemoryBudget,
     ) -> Result<RetainedConfigInfo> {
-        Self::parse_profile(input, budget, false)
-    }
-
-    pub(crate) fn parse_profile(
-        input: &[u8],
-        budget: &MemoryBudget,
-        installed: bool,
-    ) -> Result<RetainedConfigInfo> {
         let body = check_manifest_input(input)?;
         let bom = input.len() - body.len();
         preflight(body, budget)?;
@@ -338,7 +437,7 @@ impl ConfigInfo {
             body.len().checked_add(2).ok_or(BudgetError::Overflow)?,
         )?;
         wrapped.try_push(b'{')?;
-        let folded = installed.then(|| folded_descriptor(body)).flatten();
+        let folded = folded_descriptor(body);
         if let Some(locator) = &folded {
             let encoded = locator
                 .encoded
@@ -368,7 +467,8 @@ impl ConfigInfo {
                             .saturating_sub(1)
                             .saturating_add(bom)
                             .min(input.len());
-                        ConfigInfoError::Brace(error)
+                        let context = BraceContext::new(input, error.offset);
+                        ConfigInfoError::Brace(error, context)
                     }
                 },
             )?;
@@ -393,18 +493,17 @@ impl ConfigInfo {
             return Err(invalid("version-2 root"));
         }
         let descriptor = descriptor.as_atom();
-        let six_parts = folded.is_some() && descriptor.is_some_and(|atom| !atom.is_empty());
+        let legacy = folded.is_some() && descriptor.is_some_and(|atom| !atom.is_empty());
         let payload = |atom: &str| {
             atom.is_empty()
                 || (atom.len() == ROOT_BASE64_BYTES
                     && STANDARD.decode_slice(atom, &mut [0; ROOT_PAYLOAD_BYTES])
                         == Ok(ROOT_PAYLOAD_BYTES))
         };
-        if !six_parts && !descriptor.is_some_and(payload) {
+        if !legacy && !descriptor.is_some_and(payload) {
             return Err(invalid(match descriptor {
-                _ if installed => "supported root descriptor",
                 None => "root payload atom",
-                Some(_) => "empty or 64-byte Base64 root payload",
+                Some(_) => "supported root descriptor",
             }));
         }
         let root_id = root_id
@@ -466,7 +565,6 @@ impl ConfigInfo {
                 root_id,
                 entries,
             },
-            six_parts,
             _hold: output_hold,
         })
     }

@@ -200,7 +200,11 @@ pub(crate) fn implied_type(ty: &FieldType, types: &[MdType]) -> Option<TypeName>
     }
 }
 
-fn cell(n: Node, field: &FormField, implied: Option<&TypeName>) -> Result<Cell, ObjectError> {
+pub(crate) fn cell(
+    n: Node,
+    field: &FormField,
+    implied: Option<&TypeName>,
+) -> Result<Cell, ObjectError> {
     let wrap = |error| ObjectError::Value {
         field: field.display_name().to_string(),
         error,
@@ -499,6 +503,17 @@ impl<R: RandomSource> Session<R> {
         conf: &str,
         answer: &[u8],
     ) -> Result<(FormData, Vec<Unrecognized>), SessionError> {
+        let body = self.form_description(conf, answer)?;
+        let mut unrecognized = Vec::new();
+        let data = FormData::from_answer(&body, &mut unrecognized).map_err(ObjectError::from)?;
+        Ok((data, unrecognized))
+    }
+
+    pub(crate) fn form_description(
+        &mut self,
+        conf: &str,
+        answer: &[u8],
+    ) -> Result<Vec<u8>, SessionError> {
         let form_id = form_id_of(answer).map_err(ObjectError::from)?;
         let roles = self
             .login_info()
@@ -517,9 +532,6 @@ impl<R: RandomSource> Session<R> {
             &[],
             &[200],
         )?;
-        let mut unrecognized = Vec::new();
-        let data = FormData::from_answer(&Self::decoded(&resp)?, &mut unrecognized)
-            .map_err(ObjectError::from)?;
-        Ok((data, unrecognized))
+        Self::decoded(&resp)
     }
 }

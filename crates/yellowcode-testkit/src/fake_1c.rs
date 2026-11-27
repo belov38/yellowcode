@@ -219,6 +219,7 @@ pub fn report(path: &str) -> (u16, &'static [u8]) {
         "/e1cib/moxel" if path.contains("cmd=getRowContents") => {
             (200, fx!("report-recon", "rows.xml"))
         }
+        "/e1cib/messages" => (204, b""),
         _ => metadata(path),
     }
 }

@@ -14,9 +14,13 @@ use super::OpenMemory;
 use crate::Result;
 use memory_budget::{BudgetedVec, Category, MemoryBudget};
 
+const ENTRY_CEILING: u64 = 256 << 20;
+
 #[derive(Clone, Copy)]
 struct Limits {
     entry: u64,
+    read: u64,
+    explicit: bool,
     aggregate: u64,
     count: usize,
     prefix: u64,
@@ -24,13 +28,15 @@ struct Limits {
     nodes: u64,
 }
 impl Limits {
-    fn from_budget(budget: u64) -> Result<Self> {
-        let entry = (budget / 16).min(256 << 20);
+    fn from_budget(budget: u64, explicit: bool) -> Result<Self> {
+        let entry = (budget / 16).min(ENTRY_CEILING);
         let retained = entry
             .checked_add(64 << 10)
             .ok_or("DT scratch size overflow")?;
         Ok(Self {
             entry,
+            read: if explicit { budget / 16 } else { entry },
+            explicit,
             aggregate: budget
                 .checked_mul(8)
                 .ok_or("DT aggregate size overflow")?
@@ -75,7 +81,7 @@ fn reader_error(error: dtfile::Error, limits: Limits) -> crate::Error {
     match error {
         dtfile::Error::Limit { what, .. } => {
             let hard = match what {
-                "atom bytes" | "retained bytes" => limits.entry == 256 << 20,
+                "atom bytes" | "retained bytes" => limits.entry == ENTRY_CEILING,
                 "nodes" => limits.nodes == 65_536,
                 _ => true,
             };
@@ -83,6 +89,70 @@ fn reader_error(error: dtfile::Error, limits: Limits) -> crate::Error {
         }
         other => other.into(),
     }
+}
+#[derive(Clone, Debug)]
+struct EntryRefusal {
+    name: String,
+    len: u64,
+    limit: u64,
+    by_budget: bool,
+    explicit: bool,
+}
+impl std::fmt::Display for EntryRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if !self.by_budget {
+            return write!(
+                f,
+                "DT CONFIG entry {} is {} bytes, above the {}-byte limit of this reader",
+                self.name, self.len, self.limit
+            );
+        }
+        write!(
+            f,
+            "MEMORY_LIMIT: DT CONFIG entry {} is {} bytes, above the in-memory entry limit of {} bytes",
+            self.name, self.len, self.limit
+        )?;
+        let need = self.len.saturating_mul(16).div_ceil(1 << 20);
+        if !self.explicit && self.len > ENTRY_CEILING {
+            write!(
+                f,
+                "; an automatic budget reads at most {} MiB per entry, set an explicit --memory-limit of at least {need}MiB",
+                ENTRY_CEILING >> 20
+            )
+        } else {
+            write!(f, "; increase --memory-limit to at least {need}MiB")
+        }
+    }
+}
+#[derive(Debug, thiserror::Error)]
+#[error("{refusal}")]
+struct EntryMemoryRefusal {
+    refusal: EntryRefusal,
+    #[source]
+    source: crate::Error,
+}
+fn refused_len(error: &(dyn std::error::Error + 'static)) -> Option<u64> {
+    let mut current = Some(error);
+    while let Some(cause) = current {
+        let limit = cause
+            .downcast_ref::<memory_budget::MemoryLimit>()
+            .copied()
+            .or(match cause.downcast_ref::<memory_budget::BudgetError>() {
+                Some(memory_budget::BudgetError::Limit(limit)) => Some(*limit),
+                _ => None,
+            })
+            .or(match cause.downcast_ref::<mdconf::Error>() {
+                Some(mdconf::Error::Memory(limit)) => Some(*limit),
+                _ => None,
+            });
+        if let Some(limit) = limit {
+            return (limit.category == Category::Metadata
+                && limit.reason == memory_budget::LimitReason::Global)
+                .then_some(limit.requested);
+        }
+        current = cause.source();
+    }
+    None
 }
 #[derive(Debug, thiserror::Error)]
 #[error("{source}; increase --memory-limit")]
@@ -96,6 +166,7 @@ pub(super) fn memory_hint(error: crate::Error) -> crate::Error {
     while let Some(cause) = current {
         if cause.downcast_ref::<QuotaRefusal>().is_some()
             || cause.downcast_ref::<MemoryRefusal>().is_some()
+            || cause.downcast_ref::<EntryMemoryRefusal>().is_some()
         {
             return error;
         }
@@ -209,6 +280,7 @@ pub(super) struct Spool {
     budget: MemoryBudget,
     limits: Limits,
     bytes: u64,
+    refusal: Mutex<Option<EntryRefusal>>,
 }
 impl Spool {
     fn new(memory: &OpenMemory, limits: Limits) -> Result<Self> {
@@ -228,7 +300,77 @@ impl Spool {
             budget: memory.budget.clone(),
             limits,
             bytes: 0,
+            refusal: Mutex::new(None),
         })
+    }
+    fn refuse(
+        &self,
+        name: &str,
+        len: u64,
+        limit: u64,
+        by_budget: bool,
+    ) -> memory_budget::MemoryLimit {
+        if let Ok(name) = copy_name(name) {
+            *self.refusal.lock().unwrap_or_else(|e| e.into_inner()) = Some(EntryRefusal {
+                name,
+                len,
+                limit,
+                by_budget,
+                explicit: self.limits.explicit,
+            });
+        }
+        memory_budget::MemoryLimit {
+            category: Category::Metadata,
+            requested: len,
+            reason: memory_budget::LimitReason::Global,
+        }
+    }
+    fn stored_whole(
+        &self,
+        name: &str,
+        limit: u64,
+        by_budget: bool,
+    ) -> mdconf::Result<Option<mdconf::StoredBytes>> {
+        let Some(item) = self.find(name) else {
+            return Ok(None);
+        };
+        let bad = |what: &str| mdconf::Error::Format {
+            entry: name.into(),
+            what: what.into(),
+        };
+        if item.len > limit {
+            return Err(mdconf::Error::Memory(
+                self.refuse(name, item.len, limit, by_budget),
+            ));
+        }
+        let len =
+            usize::try_from(item.len).map_err(|_| bad("stored size exceeds address space"))?;
+        let mut out = BudgetedVec::try_with_capacity(&self.budget, Category::Metadata, len)
+            .map_err(|e| source_memory(name, e))?;
+        out.try_resize(len, 0).map_err(|e| source_memory(name, e))?;
+        let mut file = self.file.lock().unwrap_or_else(|e| e.into_inner());
+        file.seek(SeekFrom::Start(item.offset))?;
+        file.read_exact(&mut out)?;
+        Ok(Some(
+            mdconf::EntryBacking::from_charged(out.into_charged_vec())
+                .map_err(|e| source_memory(name, e))?,
+        ))
+    }
+    pub(super) fn memory_hint(&self, error: crate::Error) -> crate::Error {
+        let refusal = self
+            .refusal
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        match refusal {
+            Some(refusal) if refused_len(&*error) == Some(refusal.len) => {
+                Box::new(EntryMemoryRefusal {
+                    refusal,
+                    source: error,
+                })
+            }
+            _ => memory_hint(error),
+        }
     }
     pub(super) fn summary(&self) -> super::ConfigEntrySummary {
         super::ConfigEntrySummary {
@@ -413,7 +555,7 @@ impl mdconf::ManagedEntrySource for Spool {
         mdconf::ManagedEntrySource::stored_bounded(
             self,
             name,
-            usize::try_from(self.limits.entry).unwrap_or(usize::MAX),
+            usize::try_from(self.limits.read).unwrap_or(usize::MAX),
         )
     }
     fn stored_bounded(
@@ -424,18 +566,14 @@ impl mdconf::ManagedEntrySource for Spool {
         let Some(item) = self.find(name) else {
             return Ok(None);
         };
-        let limit = u64::try_from(limit)
-            .unwrap_or(u64::MAX)
-            .min(self.limits.entry);
-        if item.len > limit {
-            return Err(
-                memory_budget::BudgetError::Limit(memory_budget::MemoryLimit {
-                    category: Category::Metadata,
-                    requested: item.len,
-                    reason: memory_budget::LimitReason::Global,
-                })
-                .into(),
-            );
+        let caller = u64::try_from(limit).unwrap_or(u64::MAX);
+        if item.len > caller.min(self.limits.read) {
+            let refusal = if caller < self.limits.read {
+                self.refuse(name, item.len, caller, false)
+            } else {
+                self.refuse(name, item.len, self.limits.read, true)
+            };
+            return Err(memory_budget::BudgetError::Limit(refusal).into());
         }
         let len = usize::try_from(item.len).map_err(|_| memory_budget::BudgetError::Overflow)?;
         let mut out = BudgetedVec::try_with_capacity(&self.budget, Category::Metadata, len)?;
@@ -511,42 +649,14 @@ impl EntrySource for Spool {
             .map_err(|e| source_memory("CONFIG", e))
     }
     fn stored_owned(&self, name: &str) -> mdconf::Result<Option<mdconf::StoredBytes>> {
-        self.stored_owned_bounded(
-            name,
-            usize::try_from(self.limits.entry).unwrap_or(usize::MAX),
-        )
+        self.stored_whole(name, self.limits.read, true)
     }
     fn stored_owned_bounded(
         &self,
         name: &str,
         limit: usize,
     ) -> mdconf::Result<Option<mdconf::StoredBytes>> {
-        let Some(item) = self.find(name) else {
-            return Ok(None);
-        };
-        let bad = |what: &str| mdconf::Error::Format {
-            entry: name.into(),
-            what: what.into(),
-        };
-        if item.len > limit as u64 {
-            return Err(mdconf::Error::Memory(memory_budget::MemoryLimit {
-                category: Category::Metadata,
-                requested: item.len,
-                reason: memory_budget::LimitReason::Global,
-            }));
-        }
-        let len =
-            usize::try_from(item.len).map_err(|_| bad("stored size exceeds address space"))?;
-        let mut out = BudgetedVec::try_with_capacity(&self.budget, Category::Metadata, len)
-            .map_err(|e| source_memory(name, e))?;
-        out.try_resize(len, 0).map_err(|e| source_memory(name, e))?;
-        let mut file = self.file.lock().unwrap_or_else(|e| e.into_inner());
-        file.seek(SeekFrom::Start(item.offset))?;
-        file.read_exact(&mut out)?;
-        Ok(Some(
-            mdconf::EntryBacking::from_charged(out.into_charged_vec())
-                .map_err(|e| source_memory(name, e))?,
-        ))
+        self.stored_whole(name, u64::try_from(limit).unwrap_or(u64::MAX), false)
     }
     fn stored_range_owned(
         &self,
@@ -605,7 +715,7 @@ pub(super) fn open_with_memory(
 ) -> Result<Configuration> {
     let spool = extract_with_memory(path, memory, progress)?;
     progress("metadata")?;
-    Configuration::load(&spool, opts).map_err(|error| memory_hint(error.into()))
+    Configuration::load(&spool, opts).map_err(|error| spool.memory_hint(error.into()))
 }
 
 pub(super) fn extract(
@@ -629,7 +739,7 @@ fn extract_inner(
     progress: &mut impl FnMut(&'static str) -> Result<()>,
 ) -> Result<Spool> {
     let _phase = memory_budget::profile::phase(memory_budget::profile::Phase::DtExtract);
-    let limits = Limits::from_budget(memory.startup)?;
+    let limits = Limits::from_budget(memory.startup, memory.explicit)?;
     let _scratch = memory
         .budget
         .try_reserve(Category::ReaderWorking, limits.scratch()?)?;

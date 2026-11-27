@@ -85,7 +85,7 @@ pub enum DcsError {
     #[error(
         "the form gave no spreadsheet document: «Сформировать» of this form is code of the configuration (e.g. \
          a report form of the standard subsystems library), not the platform command; call a server procedure of \
-         the form with --call"
+         the form with --call (with --poll when it generates the report in the background)"
     )]
     NoDocument,
     #[error(

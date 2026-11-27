@@ -238,6 +238,32 @@ impl<R: Read> DtReader<R> {
         self.raw.offset()
     }
 
+    pub fn skip_table_rows(
+        &mut self,
+        row_nodes: u64,
+        check: &mut impl FnMut() -> Result<()>,
+    ) -> Result<()> {
+        if let Some(e) = &self.failed {
+            return Err(e.again());
+        }
+        let at = self.raw.offset();
+        let r = match self.raw.skip_table_rows(row_nodes, check) {
+            Ok(RawEvent::TableEnd) => {
+                self.cur = None;
+                Ok(())
+            }
+            Ok(_) => Err(Error::Dt {
+                offset: at,
+                what: "table discard: expected the table end".into(),
+            }),
+            Err(e) => Err(e),
+        };
+        if let Err(e) = &r {
+            self.failed = Some(e.again());
+        }
+        r
+    }
+
     pub fn next_event(&mut self) -> Result<Option<Event>> {
         if let Some(e) = &self.failed {
             return Err(e.again());

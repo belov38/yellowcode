@@ -1,0 +1,6 @@
+exit 2
+--- stdout
+--- stderr
+error: invalid value 'Объекты=Счет' for '--ref <ИМЯ=ССЫЛКА>': not a reference: "Счет" (cfg:<Kind>Ref.<Name>(<uuid>) or <Вид>.<Имя>(<uuid>), e.g. cfg:CatalogRef.Имя(…) or Справочник.Имя(…))
+
+For more information, try '--help'.

@@ -217,7 +217,7 @@ fn keep_carriage_returns(text: &str) -> std::borrow::Cow<'_, str> {
     std::borrow::Cow::Owned(out)
 }
 
-fn value_of(n: Node) -> Result<Value, XmlError> {
+pub(crate) fn value_of(n: Node) -> Result<Value, XmlError> {
     value_at(n, 0)
 }
 
@@ -506,6 +506,15 @@ pub(crate) fn params_xml(params: &[Value]) -> Result<String, XmlError> {
     for p in params {
         push_param(&mut r, p);
     }
+    Ok(r)
+}
+
+pub(crate) fn value_element(elem: &str, v: &Value) -> Result<String, XmlError> {
+    if !fits_depth(v) {
+        return Err(XmlError::TooDeep);
+    }
+    let mut r = String::new();
+    push_value(&mut r, elem, v);
     Ok(r)
 }
 

@@ -186,13 +186,13 @@ struct Object<'a> {
     header_id: Uuid,
     name: &'a str,
     belonging: Belonging<'a>,
-    extended_target: Uuid,
+    extended_target: Option<Uuid>,
     property_state_count: usize,
 }
 impl<'a> Object<'a> {
     fn new(object: &'a ExtensionObject<'_>) -> Result<Self> {
         let r = object.reference;
-        let header = object.header().map_err(Error::Objects)?;
+        let header = object.configured_header().map_err(Error::Objects)?;
         let pairs = header.property_states();
         let property_state_count = pairs.len();
         for pair in pairs {
@@ -223,7 +223,7 @@ impl<'a> Object<'a> {
                 known,
                 raw: header.wire_belonging.raw(),
             },
-            extended_target: Uuid(header.extended_object),
+            extended_target: header.extended_object.map(Uuid),
             property_state_count,
         })
     }
@@ -244,11 +244,11 @@ impl<'a> Object<'a> {
         quoted(out, self.name)?;
         write!(out, "\nBelonging: {} (raw: ", self.belonging.known)?;
         quoted(out, self.belonging.raw)?;
-        writeln!(
-            out,
-            ")\nExtended target: {}\nProperty state count: {}",
-            self.extended_target.0, self.property_state_count
-        )?;
+        match &self.extended_target {
+            Some(target) => write!(out, ")\nExtended target: {}", target.0)?,
+            None => out.write_all(b")\nExtended target: absent")?,
+        }
+        writeln!(out, "\nProperty state count: {}", self.property_state_count)?;
         Ok(())
     }
 }
@@ -297,7 +297,7 @@ fn serialize(
         match format {
             Format::Json => {
                 out.write_all(
-                    b"{\n  \"schemaVersion\": 1,\n  \"scope\": \"topLevel\",\n  \"rootEntryId\": ",
+                    b"{\n  \"schemaVersion\": 2,\n  \"scope\": \"topLevel\",\n  \"rootEntryId\": ",
                 )?;
                 serde_json::to_writer(&mut out, &Uuid(cfg.root_entry_id))?;
                 out.write_all(b",\n  \"classGroups\": [")?;

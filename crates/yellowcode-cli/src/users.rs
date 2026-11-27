@@ -358,6 +358,21 @@ fn publish_outcome(
     result.map_err(|_| committed_output_error())
 }
 
+fn refuse_dt(base: &std::path::Path) -> yellowcode_core::Result<()> {
+    use yellowcode_core::viewer::source;
+    if matches!(
+        source::detect(&source::resolve(base)),
+        Ok(source::SourceKind::Dt)
+    ) {
+        return Err(format!(
+            "{}: users read a file infobase (1Cv8.1CD); a DT is not supported, restore it with `yellowcode convert --to 1cd` first",
+            base.display()
+        )
+        .into());
+    }
+    Ok(())
+}
+
 fn read(
     base: Base,
     name: Option<String>,
@@ -365,6 +380,7 @@ fn read(
     out: &mut dyn Write,
     tty: bool,
 ) -> yellowcode_core::Result<()> {
+    refuse_dt(&base.base)?;
     let named = !names.no_role_names;
     let Some(name) = name else {
         return users::write_all(&base.base, base.json(tty), named, out);

@@ -306,11 +306,11 @@ fn raw_form(body: &[u8], data: &FormData) -> Result<RawForm, ObjectError> {
     })
 }
 
-fn same_name(a: &str, b: &str) -> bool {
+pub(crate) fn same_name(a: &str, b: &str) -> bool {
     a.to_lowercase() == b.to_lowercase()
 }
 
-fn named(f: &FormField, name: &str) -> bool {
+pub(crate) fn named(f: &FormField, name: &str) -> bool {
     f.name.as_deref().is_some_and(|n| same_name(n, name))
         || f.name_ru.as_deref().is_some_and(|n| same_name(n, name))
 }
@@ -417,7 +417,11 @@ fn of_type(v: &Value, ty: &TypeName) -> bool {
     v.type_name().is_some_and(|t| same_type(&t, ty))
 }
 
-fn field_value(input: &Input, field: &FormField, types: &[MdType]) -> Result<Value, String> {
+pub(crate) fn field_value(
+    input: &Input,
+    field: &FormField,
+    types: &[MdType],
+) -> Result<Value, String> {
     let single = implied_type(&field.ty, types);
     let all = allowed(&field.ty, types);
     if single.is_none() && all.len() == 1 {
@@ -511,7 +515,7 @@ fn qualifiers(v: &Value, ty: &FieldType) -> Result<(), String> {
     Ok(())
 }
 
-fn value_xml(v: &Value, typed: bool) -> Result<String, ObjectError> {
+pub(crate) fn value_xml(v: &Value, typed: bool) -> Result<String, ObjectError> {
     let text = match v.lexical() {
         Some(t) => escape_text(&t),
         None if typed && matches!(v, Value::Undefined) => {
@@ -555,11 +559,11 @@ fn empty_xml(field: &FormField, types: &[MdType]) -> Result<String, ObjectError>
     }
 }
 
-fn change_error(path: &str, e: impl std::fmt::Display) -> ObjectError {
+pub(crate) fn change_error(path: &str, e: impl std::fmt::Display) -> ObjectError {
     ObjectError::Change(format!("{path}: {e}"))
 }
 
-fn settable(f: &FormField, path: &str) -> Result<(), ObjectError> {
+pub(crate) fn settable(f: &FormField, path: &str) -> Result<(), ObjectError> {
     if f.read_only || f.no_edit {
         return Err(change_error(path, "the field is read only"));
     }
@@ -1294,7 +1298,7 @@ impl<R: RandomSource> Session<R> {
         Ok(result)
     }
 
-    fn user_messages(&mut self) -> Result<Vec<UserMessage>, SessionError> {
+    pub(crate) fn user_messages(&mut self) -> Result<Vec<UserMessage>, SessionError> {
         let mut h = self.headers("application/xml", true, false);
         h.push((
             "Content-Type".into(),

@@ -126,6 +126,28 @@ fn text_lines(view: &ReportView, sheets: &[&ReportSheet]) -> Vec<String> {
     if let Some(d) = &view.dcs {
         l.extend(settings_lines(&d.form));
     }
+    for c in view.init.iter().chain(&view.calls) {
+        l.push(format!(
+            "call: {} -> {}",
+            printable(&c.procedure),
+            c.returned.as_ref().map_or_else(
+                || "-".to_string(),
+                |v| printable(&super::values::to_json(v).to_string())
+            )
+        ));
+    }
+    for t in &view.states {
+        l.push(format!("state: {}", printable(t)));
+    }
+    for m in &view.messages {
+        l.push(match &m.field {
+            Some(f) => format!("message: {}: {}", printable(f), printable(&m.text)),
+            None => format!("message: {}", printable(&m.text)),
+        });
+    }
+    for w in &view.warnings {
+        l.push(format!("warning: {}", printable(w)));
+    }
     for s in sheets {
         l.push(format!(
             "[spreadsheet] {}: {} rows, {} columns{}",
@@ -351,8 +373,43 @@ fn csv_field(s: &str) -> String {
 
 fn report_json(view: &ReportView, sheets: &[&ReportSheet], steps: &[Step]) -> Json {
     let mut j = report_json_of(view, sheets, steps);
-    if let (Some(d), Some(o)) = (&view.dcs, j.as_object_mut()) {
+    let Some(o) = j.as_object_mut() else {
+        return j;
+    };
+    if let Some(d) = &view.dcs {
         o.insert("dcs".into(), dcs_json(&d.form, &d.details));
+    }
+    let call_json = |c: &onec_client::FormCall| {
+        json!({
+            "procedure": c.procedure,
+            "returned": c.returned.as_ref().map(super::values::to_json),
+        })
+    };
+    if let Some(c) = &view.init {
+        o.insert("init".into(), call_json(c));
+    }
+    if !view.calls.is_empty() {
+        o.insert(
+            "calls".into(),
+            Json::Array(view.calls.iter().map(call_json).collect()),
+        );
+    }
+    if !view.states.is_empty() {
+        o.insert("states".into(), json!(view.states));
+    }
+    if !view.messages.is_empty() {
+        o.insert(
+            "messages".into(),
+            Json::Array(
+                view.messages
+                    .iter()
+                    .map(|m| json!({"text": m.text, "field": m.field}))
+                    .collect(),
+            ),
+        );
+    }
+    if !view.warnings.is_empty() {
+        o.insert("warnings".into(), json!(view.warnings));
     }
     j
 }

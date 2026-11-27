@@ -11,6 +11,7 @@ pub mod cred;
 pub mod dcs;
 pub mod dlist;
 pub mod enums;
+pub mod formcall;
 pub mod formdescr;
 pub mod forms;
 pub mod info;
@@ -38,6 +39,10 @@ pub use dcs::{
 };
 pub use dlist::{ListError, ListQuery, ListView};
 pub use enums::{EnumPresentation, EnumPresentations};
+pub use formcall::{
+    AttrValue, CallOutcome, Called, Changed, CommandRun, FormAction, FormAttr, FormCommand,
+    FormError, FormRequest, FormTarget, FormView, MethodPlace, ServerMethod, SetValue,
+};
 pub use formdescr::{FieldType, FormData, FormField, FormKind, FormTable};
 pub use info::{InfoError, ServerInfo};
 pub use metadata::Metadata;
@@ -50,8 +55,8 @@ pub use object::{Cell, ObjectData, ObjectError, ObjectField, ObjectTable};
 pub use refs::{Presentation, Presentations};
 pub use report::{FormAttribute, OpenedForm, ReportError};
 pub use session::{
-    CallResult, Credentials, DcsOptions, DcsView, InfoOptions, InfoView, MetadataOptions,
-    MetadataView, ReportOptions, ReportSheet, ReportView, Session, SessionError, Step,
+    CallResult, Credentials, DcsOptions, DcsView, FormCall, InfoOptions, InfoView, MetadataOptions,
+    MetadataView, Poll, ReportOptions, ReportSheet, ReportView, Session, SessionError, Step,
 };
 pub use spreadsheet::{Details, Merge, Sheet, SheetError, SheetLimits};
 pub use tabular::{

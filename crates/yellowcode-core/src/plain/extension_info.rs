@@ -48,8 +48,15 @@ struct Purpose<'a> {
 }
 #[derive(Serialize)]
 struct Mapping<'a> {
-    raw: &'a str,
+    raw: Option<&'a str>,
     value: Option<bool>,
+}
+#[derive(Serialize)]
+struct Body<'a> {
+    version: &'a str,
+    values: usize,
+    parts: usize,
+    observed: bool,
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -68,6 +75,7 @@ struct Configuration<'a> {
     purpose: Purpose<'a>,
     keep_mapping_by_ids: Mapping<'a>,
     compatibility: Compatibility<'a>,
+    body: Body<'a>,
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -87,7 +95,7 @@ impl<'a> Properties<'a> {
             ConfigurationExtensionPurpose::Unknown => None,
         };
         Ok(Self {
-            schema_version: 1,
+            schema_version: 2,
             manifest: Manifest {
                 format_version: manifest.format_version,
                 compatibility: manifest.compatibility,
@@ -104,13 +112,19 @@ impl<'a> Properties<'a> {
                     known,
                 },
                 keep_mapping_by_ids: Mapping {
-                    raw: c.wire_keep_mapping_by_ids.raw(),
+                    raw: c.wire_keep_mapping_by_ids.map(|wire| wire.raw()),
                     value: c.keep_mapping_by_ids(),
                 },
                 compatibility: Compatibility {
                     slot26: c.compatibility_at_26.raw(),
                     slot43: c.compatibility_at_43.raw(),
                     spellings_match: c.compatibility_spellings_match(),
+                },
+                body: Body {
+                    version: c.wire_body_version.raw(),
+                    values: c.body_values,
+                    parts: c.parts,
+                    observed: c.observed(),
                 },
             },
         })
@@ -139,9 +153,14 @@ impl<'a> Properties<'a> {
             Some(false) => "false",
             None => "unknown",
         };
-        write!(out, ")\nKeep mapping by IDs: {mapping} (raw: ")?;
-        quoted(out, c.keep_mapping_by_ids.raw)?;
-        out.write_all(b")\nCompatibility slot 26: ")?;
+        if let Some(raw) = c.keep_mapping_by_ids.raw {
+            write!(out, ")\nKeep mapping by IDs: {mapping} (raw: ")?;
+            quoted(out, raw)?;
+            out.write_all(b")")?;
+        } else {
+            out.write_all(b")\nKeep mapping by IDs: absent")?;
+        }
+        out.write_all(b"\nCompatibility slot 26: ")?;
         quoted(out, c.compatibility.slot26)?;
         out.write_all(b"\nCompatibility slot 43: ")?;
         quoted(out, c.compatibility.slot43)?;
@@ -150,6 +169,15 @@ impl<'a> Properties<'a> {
             "\nCompatibility spellings match: {}\nManifest format version: {}\nManifest compatibility: {}\nManifest records: {}",
             c.compatibility.spellings_match, m.format_version, m.compatibility, m.record_count
         )?;
+        let b = &c.body;
+        out.write_all(b"Body version: ")?;
+        quoted(out, b.version)?;
+        writeln!(out, " ({} values, {} parts)", b.values, b.parts)?;
+        if !b.observed {
+            out.write_all(
+                b"Warning: this body version and size were not observed; properties are read at the positions of the observed bodies\n",
+            )?;
+        }
         Ok(())
     }
 }

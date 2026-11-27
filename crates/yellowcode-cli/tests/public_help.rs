@@ -309,6 +309,35 @@ const CASES: &[(&str, &[&str], &str)] = cases![
         ]
     ),
     ("remote-report--help", ["remote", "report", "--help"]),
+    ("remote-print--help", ["remote", "print", "--help"]),
+    (
+        "err-remote-print-no-form",
+        ["remote", "print", "http://127.0.0.1:1"]
+    ),
+    (
+        "err-remote-print-bad-ref",
+        [
+            "remote",
+            "print",
+            "http://127.0.0.1:1",
+            "--form",
+            "ОбщаяФорма.П",
+            "--ref",
+            "Объекты=Счет"
+        ]
+    ),
+    (
+        "err-remote-report-poll-no-call",
+        [
+            "remote",
+            "report",
+            "http://127.0.0.1:1",
+            "--form",
+            "Отчет.Х.Форма.Ф",
+            "--poll",
+            "П"
+        ]
+    ),
     ("remote-create--help", ["remote", "create", "--help"]),
     ("remote-write--help", ["remote", "write", "--help"]),
     (
@@ -542,6 +571,37 @@ const CASES: &[(&str, &[&str], &str)] = cases![
             "d",
             "--id",
             "urn:form:md:0:x"
+        ]
+    ),
+    ("remote-form--help", ["remote", "form", "--help"]),
+    (
+        "err-remote-form-no-target",
+        ["remote", "form", "http://127.0.0.1:1"]
+    ),
+    (
+        "err-remote-form-command-and-call",
+        [
+            "remote",
+            "form",
+            "http://127.0.0.1:1",
+            "--form",
+            "Обработка.Х.Форма",
+            "--command",
+            "К",
+            "--call",
+            "П"
+        ]
+    ),
+    (
+        "err-remote-form-set-without-run",
+        [
+            "remote",
+            "form",
+            "http://127.0.0.1:1",
+            "--form",
+            "Обработка.Х.Форма",
+            "--set",
+            "А=1"
         ]
     ),
     ("err-unknown", ["bogus"]),

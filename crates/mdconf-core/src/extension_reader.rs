@@ -73,7 +73,7 @@ impl ExtensionRoot {
     }
 
     pub fn read(source: &dyn EntrySource, budget: &MemoryBudget) -> Result<Option<Self>> {
-        Self::read_profile(source, budget, false, |_| Ok(()))
+        Self::read_profile(source, budget, |_| Ok(()))
     }
 
     pub fn read_installed(
@@ -81,13 +81,12 @@ impl ExtensionRoot {
         budget: &MemoryBudget,
         prepare: impl FnOnce(&ConfigInfo) -> Result<()>,
     ) -> Result<Option<Self>> {
-        Self::read_profile(source, budget, true, prepare)
+        Self::read_profile(source, budget, prepare)
     }
 
     fn read_profile(
         source: &dyn EntrySource,
         budget: &MemoryBudget,
-        installed: bool,
         prepare: impl FnOnce(&ConfigInfo) -> Result<()>,
     ) -> Result<Option<Self>> {
         let Some(manifest_size) = size(source, "configinfo", ExtensionEntry::Manifest)? else {
@@ -107,8 +106,7 @@ impl ExtensionRoot {
             )?;
             check_manifest_input(&raw).map_err(ExtensionReadError::Manifest)?;
             admit(&raw, &local, ExtensionEntry::Manifest, 1)?;
-            ConfigInfo::parse_profile(&raw, &local, installed)
-                .map_err(ExtensionReadError::Manifest)?
+            ConfigInfo::parse_retained(&raw, &local).map_err(ExtensionReadError::Manifest)?
         };
         prepare(&manifest.value)?;
         let name = root_name(manifest.value.root_id);
@@ -121,11 +119,7 @@ impl ExtensionRoot {
             brace::parse_bytes_budgeted(&raw, &local, CATEGORY)
                 .map_err(ExtensionReadError::Brace)?
         };
-        if manifest.six_parts {
-            crate::extension_objects::validate_six_part_root(&root)?;
-        } else {
-            ExtensionConfiguration::from_node(&root)?;
-        }
+        ExtensionConfiguration::from_node(&root)?;
         let unused = WORKING_LIMIT
             .checked_sub(local.current_bytes())
             .ok_or(BudgetError::Overflow)?;
@@ -142,7 +136,10 @@ impl ExtensionRoot {
     }
 
     pub fn installed_classes(&self) -> crate::extension_objects::ExtensionClasses<'_> {
-        let parts = if self.manifest.six_parts { 6 } else { 7 };
+        let parts = self
+            .root
+            .as_list()
+            .map_or(0, |root| root.len().saturating_sub(4));
         crate::extension_objects::ExtensionClasses::from_root(&self.root, parts)
     }
 

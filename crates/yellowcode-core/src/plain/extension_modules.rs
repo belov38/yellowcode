@@ -157,7 +157,7 @@ fn list(
     }
     let mut first = true;
     while let Some(object) = objects.next().map_err(Error::Object)? {
-        let header = object.header().map_err(Error::Object)?;
+        let header = object.configured_header().map_err(Error::Object)?;
         for module in object.modules().map_err(Error::Object)? {
             let module = module.map_err(Error::Module)?;
             let text = match module.read() {

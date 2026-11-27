@@ -126,7 +126,7 @@ pub struct ExtensionClasses<'a> {
 }
 impl<'a> ExtensionClasses<'a> {
     pub fn new(configuration: &ExtensionConfiguration<'a>) -> Self {
-        Self::from_root(configuration.source(), 7)
+        Self::from_root(configuration.source(), configuration.parts)
     }
 
     pub(crate) fn from_root(root: &'a Node, parts: usize) -> Self {
@@ -175,33 +175,6 @@ impl<'a> ExtensionClasses<'a> {
     }
 }
 
-pub(crate) fn validate_six_part_root(root: &Node) -> Result<(), ConfigurationError> {
-    use ConfigurationError as E;
-    let Some([version, identity, count, first, rest @ .., _trailer]) = root.as_list() else {
-        return Err(E::RootShape);
-    };
-    if rest.len() != 5 || count.as_atom() != Some("6") {
-        return Err(E::Parts);
-    }
-    if version.as_atom() != Some("2") {
-        return Err(E::UnsupportedRootVersion);
-    }
-    if !matches!(identity.as_list(), Some([id]) if id.as_guid().is_some()) {
-        return Err(E::RootIdentity);
-    }
-    let fields = first
-        .at(1)
-        .and_then(|p| p.at(1))
-        .and_then(Node::as_list)
-        .ok_or(E::BodyShape)?;
-    if !matches!(
-        (fields.first().and_then(Node::as_atom), fields.len()),
-        (Some("53"), 49) | (Some("55"), 51)
-    ) {
-        return Err(E::UnsupportedBodyVersion);
-    }
-    Ok(())
-}
 impl<'a> Iterator for ExtensionClasses<'a> {
     type Item = Result<ExtensionClass<'a>, InventoryError>;
     fn next(&mut self) -> Option<Self::Item> {
@@ -342,6 +315,15 @@ impl Loaded<'_> {
         })
     }
 
+    fn configured_header(&self) -> Result<InstalledHeader<'_>, ObjectReadError> {
+        InstalledHeader::parse(self.header_node()?, self.installed).map_err(|source| {
+            ObjectReadError::Header {
+                position: self.reference.position(),
+                source,
+            }
+        })
+    }
+
     pub(super) fn header_id(&self) -> Result<Guid, ObjectReadError> {
         if self.installed {
             Ok(self.installed_header()?.id)
@@ -376,6 +358,10 @@ impl ExtensionObject<'_> {
 
     pub fn installed_header(&self) -> Result<InstalledHeader<'_>, ObjectReadError> {
         self.loaded.installed_header()
+    }
+
+    pub fn configured_header(&self) -> Result<InstalledHeader<'_>, ObjectReadError> {
+        self.loaded.configured_header()
     }
 }
 
@@ -516,10 +502,9 @@ impl<'a> ExtensionObjects<'a> {
         source: &'a dyn EntrySource,
         root_hold: &Reservation,
     ) -> Result<Self, ObjectReadError> {
-        let (classes, installed) = match root.configuration() {
-            Ok(configuration) => (ExtensionClasses::new(&configuration), false),
-            Err(_) => (root.installed_classes(), true),
-        };
+        let configuration = root.configuration()?;
+        let installed = configuration.wire_body_version.raw() != "76";
+        let classes = ExtensionClasses::new(&configuration);
         let (local, caller) = workspace(root_hold)?;
         Ok(Self {
             state: Some(Session {

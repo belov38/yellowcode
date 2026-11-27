@@ -10,10 +10,67 @@ const HISTORY: [(&str, &str); 4] = [
     ("DataHistorySettingsExt", "DataHistorySettings"),
 ];
 
-fn reserve(budget: &MemoryBudget, bytes: u64) -> Result<Reservation> {
-    budget.try_reserve(Category::Metadata, bytes).map_err(|_| {
-        bad("extension metadata exceeds the schema memory share; increase --memory-limit")
-    })
+const STORAGE_ROW_MAX: u64 = SCHEMA_TEXT_MAX as u64 + MIB;
+
+fn reserve(budget: &MemoryBudget, bytes: u64, stage: &str) -> Result<Reservation> {
+    budget
+        .try_reserve(Category::Metadata, bytes)
+        .map_err(|limit| refusal(budget, stage, limit))
+}
+
+fn refusal(budget: &MemoryBudget, stage: &str, limit: memory_budget::MemoryLimit) -> Error {
+    let mib = |bytes: u64| bytes.div_ceil(MIB);
+    let (current, share) = budget
+        .scope_snapshot()
+        .map_or((0, 0), |s| (s.current, s.limit));
+    let requested = limit.requested;
+    match limit.reason {
+        memory_budget::LimitReason::Category => {
+            let need = current.saturating_add(requested).saturating_mul(4);
+            bad(format!(
+                "extension metadata exceeds the schema memory share: {stage} needs {} MiB more, \
+                 {} of {} MiB are in use; the share is a quarter of --memory-limit, \
+                 set --memory-limit to at least {} MiB (later stages may need more)",
+                mib(requested),
+                mib(current),
+                share / MIB,
+                mib(need),
+            ))
+        }
+        memory_budget::LimitReason::Global => {
+            let ledger = budget.snapshot();
+            bad(format!(
+                "extension metadata exceeds the memory budget: {stage} needs {} MiB more, \
+                 {} of {} MiB of the budget are in use ({} MiB by extension metadata); \
+                 increase --memory-limit",
+                mib(requested),
+                mib(ledger.current),
+                ledger.admission / MIB,
+                mib(current),
+            ))
+        }
+        _ => bad("extension metadata size overflow"),
+    }
+}
+
+fn parse_refusal(
+    budget: &MemoryBudget,
+    stage: &str,
+    error: &(dyn std::error::Error + 'static),
+) -> Option<Error> {
+    let mut cause = Some(error);
+    while let Some(e) = cause {
+        if let Some(memory_budget::BudgetError::Limit(limit)) =
+            e.downcast_ref::<memory_budget::BudgetError>()
+        {
+            return Some(refusal(budget, stage, *limit));
+        }
+        if let Some(limit) = e.downcast_ref::<memory_budget::MemoryLimit>() {
+            return Some(refusal(budget, stage, *limit));
+        }
+        cause = e.source();
+    }
+    None
 }
 
 fn add(a: u64, b: u64) -> Result<u64> {
@@ -412,20 +469,52 @@ fn namespace(main: &LogicalSchema, extension: &[TableDescr]) -> Result<()> {
     Ok(())
 }
 
+pub(super) fn early_profile(compat: i64) -> Result<()> {
+    compat_profile(compat)
+}
+
 pub(super) fn profile(compat: i64, cas: [u64; 2], plans: &[TablePlan]) -> Result<()> {
+    compat_profile(compat)?;
+    installed(cas)?;
+    ngs_state(plans)
+}
+
+fn compat_profile(compat: i64) -> Result<()> {
     if ![80327, 80501].contains(&compat) {
         return Err(bad("unsupported extension compatibility profile"));
     }
-    let count = |name: &str| plans.iter().find(|p| p.table == name).map(|p| p.rows);
-    if cas[0] == 0
-        || cas[1] != 0
-        || count("_EXTENSIONSINFO").is_none_or(|n| n == 0)
-        || count("_EXTENSIONSINFONGS") != Some(0)
-        || count("_EXTENSIONSRESTRUCTNGS") != Some(0)
-    {
+    Ok(())
+}
+
+fn installed(cas: [u64; 2]) -> Result<()> {
+    if cas[0] == 0 {
         return Err(bad(
-            "unsupported extension installed/applied state (ConfigCAS, ConfigCASSave or NGS)",
+            "unsupported extension state: an extension data block without installed extensions in ConfigCAS",
         ));
+    }
+    Ok(())
+}
+
+fn ngs_state(plans: &[TablePlan]) -> Result<()> {
+    let count = |name: &str| plans.iter().find(|p| p.table == name).map(|p| p.rows);
+    if count("_EXTENSIONSINFO").is_none_or(|n| n == 0) {
+        return Err(bad(
+            "unsupported extension state: an extension data block with an empty _ExtensionsInfo",
+        ));
+    }
+    for (table, name) in [
+        ("_EXTENSIONSINFONGS", "_ExtensionsInfoNgs"),
+        ("_EXTENSIONSRESTRUCTNGS", "_ExtensionsRestructNgs"),
+    ] {
+        match count(table) {
+            Some(0) => {}
+            Some(n) => {
+                return Err(bad(format!(
+                    "unsupported pending extension restructuring: {name} has {n} row(s)"
+                )));
+            }
+            None => return Err(bad(format!("unsupported extension state: no table {name}"))),
+        }
     }
     Ok(())
 }
@@ -449,7 +538,7 @@ pub(super) struct Memory {
 
 impl Memory {
     pub(super) fn new(limits: &RestoreLimits, parent: Option<&MemoryBudget>) -> Result<Self> {
-        let share = mul(limits.schema_nodes.min(SCHEMA_NODES_CAP), 100)?.min(limits.row_bytes);
+        let share = limits.metadata_bytes;
         let root = parent
             .cloned()
             .unwrap_or_else(|| MemoryBudget::new(memory_budget::Limits::new(share)));
@@ -487,7 +576,7 @@ impl Memory {
                 names(dropped)?;
             }
         }
-        self.plans = Some(reserve(budget, bytes)?);
+        self.plans = Some(reserve(budget, bytes, "the retained fit plans")?);
         self.main.take();
         self.derived.take();
         Ok(())
@@ -545,6 +634,86 @@ impl Memory {
     }
 }
 
+fn node_limit(limits: &RestoreLimits) -> Error {
+    if limits.schema_nodes < SCHEMA_NODES_CAP {
+        bad(format!(
+            "cumulative schema node limit {} (a share of the memory budget); increase --memory-limit",
+            limits.schema_nodes
+        ))
+    } else {
+        bad(format!(
+            "cumulative schema node limit {} (a product limit; --memory-limit does not raise it)",
+            limits.schema_nodes
+        ))
+    }
+}
+
+fn main_share(
+    memory: &mut Memory,
+    budget: &MemoryBudget,
+    main_live: u64,
+    main_len: usize,
+    limits: &RestoreLimits,
+) -> Result<u64> {
+    if main_len > SCHEMA_TEXT_MAX {
+        return Err(bad(
+            "schema byte limit (a product limit; --memory-limit does not raise it)",
+        ));
+    }
+    memory.main = Some(reserve(budget, main_live, "the main schema model")?);
+    let scope = budget
+        .scope_snapshot()
+        .ok_or_else(|| bad("extension metadata scope"))?;
+    let row_cap = (scope.limit.saturating_sub(scope.current) / 16).min(STORAGE_ROW_MAX);
+    let main_len = main_len as u64;
+    if row_cap < main_len {
+        return Err(refusal(
+            budget,
+            "the extension storage rows",
+            memory_budget::MemoryLimit {
+                category: Category::Metadata,
+                requested: mul(main_len, 8)?,
+                reason: memory_budget::LimitReason::Category,
+            },
+        ));
+    }
+    if limits.atom_bytes < main_len {
+        return Err(bad(format!(
+            "the main schema text ({} MiB) is over the row atom share of the memory budget \
+             ({} MiB); increase --memory-limit",
+            main_len.div_ceil(MIB),
+            limits.atom_bytes / MIB
+        )));
+    }
+    memory.raw = Some(reserve(
+        budget,
+        mul(row_cap, 8)?,
+        "the extension storage rows",
+    )?);
+    Ok(row_cap)
+}
+
+pub(super) fn early_main_share(
+    main: &LogicalSchema,
+    limits: &RestoreLimits,
+    parent: Option<&MemoryBudget>,
+) -> Result<()> {
+    let (_, main_live, _) = metrics(main)?;
+    let mut memory = Memory::new(limits, parent)?;
+    let budget = memory
+        .budget
+        .clone()
+        .ok_or_else(|| bad("missing extension metadata scope"))?;
+    main_share(
+        &mut memory,
+        &budget,
+        main_live,
+        main.to_text().len(),
+        limits,
+    )
+    .map(drop)
+}
+
 pub(super) struct Block {
     pub schema: Charged<LogicalSchema>,
     pub heads: Vec<TableHead>,
@@ -564,7 +733,6 @@ impl Block {
         parent_budget: Option<&MemoryBudget>,
     ) -> Result<Self> {
         let (main_nodes, main_live, main_tables) = metrics(main)?;
-        let share = mul(limits.schema_nodes.min(SCHEMA_NODES_CAP), 100)?.min(limits.row_bytes);
         if memory.budget.is_none() {
             *memory = Memory::new(limits, parent_budget)?;
         }
@@ -573,20 +741,8 @@ impl Block {
             .as_ref()
             .ok_or_else(|| bad("missing extension metadata scope"))?
             .clone();
-        memory.main = Some(reserve(&budget, main_live)?);
-        let current = budget
-            .scope_snapshot()
-            .ok_or_else(|| bad("extension metadata scope"))?
-            .current;
-        let row_cap = (share.saturating_sub(current) / 16).min(limits.row_bytes / 16);
-        if row_cap == 0 {
-            return Err(bad("extension metadata memory share"));
-        }
-        memory.raw = Some(reserve(&budget, mul(row_cap, 8)?)?);
         let main_text = main.to_text();
-        if main_text.len() > SCHEMA_TEXT_MAX {
-            return Err(bad("schema byte limit"));
-        }
+        let row_cap = main_share(memory, &budget, main_live, main_text.len(), limits)?;
         let head = TableHead::system(&Source::SchemaStorage).ok_or_else(|| bad("storage head"))?;
         expect(reader.next_event()?, Event::TableStart(head.clone()))?;
         reader.set_read_limits(ReadLimits {
@@ -595,8 +751,19 @@ impl Block {
             nodes: row_limits.nodes.min(row_cap / 128),
         });
         let mut rows = Vec::new();
+        let storage_limit = |error: dtfile::Error| match error {
+            dtfile::Error::Limit {
+                what: what @ ("retained bytes" | "atom bytes"),
+                ..
+            } if row_cap < STORAGE_ROW_MAX => bad(format!(
+                "an extension storage row is over the row allowance of the schema memory share \
+                 ({what} {} MiB); increase --memory-limit",
+                row_cap / MIB
+            )),
+            other => other.into(),
+        };
         loop {
-            match reader.next_event()? {
+            match reader.next_event().map_err(storage_limit)? {
                 Some(Event::Row(row)) => {
                     if rows.len() == 2 {
                         return Err(bad(
@@ -672,11 +839,13 @@ impl Block {
             .scope_snapshot()
             .ok_or_else(|| bad("extension metadata scope"))?
             .current;
-        let root = brace::parse_bytes_budgeted(text, &budget, Category::Metadata)
-            .map_err(|e| bad(format!("extension CURRENTSCHEMA: {e}")))?;
+        let root = brace::parse_bytes_budgeted(text, &budget, Category::Metadata).map_err(|e| {
+            parse_refusal(&budget, "the extension schema tree", &e)
+                .unwrap_or_else(|| bad(format!("extension CURRENTSCHEMA: {e}")))
+        })?;
         let nodes = node_count(&root)?;
         if add(main_nodes, nodes)? > limits.schema_nodes {
-            return Err(bad("cumulative schema node limit"));
+            return Err(node_limit(limits));
         }
         let layout = full_layout(&root, TABLES_MAX.saturating_sub(main_tables))?;
         drop(root);
@@ -684,7 +853,11 @@ impl Block {
         let canonical = match layout {
             IndexLayout::Full => None,
             IndexLayout::Short => {
-                lease = Some(reserve(&budget, legacy_allowance(nodes, text.len())?)?);
+                lease = Some(reserve(
+                    &budget,
+                    legacy_allowance(nodes, text.len())?,
+                    "the legacy index form of the extension schema",
+                )?);
                 let legacy = LogicalSchema::from_text_legacy_indexes(text)
                     .map_err(|e| bad(format!("unsupported extension CURRENTSCHEMA: {e}")))?;
                 let full = legacy.to_text();
@@ -698,9 +871,12 @@ impl Block {
                     return Err(bad("cumulative schema byte limit"));
                 }
                 let root = brace::parse_bytes_budgeted(&full, &budget, Category::Metadata)
-                    .map_err(|e| bad(format!("extension CURRENTSCHEMA: {e}")))?;
+                    .map_err(|e| {
+                        parse_refusal(&budget, "the extension schema tree", &e)
+                            .unwrap_or_else(|| bad(format!("extension CURRENTSCHEMA: {e}")))
+                    })?;
                 if add(main_nodes, node_count(&root)?)? > limits.schema_nodes {
-                    return Err(bad("cumulative schema node limit"));
+                    return Err(node_limit(limits));
                 }
                 if full_layout(&root, TABLES_MAX.saturating_sub(main_tables))? != IndexLayout::Full
                 {
@@ -710,8 +886,10 @@ impl Block {
             }
         };
         let text = canonical.as_deref().unwrap_or(text);
-        let schema = LogicalSchema::from_text_budgeted(text, &budget)
-            .map_err(|e| bad(format!("unsupported extension CURRENTSCHEMA: {e}")))?;
+        let schema = LogicalSchema::from_text_budgeted(text, &budget).map_err(|e| {
+            parse_refusal(&budget, "the extension schema model", &e)
+                .unwrap_or_else(|| bad(format!("unsupported extension CURRENTSCHEMA: {e}")))
+        })?;
         let (_, extension_live, extension_tables) = metrics(&schema)?;
         if main_tables
             .checked_add(extension_tables)
@@ -719,7 +897,11 @@ impl Block {
         {
             return Err(bad("cumulative schema table limit"));
         }
-        memory.derived = Some(reserve(&budget, mul(extension_live, 4)?)?);
+        memory.derived = Some(reserve(
+            &budget,
+            mul(extension_live, 4)?,
+            "the derived extension heads and descriptors",
+        )?);
         schema_profile(&schema, main)?;
         if let Some(full) = canonical {
             for pin in &mut pins {
@@ -757,6 +939,7 @@ impl Block {
                     .saturating_sub(baseline),
                 2,
             )?,
+            "the typed extension schema event",
         )?);
         match reader.next_event()? {
             Some(Event::ExtensionStart {
@@ -954,7 +1137,11 @@ impl Verified {
                     Sha256::digest(&seed().newgen).into(),
                 ),
             ] {
-                let _lease = reserve(&self.budget, mul(size as u64, 2)?)?;
+                let _lease = reserve(
+                    &self.budget,
+                    mul(size as u64, 2)?,
+                    "the final storage check",
+                )?;
                 let bytes = match value(name)? {
                     Value::Image(BlobVal::Ref(r)) if r.len as usize == size => {
                         table.blob_bytes(*r)?

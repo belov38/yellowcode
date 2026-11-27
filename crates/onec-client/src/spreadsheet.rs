@@ -170,7 +170,15 @@ pub fn read_changes(
             ),
         });
     };
-    let full = is_sheet(doc, "fullDocument");
+    read_document(doc, is_sheet(doc, "fullDocument"), limits, count)
+}
+
+pub fn read_document(
+    doc: Node,
+    full: bool,
+    limits: SheetLimits,
+    count: &mut CellCount,
+) -> Result<SheetChanges, SheetError> {
     let key = child(doc, "distributedKey").and_then(text);
     let width = doc
         .children()

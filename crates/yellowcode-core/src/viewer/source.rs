@@ -77,7 +77,7 @@ pub(crate) fn open_retained_dt(
     progress("metadata")?;
     let cfg = {
         let _phase = memory_budget::profile::phase(memory_budget::profile::Phase::Metadata);
-        Configuration::load(&*spool, opts).map_err(|e| dt::memory_hint(e.into()))?
+        Configuration::load(&*spool, opts).map_err(|e| spool.memory_hint(e.into()))?
     };
     if file_fingerprint(path).map_err(|e| e.to_string())? != fp {
         return Err("DT input changed during metadata load".into());
@@ -96,14 +96,17 @@ pub(crate) fn open_retained_dt(
 pub struct OpenMemory {
     pub(super) budget: memory_budget::MemoryBudget,
     pub(super) startup: u64,
+    pub(super) explicit: bool,
     _control:
         Option<std::sync::Arc<std::sync::Mutex<memory_budget::control::storage::ControlReserve>>>,
 }
 impl OpenMemory {
     pub fn from_context(context: &crate::service::memory::Context) -> Self {
+        let (startup, mode, _) = context.restore_budget();
         Self {
             budget: context.ledger().clone(),
-            startup: context.restore_budget().0,
+            startup,
+            explicit: mode == "explicit",
             _control: None,
         }
     }
@@ -123,6 +126,7 @@ impl OpenMemory {
         Self {
             budget: budget.clone(),
             startup: budget.snapshot().admission,
+            explicit: false,
             _control: None,
         }
     }
@@ -131,6 +135,7 @@ impl std::fmt::Debug for OpenMemory {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OpenMemory")
             .field("startup", &self.startup)
+            .field("explicit", &self.explicit)
             .finish_non_exhaustive()
     }
 }
@@ -848,9 +853,9 @@ pub(crate) fn open_with_entries_and_memory<T>(
             let spool = dt::extract_with_memory(path, memory, &mut |_| Ok(()))?;
             let mut cfg = {
                 let _phase = memory_budget::profile::phase(memory_budget::profile::Phase::Metadata);
-                load_from(&spool, opts).map_err(|e| dt::memory_hint(e.into()))?
+                load_from(&spool, opts).map_err(|e| spool.memory_hint(e.into()))?
             };
-            let extra = post(&mut cfg, &spool).map_err(dt::memory_hint)?;
+            let extra = post(&mut cfg, &spool).map_err(|e| spool.memory_hint(e))?;
             Ok((cfg, extra))
         }
         SourceKind::Infobase => {
@@ -928,7 +933,7 @@ fn with_config_entries_inner<T>(
                 Some(memory) => dt::extract_with_memory(path, memory, &mut |_| Ok(()))?,
                 None => dt::extract(path, &mut |_| Ok(()))?,
             };
-            consume(&spool).map_err(dt::memory_hint)
+            consume(&spool).map_err(|e| spool.memory_hint(e))
         }
         SourceKind::Infobase => {
             let mut opts = OpenOptions::read_only();

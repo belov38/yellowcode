@@ -384,6 +384,14 @@ pub struct FormMethod {
     pub kind: MemberKind,
     pub name: String,
     pub params: u32,
+    pub export: bool,
+    pub defaults: Vec<u32>,
+}
+
+impl FormMethod {
+    pub fn required(&self) -> u32 {
+        self.params.saturating_sub(self.defaults.len() as u32)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -394,6 +402,7 @@ pub struct FormModuleIds {
     pub security_info: Option<String>,
     pub assembly_version: Option<String>,
     pub server_methods: Vec<FormMethod>,
+    pub server_methods_without_context: Vec<FormMethod>,
 }
 
 pub fn parse_form_module_ids(body: &[u8]) -> Result<FormModuleIds, ModulesError> {
@@ -460,13 +469,15 @@ fn module_ids(n: Node) -> Result<FormModuleIds, ModulesError> {
             });
         }
     }
+    let (server_methods, server_methods_without_context) = methods.unwrap_or_default();
     Ok(FormModuleIds {
         module_name,
         context,
         without_context: wo,
         security_info: security,
         assembly_version: assembly.filter(|t| !t.is_empty()),
-        server_methods: methods.unwrap_or_default(),
+        server_methods,
+        server_methods_without_context,
     })
 }
 
@@ -482,26 +493,30 @@ fn check_part(id: &ModuleId, ext: &str, field: &str) -> Result<(), ModulesError>
     .into())
 }
 
-fn form_methods(n: Node) -> Result<Vec<FormMethod>, ModulesError> {
+fn form_methods(n: Node) -> Result<(Vec<FormMethod>, Vec<FormMethod>), ModulesError> {
     no_attributes(n, FORM, "methods")?;
-    let mut srv = None;
+    let (mut srv, mut woc) = (None, None);
     for c in elements(n, FORM, "methods")? {
-        if !answer::is(c, NS_WS, "srvMtd") {
+        let (slot, tag) = if answer::is(c, NS_WS, "srvMtd") {
+            (&mut srv, "srvMtd")
+        } else if answer::is(c, NS_WS, "srvWOCMtd") {
+            (&mut woc, "srvWOCMtd")
+        } else {
             return Err(unknown(FORM, "methods", c));
-        }
-        no_attributes(c, FORM, "srvMtd")?;
+        };
+        no_attributes(c, FORM, tag)?;
         let mut list = Vec::new();
-        for m in elements(c, FORM, "srvMtd")? {
+        for m in elements(c, FORM, tag)? {
             let kind = match (m.tag_name().namespace(), m.tag_name().name()) {
                 (Some(NS_MODULES), "func") => MemberKind::Func,
                 (Some(NS_MODULES), "proc") => MemberKind::Proc,
-                _ => return Err(unknown(FORM, "srvMtd", m)),
+                _ => return Err(unknown(FORM, tag, m)),
             };
             list.push(form_method(m, kind)?);
         }
-        set_once(&mut srv, list, FORM, "methods", "srvMtd")?;
+        set_once(slot, list, FORM, "methods", tag)?;
     }
-    Ok(srv.unwrap_or_default())
+    Ok((srv.unwrap_or_default(), woc.unwrap_or_default()))
 }
 
 fn form_method(m: Node, kind: MemberKind) -> Result<FormMethod, ModulesError> {
@@ -511,7 +526,7 @@ fn form_method(m: Node, kind: MemberKind) -> Result<FormMethod, ModulesError> {
         "proc"
     };
     for a in m.attributes() {
-        if a.namespace().is_some() || !matches!(a.name(), "name" | "params") {
+        if a.namespace().is_some() || !matches!(a.name(), "name" | "params" | "exp") {
             return Err(ModulesError::UnknownAttribute {
                 answer: FORM,
                 element,
@@ -519,8 +534,32 @@ fn form_method(m: Node, kind: MemberKind) -> Result<FormMethod, ModulesError> {
             });
         }
     }
-    if let Some(c) = elements(m, FORM, element)?.first() {
-        return Err(unknown(FORM, element, *c));
+    let mut defaults = Vec::new();
+    for c in elements(m, FORM, element)? {
+        if !answer::is(c, NS_MODULES, "param") {
+            return Err(unknown(FORM, element, c));
+        }
+        for a in c.attributes() {
+            if a.namespace().is_some() || !matches!(a.name(), "pos" | "def") {
+                return Err(ModulesError::UnknownAttribute {
+                    answer: FORM,
+                    element: "param",
+                    attr: a.name().to_string(),
+                });
+            }
+        }
+        let bad = |field: &str, value: String| AnswerError::Bad {
+            answer: FORM,
+            field: format!("{element} param {field}"),
+            value,
+        };
+        let pos = answer::attr(c, "pos").unwrap_or_default();
+        let pos = answer::unsigned(&pos).ok_or_else(|| bad("pos", pos.clone()))?;
+        match answer::attr(c, "def").as_deref() {
+            Some("true") => defaults.push(pos),
+            Some("false") | None => {}
+            Some(v) => return Err(bad("def", v.to_string()).into()),
+        }
     }
     let name = answer::attr(m, "name").ok_or_else(|| AnswerError::Missing {
         answer: FORM,
@@ -534,7 +573,22 @@ fn form_method(m: Node, kind: MemberKind) -> Result<FormMethod, ModulesError> {
             value: t.clone(),
         })?,
     };
-    Ok(FormMethod { kind, name, params })
+    if let Some(p) = defaults.iter().find(|p| **p >= params) {
+        return Err(AnswerError::Bad {
+            answer: FORM,
+            field: format!("{element} param pos"),
+            value: p.to_string(),
+        }
+        .into());
+    }
+    let export = answer::attr(m, "exp").as_deref() == Some("true");
+    Ok(FormMethod {
+        kind,
+        name,
+        params,
+        export,
+        defaults,
+    })
 }
 
 pub fn check_source_type(content_type: Option<&str>) -> Result<String, ModulesError> {

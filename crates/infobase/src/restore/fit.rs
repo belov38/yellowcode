@@ -15,10 +15,10 @@ use onecd::format::layout::value_size;
 use onecd::{BlobVal, Database, FormatInfo, RecordLayout, Row, TableDescr, Value};
 
 use super::{
-    Batches, FILES_MAX, FOLDERS, Notes, PAGE, Phase, Plan, Progress, RestoreEvent, RestoreLimits,
-    RestoreOptions, TABLES_MAX, bad, check_row, counted_file, database_options, discard_file,
-    expect, extensions, folder_file_name, folder_header, folder_header_limits, folder_length,
-    io as io_err, open_f3, probe_locale, read_preamble, read_schema, row_limit,
+    Batches, FILES_MAX, FOLDERS, Notes, PAGE, Phase, Plan, Progress, ROW_NODES, RestoreEvent,
+    RestoreLimits, RestoreOptions, TABLES_MAX, bad, check_row, counted_file, database_options,
+    discard_file, expect, extensions, folder_file_name, folder_header, folder_header_limits,
+    folder_length, io as io_err, open_f3, probe_locale, read_preamble, read_schema, row_limit,
 };
 use crate::Result;
 use crate::physical::{NameCase, descrs};
@@ -466,8 +466,28 @@ pub(crate) fn prepass(
     notes: &mut Notes<'_, '_>,
     extension_memory: &mut extensions::Memory,
 ) -> Result<Vec<TablePlan>> {
-    prepass_inner(source, staging, locale, opts, notes, extension_memory)
-        .map_err(|e| row_limit(e, &opts.limits))
+    match prepass_inner(source, staging, locale, opts, notes, extension_memory, true) {
+        Ok(Prepass::NoBlock) => prepass_inner(
+            source,
+            staging,
+            locale,
+            opts,
+            notes,
+            extension_memory,
+            false,
+        ),
+        other => other,
+    }
+    .and_then(|outcome| match outcome {
+        Prepass::Plans(plans) => Ok(plans),
+        Prepass::NoBlock => Err(bad("extension pre-check repeated")),
+    })
+    .map_err(|e| row_limit(e, &opts.limits))
+}
+
+enum Prepass {
+    Plans(Vec<TablePlan>),
+    NoBlock,
 }
 
 fn prepass_inner(
@@ -477,7 +497,8 @@ fn prepass_inner(
     opts: &RestoreOptions<'_>,
     notes: &mut Notes<'_, '_>,
     extension_memory: &mut extensions::Memory,
-) -> Result<Vec<TablePlan>> {
+    early: bool,
+) -> Result<Prepass> {
     let limits = opts.limits;
     let file = io_err(File::open(source))?;
     let source_len = io_err(file.metadata())?.len();
@@ -506,11 +527,33 @@ fn prepass_inner(
         FILES_MAX,
     )?;
     skip_users(&mut reader, next)?;
+    let candidate = early && cas[0] > 0;
+    let mut doomed = if candidate {
+        extensions::early_profile(compat).err()
+    } else {
+        None
+    };
 
     let schema = read_schema(&mut reader, &limits, row_limits)?;
     let walk = schema.walk();
     if walk.len() > TABLES_MAX {
         return Err(bad("schema table limit"));
+    }
+    if candidate && doomed.is_none() {
+        doomed = extensions::early_main_share(&schema, &limits, opts.memory_budget.as_ref()).err();
+    }
+    if let Some(refusal) = doomed {
+        for head in TableHead::database(&schema)? {
+            expect(reader.next_event()?, Event::TableStart(head.clone()))?;
+            ticks.table.clone_from(&head.phys_name);
+            ticks.send(notes);
+            reader.skip_table_rows(ROW_NODES, &mut || Ok(()))?;
+        }
+        return match reader.next_event()? {
+            Some(Event::ExtensionsStart) => Err(refusal),
+            Some(Event::DataBaseEnd) => Ok(Prepass::NoBlock),
+            _ => Err(bad("element order, layout or value")),
+        };
     }
     let heads = TableHead::database(&schema)?;
     let all = descrs(&schema, NameCase::Upper)?;
@@ -597,11 +640,11 @@ fn prepass_inner(
             drop(verified);
             drop(schema);
             extension_memory.retain_plans(&plans)?;
-            return Ok(plans);
+            return Ok(Prepass::Plans(plans));
         }
         _ => return Err(bad("element order, layout or value")),
     }
-    Ok(plans)
+    Ok(Prepass::Plans(plans))
 }
 
 pub(super) fn skip_folders<R: Read>(

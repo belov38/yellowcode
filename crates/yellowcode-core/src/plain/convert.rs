@@ -65,16 +65,41 @@ fn file(output: &Path, write: impl FnOnce(&mut dyn Write) -> Result<()>) -> Resu
     Ok(())
 }
 
+const RAW_CHUNK: usize = 1 << 20;
+
 struct RawData<'a> {
     source: &'a dyn EntrySource,
     names: Vec<String>,
+    lens: Vec<u64>,
+    ranged: bool,
+}
+impl RawData<'_> {
+    fn copy_ranges(&self, name: &str, len: u64, out: &mut dyn Write) -> Result<()> {
+        let mut offset = 0u64;
+        while offset < len {
+            let chunk = self
+                .source
+                .stored_range_owned(name, offset, RAW_CHUNK)?
+                .ok_or_else(|| format!("CONFIG entry disappeared: {name}"))?;
+            if chunk.is_empty() {
+                return Err(format!("CONFIG entry shorter than its size: {name}").into());
+            }
+            out.write_all(&chunk)?;
+            offset += u64::try_from(chunk.len())?;
+        }
+        Ok(())
+    }
 }
 impl v8cont::DataSource for RawData<'_> {
     fn write_data(&mut self, index: usize, out: &mut dyn Write) -> v8cont::Result<()> {
-        let name = self
-            .names
-            .get(index)
-            .ok_or_else(|| v8cont::Error::LayoutMismatch("CONFIG entry index".into()))?;
+        let (Some(name), Some(&len)) = (self.names.get(index), self.lens.get(index)) else {
+            return Err(v8cont::Error::LayoutMismatch("CONFIG entry index".into()));
+        };
+        if self.ranged {
+            return self
+                .copy_ranges(name, len, out)
+                .map_err(|e| v8cont::Error::Io(std::io::Error::other(e)));
+        }
         let bytes = self
             .source
             .stored_owned(name)
@@ -87,21 +112,32 @@ impl v8cont::DataSource for RawData<'_> {
     }
 }
 
-fn raw_cf(source: &Path, memory: Option<&source::OpenMemory>, out: &mut dyn Write) -> Result<()> {
+fn raw_cf(
+    source: &Path,
+    kind: SourceKind,
+    memory: Option<&source::OpenMemory>,
+    out: &mut dyn Write,
+) -> Result<()> {
+    let ranged = kind == SourceKind::Dt;
     let consume = |entries: &dyn EntrySource| {
         let list = entries.list_owned()?;
         let mut specs = Vec::new();
+        let mut lens = Vec::new();
         for meta in list.iter() {
-            let data = entries
-                .stored_owned(&meta.name)?
-                .ok_or_else(|| format!("CONFIG missing entry: {}", meta.name))?;
+            let missing = || format!("CONFIG missing entry: {}", meta.name);
+            let len = if ranged {
+                entries.stored_len(&meta.name)?.ok_or_else(missing)?
+            } else {
+                u64::try_from(entries.stored_owned(&meta.name)?.ok_or_else(missing)?.len())?
+            };
             specs.push(v8cont::EntrySpec {
                 name: meta.name.clone(),
                 ctime: meta.ctime,
                 mtime: meta.mtime,
                 attrs: meta.attrs,
-                data_len: Some(u64::try_from(data.len())?),
+                data_len: Some(len),
             });
+            lens.push(len);
         }
         if specs.is_empty() {
             return Err("CONFIG has no configuration entries".into());
@@ -109,6 +145,8 @@ fn raw_cf(source: &Path, memory: Option<&source::OpenMemory>, out: &mut dyn Writ
         let mut data = RawData {
             source: entries,
             names: specs.iter().map(|s| s.name.clone()).collect(),
+            lens,
+            ranged,
         };
         v8cont::write_container(
             out,
@@ -259,7 +297,9 @@ pub fn run(args: Request, out: &mut dyn Write, err: &mut dyn Write) -> Result<i3
             let opening = memory
                 .as_ref()
                 .map(|(context, _)| source::OpenMemory::from_context(context));
-            file(&args.output, |out| raw_cf(&source, opening.as_ref(), out))?;
+            file(&args.output, |out| {
+                raw_cf(&source, kind, opening.as_ref(), out)
+            })?;
         }
         Format::Dt => {
             let layout = match args.users_layout.ok_or("missing --users-layout")? {
@@ -442,8 +482,12 @@ fn restore_dt(
     let limits = RestoreLimits::from_budget(budget);
     writeln!(
         err,
-        "yellowcode: memory mode={mode} B={budget} cache={} dirty={} row={} schema-nodes={}",
-        limits.cache_bytes, limits.max_dirty_bytes, limits.row_bytes, limits.schema_nodes
+        "yellowcode: memory mode={mode} B={budget} cache={} dirty={} row={} schema-nodes={} metadata={}",
+        limits.cache_bytes,
+        limits.max_dirty_bytes,
+        limits.row_bytes,
+        limits.schema_nodes,
+        limits.metadata_bytes
     )?;
     let started = std::time::Instant::now();
     let mut last: Option<(Phase, std::time::Instant)> = None;

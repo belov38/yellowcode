@@ -1,6 +1,7 @@
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
+mod form;
 mod info;
 mod list;
 mod metadata;
@@ -10,6 +11,7 @@ mod report;
 mod values;
 mod write;
 
+pub use form::{FormCommandRequest, FormRun, FormSet};
 pub use object::{ObjectRef, ObjectRequest};
 pub use onec_client::WriteMode;
 pub use report::ReportFormat;
@@ -20,10 +22,10 @@ use onec_client::auth::printable;
 pub use onec_client::session::is_build;
 use onec_client::session::{Session, client_nm, login_query, new_cln_id};
 use onec_client::{
-    Array, CallResult, Credentials, Date, DcsOptions, Decimal, EnumPresentation, EnumPresentations,
-    EnumRef, HttpTransport, InfoOptions, Map, MetadataOptions, ModuleId, NativeOptions,
-    NativeTarget, NativeTransport, Presentation, Presentations, ReportOptions, SessionError,
-    Structure, Value, Wire,
+    Array, Assign, CallResult, Credentials, Date, DcsOptions, Decimal, EnumPresentation,
+    EnumPresentations, EnumRef, HttpTransport, InfoOptions, Input, Map, MetadataOptions, ModuleId,
+    NativeOptions, NativeTarget, NativeTransport, Poll, Presentation, Presentations, ReportOptions,
+    SessionError, Structure, Value, Wire,
 };
 
 use crate::Result;
@@ -72,6 +74,77 @@ impl Param {
     pub fn parse_json(arg: &str) -> std::result::Result<Param, String> {
         parse_param_json(arg).map(Param)
     }
+}
+
+#[derive(Debug, Clone)]
+pub enum FormParam {
+    Value { name: String, value: Param },
+    Ref { name: String, reference: ObjectRef },
+}
+
+impl FormParam {
+    pub fn parse(arg: &str) -> std::result::Result<FormParam, String> {
+        let (name, value) = param_name(arg)?;
+        Ok(FormParam::Value {
+            name,
+            value: Param::parse(value)?,
+        })
+    }
+
+    pub fn parse_json(arg: &str) -> std::result::Result<FormParam, String> {
+        let (name, value) = param_name(arg)?;
+        Ok(FormParam::Value {
+            name,
+            value: Param::parse_json(value)?,
+        })
+    }
+
+    pub fn parse_ref(arg: &str) -> std::result::Result<FormParam, String> {
+        let (name, value) = param_name(arg)?;
+        Ok(FormParam::Ref {
+            name,
+            reference: ObjectRef::parse(value.trim())?,
+        })
+    }
+}
+
+fn param_name(arg: &str) -> std::result::Result<(String, &str), String> {
+    match arg.split_once('=') {
+        Some((name, value)) if !name.trim().is_empty() => Ok((name.trim().to_string(), value)),
+        _ => Err(format!("not a parameter: {arg:?} (Имя=значение)")),
+    }
+}
+
+fn form_params(params: Vec<FormParam>) -> std::result::Result<Vec<(String, Value)>, String> {
+    let mut out = Vec::new();
+    let mut arrays: Vec<(String, Vec<Value>)> = Vec::new();
+    for p in params {
+        match p {
+            FormParam::Value {
+                name,
+                value: Param(v),
+            } => out.push((name, v)),
+            FormParam::Ref { name, reference } => {
+                let v = Value::Ref(reference.into_ref());
+                match arrays.iter_mut().find(|(n, _)| *n == name) {
+                    Some((_, items)) => items.push(v),
+                    None => arrays.push((name, vec![v])),
+                }
+            }
+        }
+    }
+    out.extend(
+        arrays
+            .into_iter()
+            .map(|(name, items)| (name, Value::Array(Array::new(items)))),
+    );
+    let mut seen = std::collections::HashSet::new();
+    for (name, _) in &out {
+        if !seen.insert(name.as_str()) {
+            return Err(format!("the parameter {name} of the form is given twice"));
+        }
+    }
+    Ok(out)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -125,11 +198,23 @@ pub struct ModulesRequest {
 pub struct ReportRequest {
     pub login: Login,
     pub form: String,
+    pub open_params: Vec<FormParam>,
+    pub init: Option<(String, Vec<Param>)>,
+    pub attributes: Vec<(String, String)>,
+    pub before: Vec<String>,
     pub call: Option<String>,
     pub params: Vec<Param>,
+    pub poll: Option<PollRequest>,
     pub attribute: Option<String>,
     pub format: ReportFormat,
     pub dcs: Option<DcsRequest>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PollRequest {
+    pub procedure: String,
+    pub running: Option<String>,
+    pub timeout: std::time::Duration,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -150,6 +235,7 @@ pub enum Request {
     List(ListRequest),
     Report(ReportRequest),
     Write(WriteCommand),
+    Form(FormCommandRequest),
 }
 
 pub fn run(
@@ -167,6 +253,7 @@ pub fn run(
         Request::List(r) => list::run(r, out, err, input),
         Request::Report(r) => run_report(r, out, err, input),
         Request::Write(r) => write::run(r, out, err, input),
+        Request::Form(r) => form::run(r, out, err, input),
     }
 }
 
@@ -176,15 +263,37 @@ fn run_report(
     err: &mut dyn Write,
     input: &mut dyn BufRead,
 ) -> Result<i32> {
+    let open_params = form_params(r.open_params)?;
     let (session, login) = open_session(&r.login, input)?;
     let params: Vec<Value> = r.params.into_iter().map(|Param(v)| v).collect();
     let (form, call, attribute, format, dcs) = (r.form, r.call, r.attribute, r.format, r.dcs);
+    let (before, poll) = (r.before, r.poll);
+    let init: Option<(String, Vec<Value>)> = r
+        .init
+        .map(|(c, p)| (c, p.into_iter().map(|Param(v)| v).collect()));
+    let attributes: Vec<Assign> = r
+        .attributes
+        .into_iter()
+        .map(|(name, text)| Assign {
+            name,
+            input: Input::Text(text),
+        })
+        .collect();
     let (session, outcome) = on_value_stack(move || {
         let mut session = session;
         let outcome = login.and_then(|()| {
             session.run_report(ReportOptions {
                 form: &form,
+                open_params: &open_params,
+                init: init.as_ref().map(|(c, p)| (c.as_str(), p.as_slice())),
+                attributes: &attributes,
+                before: &before,
                 call: call.as_deref().map(|c| (c, params.as_slice())),
+                poll: poll.as_ref().map(|p| Poll {
+                    procedure: &p.procedure,
+                    running: p.running.as_deref(),
+                    timeout: p.timeout,
+                }),
                 limits: onec_client::spreadsheet::DEFAULT_LIMITS,
                 dcs: dcs.as_ref().map(|d| DcsOptions {
                     variant: d.variant.as_deref(),

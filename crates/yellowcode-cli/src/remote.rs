@@ -3,11 +3,12 @@ use std::path::PathBuf;
 
 use yellowcode_core::output::Out;
 use yellowcode_core::remote::{
-    CallRequest, DEFAULT_LIMIT, DEFAULT_PAGE_SIZE, DcsChange, DcsRequest, Edit, Filter,
+    CallRequest, DEFAULT_LIMIT, DEFAULT_PAGE_SIZE, DcsChange, DcsRequest, Edit, Filter, FormParam,
     InfoRequest, ListRequest, Login, MetadataRequest, ModuleUrn, ModulesRequest, ObjectRef,
-    ObjectRequest, Order, Param, Password, ReportFormat, ReportRequest, Request, Uuid,
+    ObjectRequest, Order, Param, Password, PollRequest, ReportFormat, ReportRequest, Request, Uuid,
     WriteCommand, WriteMode, WriteTarget,
 };
+use yellowcode_core::remote::{FormCommandRequest, FormRun, FormSet};
 
 macro_rules! after_help {
     () => {
@@ -152,6 +153,7 @@ const TERMINAL: &str = "the password of --user is not read from a terminal: give
 
 const JSON_HELP: &str = "Вывести один объект JSON вместо текста";
 
+#[allow(clippy::large_enum_variant)]
 #[derive(clap::Subcommand)]
 pub(crate) enum Command {
     #[command(
@@ -455,7 +457,7 @@ NULL, {\"n\":\"1.5\"} Число (голое число JSON не принима
         json: bool,
     },
     #[command(
-        about = "Открыть форму отчёта и показать её реквизиты; с --call — вызвать серверную процедуру формы, с --generate — сформировать отчёт на СКД; вывести табличный документ",
+        about = "Открыть форму отчёта и показать её реквизиты; с --call — вызвать серверную процедуру формы (с --poll — дождаться длительной операции), с --generate — сформировать отчёт на СКД; вывести табличный документ",
         group = clap::ArgGroup::new("which").required(true).args(["form", "report"]),
         group = clap::ArgGroup::new("run").multiple(true).args(["call", "generate", "sets", "filters", "offs", "details"]),
         after_help = concat!(
@@ -466,6 +468,15 @@ NULL, {\"n\":\"1.5\"} Число (голое число JSON не принима
 содержимого дочитывается по строкам (moxel?cmd=getRowContents). Форма закрывается в конце (processFormsClose). \
 Какую процедуру и с какими параметрами зовёт команда формы, видно в тексте модуля формы \
 (remote modules --out, contextModuleId формы).\n\n\
+Клиентский код формы и конфигурации CLI не выполняет; то, что он делает на сервере, задаётся флагами. \
+--init-call — функция общего модуля с вызовом сервера, которую клиентский код зовёт при запуске клиента (до \
+открытия формы). --attr — реквизиты формы, которые клиентский код заполняет при открытии; они уходят с первым \
+вызовом. --before — серверные процедуры формы без параметров, которые клиентский код зовёт при открытии, по \
+порядку. Длительная операция (формирование в фоне): --call её запускает, --poll опрашивает, пока процедура опроса \
+не изменит табличный документ или не скажет, что операция завершилась (--poll-while — поле её Структуры), не \
+дольше --timeout. Если --call вернула Ложь, операция не запущена и опроса нет. После вызовов выводятся строки \
+call: (процедура и что она вернула), state: (текст состояния поля формы — например, ошибка формирования) и \
+message: (сообщения пользователю).\n\n\
 Отчёт на схеме компоновки данных (СКД): --report Отчет.X открывает его форму по умолчанию (Отчет.X.Форма), \
 --form — любую форму отчёта. Показываются варианты отчёта (текущий отмечен *) и пользовательские настройки \
 (параметры и отборы: имя, заголовок, используется ли, значение и его тип). С --generate отчёт формируется \
@@ -477,12 +488,13 @@ NULL, {\"n\":\"1.5\"} Число (голое число JSON не принима
 формирования). Неизвестная настройка, неверное значение и составной тип — ошибка до формирования. --details \
 добавляет расшифровку каждой ячейки (dcs?cmd=loadDetailsPart): значения полей ячейки и её группировок. Форма, \
 «Сформировать» которой — код конфигурации (например, форма отчёта БСП), документа не даёт: это ошибка с \
-подсказкой вызвать её серверную процедуру через --call.\n\n\
+подсказкой вызвать её серверную процедуру через --call (с --poll, если она формирует отчёт в фоне).\n\n\
 ВНИМАНИЕ: --variant ЗАПИСЫВАЕТ В БАЗУ. Сервер запоминает выбранный вариант как текущий вариант отчёта у \
 пользователя (в хранилище его настроек), так же как при выборе варианта в клиенте 1С: следующее открытие отчёта \
 этим пользователем, в том числе в клиенте 1С, начнётся с этого варианта. Без --variant команда открывает текущий \
 вариант и настроек не меняет.\n\n\
-ВНИМАНИЕ: --call и --generate выполняют код конфигурации на сервере, как remote call: процедура формы и \
+ВНИМАНИЕ: --call, --before, --poll, --init-call и --generate выполняют код конфигурации на сервере, как remote \
+call: процедуры формы и \
 обработчики отчёта могут записывать данные базы. Вызывайте только процедуры и отчёты, про которые известно, что \
 они только читают.\n\n\
 Пределы: 100000 строк, 10000 колонок и 20000000 клеток (строки × колонки) на документ, 2000000 ячеек с \
@@ -532,6 +544,67 @@ NULL, {\"n\":\"1.5\"} Число (голое число JSON не принима
 значений: {\"vl\":{}}); не вместе с --param"
         )]
         params_json: Vec<Param>,
+        #[arg(
+            long = "init-call",
+            value_name = "МОДУЛЬ.ФУНКЦИЯ",
+            help = "Функция серверного общего модуля (с вызовом сервера), которую вызвать сразу после входа, до \
+открытия формы, как её зовёт клиентский код конфигурации при запуске клиента; параметры — --init-param-json. \
+Выполняет код конфигурации и может менять данные"
+        )]
+        init_call: Option<String>,
+        #[arg(
+            long = "init-param-json",
+            value_name = "JSON",
+            value_parser = Param::parse_json,
+            requires = "init_call",
+            help = "Параметр функции --init-call в типизированном JSON, как у remote call --param-json; для \
+нескольких повторите флаг, по порядку"
+        )]
+        init_params: Vec<Param>,
+        #[arg(
+            long = "attr",
+            value_name = "РЕКВИЗИТ=ЗНАЧЕНИЕ",
+            value_parser = parse_attr,
+            requires = "call",
+            help = "Реквизит формы, который установить перед вызовами, как это делает клиентский код формы при \
+открытии (например 'Date1=2026-01-01'); значение читается по типу реквизита, как у remote write --set. Для \
+нескольких повторите флаг"
+        )]
+        attrs: Vec<(String, String)>,
+        #[arg(
+            long = "before",
+            value_name = "ПРОЦЕДУРА",
+            requires = "call",
+            help = "Серверная процедура формы без параметров, которую вызвать до --call (как её зовёт клиентский \
+код при открытии формы); для нескольких повторите флаг, по порядку"
+        )]
+        before: Vec<String>,
+        #[arg(
+            long,
+            value_name = "ПРОЦЕДУРА",
+            requires = "call",
+            help = "Длительная операция: --call её запускает, а эта серверная процедура формы без параметров \
+опрашивает (пауза 1 с, затем каждая в 1,4 раза длиннее, не больше 15 с), пока не изменит табличный документ или \
+не скажет, что операция завершилась: вернёт Ложь или, с --poll-while, Структуру, поле которой Ложь"
+        )]
+        poll: Option<String>,
+        #[arg(
+            long = "poll-while",
+            value_name = "ПОЛЕ",
+            requires = "poll",
+            help = "Поле Структуры, которую возвращает процедура --poll: пока оно Истина, операция выполняется"
+        )]
+        poll_while: Option<String>,
+        #[arg(
+            long,
+            value_name = "СЕКУНДЫ",
+            default_value_t = 600,
+            value_parser = clap::value_parser!(u64).range(1..),
+            requires = "poll",
+            help = "Сколько ждать длительную операцию; по истечении — ошибка (операция может продолжаться на \
+сервере, форма закрывается)"
+        )]
+        timeout: u64,
         #[arg(
             long,
             conflicts_with = "call",
@@ -594,6 +667,88 @@ NULL, {\"n\":\"1.5\"} Число (голое число JSON не принима
             help = "text — реквизиты и строки документов; csv — один документ в CSV по RFC 4180 (все строки и \
 колонки, строки через CRLF; строка RESULT при ошибке — в stderr), нужен --call или --generate; json — один \
 объект JSON с ячейками, расшифровками и объединениями (строка RESULT при ошибке — в stderr)"
+        )]
+        format: ReportFormatArg,
+    },
+    #[command(
+        about = "Открыть форму с параметрами (например, форму печати документов) и вывести табличные документы, \
+которые она сформировала при открытии",
+        after_help = concat!(
+            "Войти на сервер, открыть форму по её имени с параметрами (logForm?cmd=query, prms), как её открывает \
+клиентский код команды печати, и вывести каждый табличный документ, который есть в данных открытой формы, в том \
+числе в реквизитах, которые форма добавила себе при открытии: строки документа, тексты ячеек через ` | `. Ячейки \
+дочитываются по строкам (moxel?cmd=getRowContents). Документ без строк не выводится. Форма закрывается в конце \
+(processFormsClose). Какую форму и с какими параметрами открывает команда печати, видно в тексте её клиентского \
+модуля (remote modules --out).\n\n\
+Параметр формы: --param Имя=значение (значение как у remote call --param: строка как есть или с префиксом n:, b:, \
+d:, u:, s:, undef), --param-json Имя=JSON (типизированный JSON, как у remote call --param-json), --ref \
+Имя=<Вид>.<Имя>(<uuid>) — ссылка в параметр-массив (повтор с тем же именем добавляет ссылку в тот же массив). \
+Сначала передаются все --param по порядку, затем все --param-json, затем параметры-массивы --ref; имя \
+параметра, заданное дважды (в том числе в --param и --ref), — ошибка до входа.\n\n\
+ВНИМАНИЕ: открытие формы выполняет код конфигурации на сервере (ПриСозданииНаСервере формы и код, который она \
+зовёт): он может записывать данные базы. Перед печатью прочитайте модули формы и менеджера печати.\n\n\
+Пределы: как у remote report.\n\n",
+            after_help!()
+        )
+    )]
+    Print {
+        #[command(flatten)]
+        login: LoginArgs,
+        #[arg(
+            long,
+            value_name = "ИМЯ_ФОРМЫ",
+            help = "Полное имя формы, например ОбщаяФорма.ПечатьДокументов или Документ.Счет.Форма.ФормаПечати"
+        )]
+        form: String,
+        #[arg(
+            long = "param",
+            value_name = "ИМЯ=ЗНАЧЕНИЕ",
+            value_parser = FormParam::parse,
+            help = "Параметр формы: имя и значение, как у remote call --param; для нескольких повторите флаг"
+        )]
+        params: Vec<FormParam>,
+        #[arg(
+            long = "param-json",
+            value_name = "ИМЯ=JSON",
+            value_parser = FormParam::parse_json,
+            help = "Параметр формы: имя и значение в типизированном JSON, как у remote call --param-json"
+        )]
+        params_json: Vec<FormParam>,
+        #[arg(
+            long = "ref",
+            value_name = "ИМЯ=ССЫЛКА",
+            value_parser = FormParam::parse_ref,
+            help = "Ссылка <Вид>.<Имя>(<uuid>) в параметр-массив формы с этим именем; повтор с тем же именем \
+добавляет ссылку в тот же массив"
+        )]
+        refs: Vec<FormParam>,
+        #[arg(
+            long = "init-call",
+            value_name = "МОДУЛЬ.ФУНКЦИЯ",
+            help = "Функция серверного общего модуля (с вызовом сервера), которую вызвать сразу после входа, до \
+открытия формы, как её зовёт клиентский код конфигурации при запуске клиента; параметры — --init-param-json"
+        )]
+        init_call: Option<String>,
+        #[arg(
+            long = "init-param-json",
+            value_name = "JSON",
+            value_parser = Param::parse_json,
+            requires = "init_call",
+            help = "Параметр функции --init-call в типизированном JSON; для нескольких повторите флаг, по порядку"
+        )]
+        init_params: Vec<Param>,
+        #[arg(
+            long,
+            value_name = "РЕКВИЗИТ",
+            help = "Вывести только табличный документ этого реквизита формы"
+        )]
+        attribute: Option<String>,
+        #[arg(
+            long,
+            value_enum,
+            default_value = "text",
+            help = "text — реквизиты и строки документов; csv — один документ в CSV по RFC 4180 (строка RESULT \
+при ошибке — в stderr); json — один объект JSON с ячейками и объединениями"
         )]
         format: ReportFormatArg,
     },
@@ -768,6 +923,107 @@ d:, b:, u:, undef или ссылку. Имена — русские или ан
         #[arg(long = "unmark-deletion", help = "Снять пометку удаления")]
         unmark_deletion: bool,
     },
+    #[command(
+        about = "Открыть форму (обработки, отчёта, общую, объекта), показать её реквизиты, команды и серверные методы; с --command или --call — выполнить серверную часть формы",
+        group = clap::ArgGroup::new("target").required(true).multiple(true).args(["form", "reference"]),
+        after_help = concat!(
+            "Войти на сервер, открыть форму (logForm?cmd=query): по имени (--form), или форму объекта по \
+ссылке (--ref; с --form — эту форму объекта), и показать её реквизиты со значениями, серверные методы модуля формы \
+(&НаСервере — server, &НаСервереБезКонтекста — server without context) и команды формы: server — команда \
+выполняется на сервере (её обработчик — серверный метод формы, или клиентский обработчик только вызывает один \
+серверный метод без параметров), client — обработчик выполняется на клиенте, такую команду CLI не выполняет \
+(клиентский код не исполняется); у неё перечислены серверные методы, которые вызывает обработчик. Клиентский \
+обработчик читается в клиентской части модуля формы (modules/src). Форма закрывается в конце \
+(processFormsClose).\n\n\
+--command выполняет серверную команду; --call вызывает серверный метод формы с параметрами --param/--param-json \
+(метод &НаСервереБезКонтекста — через logForm?cmd=callWOContext, без данных формы). --set меняет реквизиты формы \
+перед вызовом, как их меняет пользователь: Реквизит=значение (реквизит формы) или Объект.Поле=значение (поле \
+главного реквизита; Поле= без Объект. — если у формы нет реквизита с этим именем). Значение читается по типу, как \
+у write --set. После вызова печатаются изменённые реквизиты (было -> стало, строки табличных частей, которые \
+вернул сервер), возвращаемое значение функции и сообщения пользователю (/e1cib/messages). Код выхода: 0 — \
+выполнено, 1 — ошибка или исключение на сервере (failed:), 3 — вызов отправлен, итог неизвестен (RESULT UNKNOWN).\n\n\
+ВНИМАНИЕ: открытие формы, --command и --call выполняют код конфигурации на сервере, как у пользователя, нажавшего \
+кнопку: метод формы может записывать данные базы, писать файлы, обращаться к внешним системам. Изменения \
+реквизитов формы сами объект не записывают. Вызывайте только команды и методы, про которые известно, что они только \
+читают, или работайте на копии базы.\n\n\
+Например:\n  \
+# Реквизиты, серверные методы и команды формы обработки\n  \
+yellowcode remote form http://server/base --form Обработка.Проба.Форма\n  \
+# Задать реквизит и выполнить команду\n  \
+yellowcode remote form http://server/base --form Обработка.Проба.Форма --set Объект.Число1=2 --command Сложить\n  \
+# Команда формы элемента справочника\n  \
+yellowcode remote form http://server/base --ref 'Справочник.Задачи(<uuid>)' --command Пересчитать\n  \
+# Серверная функция формы с параметрами\n  \
+yellowcode remote form http://server/base --form Обработка.Проба.Форма --call РассчитатьНаСервере --param n:7 \
+--param s:x\n\n",
+            after_help!()
+        )
+    )]
+    Form {
+        #[command(flatten)]
+        login: LoginArgs,
+        #[arg(
+            long,
+            value_name = "ИМЯ_ФОРМЫ",
+            help = "Полное имя формы, например Обработка.Проба.Форма (основная форма) или Обработка.Проба.Форма.Форма; \
+с --ref — форма объекта этой ссылки"
+        )]
+        form: Option<String>,
+        #[arg(
+            long = "ref",
+            value_name = "ССЫЛКА",
+            value_parser = ObjectRef::parse,
+            help = "Ссылка на объект: cfg:<Вид>Ref.<Имя>(<uuid>) или <Вид>.<Имя>(<uuid>), как у object; без --form \
+открывается его форма объекта"
+        )]
+        reference: Option<ObjectRef>,
+        #[arg(
+            long = "set",
+            value_name = "РЕКВИЗИТ=ЗНАЧЕНИЕ",
+            value_parser = FormSet::parse,
+            help = "Значение реквизита формы перед вызовом: Реквизит=значение или Объект.Поле=значение; для \
+нескольких повторите флаг. Нужен --command или --call"
+        )]
+        set: Vec<FormSet>,
+        #[arg(
+            long,
+            value_name = "КОМАНДА",
+            conflicts_with_all = ["call", "list"],
+            help = "Выполнить команду формы, серверная часть которой — вся команда (server в списке команд)"
+        )]
+        command: Option<String>,
+        #[arg(
+            long,
+            value_name = "МЕТОД",
+            conflicts_with = "list",
+            help = "Вызвать серверный метод формы (&НаСервере или &НаСервереБезКонтекста) с параметрами"
+        )]
+        call: Option<String>,
+        #[arg(
+            long = "param",
+            value_name = "ЗНАЧЕНИЕ",
+            value_parser = Param::parse,
+            requires = "call",
+            help = "Параметр метода, как у remote call --param; для нескольких повторите флаг, по порядку"
+        )]
+        params: Vec<Param>,
+        #[arg(
+            long = "param-json",
+            value_name = "JSON",
+            value_parser = Param::parse_json,
+            conflicts_with = "params",
+            requires = "call",
+            help = "Параметр метода в типизированном JSON, как у remote call --param-json; не вместе с --param"
+        )]
+        params_json: Vec<Param>,
+        #[arg(
+            long,
+            help = "Только показать реквизиты, серверные методы и команды формы (так же без --command и --call)"
+        )]
+        list: bool,
+        #[arg(long, help = JSON_HELP)]
+        json: bool,
+    },
 }
 
 fn parse_uuid(s: &str) -> Result<Uuid, String> {
@@ -894,6 +1150,13 @@ fn request(command: Command, stdin_terminal: bool) -> Result<Request, String> {
             call,
             params,
             params_json,
+            init_call,
+            init_params,
+            attrs,
+            before,
+            poll,
+            poll_while,
+            timeout,
             generate,
             variant,
             sets,
@@ -904,6 +1167,7 @@ fn request(command: Command, stdin_terminal: bool) -> Result<Request, String> {
             format,
         } => Request::Report(ReportRequest {
             login: login.login(stdin_terminal)?,
+            open_params: Vec::new(),
             dcs: dcs_request(
                 report.is_some(),
                 generate,
@@ -916,14 +1180,50 @@ fn request(command: Command, stdin_terminal: bool) -> Result<Request, String> {
             form: form
                 .or_else(|| report.map(|r| format!("{r}.Форма")))
                 .unwrap_or_default(),
+            init: init_call.map(|c| (c, init_params)),
+            attributes: attrs,
+            before,
             call,
             params: params.into_iter().chain(params_json).collect(),
+            poll: poll.map(|procedure| PollRequest {
+                procedure,
+                running: poll_while,
+                timeout: std::time::Duration::from_secs(timeout),
+            }),
             attribute,
             format: match format {
                 ReportFormatArg::Text => ReportFormat::Text,
                 ReportFormatArg::Csv => ReportFormat::Csv,
                 ReportFormatArg::Json => ReportFormat::Json,
             },
+        }),
+        Command::Print {
+            login,
+            form,
+            params,
+            params_json,
+            refs,
+            init_call,
+            init_params,
+            attribute,
+            format,
+        } => Request::Report(ReportRequest {
+            login: login.login(stdin_terminal)?,
+            form,
+            open_params: params.into_iter().chain(params_json).chain(refs).collect(),
+            init: init_call.map(|c| (c, init_params)),
+            attributes: Vec::new(),
+            before: Vec::new(),
+            call: None,
+            params: Vec::new(),
+            poll: None,
+            attribute,
+            format: match format {
+                ReportFormatArg::Text => ReportFormat::Text,
+                ReportFormatArg::Csv => ReportFormat::Csv,
+                ReportFormatArg::Json => ReportFormat::Json,
+            },
+            dcs: None,
         }),
         Command::Create {
             login,
@@ -981,7 +1281,47 @@ fn request(command: Command, stdin_terminal: bool) -> Result<Request, String> {
             dry_run,
             json,
         }),
+        Command::Form {
+            login,
+            form,
+            reference,
+            set,
+            command,
+            call,
+            params,
+            params_json,
+            list: _,
+            json,
+        } => {
+            if !set.is_empty() && command.is_none() && call.is_none() {
+                return Err("--set needs --command or --call".into());
+            }
+            Request::Form(FormCommandRequest {
+                login: login.login(stdin_terminal)?,
+                form,
+                reference: reference.map(ObjectRef::into_ref),
+                set,
+                run: match (command, call) {
+                    (Some(c), _) => FormRun::Command(c),
+                    (None, Some(name)) => FormRun::Call {
+                        name,
+                        params: params.into_iter().chain(params_json).collect(),
+                    },
+                    (None, None) => FormRun::Show,
+                },
+                json,
+            })
+        }
     })
+}
+
+fn parse_attr(arg: &str) -> std::result::Result<(String, String), String> {
+    match arg.split_once('=') {
+        Some((name, value)) if !name.trim().is_empty() => {
+            Ok((name.trim().to_string(), value.to_string()))
+        }
+        _ => Err(format!("not an attribute: {arg:?} (Реквизит=значение)")),
+    }
 }
 
 fn write_mode(post: bool, unpost: bool) -> WriteMode {
