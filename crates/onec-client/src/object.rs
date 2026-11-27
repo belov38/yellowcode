@@ -12,7 +12,7 @@ use crate::value::{
 };
 use crate::xml::{self, XmlError};
 
-const NS_LF: &str = "http://v8.1c.ru/8.2/managed-application/logform";
+pub(crate) const NS_LF: &str = "http://v8.1c.ru/8.2/managed-application/logform";
 
 const IGNORED: &[&str] = &[
     "fover",
@@ -41,6 +41,14 @@ pub enum ObjectError {
     Shape(String),
     #[error("logForm/query: the form shows {got}, not the object asked {asked}")]
     OtherObject { asked: String, got: String },
+    #[error("change refused before the write: {0}")]
+    Change(String),
+    #[error("logForm/call: {0}")]
+    WriteAnswer(String),
+    #[error(
+        "logForm/call: the write was sent and its outcome is not known ({0}); read the object before writing it again"
+    )]
+    WriteSent(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -112,16 +120,20 @@ pub fn parse_ref(text: &str) -> Result<Ref, String> {
     Ref::new(TypeName::config(&local), uuid).map_err(|_| bad())
 }
 
-pub(crate) fn open_request(key: &str, r: &Ref) -> String {
+pub(crate) fn open_request(key: &str, r: Option<&Ref>) -> String {
+    let prms = r.map_or(String::new(), |r| {
+        format!(
+            "<prms><prm><name>Ключ</name><val xsi:type=\"cfg:{}\">{}</val></prm></prms>",
+            escape(r.type_name().local()),
+            r.uuid()
+        )
+    });
     format!(
         "\u{feff}<?xml version=\"1.0\" encoding=\"UTF-8\"?><request xmlns=\"http://v8.1c.ru/8.2/mngsrv/ws\" \
          xmlns:cfg=\"{NS_CONFIG}\" xmlns:ent=\"http://v8.1c.ru/8.1/data/enterprise\" xmlns:v8=\"{NS_CORE}\" \
-         xmlns:xs=\"{NS_XS}\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"><key>{}</key><prms><prm>\
-         <name>Ключ</name><val xsi:type=\"cfg:{}\">{}</val></prm></prms><mw>0</mw><mh>0</mh><pres>false</pres>\
-         <trdata>false</trdata></request>",
+         xmlns:xs=\"{NS_XS}\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"><key>{}</key>{prms}<mw>0</mw>\
+         <mh>0</mh><pres>false</pres><trdata>false</trdata></request>",
         escape(key),
-        escape(r.type_name().local()),
-        r.uuid()
     )
 }
 
@@ -160,7 +172,7 @@ fn form_id_of(body: &[u8]) -> Result<String, AnswerError> {
     })
 }
 
-fn type_of_id(id: &str, types: &[MdType]) -> Option<TypeName> {
+pub(crate) fn type_of_id(id: &str, types: &[MdType]) -> Option<TypeName> {
     let platform = [
         ("9b6abf8b-0173-48e5-b0a0-83b21fcf63c5", NS_XS, "string"),
         ("b0be78f2-0ee6-4d31-a3bb-77dd32ba5bec", NS_XS, "decimal"),
@@ -181,7 +193,7 @@ fn type_of_id(id: &str, types: &[MdType]) -> Option<TypeName> {
     config_ref_class(&ty).is_some().then_some(ty)
 }
 
-fn implied_type(ty: &FieldType, types: &[MdType]) -> Option<TypeName> {
+pub(crate) fn implied_type(ty: &FieldType, types: &[MdType]) -> Option<TypeName> {
     match ty.ids.as_slice() {
         [one] => type_of_id(one, types),
         _ => None,
@@ -208,7 +220,7 @@ fn cell(n: Node, field: &FormField, implied: Option<&TypeName>) -> Result<Cell, 
     }
 }
 
-fn uo_children<'a, 'i>(n: Node<'a, 'i>) -> impl Iterator<Item = Node<'a, 'i>> {
+pub(crate) fn uo_children<'a, 'i>(n: Node<'a, 'i>) -> impl Iterator<Item = Node<'a, 'i>> {
     n.children()
         .filter(|c| c.is_element() && c.tag_name().namespace() == Some(NS_UO))
 }
@@ -266,7 +278,7 @@ pub(crate) fn object_of(
     body: &[u8],
     data: &FormData,
     types: &[MdType],
-    r: &Ref,
+    r: Asked,
     unrecognized: &mut Vec<Unrecognized>,
 ) -> Result<ObjectData, ObjectError> {
     let text = xml::value_text(body);
@@ -280,7 +292,7 @@ pub(crate) fn object_of(
     )?
 }
 
-fn main_of<'a, 'i>(
+pub(crate) fn main_of<'a, 'i>(
     properties: &[Node<'a, 'i>],
     props: Node<'a, 'i>,
 ) -> Result<Node<'a, 'i>, ObjectError> {
@@ -310,12 +322,22 @@ fn main_of<'a, 'i>(
         .ok_or_else(|| ObjectError::Shape("no value of the main attribute".into()))
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum Asked<'r> {
+    Existing(&'r Ref),
+    New(&'r Ref),
+}
+
 fn read_object(
     rd: &Reader,
     data: &FormData,
     types: &[MdType],
-    r: &Ref,
+    asked: Asked,
 ) -> Result<ObjectData, ObjectError> {
+    let (r, new) = match asked {
+        Asked::Existing(r) => (r, false),
+        Asked::New(r) => (r, true),
+    };
     let form_id = rd.text(NS_WS, "id")?.ok_or_else(|| rd.missing("id"))?;
     rd.text(NS_WS, "fid")?;
     let main_value = |n: &Node| n.tag_name().name() == "v";
@@ -378,7 +400,7 @@ fn read_object(
         .ok_or_else(|| ObjectError::Shape("no field Ref".into()))?;
     let asked = || format!("{}({})", r.type_name(), r.uuid());
     match &shown.value {
-        Cell::Value(Value::Ref(got)) if same_ref(got, r) => {}
+        Cell::Value(Value::Ref(got)) if same_ref(got, r) && (!new || got.is_empty()) => {}
         Cell::Value(Value::Ref(got)) => {
             return Err(ObjectError::OtherObject {
                 asked: asked(),
@@ -420,7 +442,29 @@ impl<R: RandomSource> Session<R> {
         let conf = self.prologue(true)?.conf;
         let types = self.session_types("the types of the values of the object")?;
         let key = form_key(r)?;
-        let req = body::zstd_compress(open_request(&key, r).as_bytes());
+        let (fid, answer) = self.open_form(&key, Some(r))?;
+        let read = self
+            .describe_form(&conf, &answer)
+            .and_then(|(data, mut unrecognized)| {
+                let mut object = object_of(
+                    &answer,
+                    &data,
+                    &types,
+                    Asked::Existing(r),
+                    &mut unrecognized,
+                )?;
+                object.unrecognized = unrecognized;
+                Ok(object)
+            });
+        self.closing(&fid, read)
+    }
+
+    pub(crate) fn open_form(
+        &mut self,
+        key: &str,
+        r: Option<&Ref>,
+    ) -> Result<(String, Vec<u8>), SessionError> {
+        let req = body::zstd_compress(open_request(key, r).as_bytes());
         let h = self.headers("application/xml", true, true);
         let resp = self.step(
             "logForm/query",
@@ -432,10 +476,17 @@ impl<R: RandomSource> Session<R> {
         )?;
         let answer = Self::decoded(&resp)?;
         let fid = opened(&answer).map_err(ObjectError::from)?;
-        let read = self.describe_and_read(&conf, &answer, &types, r);
-        let closed = self.close_form(&fid);
-        match (read, closed) {
-            (Ok(data), Ok(())) => Ok(data),
+        Ok((fid, answer))
+    }
+
+    pub(crate) fn closing<T>(
+        &mut self,
+        fid: &str,
+        outcome: Result<T, SessionError>,
+    ) -> Result<T, SessionError> {
+        let closed = self.close_form(fid);
+        match (outcome, closed) {
+            (Ok(v), Ok(())) => Ok(v),
             (Err(e), Ok(())) | (Ok(_), Err(e)) => Err(e),
             (Err(e), Err(c)) => Err(SessionError::Protocol(format!(
                 "{e}; the form was not closed either: {c}"
@@ -443,13 +494,11 @@ impl<R: RandomSource> Session<R> {
         }
     }
 
-    fn describe_and_read(
+    pub(crate) fn describe_form(
         &mut self,
         conf: &str,
         answer: &[u8],
-        types: &[MdType],
-        r: &Ref,
-    ) -> Result<ObjectData, SessionError> {
+    ) -> Result<(FormData, Vec<Unrecognized>), SessionError> {
         let form_id = form_id_of(answer).map_err(ObjectError::from)?;
         let roles = self
             .login_info()
@@ -471,8 +520,6 @@ impl<R: RandomSource> Session<R> {
         let mut unrecognized = Vec::new();
         let data = FormData::from_answer(&Self::decoded(&resp)?, &mut unrecognized)
             .map_err(ObjectError::from)?;
-        let mut object = object_of(answer, &data, types, r, &mut unrecognized)?;
-        object.unrecognized = unrecognized;
-        Ok(object)
+        Ok((data, unrecognized))
     }
 }

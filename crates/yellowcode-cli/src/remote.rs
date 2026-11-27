@@ -3,9 +3,10 @@ use std::path::PathBuf;
 
 use yellowcode_core::output::Out;
 use yellowcode_core::remote::{
-    CallRequest, DEFAULT_LIMIT, DEFAULT_PAGE_SIZE, Filter, InfoRequest, ListRequest, Login,
-    MetadataRequest, ModuleUrn, ModulesRequest, ObjectRef, ObjectRequest, Order, Param, Password,
-    ReportFormat, ReportRequest, Request, Uuid,
+    CallRequest, DEFAULT_LIMIT, DEFAULT_PAGE_SIZE, DcsChange, DcsRequest, Edit, Filter,
+    InfoRequest, ListRequest, Login, MetadataRequest, ModuleUrn, ModulesRequest, ObjectRef,
+    ObjectRequest, Order, Param, Password, ReportFormat, ReportRequest, Request, Uuid,
+    WriteCommand, WriteMode, WriteTarget,
 };
 
 macro_rules! after_help {
@@ -17,6 +18,15 @@ macro_rules! after_help {
 строка: `printf '\\n' | yellowcode remote …` в sh, bash, zsh; `echo.| yellowcode remote …` в cmd. Ввод, который \
 кончился раньше первой строки, — ошибка.
 
+Адрес вида Srvr=\"хост[:порт]\";Ref=\"база\"; (строка подключения 1С) или tcp://хост[:порт]/база — подключение \
+к серверу напрямую, как у тонкого клиента по /S, без веб-публикации: к менеджеру кластера (порт по умолчанию \
+1541) или к ibsrv --direct-regport. Менеджер называет рабочий процесс по имени компьютера сервера; если это имя \
+отсюда не разрешается, адрес рабочего процесса задаёт --worker хост:порт. Поддерживается только уровень \
+безопасности соединения 0 (сервер, требующий шифрованного канала, получает отказ с объяснением).
+
+Адрес https:// — соединение по TLS. Сертификат сервера проверяется всегда: по встроенным корням Mozilla \
+(webpki-roots) и по сертификатам из файлов --ca-cert; отключить проверку нельзя.
+
 Примеры:
   # Сводка сервера при входе без пользователя
   yellowcode remote info http://127.0.0.1:28736
@@ -26,6 +36,15 @@ macro_rules! after_help {
 
   # Метаданные под пользователем, пароль из переменной окружения YC_PASSWORD
   yellowcode remote metadata http://server/base --user Администратор --password-env YC_PASSWORD
+
+  # Напрямую к кластеру (/S), без веб-публикации
+  yellowcode remote info 'Srvr=\"server:1541\";Ref=\"base\";' --user Администратор --password-env YC_PASSWORD
+
+  # Напрямую к ibsrv --direct-regport через туннель: рабочий процесс тоже через туннель
+  yellowcode remote info tcp://127.0.0.1:28730/base --worker 127.0.0.1:28731
+
+  # Веб-публикация по HTTPS с корпоративным центром сертификации
+  yellowcode remote info https://server/base --ca-cert corp-ca.pem
 
   # Пароль из файла
   yellowcode remote info http://server/base --user Администратор < password.txt
@@ -55,7 +74,7 @@ pub(crate) const EXAMPLES: &str = after_help!();
 #[derive(clap::Args)]
 pub(crate) struct LoginArgs {
     #[arg(
-        help = "Адрес сервера 1С, например http://127.0.0.1:28736 (ibsrv --http-port) или адрес веб-публикации"
+        help = "Адрес сервера 1С: веб-публикация или ibsrv --http-port (http://, https://), либо прямое подключение /S — Srvr=\"хост[:порт]\";Ref=\"база\"; или tcp://хост[:порт]/база"
     )]
     url: String,
     #[arg(
@@ -78,6 +97,12 @@ pub(crate) struct LoginArgs {
     )]
     strong_password: bool,
     #[arg(
+        long = "ca-cert",
+        value_name = "PATH",
+        help = "Доверять также сертификатам из этого файла PEM: корпоративный центр сертификации или самоподписанный сертификат сервера; можно повторять. Добавляются к встроенным корням, только для https://"
+    )]
+    ca_certs: Vec<PathBuf>,
+    #[arg(
         long,
         value_name = "ВЕРСИЯ",
         value_parser = server_version,
@@ -85,6 +110,12 @@ pub(crate) struct LoginArgs {
                 а вход, отклонённый из-за версии, повторяется один раз с версией сервера из ответа"
     )]
     server_version: Option<String>,
+    #[arg(
+        long,
+        value_name = "ХОСТ:ПОРТ",
+        help = "Только /S: подключаться к рабочему процессу по этому адресу, а не по имени, которое назвал менеджер"
+    )]
+    worker: Option<String>,
 }
 
 fn server_version(v: &str) -> Result<String, String> {
@@ -109,7 +140,9 @@ impl LoginArgs {
             user: self.user,
             password,
             strong: self.strong_password,
+            ca_certs: self.ca_certs,
             server_version: self.server_version,
+            worker: self.worker,
         })
     }
 }
@@ -422,7 +455,9 @@ NULL, {\"n\":\"1.5\"} Число (голое число JSON не принима
         json: bool,
     },
     #[command(
-        about = "Открыть форму (отчёта) и показать её реквизиты; с --call — вызвать серверную процедуру формы и вывести табличный документ",
+        about = "Открыть форму отчёта и показать её реквизиты; с --call — вызвать серверную процедуру формы, с --generate — сформировать отчёт на СКД; вывести табличный документ",
+        group = clap::ArgGroup::new("which").required(true).args(["form", "report"]),
+        group = clap::ArgGroup::new("run").multiple(true).args(["call", "generate", "sets", "filters", "offs", "details"]),
         after_help = concat!(
             "Войти на сервер, открыть форму по её имени (logForm?cmd=query) и показать её реквизиты с типами; \
 реквизит-табличный документ помечен (spreadsheet). С --call вызвать серверную процедуру этой формы \
@@ -431,8 +466,25 @@ NULL, {\"n\":\"1.5\"} Число (голое число JSON не принима
 содержимого дочитывается по строкам (moxel?cmd=getRowContents). Форма закрывается в конце (processFormsClose). \
 Какую процедуру и с какими параметрами зовёт команда формы, видно в тексте модуля формы \
 (remote modules --out, contextModuleId формы).\n\n\
-ВНИМАНИЕ: --call выполняет код конфигурации на сервере, как remote call: процедура формы может записывать данные \
-базы. Вызывайте только процедуры, про которые известно, что они только читают.\n\n\
+Отчёт на схеме компоновки данных (СКД): --report Отчет.X открывает его форму по умолчанию (Отчет.X.Форма), \
+--form — любую форму отчёта. Показываются варианты отчёта (текущий отмечен *) и пользовательские настройки \
+(параметры и отборы: имя, заголовок, используется ли, значение и его тип). С --generate отчёт формируется \
+платформенной командой «Сформировать» формы (logForm?cmd=call controller::composeResult) с настройками формы и \
+изменениями --set, --filter, --off; сервер этих изменений не сохраняет. Значение приводится к типу параметра или поля \
+схемы: строка как дана, число, булево (да/нет), дата ГГГГ-ММ-ДД[Тчч:мм:сс], стандартный период \
+'ГГГГ-ММ-ДД..ГГГГ-ММ-ДД' или вариант периода (ThisYear, LastMonth, …), значение перечисления по имени, ссылка — \
+её uuid или представление (поиск как при вводе текста в поле: ни одного или несколько найденных — ошибка до \
+формирования). Неизвестная настройка, неверное значение и составной тип — ошибка до формирования. --details \
+добавляет расшифровку каждой ячейки (dcs?cmd=loadDetailsPart): значения полей ячейки и её группировок. Форма, \
+«Сформировать» которой — код конфигурации (например, форма отчёта БСП), документа не даёт: это ошибка с \
+подсказкой вызвать её серверную процедуру через --call.\n\n\
+ВНИМАНИЕ: --variant ЗАПИСЫВАЕТ В БАЗУ. Сервер запоминает выбранный вариант как текущий вариант отчёта у \
+пользователя (в хранилище его настроек), так же как при выборе варианта в клиенте 1С: следующее открытие отчёта \
+этим пользователем, в том числе в клиенте 1С, начнётся с этого варианта. Без --variant команда открывает текущий \
+вариант и настроек не меняет.\n\n\
+ВНИМАНИЕ: --call и --generate выполняют код конфигурации на сервере, как remote call: процедура формы и \
+обработчики отчёта могут записывать данные базы. Вызывайте только процедуры и отчёты, про которые известно, что \
+они только читают.\n\n\
 Пределы: 100000 строк, 10000 колонок и 20000000 клеток (строки × колонки) на документ, 2000000 ячеек с \
 текстом на отчёт; больший отчёт — ошибка без вывода.\n\n",
             after_help!()
@@ -446,7 +498,15 @@ NULL, {\"n\":\"1.5\"} Число (голое число JSON не принима
             value_name = "ИМЯ_ФОРМЫ",
             help = "Полное имя формы, например Отчет.Остатки.Форма.ФормаОтчета"
         )]
-        form: String,
+        form: Option<String>,
+        #[arg(
+            long,
+            value_name = "ОТЧЕТ",
+            conflicts_with = "call",
+            help = "Отчёт, например Отчет.Остатки: открыть его форму по умолчанию (Отчет.Остатки.Форма) и показать \
+варианты и пользовательские настройки СКД"
+        )]
+        report: Option<String>,
         #[arg(
             long,
             value_name = "ПРОЦЕДУРА",
@@ -474,8 +534,55 @@ NULL, {\"n\":\"1.5\"} Число (голое число JSON не принима
         params_json: Vec<Param>,
         #[arg(
             long,
+            conflicts_with = "call",
+            help = "Сформировать отчёт на СКД платформенной командой «Сформировать» формы; подразумевается \
+флагами --set, --filter, --off, --details"
+        )]
+        generate: bool,
+        #[arg(
+            long,
+            value_name = "ВАРИАНТ",
+            conflicts_with = "call",
+            help = "Вариант отчёта: ключ или представление. ЗАПИСЫВАЕТ В БАЗУ: сервер запоминает его как текущий \
+вариант отчёта у пользователя, как клиент 1С"
+        )]
+        variant: Option<String>,
+        #[arg(
+            long = "set",
+            value_name = "ПАРАМЕТР=ЗНАЧЕНИЕ",
+            value_parser = parse_set,
+            conflicts_with = "call",
+            help = "Значение параметра из пользовательских настроек (по имени или заголовку), например \
+'Период=2026-01-01..2026-03-31'; параметр включается. Для нескольких повторите флаг"
+        )]
+        sets: Vec<DcsChange>,
+        #[arg(
+            long = "filter",
+            value_name = "ПОЛЕ ОП ЗНАЧЕНИЕ",
+            value_parser = parse_filter,
+            conflicts_with = "call",
+            help = "Отбор из пользовательских настроек (по полю или заголовку): поле, операция (= <> < <= > >= \
+~ содержит, !~ не содержит — только у строки) и значение, например 'Номенклатура=Гвозди'; отбор включается. Для нескольких \
+повторите флаг"
+        )]
+        filters: Vec<Filter>,
+        #[arg(
+            long = "off",
+            value_name = "НАСТРОЙКА",
+            conflicts_with = "call",
+            help = "Выключить параметр или отбор из пользовательских настроек (по имени или заголовку)"
+        )]
+        offs: Vec<String>,
+        #[arg(
+            long,
+            conflicts_with = "call",
+            help = "Добавить расшифровку ячеек отчёта на СКД: значения полей ячейки и её группировок"
+        )]
+        details: bool,
+        #[arg(
+            long,
             value_name = "РЕКВИЗИТ",
-            requires = "call",
+            requires = "run",
             help = "Вывести только табличный документ этого реквизита формы"
         )]
         attribute: Option<String>,
@@ -483,12 +590,183 @@ NULL, {\"n\":\"1.5\"} Число (голое число JSON не принима
             long,
             value_enum,
             default_value = "text",
-            requires_if("csv", "call"),
+            requires_if("csv", "run"),
             help = "text — реквизиты и строки документов; csv — один документ в CSV по RFC 4180 (все строки и \
-колонки, строки через CRLF; строка RESULT при ошибке — в stderr), нужен --call; json — один объект JSON с \
-ячейками, расшифровками и объединениями (строка RESULT при ошибке — в stderr)"
+колонки, строки через CRLF; строка RESULT при ошибке — в stderr), нужен --call или --generate; json — один \
+объект JSON с ячейками, расшифровками и объединениями (строка RESULT при ошибке — в stderr)"
         )]
         format: ReportFormatArg,
+    },
+    #[command(
+        about = "Создать объект (справочник, документ) через форму объекта, как тонкий клиент — ИЗМЕНЯЕТ ДАННЫЕ",
+        after_help = concat!(
+            "Войти на сервер, открыть форму нового объекта (logForm?cmd=query), заполнить реквизиты и строки \
+табличных частей и записать объект через форму (logForm?cmd=call controller::write), затем закрыть форму. \
+Сообщения пользователю (проверка заполнения, Сообщить) выводятся строками message:. Новый документ \
+записывается без проведения, с --post — проводится. Код выхода: 0 — записано (или --dry-run), 1 — не записано \
+или ошибка до записи, 3 — запись отправлена, итог неизвестен (RESULT UNKNOWN): прочитайте объект, прежде чем \
+повторять.\n\n\
+ВНИМАНИЕ: команда ИЗМЕНЯЕТ ДАННЫЕ БАЗЫ. Запись выполняет на сервере код формы и объекта (ПередЗаписью, \
+проверку заполнения, проведение) так же, как запись пользователем. Запускайте её только на тестовых базах и \
+копиях; сначала проверьте изменения с --dry-run. Отмены записи нет.\n\n",
+            after_help!()
+        )
+    )]
+    Create {
+        #[command(flatten)]
+        login: LoginArgs,
+        #[arg(
+            long = "set",
+            value_name = "ПОЛЕ=ЗНАЧЕНИЕ",
+            value_parser = Edit::parse_set,
+            help = "Изменить реквизит: Поле=значение; ячейку строки табличной части: ТЧ[N].Поле=значение (N — \
+номер строки, как его выводит object), ячейку новой строки: ТЧ[+N].Поле=значение (N — номер новой строки по \
+порядку). Значение читается по типу поля: число 12.5, строка как есть, true/false, дата ГГГГ-ММ-ДД или \
+ГГГГ-ММ-ДДTчч:мм:сс (время — чч:мм:сс), ссылка — uuid или <Вид>.<Имя>(<uuid>), перечисление — имя значения; \
+пустое значение (Поле=) — пустое значение типа. Поле составного типа требует префикс, как у --param: s:, n:, \
+d:, b:, u:, undef или ссылку. Имена — русские или английские, без учёта регистра. Для нескольких повторите флаг"
+        )]
+        set: Vec<Edit>,
+        #[arg(
+            long = "delete-row",
+            value_name = "ТЧ[N]",
+            value_parser = Edit::parse_delete,
+            help = "Удалить строку N табличной части; для нескольких повторите флаг"
+        )]
+        delete_rows: Vec<Edit>,
+        #[arg(
+            long = "clear-table",
+            value_name = "ТЧ",
+            value_parser = Edit::parse_clear,
+            help = "Очистить табличную часть (до добавления строк этой команды)"
+        )]
+        clear_tables: Vec<Edit>,
+        #[arg(
+            long,
+            value_name = "ФАЙЛ",
+            help = "Изменения в JSON (- — из stdin; пароль тогда только через --password-env): \
+{\"set\":{\"Поле\":значение},\"tables\":{\"ТЧ\":{\"clear\":true,\"rows\":[{\"line\":2,\"set\":{…}},\
+{\"line\":3,\"delete\":true},{\"add\":{…}}]}}}. Значение — строка (читается по типу поля, как в --set) или \
+типизированный JSON --param-json. Флаги командной строки применяются после файла"
+        )]
+        data: Option<PathBuf>,
+        #[arg(
+            long,
+            conflicts_with = "unpost",
+            help = "Провести документ (РежимЗаписи Проведение)"
+        )]
+        post: bool,
+        #[arg(
+            long,
+            help = "Отменить проведение документа (РежимЗаписи ОтменаПроведения)"
+        )]
+        unpost: bool,
+        #[arg(
+            long = "dry-run",
+            help = "Не записывать: войти, открыть форму (при этом выполняется код формы на сервере), описать и \
+закрыть её и вывести изменения и тело запроса controller::write, которое ушло бы на сервер"
+        )]
+        dry_run: bool,
+        #[arg(long, help = JSON_HELP)]
+        json: bool,
+        #[arg(
+            long,
+            value_name = "ОБЪЕКТ",
+            value_parser = WriteTarget::parse_new,
+            help = "Вид и имя объекта: <Вид>.<Имя>, например Справочник.Имя или Документ.Имя. \
+Записываются справочники и документы"
+        )]
+        object: WriteTarget,
+    },
+    #[command(
+        about = "Изменить объект по ссылке через форму объекта, как тонкий клиент — ИЗМЕНЯЕТ ДАННЫЕ",
+        after_help = concat!(
+            "Войти на сервер, открыть форму объекта по ссылке, изменить реквизиты и строки табличных частей и \
+записать объект через форму (logForm?cmd=call controller::write), затем закрыть форму. На сервер уходят только \
+изменённые поля и всегда ВерсияДанных: если объект изменили после открытия формы, сервер отказывает. Проведённый \
+документ с изменениями без --post/--unpost перепроводится (пометка на удаление снимает проведение), непроведённый \
+записывается без проведения; без изменений документ записывается только с --post или --unpost. Если запись \
+отправлена, а ответ не получен или не разобран, команда сообщает, что итог неизвестен: прочитайте объект (object), \
+прежде чем повторять. Код выхода: 0 — записано (или --dry-run), 1 — не записано или ошибка до записи, 3 — \
+запись отправлена, итог неизвестен (RESULT UNKNOWN).\n\n\
+ВНИМАНИЕ: команда ИЗМЕНЯЕТ ДАННЫЕ БАЗЫ. Запись выполняет на сервере код формы и объекта (ПередЗаписью, \
+проверку заполнения, проведение) так же, как запись пользователем. Запускайте её только на тестовых базах и \
+копиях; сначала проверьте изменения с --dry-run. Отмены записи нет.\n\n",
+            after_help!()
+        )
+    )]
+    Write {
+        #[command(flatten)]
+        login: LoginArgs,
+        #[arg(
+            long = "set",
+            value_name = "ПОЛЕ=ЗНАЧЕНИЕ",
+            value_parser = Edit::parse_set,
+            help = "Изменить реквизит: Поле=значение; ячейку строки табличной части: ТЧ[N].Поле=значение (N — \
+номер строки, как его выводит object), ячейку новой строки: ТЧ[+N].Поле=значение (N — номер новой строки по \
+порядку). Значение читается по типу поля: число 12.5, строка как есть, true/false, дата ГГГГ-ММ-ДД или \
+ГГГГ-ММ-ДДTчч:мм:сс (время — чч:мм:сс), ссылка — uuid или <Вид>.<Имя>(<uuid>), перечисление — имя значения; \
+пустое значение (Поле=) — пустое значение типа. Поле составного типа требует префикс, как у --param: s:, n:, \
+d:, b:, u:, undef или ссылку. Имена — русские или английские, без учёта регистра. Для нескольких повторите флаг"
+        )]
+        set: Vec<Edit>,
+        #[arg(
+            long = "delete-row",
+            value_name = "ТЧ[N]",
+            value_parser = Edit::parse_delete,
+            help = "Удалить строку N табличной части; для нескольких повторите флаг"
+        )]
+        delete_rows: Vec<Edit>,
+        #[arg(
+            long = "clear-table",
+            value_name = "ТЧ",
+            value_parser = Edit::parse_clear,
+            help = "Очистить табличную часть (до добавления строк этой команды)"
+        )]
+        clear_tables: Vec<Edit>,
+        #[arg(
+            long,
+            value_name = "ФАЙЛ",
+            help = "Изменения в JSON (- — из stdin; пароль тогда только через --password-env): \
+{\"set\":{\"Поле\":значение},\"tables\":{\"ТЧ\":{\"clear\":true,\"rows\":[{\"line\":2,\"set\":{…}},\
+{\"line\":3,\"delete\":true},{\"add\":{…}}]}}}. Значение — строка (читается по типу поля, как в --set) или \
+типизированный JSON --param-json. Флаги командной строки применяются после файла"
+        )]
+        data: Option<PathBuf>,
+        #[arg(
+            long,
+            conflicts_with = "unpost",
+            help = "Провести документ (РежимЗаписи Проведение)"
+        )]
+        post: bool,
+        #[arg(
+            long,
+            help = "Отменить проведение документа (РежимЗаписи ОтменаПроведения)"
+        )]
+        unpost: bool,
+        #[arg(
+            long = "dry-run",
+            help = "Не записывать: войти, открыть форму (при этом выполняется код формы на сервере), описать и \
+закрыть её и вывести изменения и тело запроса controller::write, которое ушло бы на сервер"
+        )]
+        dry_run: bool,
+        #[arg(long, help = JSON_HELP)]
+        json: bool,
+        #[arg(
+            long = "ref",
+            value_name = "ССЫЛКА",
+            value_parser = WriteTarget::parse_existing,
+            help = "Ссылка на объект: cfg:<Вид>Ref.<Имя>(<uuid>) или <Вид>.<Имя>(<uuid>), как у object"
+        )]
+        reference: WriteTarget,
+        #[arg(
+            long = "mark-deletion",
+            conflicts_with = "unmark_deletion",
+            help = "Пометить объект на удаление (ПометкаУдаления = Истина)"
+        )]
+        mark_deletion: bool,
+        #[arg(long = "unmark-deletion", help = "Снять пометку удаления")]
+        unmark_deletion: bool,
     },
 }
 
@@ -498,6 +776,10 @@ fn parse_uuid(s: &str) -> Result<Uuid, String> {
 
 fn parse_filter(s: &str) -> Result<Filter, String> {
     Filter::parse(s).map_err(|e| e.to_string())
+}
+
+fn parse_set(s: &str) -> Result<DcsChange, String> {
+    DcsChange::parse_set(s).ok_or_else(|| format!("not ПАРАМЕТР=ЗНАЧЕНИЕ: {s:?}"))
 }
 
 fn parse_order(s: &str) -> Result<Order, String> {
@@ -608,14 +890,32 @@ fn request(command: Command, stdin_terminal: bool) -> Result<Request, String> {
         Command::Report {
             login,
             form,
+            report,
             call,
             params,
             params_json,
+            generate,
+            variant,
+            sets,
+            filters,
+            offs,
+            details,
             attribute,
             format,
         } => Request::Report(ReportRequest {
             login: login.login(stdin_terminal)?,
-            form,
+            dcs: dcs_request(
+                report.is_some(),
+                generate,
+                variant,
+                sets,
+                filters,
+                offs,
+                details,
+            ),
+            form: form
+                .or_else(|| report.map(|r| format!("{r}.Форма")))
+                .unwrap_or_default(),
             call,
             params: params.into_iter().chain(params_json).collect(),
             attribute,
@@ -625,6 +925,93 @@ fn request(command: Command, stdin_terminal: bool) -> Result<Request, String> {
                 ReportFormatArg::Json => ReportFormat::Json,
             },
         }),
+        Command::Create {
+            login,
+            set,
+            delete_rows,
+            clear_tables,
+            data,
+            post,
+            unpost,
+            dry_run,
+            json,
+            object,
+        } => Request::Write(WriteCommand {
+            login: login.login(stdin_terminal)?,
+            target: object,
+            edits: set
+                .into_iter()
+                .chain(delete_rows)
+                .chain(clear_tables)
+                .collect(),
+            data,
+            mode: write_mode(post, unpost),
+            deletion_mark: None,
+            dry_run,
+            json,
+        }),
+        Command::Write {
+            login,
+            set,
+            delete_rows,
+            clear_tables,
+            data,
+            post,
+            unpost,
+            dry_run,
+            json,
+            reference,
+            mark_deletion,
+            unmark_deletion,
+        } => Request::Write(WriteCommand {
+            login: login.login(stdin_terminal)?,
+            target: reference,
+            edits: set
+                .into_iter()
+                .chain(delete_rows)
+                .chain(clear_tables)
+                .collect(),
+            data,
+            mode: write_mode(post, unpost),
+            deletion_mark: match (mark_deletion, unmark_deletion) {
+                (true, _) => Some(true),
+                (_, true) => Some(false),
+                _ => None,
+            },
+            dry_run,
+            json,
+        }),
+    })
+}
+
+fn write_mode(post: bool, unpost: bool) -> WriteMode {
+    match (post, unpost) {
+        (true, _) => WriteMode::Post,
+        (_, true) => WriteMode::Unpost,
+        _ => WriteMode::Default,
+    }
+}
+
+fn dcs_request(
+    report: bool,
+    generate: bool,
+    variant: Option<String>,
+    sets: Vec<DcsChange>,
+    filters: Vec<Filter>,
+    offs: Vec<String>,
+    details: bool,
+) -> Option<DcsRequest> {
+    let changes: Vec<DcsChange> = sets
+        .into_iter()
+        .chain(filters.into_iter().map(DcsChange::Filter))
+        .chain(offs.into_iter().map(|name| DcsChange::Off { name }))
+        .collect();
+    let generate = generate || details || !changes.is_empty();
+    (report || generate || variant.is_some()).then_some(DcsRequest {
+        variant,
+        changes,
+        generate,
+        details,
     })
 }
 

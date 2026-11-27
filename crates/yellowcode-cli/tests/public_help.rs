@@ -309,6 +309,42 @@ const CASES: &[(&str, &[&str], &str)] = cases![
         ]
     ),
     ("remote-report--help", ["remote", "report", "--help"]),
+    ("remote-create--help", ["remote", "create", "--help"]),
+    ("remote-write--help", ["remote", "write", "--help"]),
+    (
+        "err-remote-create-no-object",
+        [
+            "remote",
+            "create",
+            "http://127.0.0.1:1",
+            "--set",
+            "Наименование=x"
+        ]
+    ),
+    (
+        "err-remote-write-bad-set",
+        [
+            "remote",
+            "write",
+            "http://127.0.0.1:1",
+            "--ref",
+            "Справочник.Товары(a3da0ff9-e955-11f1-a6fc-00090faa0001)",
+            "--set",
+            "Товары[0].Цена=1"
+        ]
+    ),
+    (
+        "err-remote-write-post-and-unpost",
+        [
+            "remote",
+            "write",
+            "http://127.0.0.1:1",
+            "--ref",
+            "Документ.Счет(a3da0ff9-e955-11f1-a6fc-00090faa0001)",
+            "--post",
+            "--unpost"
+        ]
+    ),
     (
         "err-remote-call-no-call",
         ["remote", "call", "http://127.0.0.1:1"]
@@ -335,6 +371,59 @@ const CASES: &[(&str, &[&str], &str)] = cases![
             "Отчет.Х.Форма.Ф",
             "--attribute",
             "Р"
+        ]
+    ),
+    (
+        "err-remote-report-no-form",
+        ["remote", "report", "http://127.0.0.1:1"]
+    ),
+    (
+        "err-remote-report-form-and-report",
+        [
+            "remote",
+            "report",
+            "http://127.0.0.1:1",
+            "--form",
+            "Отчет.Х.Форма.Ф",
+            "--report",
+            "Отчет.Х"
+        ]
+    ),
+    (
+        "err-remote-report-report-and-call",
+        [
+            "remote",
+            "report",
+            "http://127.0.0.1:1",
+            "--report",
+            "Отчет.Х",
+            "--call",
+            "П"
+        ]
+    ),
+    (
+        "err-remote-report-generate-and-call",
+        [
+            "remote",
+            "report",
+            "http://127.0.0.1:1",
+            "--form",
+            "Отчет.Х.Форма.Ф",
+            "--generate",
+            "--call",
+            "П"
+        ]
+    ),
+    (
+        "err-remote-report-bad-set",
+        [
+            "remote",
+            "report",
+            "http://127.0.0.1:1",
+            "--report",
+            "Отчет.Х",
+            "--set",
+            "Период"
         ]
     ),
     (

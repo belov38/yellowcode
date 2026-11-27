@@ -1,15 +1,25 @@
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
+use std::path::PathBuf;
 use std::time::Duration;
+
+use crate::tls::{self, Tls, TlsStream};
 
 pub const MAX_RESPONSE_BODY: usize = 64 * 1024 * 1024;
 const MAX_HEAD: usize = 64 * 1024;
 const TIMEOUT: Duration = Duration::from_secs(60);
+pub const ONCE_TIMEOUT: Duration = Duration::from_secs(600);
 
 #[derive(Debug, thiserror::Error)]
 pub enum TransportError {
-    #[error("bad base URL {0:?}: expected http://host[:port][/path]")]
+    #[error("bad base URL {0:?}: expected http://host[:port][/path] or https://host[:port][/path]")]
     BadUrl(String),
+    #[error("--ca-cert applies to https:// only, the URL {0:?} is not https://")]
+    CaCertWithoutTls(String),
+    #[error("CA certificate file {}: {reason}", path.display())]
+    CaCert { path: PathBuf, reason: String },
+    #[error("TLS: {0}")]
+    Tls(String),
     #[error("{0}")]
     Io(#[from] std::io::Error),
     #[error("malformed HTTP response: {0}")]
@@ -36,6 +46,7 @@ impl Response {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BaseUrl {
+    pub tls: bool,
     pub host: String,
     pub port: u16,
     pub prefix: String,
@@ -44,7 +55,12 @@ pub struct BaseUrl {
 impl BaseUrl {
     pub fn parse(url: &str) -> Result<Self, TransportError> {
         let bad = || TransportError::BadUrl(url.to_string());
-        let rest = url.strip_prefix("http://").ok_or_else(bad)?;
+        let (tls, rest) = match (url.strip_prefix("http://"), url.strip_prefix("https://")) {
+            (Some(rest), _) => (false, rest),
+            (None, Some(rest)) => (true, rest),
+            (None, None) => return Err(bad()),
+        };
+        let default_port = if tls { 443 } else { 80 };
         let (authority, path) = match rest.find('/') {
             Some(i) => rest.split_at(i),
             None => (rest, ""),
@@ -56,20 +72,21 @@ impl BaseUrl {
             let (h, after) = h.split_once(']').ok_or_else(bad)?;
             let port = match after.strip_prefix(':') {
                 Some(p) => p.parse().map_err(|_| bad())?,
-                None if after.is_empty() => 80,
+                None if after.is_empty() => default_port,
                 None => return Err(bad()),
             };
             (format!("[{h}]"), port)
         } else {
             match authority.rsplit_once(':') {
                 Some((h, p)) => (h.to_string(), p.parse().map_err(|_| bad())?),
-                None => (authority.to_string(), 80),
+                None => (authority.to_string(), default_port),
             }
         };
         if host.is_empty() {
             return Err(bad());
         }
         Ok(Self {
+            tls,
             host,
             port,
             prefix: path.trim_end_matches('/').to_string(),
@@ -86,18 +103,71 @@ impl BaseUrl {
     }
 }
 
+enum Stream {
+    Plain(TcpStream),
+    Tls(Box<TlsStream>),
+}
+
+impl Stream {
+    fn tcp(&self) -> &TcpStream {
+        match self {
+            Stream::Plain(s) => s,
+            Stream::Tls(s) => s.get_ref(),
+        }
+    }
+}
+
+impl Read for Stream {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Stream::Plain(s) => s.read(buf),
+            Stream::Tls(s) => s.read(buf),
+        }
+    }
+}
+
+impl Write for Stream {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match self {
+            Stream::Plain(s) => s.write(buf),
+            Stream::Tls(s) => s.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Stream::Plain(s) => s.flush(),
+            Stream::Tls(s) => s.flush(),
+        }
+    }
+}
+
 pub struct HttpTransport {
     base: BaseUrl,
     base_location: String,
-    conn: Option<BufReader<TcpStream>>,
+    tls: Option<Tls>,
+    conn: Option<BufReader<Stream>>,
 }
 
 impl HttpTransport {
     pub fn new(base_url: &str) -> Result<Self, TransportError> {
+        Self::with_ca_certs(base_url, &[])
+    }
+
+    pub fn with_ca_certs(base_url: &str, ca_files: &[PathBuf]) -> Result<Self, TransportError> {
         let base = BaseUrl::parse(base_url)?;
+        if !base.tls && !ca_files.is_empty() {
+            return Err(TransportError::CaCertWithoutTls(base_url.to_string()));
+        }
+        let tls = if base.tls {
+            Some(Tls::new(&base.host, ca_files)?)
+        } else {
+            None
+        };
         Ok(Self {
             base,
             base_location: base_url.trim_end_matches('/').to_string(),
+            tls,
             conn: None,
         })
     }
@@ -106,12 +176,16 @@ impl HttpTransport {
         &self.base_location
     }
 
-    fn connect(&self) -> Result<BufReader<TcpStream>, TransportError> {
+    fn connect(&self) -> Result<BufReader<Stream>, TransportError> {
         let s = TcpStream::connect(self.base.socket_addr())?;
         s.set_read_timeout(Some(TIMEOUT))?;
         s.set_write_timeout(Some(TIMEOUT))?;
         s.set_nodelay(true)?;
-        Ok(BufReader::new(s))
+        let stream = match &self.tls {
+            None => Stream::Plain(s),
+            Some(tls) => Stream::Tls(Box::new(tls.connect(s)?)),
+        };
+        Ok(BufReader::new(stream))
     }
 
     pub fn exchange(
@@ -131,6 +205,25 @@ impl HttpTransport {
             }
             Err(e) => Err(e),
         }
+    }
+
+    pub fn exchange_once(
+        &mut self,
+        method: &str,
+        path: &str,
+        headers: &[(String, String)],
+        body: &[u8],
+    ) -> Result<Response, TransportError> {
+        let req = self.request_bytes(method, path, headers, body);
+        self.conn = None;
+        let mut conn = self.connect()?;
+        conn.get_ref().tcp().set_read_timeout(Some(ONCE_TIMEOUT))?;
+        conn.get_mut().write_all(&req)?;
+        conn.get_mut().flush()?;
+        let resp = read_response(&mut conn)?;
+        conn.get_ref().tcp().set_read_timeout(Some(TIMEOUT))?;
+        self.conn = Some(conn);
+        Ok(resp)
     }
 
     fn request_bytes(
@@ -162,9 +255,20 @@ impl HttpTransport {
             .conn
             .as_mut()
             .ok_or_else(|| TransportError::Malformed("no connection after connect".to_string()))?;
-        conn.get_mut().write_all(req)?;
-        conn.get_mut().flush()?;
-        read_response(conn)
+        let result = conn
+            .get_mut()
+            .write_all(req)
+            .and_then(|()| conn.get_mut().flush())
+            .map_err(TransportError::Io)
+            .and_then(|()| read_response(conn));
+        let result = match result {
+            Err(TransportError::Io(e)) => Err(tls::classify(e, &self.base.host)),
+            other => other,
+        };
+        if let Err(TransportError::Tls(_)) = result {
+            self.conn = None;
+        }
+        result
     }
 }
 

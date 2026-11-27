@@ -1,0 +1,8 @@
+exit 2
+--- stdout
+--- stderr
+error: the argument '--post' cannot be used with '--unpost'
+
+Usage: yellowcode remote write --ref <ССЫЛКА> --post <URL>
+
+For more information, try '--help'.

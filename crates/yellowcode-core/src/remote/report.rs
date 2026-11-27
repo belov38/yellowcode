@@ -1,4 +1,7 @@
+use std::collections::{HashMap, HashSet};
+
 use onec_client::auth::printable;
+use onec_client::dcs::{DcsForm, DetailsItem, SettingKind, UserSetting, Variant};
 use onec_client::formdescr::platform_type;
 use onec_client::spreadsheet::Cell;
 use onec_client::{FormAttribute, ReportSheet, ReportView, Sheet, Step};
@@ -120,6 +123,9 @@ fn text_lines(view: &ReportView, sheets: &[&ReportSheet]) -> Vec<String> {
             printable(&type_text(a))
         ));
     }
+    if let Some(d) = &view.dcs {
+        l.extend(settings_lines(&d.form));
+    }
     for s in sheets {
         l.push(format!(
             "[spreadsheet] {}: {} rows, {} columns{}",
@@ -136,7 +142,159 @@ fn text_lines(view: &ReportView, sheets: &[&ReportSheet]) -> Vec<String> {
             l.push(text_row(row));
         }
     }
+    if let Some(d) = view.dcs.as_ref().filter(|d| !d.details.is_empty()) {
+        l.push(format!("[details] {} items", d.details.len()));
+        let by_id: HashMap<u32, &DetailsItem> = d.details.iter().map(|i| (i.id, i)).collect();
+        for s in sheets {
+            for c in &s.sheet.cells {
+                if let Some(id) = c.details_id {
+                    l.push(details_line(c, id, &by_id));
+                }
+            }
+        }
+    }
     l
+}
+
+fn variant_text(v: &Variant) -> String {
+    if v.key == v.presentation {
+        printable(&v.key)
+    } else {
+        format!("{} ({})", printable(&v.key), printable(&v.presentation))
+    }
+}
+
+fn settings_lines(f: &DcsForm) -> Vec<String> {
+    let mut l = vec![format!(
+        "variant: {}",
+        f.variant.as_ref().map_or_else(|| "-".into(), variant_text)
+    )];
+    if !f.variants.is_empty() {
+        l.push(format!(
+            "variants: {}",
+            f.variants
+                .iter()
+                .map(|v| {
+                    let mark = if f.variant.as_ref().is_some_and(|c| c.key == v.key) {
+                        "*"
+                    } else {
+                        ""
+                    };
+                    format!("{}{mark}", variant_text(v))
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    for s in &f.settings {
+        l.push(format!("setting: {}", setting_text(s)));
+    }
+    l
+}
+
+fn setting_text(s: &UserSetting) -> String {
+    let name = match &s.title {
+        Some(t) if t != s.name() => format!("{} ({})", printable(s.name()), printable(t)),
+        _ => printable(s.name()),
+    };
+    let kind = match &s.kind {
+        SettingKind::Parameter { .. } => "parameter".to_string(),
+        SettingKind::Filter { comparison, .. } => format!("filter {}", printable(comparison)),
+        SettingKind::Other(t) => return format!("{name}: {} (not changed here)", printable(t)),
+    };
+    let used = if s.used { "used" } else { "not used" };
+    match &s.value {
+        Some(v) => format!(
+            "{name}: {kind}, {used}, {}{}",
+            one_line(&v.text),
+            v.type_name
+                .as_ref()
+                .map_or_else(String::new, |t| format!(" [{}]", printable(t)))
+        ),
+        None => format!("{name}: {kind}, {used}"),
+    }
+}
+
+fn details_line(c: &Cell, id: u32, items: &HashMap<u32, &DetailsItem>) -> String {
+    let mut parts = Vec::new();
+    let mut action = None;
+    let mut next = Some(id);
+    let mut seen = HashSet::new();
+    while let Some(i) = next {
+        if !seen.insert(i) {
+            break;
+        }
+        let Some(item) = items.get(&i) else {
+            break;
+        };
+        if action.is_none() {
+            action = item.main_action.clone();
+        }
+        for v in &item.values {
+            let part = match &v.text {
+                Some(t) => format!(
+                    "{}={}{}",
+                    printable(&v.field),
+                    one_line(t),
+                    v.type_name
+                        .as_ref()
+                        .map_or_else(String::new, |t| format!(" [{}]", printable(t)))
+                ),
+                None => printable(&v.field),
+            };
+            if !parts.contains(&part) {
+                parts.push(part);
+            }
+        }
+        next = item.parent;
+    }
+    format!(
+        "details: R{}C{} #{id}: {}{}",
+        c.row + 1,
+        c.column + 1,
+        if parts.is_empty() {
+            "-".to_string()
+        } else {
+            parts.join("; ")
+        },
+        action.map_or_else(String::new, |a| format!(" ({})", printable(&a)))
+    )
+}
+
+fn dcs_json(f: &DcsForm, details: &[DetailsItem]) -> Json {
+    let variant = |v: &Variant| json!({"key": v.key, "presentation": v.presentation});
+    json!({
+        "variant": f.variant.as_ref().map(variant),
+        "variants": f.variants.iter().map(variant).collect::<Vec<_>>(),
+        "settings": f.settings.iter().map(|s| {
+            let (kind, comparison) = match &s.kind {
+                SettingKind::Parameter { .. } => ("parameter".to_string(), None),
+                SettingKind::Filter { comparison, .. } => ("filter".to_string(), Some(comparison.clone())),
+                SettingKind::Other(t) => (t.clone(), None),
+            };
+            json!({
+                "id": s.id,
+                "kind": kind,
+                "name": s.name(),
+                "title": s.title,
+                "used": s.used,
+                "comparison": comparison,
+                "value": s.value.as_ref().map(|v| json!({"type": v.type_name, "text": v.text})),
+            })
+        }).collect::<Vec<_>>(),
+        "parameters": f.parameters.iter().map(|p| json!({
+            "name": p.name, "title": p.title, "types": p.types, "visible": p.visible,
+        })).collect::<Vec<_>>(),
+        "fields": f.fields.iter().filter(|p| !p.folder).map(|p| json!({
+            "name": p.name, "title": p.title, "types": p.types,
+        })).collect::<Vec<_>>(),
+        "details": details.iter().map(|d| json!({
+            "id": d.id,
+            "parent": d.parent,
+            "values": d.values.iter().map(|v| json!({"field": v.field, "type": v.type_name, "text": v.text})).collect::<Vec<_>>(),
+            "main_action": d.main_action,
+        })).collect::<Vec<_>>(),
+    })
 }
 
 fn one_line(s: &str) -> String {
@@ -192,6 +350,14 @@ fn csv_field(s: &str) -> String {
 }
 
 fn report_json(view: &ReportView, sheets: &[&ReportSheet], steps: &[Step]) -> Json {
+    let mut j = report_json_of(view, sheets, steps);
+    if let (Some(d), Some(o)) = (&view.dcs, j.as_object_mut()) {
+        o.insert("dcs".into(), dcs_json(&d.form, &d.details));
+    }
+    j
+}
+
+fn report_json_of(view: &ReportView, sheets: &[&ReportSheet], steps: &[Step]) -> Json {
     json!({
         "form": {"id": view.form.id, "names": view.form.names},
         "attributes": view.attributes.iter().map(|a| json!({
@@ -213,6 +379,7 @@ fn report_json(view: &ReportView, sheets: &[&ReportSheet], steps: &[Step]) -> Js
                 "column": c.column,
                 "text": c.text,
                 "details": c.details.as_ref().map(|d| json!({"type": d.type_name, "text": d.text})),
+                "details_id": c.details_id,
             })).collect::<Vec<_>>(),
             "merges": s.sheet.merges.iter().map(|m| json!({
                 "row": m.row, "column": m.column, "columns": m.columns, "rows": m.rows,

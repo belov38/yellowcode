@@ -58,6 +58,7 @@ pub struct Cell {
     pub column: u32,
     pub text: String,
     pub details: Option<Details>,
+    pub details_id: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -212,7 +213,13 @@ pub fn read_changes(
             rows: child(m, "h").map_or(Ok(0), |n| number(n, "merge h"))?,
         });
     }
-    if !full {
+    let inline = items.iter().any(|item| {
+        child(*item, "row").is_some_and(|row| {
+            row.children()
+                .any(|n| n.is_element() && n.tag_name().name() == "c")
+        })
+    });
+    if !full && !inline {
         let key = key.ok_or(SheetError::Missing("distributedKey"))?;
         return Ok(SheetChanges::WithoutContent { key, sheet });
     }
@@ -225,12 +232,13 @@ pub fn read_changes(
         let n = cells.len().saturating_mul((to - from + 1) as usize);
         count.add(n, limits)?;
         for r in from..=to {
-            for (column, text, details) in &cells {
+            for (column, text, details, details_id) in &cells {
                 sheet.cells.push(Cell {
                     row: r,
                     column: *column,
                     text: text.clone(),
                     details: details.clone(),
+                    details_id: *details_id,
                 });
             }
         }
@@ -284,19 +292,20 @@ pub fn read_row_contents(
     for (r, row) in rows.iter().zip(got) {
         let cells = row_cells(row, false, limits)?;
         count.add(cells.len(), limits)?;
-        for (column, text, details) in cells {
+        for (column, text, details, details_id) in cells {
             sheet.cells.push(Cell {
                 row: *r,
                 column,
                 text,
                 details,
+                details_id,
             });
         }
     }
     Ok(())
 }
 
-type RowCell = (u32, String, Option<Details>);
+type RowCell = (u32, String, Option<Details>, Option<u32>);
 
 fn row_cells(row: Node, full: bool, limits: SheetLimits) -> Result<Vec<RowCell>, SheetError> {
     let mut out = Vec::new();
@@ -324,8 +333,18 @@ fn row_cells(row: Node, full: bool, limits: SheetLimits) -> Result<Vec<RowCell>,
             .map(|t| t.text().unwrap_or("").to_string())
             .or_else(|| child_any(cell, "tl").map(local_text));
         let details = child_any(cell, "d").map(details_of);
-        if text.as_deref().is_some_and(|t| !t.is_empty()) || details.is_some() {
-            out.push((column, text.unwrap_or_default(), details));
+        let details_id = if full {
+            child_any(cell, "r")
+                .map(|r| number(r, "cell r"))
+                .transpose()?
+        } else {
+            None
+        };
+        if text.as_deref().is_some_and(|t| !t.is_empty())
+            || details.is_some()
+            || details_id.is_some()
+        {
+            out.push((column, text.unwrap_or_default(), details, details_id));
         }
         column = column.checked_add(1).ok_or(SheetError::Bad {
             field: "cell i",

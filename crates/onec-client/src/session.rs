@@ -4,6 +4,7 @@ use crate::answer::{NS_APP, read};
 use crate::auth::{AuthSettings, AuthSettingsError};
 use crate::body::{self, ACCEPT_ENCODING};
 use crate::cred;
+use crate::dcs;
 use crate::enums::{self, EnumPresentations, EnumType};
 use crate::formdescr::{FormData, FormKind};
 use crate::info::{Answers, InfoError, ServerInfo};
@@ -12,8 +13,9 @@ use crate::modules::{self, HttpCache, ModuleDefs, ModuleId, ModuleSource, Module
 use crate::refs::{self, Presentations};
 use crate::report::{self, FormAttribute, OpenedForm, ReportError};
 use crate::spreadsheet::{self, CellCount, Sheet, SheetChanges, SheetLimits};
-use crate::transport::{HttpTransport, Response, TransportError};
+use crate::transport::{Response, TransportError};
 use crate::value::{EnumRef, Ref, Uuid, Value};
+use crate::wire::Wire;
 use crate::xml::{self, LoginInfo, XmlError};
 
 pub const VERSION: &str = "8.5.1.1529";
@@ -41,6 +43,8 @@ pub enum SessionError {
     #[error(transparent)]
     Transport(#[from] TransportError),
     #[error(transparent)]
+    Native(#[from] crate::native::NativeError),
+    #[error(transparent)]
     Body(#[from] body::BodyError),
     #[error(transparent)]
     Xml(#[from] XmlError),
@@ -54,6 +58,8 @@ pub enum SessionError {
     AuthSettings(#[from] AuthSettingsError),
     #[error(transparent)]
     Report(#[from] ReportError),
+    #[error(transparent)]
+    Dcs(#[from] crate::dcs::DcsError),
     #[error("random source failed: {0}")]
     Random(String),
     #[error("{step}: HTTP {status} {message}")]
@@ -134,6 +140,21 @@ pub struct ReportOptions<'a> {
     pub form: &'a str,
     pub call: Option<(&'a str, &'a [Value])>,
     pub limits: SheetLimits,
+    pub dcs: Option<DcsOptions<'a>>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DcsOptions<'a> {
+    pub variant: Option<&'a str>,
+    pub changes: &'a [crate::dcs::Change],
+    pub generate: bool,
+    pub details: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct DcsView {
+    pub form: crate::dcs::DcsForm,
+    pub details: Vec<crate::dcs::DetailsItem>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -148,12 +169,16 @@ pub struct ReportView {
     pub form: OpenedForm,
     pub attributes: Vec<FormAttribute>,
     pub sheets: Vec<ReportSheet>,
+    pub dcs: Option<DcsView>,
 }
 
+type ReportParts = (Vec<FormAttribute>, Vec<ReportSheet>, Option<DcsView>);
+
 const ROWS_PER_REQUEST: usize = 1000;
+const DETAILS_PER_REQUEST: u32 = 1000;
 
 pub struct Session<R: RandomSource = OsRandom> {
-    tr: HttpTransport,
+    tr: Box<dyn Wire>,
     rng: R,
     vrs: Option<String>,
     sync: u32,
@@ -175,15 +200,15 @@ pub(crate) struct Prologue {
 }
 
 impl Session<OsRandom> {
-    pub fn new(tr: HttpTransport) -> Self {
+    pub fn new(tr: impl Wire + 'static) -> Self {
         Self::with_rng(tr, OsRandom)
     }
 }
 
 impl<R: RandomSource> Session<R> {
-    pub fn with_rng(tr: HttpTransport, rng: R) -> Self {
+    pub fn with_rng(tr: impl Wire + 'static, rng: R) -> Self {
         Self {
-            tr,
+            tr: Box::new(tr),
             rng,
             vrs: None,
             sync: 0,
@@ -200,6 +225,7 @@ impl<R: RandomSource> Session<R> {
     pub fn set_version(&mut self, build: &str) {
         self.version = build.to_string();
         self.auto_version = false;
+        self.tr.set_version(build);
     }
 
     pub fn version(&self) -> &str {
@@ -281,7 +307,7 @@ impl<R: RandomSource> Session<R> {
                     status: 0,
                     ok: false,
                 });
-                return Err(e.into());
+                return Err(e);
             }
         };
         let ok = accept.contains(&resp.status);
@@ -289,6 +315,34 @@ impl<R: RandomSource> Session<R> {
             name,
             status: resp.status,
             ok,
+        });
+        Ok(resp)
+    }
+
+    pub(crate) fn step_once(
+        &mut self,
+        name: &'static str,
+        method: &str,
+        path: &str,
+        headers: &[(String, String)],
+        body: &[u8],
+        accept: &[u16],
+    ) -> Result<Response, SessionError> {
+        let resp = match self.tr.exchange_once(method, path, headers, body) {
+            Ok(r) => r,
+            Err(e) => {
+                self.steps.push(Step {
+                    name,
+                    status: 0,
+                    ok: false,
+                });
+                return Err(e);
+            }
+        };
+        self.steps.push(Step {
+            name,
+            status: resp.status,
+            ok: accept.contains(&resp.status),
         });
         Ok(resp)
     }
@@ -425,6 +479,7 @@ impl<R: RandomSource> Session<R> {
             && let Some(build) = server_build(&resp).filter(|b| *b != self.version)
         {
             self.version = build;
+            self.tr.set_version(&self.version);
             let q = with_version(query, &self.version);
             let (h, b) = request(self)?;
             let resp = self.step(name, "POST", &format!("/e1cib/login?{q}"), &h, &b, &[200])?;
@@ -1105,7 +1160,54 @@ impl<R: RandomSource> Session<R> {
             .as_ref()
             .and_then(|i| i.roles_id.clone())
             .unwrap_or_else(|| "0".to_string());
-        let body = body::zstd_compress(&report::query_request(opts.form));
+        let (mut form, mut body) = self.open_report_form(opts.form, &[])?;
+        if let Some(name) = opts.dcs.and_then(|d| d.variant) {
+            let wanted = dcs::read_variants(&body).and_then(|(current, list)| {
+                let v = dcs::find_variant(&list, name)?;
+                Ok((current.is_some_and(|c| c.key == v.key), v.key.clone()))
+            });
+            let key = match wanted {
+                Ok((true, _)) => None,
+                Ok((false, key)) => Some(key),
+                Err(e) => {
+                    let _ = self.close_form(&form.fid);
+                    return Err(e.into());
+                }
+            };
+            if let Some(key) = key {
+                self.close_form(&form.fid)?;
+                (form, body) = self.open_report_form(opts.form, &[(dcs::VARIANT_PARAM, &key)])?;
+                let opened = dcs::read_variants(&body).and_then(|(current, _)| match current {
+                    Some(c) if c.key == key => Ok(()),
+                    c => Err(dcs::DcsError::VariantNotOpened {
+                        asked: key.clone(),
+                        got: c.map(|c| c.key).unwrap_or_default(),
+                    }),
+                });
+                if let Err(e) = opened {
+                    let _ = self.close_form(&form.fid);
+                    return Err(e.into());
+                }
+            }
+        }
+        let outcome = self.report_of(&form, &body, &pro.conf, &roles, opts);
+        let closed = self.close_form(&form.fid);
+        let (attributes, sheets, dcs) = outcome?;
+        closed?;
+        Ok(ReportView {
+            form,
+            attributes,
+            sheets,
+            dcs,
+        })
+    }
+
+    fn open_report_form(
+        &mut self,
+        key: &str,
+        params: &[(&str, &str)],
+    ) -> Result<(OpenedForm, Vec<u8>), SessionError> {
+        let body = body::zstd_compress(&report::query_request_with(key, params));
         let h = self.headers("application/xml", true, true);
         let resp = self.step(
             "logForm/query",
@@ -1116,33 +1218,25 @@ impl<R: RandomSource> Session<R> {
             &[200],
         )?;
         let body = Self::decoded(&resp)?;
-        let form = match report::read_opened(&body) {
-            Ok(f) => f,
+        match report::read_opened(&body) {
+            Ok(f) => Ok((f, body)),
             Err(e) => {
                 if let Some(fid) = report::fid_of(&body) {
                     let _ = self.close_form(&fid);
                 }
-                return Err(e.into());
+                Err(e.into())
             }
-        };
-        let outcome = self.report_of(&form, &pro.conf, &roles, opts);
-        let closed = self.close_form(&form.fid);
-        let (attributes, sheets) = outcome?;
-        closed?;
-        Ok(ReportView {
-            form,
-            attributes,
-            sheets,
-        })
+        }
     }
 
     fn report_of(
         &mut self,
         form: &OpenedForm,
+        query: &[u8],
         conf: &str,
         roles: &str,
         opts: ReportOptions,
-    ) -> Result<(Vec<FormAttribute>, Vec<ReportSheet>), SessionError> {
+    ) -> Result<ReportParts, SessionError> {
         let sysver = self.version.clone();
         let h = self.headers("application/xml", false, false);
         let resp = self.step(
@@ -1156,9 +1250,38 @@ impl<R: RandomSource> Session<R> {
             &[],
             &[200],
         )?;
-        let attributes = report::read_attributes(&Self::decoded(&resp)?)?;
+        let descr = Self::decoded(&resp)?;
+        let attributes = report::read_attributes(&descr)?;
+        if let Some(d) = opts.dcs {
+            let dcs_form = match dcs::read_form(query, &descr, &attributes) {
+                Ok(f) => f,
+                Err(dcs::DcsError::NoComposer) if !d.generate => {
+                    return Ok((attributes, Vec::new(), None));
+                }
+                Err(e) => return Err(e.into()),
+            };
+            if !d.generate {
+                return Ok((
+                    attributes,
+                    Vec::new(),
+                    Some(DcsView {
+                        form: dcs_form,
+                        details: Vec::new(),
+                    }),
+                ));
+            }
+            let (sheets, details) = self.compose(form, &dcs_form, d, opts.limits)?;
+            return Ok((
+                attributes,
+                sheets,
+                Some(DcsView {
+                    form: dcs_form,
+                    details,
+                }),
+            ));
+        }
         let Some((procedure, params)) = opts.call else {
-            return Ok((attributes, Vec::new()));
+            return Ok((attributes, Vec::new(), None));
         };
         let body = body::zstd_compress(&report::call_request(form, procedure, params)?);
         let h = self.headers("application/xml", true, true);
@@ -1170,8 +1293,102 @@ impl<R: RandomSource> Session<R> {
             &body,
             &[200],
         )?;
+        let sheets = self.sheets_of(&Self::decoded(&resp)?, opts.limits)?;
+        Ok((attributes, sheets, None))
+    }
+
+    fn compose(
+        &mut self,
+        form: &OpenedForm,
+        dcs_form: &dcs::DcsForm,
+        opts: DcsOptions,
+        limits: SheetLimits,
+    ) -> Result<(Vec<ReportSheet>, Vec<dcs::DetailsItem>), SessionError> {
+        let types = if opts.changes.is_empty() {
+            dcs::RefTypes::default()
+        } else {
+            dcs::RefTypes::new(&self.session_types("the values of the report settings")?)
+        };
+        let mut edits = dcs::resolve(dcs_form, opts.changes, &types)?;
+        let mut failure = None;
+        dcs::settle_searches(&mut edits, dcs_form, |clsid, text| {
+            let body = body::zstd_compress(&dcs::search_request(clsid, text));
+            let h = self.headers("application/xml", true, true);
+            let resp = self.step(
+                "logForm/querySearchResult",
+                "POST",
+                "/e1cib/logForm?cmd=querySearchResult",
+                &h,
+                &body,
+                &[200],
+            );
+            match resp.and_then(|r| Self::decoded(&r)) {
+                Ok(b) => dcs::read_search(&b),
+                Err(e) => {
+                    failure = Some(e);
+                    Ok(Vec::new())
+                }
+            }
+        })
+        .map_err(|e| failure.take().unwrap_or(SessionError::Dcs(e)))?;
+        let pchs = dcs_form.compose_pchs(&edits)?;
+        let body = body::zstd_compress(&report::call_request_with(
+            form,
+            dcs::COMPOSE_RESULT,
+            &dcs::compose_params(),
+            &pchs,
+        )?);
+        let h = self.headers("application/xml", true, true);
+        let resp = self.step(
+            "logForm/call",
+            "POST",
+            "/e1cib/logForm?cmd=call",
+            &h,
+            &body,
+            &[200],
+        )?;
+        let answer = Self::decoded(&resp)?;
+        let sheets = self.sheets_of(&answer, limits)?;
+        if sheets.is_empty() {
+            return Err(dcs::DcsError::NoDocument.into());
+        }
+        let mut details = std::collections::BTreeMap::new();
+        let ids: Vec<u32> = sheets
+            .iter()
+            .flat_map(|s| s.sheet.cells.iter().filter_map(|c| c.details_id))
+            .collect();
+        if let (true, Some(address)) = (
+            opts.details && !ids.is_empty(),
+            dcs::details_address(&answer)?,
+        ) {
+            for (from, to) in dcs::details_intervals(ids, DETAILS_PER_REQUEST) {
+                let body = body::zstd_compress(&dcs::details_request(&address, from, to));
+                let h = self.headers("application/xml", true, true);
+                let resp = self.step(
+                    "dcs/loadDetailsPart",
+                    "POST",
+                    "/e1cib/dcs?cmd=loadDetailsPart",
+                    &h,
+                    &body,
+                    &[200],
+                )?;
+                for item in dcs::read_details(&Self::decoded(&resp)?)? {
+                    details.entry(item.id).or_insert(item);
+                }
+                dcs::details_bound(details.len(), limits.cells)?;
+            }
+        }
+        let details = details.into_values().collect();
+        Ok((sheets, details))
+    }
+
+    fn sheets_of(
+        &mut self,
+        answer: &[u8],
+        limits: SheetLimits,
+    ) -> Result<Vec<ReportSheet>, SessionError> {
         let mut count = CellCount::default();
-        let changed = report::read_call(&Self::decoded(&resp)?, opts.limits, &mut count)?;
+        let changed = report::read_call(answer, limits, &mut count)?;
         let mut sheets = Vec::with_capacity(changed.len());
         for c in changed {
             let (sheet, rows_asked) = match c.changes {
@@ -1194,12 +1411,12 @@ impl<R: RandomSource> Session<R> {
                             &Self::decoded(&resp)?,
                             batch,
                             &mut sheet,
-                            opts.limits,
+                            limits,
                             &mut count,
                         )
                         .map_err(ReportError::from)?;
                     }
-                    sheet.settle(opts.limits).map_err(ReportError::from)?;
+                    sheet.settle(limits).map_err(ReportError::from)?;
                     (sheet, true)
                 }
             };
@@ -1209,7 +1426,7 @@ impl<R: RandomSource> Session<R> {
                 rows_asked,
             });
         }
-        Ok((attributes, sheets))
+        Ok(sheets)
     }
 
     pub fn logout(&mut self) -> Result<(), SessionError> {

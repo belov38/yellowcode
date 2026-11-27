@@ -2,8 +2,8 @@ exit 2
 --- stdout
 --- stderr
 error: the following required arguments were not provided:
-  --call <ПРОЦЕДУРА>
+  <--call <ПРОЦЕДУРА>|--generate|--set <ПАРАМЕТР=ЗНАЧЕНИЕ>|--filter <ПОЛЕ ОП ЗНАЧЕНИЕ>|--off <НАСТРОЙКА>|--details>
 
-Usage: yellowcode remote report --form <ИМЯ_ФОРМЫ> --call <ПРОЦЕДУРА> --attribute <РЕКВИЗИТ> <URL>
+Usage: yellowcode remote report --attribute <РЕКВИЗИТ> <--form <ИМЯ_ФОРМЫ>|--report <ОТЧЕТ>> <--call <ПРОЦЕДУРА>|--generate|--set <ПАРАМЕТР=ЗНАЧЕНИЕ>|--filter <ПОЛЕ ОП ЗНАЧЕНИЕ>|--off <НАСТРОЙКА>|--details> <URL>
 
 For more information, try '--help'.

@@ -80,8 +80,24 @@ pub struct ChangedSheet {
 }
 
 pub fn query_request(key: &str) -> Vec<u8> {
+    query_request_with(key, &[])
+}
+
+pub fn query_request_with(key: &str, params: &[(&str, &str)]) -> Vec<u8> {
+    let mut prms = String::new();
+    if !params.is_empty() {
+        prms.push_str("<prms>");
+        for (name, value) in params {
+            prms.push_str(&format!(
+                "<prm><name>{}</name><val xsi:type=\"xs:string\">{}</val></prm>",
+                xml::escape_text(name),
+                xml::escape_text(value)
+            ));
+        }
+        prms.push_str("</prms>");
+    }
     format!(
-        "\u{feff}<?xml version=\"1.0\" encoding=\"UTF-8\"?><request {}><key>{}</key><mw>0</mw><mh>0</mh>\
+        "\u{feff}<?xml version=\"1.0\" encoding=\"UTF-8\"?><request {}><key>{}</key>{prms}<mw>0</mw><mh>0</mh>\
          <pres>false</pres><trdata>false</trdata></request>",
         namespaces(&[]),
         xml::escape_text(key)
@@ -184,6 +200,17 @@ pub fn call_request(
     procedure: &str,
     params: &[Value],
 ) -> Result<Vec<u8>, ReportError> {
+    call_request_with(form, procedure, params, EMPTY_PCHS)
+}
+
+pub const EMPTY_PCHS: &str = "<pchs sinDesc=\"0\" sin=\"0\" seq=\"0\"/>";
+
+pub fn call_request_with(
+    form: &OpenedForm,
+    procedure: &str,
+    params: &[Value],
+    pchs: &str,
+) -> Result<Vec<u8>, ReportError> {
     if let Some((p, uri)) = form
         .namespaces
         .iter()
@@ -213,7 +240,7 @@ pub fn call_request(
         xml::escape_attr(procedure),
         xml::params_xml(params)?
     ));
-    r.push_str("<pchs sinDesc=\"0\" sin=\"0\" seq=\"0\"/>");
+    r.push_str(pchs);
     r.push_str(form.prms.as_deref().unwrap_or(""));
     r.push_str(form.dd.as_deref().unwrap_or(""));
     r.push_str("</request>");

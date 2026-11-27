@@ -8,24 +8,29 @@ mod modules;
 mod object;
 mod report;
 mod values;
+mod write;
 
 pub use object::{ObjectRef, ObjectRequest};
+pub use onec_client::WriteMode;
 pub use report::ReportFormat;
+pub use write::{Edit, WriteCommand, WriteTarget};
 
 pub use onec_client::Uuid;
 use onec_client::auth::printable;
 pub use onec_client::session::is_build;
 use onec_client::session::{Session, client_nm, login_query, new_cln_id};
 use onec_client::{
-    Array, CallResult, Credentials, Date, Decimal, EnumPresentation, EnumPresentations, EnumRef,
-    HttpTransport, InfoOptions, Map, MetadataOptions, ModuleId, Presentation, Presentations,
-    ReportOptions, SessionError, Structure, Value,
+    Array, CallResult, Credentials, Date, DcsOptions, Decimal, EnumPresentation, EnumPresentations,
+    EnumRef, HttpTransport, InfoOptions, Map, MetadataOptions, ModuleId, NativeOptions,
+    NativeTarget, NativeTransport, Presentation, Presentations, ReportOptions, SessionError,
+    Structure, Value, Wire,
 };
 
 use crate::Result;
 use crate::output::Out;
 
 pub use list::{DEFAULT_LIMIT, DEFAULT_PAGE_SIZE, ListRequest};
+pub use onec_client::dcs::Change as DcsChange;
 pub use onec_client::dlist::{Filter, ListError, Order};
 
 #[derive(Clone, PartialEq, Eq)]
@@ -51,7 +56,9 @@ pub struct Login {
     pub user: Option<String>,
     pub password: Password,
     pub strong: bool,
+    pub ca_certs: Vec<PathBuf>,
     pub server_version: Option<String>,
+    pub worker: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -122,6 +129,15 @@ pub struct ReportRequest {
     pub params: Vec<Param>,
     pub attribute: Option<String>,
     pub format: ReportFormat,
+    pub dcs: Option<DcsRequest>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct DcsRequest {
+    pub variant: Option<String>,
+    pub changes: Vec<DcsChange>,
+    pub generate: bool,
+    pub details: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -133,6 +149,7 @@ pub enum Request {
     Object(ObjectRequest),
     List(ListRequest),
     Report(ReportRequest),
+    Write(WriteCommand),
 }
 
 pub fn run(
@@ -149,6 +166,7 @@ pub fn run(
         Request::Object(r) => object::run(r, out, err, input),
         Request::List(r) => list::run(r, out, err, input),
         Request::Report(r) => run_report(r, out, err, input),
+        Request::Write(r) => write::run(r, out, err, input),
     }
 }
 
@@ -160,7 +178,7 @@ fn run_report(
 ) -> Result<i32> {
     let (session, login) = open_session(&r.login, input)?;
     let params: Vec<Value> = r.params.into_iter().map(|Param(v)| v).collect();
-    let (form, call, attribute, format) = (r.form, r.call, r.attribute, r.format);
+    let (form, call, attribute, format, dcs) = (r.form, r.call, r.attribute, r.format, r.dcs);
     let (session, outcome) = on_value_stack(move || {
         let mut session = session;
         let outcome = login.and_then(|()| {
@@ -168,6 +186,12 @@ fn run_report(
                 form: &form,
                 call: call.as_deref().map(|c| (c, params.as_slice())),
                 limits: onec_client::spreadsheet::DEFAULT_LIMITS,
+                dcs: dcs.as_ref().map(|d| DcsOptions {
+                    variant: d.variant.as_deref(),
+                    changes: &d.changes,
+                    generate: d.generate,
+                    details: d.details && format != ReportFormat::Csv,
+                }),
             })
         });
         let _ = session.logout();
@@ -295,7 +319,7 @@ fn run_info(
     input: &mut dyn BufRead,
 ) -> Result<i32> {
     if r.auth_settings_only {
-        return auth_settings_only_report(&r.login.url, r.json, out);
+        return auth_settings_only_report(&r.login, r.json, out);
     }
     let (mut session, login) = open_session(&r.login, input)?;
     let opts = InfoOptions {
@@ -396,8 +420,8 @@ fn info_report(
     ))
 }
 
-fn auth_settings_only_report(url: &str, json: bool, out: &mut Out) -> Result<i32> {
-    let mut session = Session::new(HttpTransport::new(url)?);
+fn auth_settings_only_report(login: &Login, json: bool, out: &mut Out) -> Result<i32> {
+    let mut session = Session::new(transport(login)?);
     match session.auth_settings() {
         Ok(a) if json => {
             let j = serde_json::json!({
@@ -440,12 +464,51 @@ fn users_hint(user: &Option<String>, e: &SessionError, out: &mut Out) -> Result<
     Ok(())
 }
 
+fn transport(login: &Login) -> Result<Box<dyn Wire>> {
+    if NativeTarget::is_native(&login.url) {
+        if !login.ca_certs.is_empty() {
+            return Err("--ca-cert is for https:// addresses, not for /S".into());
+        }
+        let target = NativeTarget::parse(&login.url)?;
+        return Ok(Box::new(NativeTransport::new(
+            target,
+            native_options(login)?,
+        )));
+    }
+    if login.worker.is_some() {
+        return Err("--worker is for /S addresses (Srvr=… or tcp://…)".into());
+    }
+    Ok(Box::new(HttpTransport::with_ca_certs(
+        &login.url,
+        &login.ca_certs,
+    )?))
+}
+
+fn native_options(login: &Login) -> Result<NativeOptions> {
+    let worker = match &login.worker {
+        Some(w) => Some(
+            onec_client::native::transport::split_host_port(w)
+                .ok_or_else(|| format!("bad --worker {w:?}: expected host:port"))?,
+        ),
+        None => None,
+    };
+    let mut opts = NativeOptions {
+        worker,
+        ..NativeOptions::default()
+    };
+    if let Some(build) = &login.server_version {
+        opts.version = build.clone();
+        opts.auto_version = false;
+    }
+    Ok(opts)
+}
+
 fn open_session(
     login: &Login,
     input: &mut dyn BufRead,
 ) -> Result<(Session, std::result::Result<(), SessionError>)> {
     let password = password_of(login, |v| std::env::var(v), input)?;
-    let tr = HttpTransport::new(&login.url)?;
+    let tr = transport(login)?;
     let mut session = Session::new(tr);
     if let Some(build) = &login.server_version {
         session.set_version(build);

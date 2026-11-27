@@ -1,0 +1,6 @@
+exit 2
+--- stdout
+--- stderr
+error: invalid value 'Товары[0].Цена=1' for '--set <ПОЛЕ=ЗНАЧЕНИЕ>': not a row number: "0" in "Товары[0].Цена" (1, 2, … or +1, +2, … for added rows)
+
+For more information, try '--help'.

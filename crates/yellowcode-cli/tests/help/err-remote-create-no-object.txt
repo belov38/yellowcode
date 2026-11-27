@@ -1,0 +1,9 @@
+exit 2
+--- stdout
+--- stderr
+error: the following required arguments were not provided:
+  --object <ОБЪЕКТ>
+
+Usage: yellowcode remote create --object <ОБЪЕКТ> --set <ПОЛЕ=ЗНАЧЕНИЕ> <URL>
+
+For more information, try '--help'.
