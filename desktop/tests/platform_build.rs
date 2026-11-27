@@ -4,10 +4,10 @@ use std::process::Command;
 fn gui_rejects_missing_build_before_initializing_tauri() {
     for args in [
         vec!["--platform-build", "9.9.9.9999"],
-        vec!["open", "--platform-build=9.9.9.9999"],
+        vec!["--platform-build=9.9.9.9999"],
         vec!["missing-ar5t2.cf", "--platform-build", "9.9.9.9999"],
     ] {
-        let out = Command::new(env!("CARGO_BIN_EXE_yellowcode"))
+        let out = Command::new(env!("CARGO_BIN_EXE_yellowcode-desktop"))
             .args(args)
             .env_remove("DISPLAY")
             .env_remove("WAYLAND_DISPLAY")
@@ -26,8 +26,8 @@ fn gui_rejects_missing_build_before_initializing_tauri() {
 #[test]
 fn gui_build_arguments_are_parsed_without_becoming_source_paths() {
     for args in [
-        vec!["--platform-build", "8.5.1.1529", "open", "x.cf"],
-        vec!["open", "x.cf", "--platform-build=8.5.1.1529"],
+        vec!["--platform-build", "8.5.1.1529", "x.cf"],
+        vec!["x.cf", "--platform-build=8.5.1.1529"],
     ] {
         let args: Vec<_> = args.into_iter().map(str::to_string).collect();
         let opts = onec_desktop::parse_args(&args).unwrap();
@@ -40,7 +40,6 @@ fn gui_memory_values_are_not_platform_options() {
     for args in [
         vec!["--memory-limit", "--platform-build"],
         vec![
-            "open",
             "--memory-limit",
             "--platform-build",
             "--platform-build",
@@ -61,13 +60,11 @@ fn gui_memory_and_build_options_preserve_each_other() {
         vec![
             "--platform-build",
             "8.5.1.1529",
-            "open",
             "йё.cf",
             "--memory-limit",
             "1GiB",
         ],
         vec![
-            "open",
             "йё.cf",
             "--memory-limit",
             "1GiB",
@@ -75,7 +72,6 @@ fn gui_memory_and_build_options_preserve_each_other() {
             "8.5.1.1529",
         ],
         vec![
-            "open",
             "йё.cf",
             "--names",
             "--platform-build",

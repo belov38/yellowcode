@@ -5,20 +5,14 @@ Yellowcode: конфигурации и информационные базы 1�
 Usage: yellowcode [OPTIONS] [COMMAND]
 
 Commands:
-  bak       Осмотреть резервную копию MS SQL Server или получить из неё CF, DT, 1CD
-  convert   Преобразовать конфигурацию или выгрузить информационную базу; исходный файл не меняется
-  open      Открыть конфигурацию или информационную базу в установленном приложении
-  query     Выполнить запрос к информационной базе (только чтение)
-  serve     HTTP-сервис запросов и постраничного чтения таблиц (только чтение)
-  table     Прочитать одну страницу таблицы базы, при необходимости по индексу
-  users     Пользователи информационной базы и их карточки (без паролей и других секретов)
-  metadata  Метаданные конфигурации
-  module    Модули: список, текст, процедуры и функции
-  template  Макеты: список, содержимое, запросы схем компоновки данных
-  grep      Поиск в текстах модулей, запросах схем компоновки данных и именах объектов, как grep
-  export    Выгрузить модули и макеты выбранной части конфигурации в каталог
-  remote    Сервер 1С по сети: сводка, метаданные, вызов серверных функций, модули клиента
-  help      Print this message or the help of the given subcommand(s)
+  open     Открыть источник в окне приложения (yellowcode-desktop)
+  config   Конфигурация из CF, DT, 1CD или базы (только чтение): метаданные, модули, макеты, поиск, выгрузка
+  ext      Расширение из файла CFE: свойства, объекты, модули, перехваты; только чтение
+  ib       Данные файловой информационной базы: запросы, таблицы, пользователи, HTTP-сервис
+  convert  Преобразовать файл в другой формат; исходный файл не меняется
+  bak      Резервные копии MS SQL Server: осмотр, получение CF, DT, 1CD
+  remote   Сервер 1С по сети, как тонкий клиент: сводка, метаданные, вызовы, модули, объекты, отчёты, запись, формы, печать
+  help     Print this message or the help of the given subcommand(s)
 
 Options:
       --platform-build <BUILD>  Точная версия эмулируемой платформы (не режим совместимости конфигурации) [default: 8.5.1.1529]
@@ -27,23 +21,62 @@ Options:
   -V, --version                 Print version
 
 Примеры:
+  # Показать справочники и документы конфигурации
+  yellowcode config metadata tree configuration.cf --kind Справочник,Документ --depth 2 --format text
+
+  # Перехваты методов в расширении
+  yellowcode ext intercepts extension.cfe --format text
+
   # Выполнить запрос к файловой базе (каталог с 1Cv8.1CD)
-  yellowcode query base --text "ВЫБРАТЬ ПЕРВЫЕ 10 Наименование ИЗ Справочник.Контрагенты"
+  yellowcode ib query base --text "ВЫБРАТЬ ПЕРВЫЕ 10 Наименование ИЗ Справочник.Контрагенты"
 
   # Прочитать первую страницу таблицы документа
-  yellowcode table base Документ Счет --limit 100
-
-  # Показать справочники и документы конфигурации
-  yellowcode metadata tree configuration.cf --kind Справочник,Документ --depth 2 --format text
+  yellowcode ib table base Документ Счет --limit 100
 
   # Сохранить конфигурацию из DT в CF
   yellowcode convert backup.dt --to cf --output configuration.cf
 
-  # Список пользователей базы
-  yellowcode users list base
+  # Получить CF из резервной копии MS SQL Server
+  yellowcode bak convert base.bak --to cf --output configuration.cf
 
-  # HTTP-сервис запросов на 127.0.0.1:8080
-  yellowcode serve base
+  # Сводка сервера 1С при входе без пользователя
+  yellowcode remote info http://server/base
+
+  # Открыть конфигурацию в окне приложения
+  yellowcode open configuration.cf
+
+Коды выхода: 0 — готово, 1 — ошибка выполнения, 2 — ошибка в аргументах, 3 — у remote create, write, form:
+запрос отправлен, итог неизвестен, 4 — отказ по YELLOWCODE_READONLY (команда меняет данные, ничего не отправлено);
+у yellowcode config grep, как у grep, 1 — нет совпадений, 2 — ошибка.
 
 Справка по команде: yellowcode <команда> --help
+
+Переменные окружения (имя, текущее значение, назначение):
+  YELLOWCODE_READONLY                не задана  — 1 или true: отказ с кодом 4 командам, которые меняют данные
+                                                  (ib users create, edit, delete, clear-password,
+                                                  bak convert --server, remote call, remote create и remote write
+                                                  без --dry-run, remote form --command/--call,
+                                                  remote print --init-call,
+                                                  remote report --call/--init-call/--before/--variant); защита от
+                                                  ошибок, а не граница безопасности: переменную можно снять
+  YELLOWCODE_PROGRESS                не задана  — ход работы в stderr без --progress (config, ext, convert): auto,
+                                                  always или never
+  YELLOWCODE_MEMORY_LIMIT            не задана  — бюджет памяти без --memory-limit: ib query, ib table, ib serve,
+                                                  convert в 1CD, bak convert --to 1cd
+  YELLOWCODE_CACHE_LIMIT             не задана  — предел кэша страниц без --cache-limit (ib query, ib table,
+                                                  ib serve)
+  YELLOWCODE_QUERY_MEMORY_LIMIT      не задана  — предел памяти запроса без --query-memory-limit (ib query,
+                                                  ib table, ib serve)
+  YELLOWCODE_RESULT_MEMORY_LIMIT     не задана  — предел памяти результатов без --result-memory-limit (ib query,
+                                                  ib table, ib serve)
+  YELLOWCODE_RESPONSE_LIMIT          не задана  — предел размера ответа без --response-limit (ib query, ib table,
+                                                  ib serve)
+  YELLOWCODE_CONTAINER_MEMORY_BYTES  не задана  — память контейнера в байтах; ограничивает бюджет памяти auto
+                                                  (ib query, ib table, ib serve, convert в 1CD,
+                                                  bak convert --to 1cd)
+  YELLOWCODE_TRACE                   не задана  — новый файл трассы bak convert --server без --trace
+  YELLOWCODE_PLATFORM_RESOURCES      не задана  — каталог ресурсов платформы для --platform-build, отличной от
+                                                  встроенной (все команды); по умолчанию каталог рядом с yellowcode
+  YELLOWCODE_DESKTOP                 не задана  — исполняемый файл окна для open; по умолчанию yellowcode-desktop
+                                                  рядом с yellowcode
 --- stderr

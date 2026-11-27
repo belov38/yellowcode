@@ -4,6 +4,6 @@ exit 2
 error: the following required arguments were not provided:
   --index <INDEX>
 
-Usage: yellowcode table --index <INDEX> --eq <VALUE> <BASE> <KIND> <NAME>
+Usage: yellowcode ib table --index <INDEX> --eq <VALUE> <BASE> <KIND> <NAME>
 
 For more information, try '--help'.

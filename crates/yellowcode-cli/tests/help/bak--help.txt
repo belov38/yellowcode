@@ -1,6 +1,6 @@
 exit 0
 --- stdout
-Осмотреть резервную копию MS SQL Server или получить из неё CF, DT, 1CD
+Резервные копии MS SQL Server: осмотр, получение CF, DT, 1CD
 
 Usage: yellowcode bak [OPTIONS] <COMMAND>
 

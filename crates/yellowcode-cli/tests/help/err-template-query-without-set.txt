@@ -4,6 +4,6 @@ exit 2
 error: the following required arguments were not provided:
   --set <НАБОР>
 
-Usage: yellowcode template show --query --set <НАБОР> <SOURCE> <TEMPLATE>
+Usage: yellowcode config template show --query --set <НАБОР> <SOURCE> <TEMPLATE>
 
 For more information, try '--help'.

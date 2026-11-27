@@ -112,6 +112,25 @@ impl Lower<'_> {
         } else {
             None
         };
+        let hidden_active = if pos(StdRole::Active).is_none()
+            && self.schema.meta(v.register).is_some_and(|m| m.subordinate)
+        {
+            Some(
+                self.map
+                    .table(main)
+                    .field_by_std(StdField::Active)
+                    .ok_or_else(|| crate::ExecError::Fatal("slice active field".into()))?,
+            )
+        } else {
+            None
+        };
+        let active = match hidden_active {
+            Some(_) => Some(
+                u16::try_from(fields.len())
+                    .map_err(|_| crate::ExecError::Fatal("too many slice fields".into()))?,
+            ),
+            None => pos(StdRole::Active),
+        };
         let dimensions = fields
             .iter()
             .enumerate()
@@ -158,7 +177,7 @@ impl Lower<'_> {
         } else {
             role::TOTALS_SLICE_LAST
         };
-        let totals = if safe {
+        let totals = if safe && hidden_active.is_none() {
             self.map
                 .object(md)
                 .and_then(|o| o.service.iter().find(|(p, _)| p == purpose))
@@ -167,10 +186,10 @@ impl Lower<'_> {
             None
         };
         let totals = totals.filter(|t| self.slice_fields(v, *t, &fields).is_some());
-        let mut input = self.slice_input(v, main, &fields)?;
+        let mut input = self.slice_input(v, main, &fields, hidden_active)?;
         let totals = totals
             .map(|t| {
-                let branch = self.slice_input(v, t, &fields)?;
+                let branch = self.slice_input(v, t, &fields, None)?;
                 if branch.width != input.width || branch.signal != input.signal {
                     return later("Q7b-DeferredSecurityRead", "Q7c");
                 }
@@ -191,7 +210,7 @@ impl Lower<'_> {
                     dimensions,
                     period,
                     recorder,
-                    active: pos(StdRole::Active),
+                    active,
                     width: input.width,
                     view: v.span,
                 }),
@@ -326,17 +345,25 @@ impl Lower<'_> {
         })
     }
 
-    fn slice_input(&mut self, v: &SliceS, table: TableId, required: &[QFieldId]) -> R<Row> {
-        let fields = self.slice_fields(v, table, required).ok_or_else(|| {
+    fn slice_input(
+        &mut self,
+        v: &SliceS,
+        table: TableId,
+        required: &[QFieldId],
+        extra: Option<FieldId>,
+    ) -> R<Row> {
+        let mut fields = self.slice_fields(v, table, required).ok_or_else(|| {
             crate::ExecError::Fatal("slice field missing from base storage".into())
         })?;
+        fields.extend(extra);
+        let width = fields.len();
         self.set_level(v.inner);
         self.inner += 1;
         let result = (|| {
             let mut row = Row {
                 signal: None,
                 rel: RelL::Scan { table, fields },
-                width: required.len(),
+                width,
                 rep: Some(v.inner),
                 keys: None,
             };
@@ -351,7 +378,7 @@ impl Lower<'_> {
             if row.signal.is_some() && !self.slice_condition_signal_supported(v, table) {
                 return later("Q7b-DeferredSecurityRead", "Q7c");
             }
-            let mut exprs = (0..required.len())
+            let mut exprs = (0..width)
                 .map(|i| p16(i as i64).map(PExpr::Col))
                 .collect::<R<Vec<_>>>()?;
             let signal = row

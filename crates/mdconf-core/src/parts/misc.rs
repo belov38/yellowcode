@@ -51,9 +51,11 @@ pub(crate) fn parse_content(cfg: &Configuration, t: &Node) -> R<Vec<ContentItem>
 
 fn parse_content_stream(cfg: &Configuration, t: &Node) -> R<(Vec<ContentItem>, Vec<u32>)> {
     let l = t.as_list().ok_or("shape")?;
-    if atext(l, 0)? != "2" {
-        return Err("version");
-    }
+    let tail_allowed = match atext(l, 0)? {
+        "2" => true,
+        "1" => false,
+        _ => return Err("version"),
+    };
     let n = count(at(l, 1)?)?;
     let mut raw = Vec::new();
     for k in 0..n {
@@ -86,7 +88,7 @@ fn parse_content_stream(cfg: &Configuration, t: &Node) -> R<(Vec<ContentItem>, V
     let end = 2 + 2 * n;
     match l.get(end..).unwrap_or_default() {
         [] => {}
-        [x] if x.text() == Some("0") => {}
+        [x] if tail_allowed && x.text() == Some("0") => {}
         _ => return Err("tail"),
     }
     Ok((items, stream))

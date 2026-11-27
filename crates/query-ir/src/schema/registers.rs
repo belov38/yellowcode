@@ -509,6 +509,7 @@ fn information(b: &mut Builder<'_>, r: &mut Reg<'_>, owner: &str) {
     });
     r.meta.subordinate = text_prop(o, "WriteMode") == Some("RecorderSubordinate");
     r.meta.filter_on_period = bool_prop(o, "MainFilterOnPeriod");
+    r.meta.slice_last = bool_prop(o, "EnableTotalsSliceLast");
 }
 
 fn accounting<'a>(b: &mut Builder<'_>, r: &mut Reg<'a>, objs: &ObjIndex<'a>, owner: &str) {
@@ -688,7 +689,7 @@ fn main_table(b: &mut Builder<'_>, r: &Reg<'_>) -> Result<(), SchemaError> {
             f.virt(StdRole::PointInTime, QType::other(Other::PointInTime));
         }
         MdKind::InformationRegister => {
-            information_fields(&mut f, r);
+            information_fields(&mut f, r, true);
             if r.meta.subordinate {
                 f.virt(StdRole::PointInTime, QType::other(Other::PointInTime));
             }
@@ -734,14 +735,16 @@ fn main_table(b: &mut Builder<'_>, r: &Reg<'_>) -> Result<(), SchemaError> {
     flush(b, r.table, f)
 }
 
-fn information_fields(f: &mut Tf, r: &Reg<'_>) {
+fn information_fields(f: &mut Tf, r: &Reg<'_>, line_and_active: bool) {
     if r.meta.periodic {
         f.std(StdRole::Period, r.period.clone());
     }
     if r.meta.subordinate {
         f.std(StdRole::Recorder, r.recorder.clone());
-        f.std(StdRole::LineNumber, line_number());
-        f.std(StdRole::Active, QType::boolean());
+        if line_and_active {
+            f.std(StdRole::LineNumber, line_number());
+            f.std(StdRole::Active, QType::boolean());
+        }
     }
     dims(f, r, false);
     resources(f, r, false);
@@ -923,10 +926,10 @@ fn information_vts(b: &mut Builder<'_>, r: &Reg<'_>) -> Result<(), SchemaError> 
         return Ok(());
     }
     simple_vt(b, r, VtKind::SliceLast, "SliceLast", |f| {
-        information_fields(f, r);
+        information_fields(f, r, !r.meta.slice_last);
     })?;
     simple_vt(b, r, VtKind::SliceFirst, "SliceFirst", |f| {
-        information_fields(f, r);
+        information_fields(f, r, true);
     })
 }
 

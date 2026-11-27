@@ -40,9 +40,11 @@ type Decoded = (Charged<Vec<ContentItem>>, Charged<Vec<u32>>);
 fn decode(index: &ManagedIndex, raw: &Node) -> R<Decoded> {
     let budget = index.memory_budget();
     let nodes = raw.as_list().ok_or(Failure::Bad("shape"))?;
-    if txt(at(nodes, 0)?)? != "2" {
-        return Err(Failure::Bad("version"));
-    }
+    let tail_allowed = match txt(at(nodes, 0)?)? {
+        "2" => true,
+        "1" => false,
+        _ => return Err(Failure::Bad("version")),
+    };
     let n = txt(at(nodes, 1)?)?
         .trim()
         .parse::<i64>()
@@ -89,7 +91,7 @@ fn decode(index: &ManagedIndex, raw: &Node) -> R<Decoded> {
         .ok_or(Failure::Bad("number"))?;
     match nodes.get(end..).unwrap_or_default() {
         [] => {}
-        [node] if node.text() == Some("0") => {}
+        [node] if tail_allowed && node.text() == Some("0") => {}
         _ => return Err(Failure::Bad("tail")),
     }
     Ok((output, stream.into_charged_vec()))

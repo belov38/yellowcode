@@ -443,7 +443,7 @@ fn start_load(app: &AppHandle, path: String) -> Result<(), String> {
             Finish::Discarded => {
                 if st.smoke {
                     eprintln!(
-                        "yellowcode: the load of {path} was discarded{}",
+                        "yellowcode-desktop: the load of {path} was discarded{}",
                         smoke_error.map_or(String::new(), |e| format!(" (it failed: {e})"))
                     );
                     std::process::exit(1);
@@ -453,7 +453,7 @@ fn start_load(app: &AppHandle, path: String) -> Result<(), String> {
         if st.smoke
             && let Status::Error { error, .. } = st.status()
         {
-            eprintln!("yellowcode: {error}");
+            eprintln!("yellowcode-desktop: {error}");
             std::process::exit(1);
         }
     });
@@ -832,9 +832,6 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
         }
     }
     let mut it = positional.iter().copied();
-    if positional.first().is_some_and(|arg| arg.as_str() == "open") {
-        it.next();
-    }
     while let Some(a) = it.next() {
         match a.as_str() {
             "--smoke" => o.smoke = true,
@@ -859,7 +856,7 @@ pub fn run_from_args(args: Vec<String>) -> i32 {
         Ok(o) => o,
         Err(e) => {
             eprintln!(
-                "yellowcode: {e}\nUsage: yellowcode [open] [<source>] [--lang ru|en] [--names <dump>] [--platform-build <BUILD>] [--memory-limit <size>] [--smoke]"
+                "yellowcode-desktop: {e}; консольные команды — в yellowcode (yellowcode --help; в AppImage: <файл>.AppImage cli --help)\nUsage: yellowcode-desktop [<source>] [--lang ru|en] [--names <dump>] [--memory-limit <size>] [--platform-build <BUILD>] [--smoke]"
             );
             return 2;
         }
@@ -868,7 +865,7 @@ pub fn run_from_args(args: Vec<String>) -> i32 {
         None | Some("ru") => Lang::Ru,
         Some("en") => Lang::En,
         Some(other) => {
-            eprintln!("yellowcode: --lang: ru or en expected, got {other}");
+            eprintln!("yellowcode-desktop: --lang: ru or en expected, got {other}");
             return 2;
         }
     };
@@ -877,7 +874,7 @@ pub fn run_from_args(args: Vec<String>) -> i32 {
             match yellowcode_core::viewer::source::OpenMemory::resolve(Some(limit.clone())) {
                 Ok(memory) => Some(memory),
                 Err(error) => {
-                    eprintln!("yellowcode: {error}");
+                    eprintln!("yellowcode-desktop: {error}");
                     return if yellowcode_core::service::memory::is_config_error(&*error) {
                         2
                     } else {
@@ -891,7 +888,7 @@ pub fn run_from_args(args: Vec<String>) -> i32 {
     let process = match Process::unlimited() {
         Ok(process) => process,
         Err(error) => {
-            eprintln!("yellowcode: {error}");
+            eprintln!("yellowcode-desktop: {error}");
             return 1;
         }
     };
@@ -913,7 +910,7 @@ pub fn run_from_args(args: Vec<String>) -> i32 {
     };
     if let Err(error) = selected {
         eprintln!(
-            "yellowcode: {}",
+            "yellowcode-desktop: {}",
             yellowcode_core::platform::managed_message(build, &error)
         );
         return 2;
@@ -921,7 +918,7 @@ pub fn run_from_args(args: Vec<String>) -> i32 {
     match run(opts, lang, process, cli_memory) {
         Ok(()) => 0,
         Err(e) => {
-            eprintln!("yellowcode: {e}");
+            eprintln!("yellowcode-desktop: {e}");
             1
         }
     }
@@ -1018,14 +1015,14 @@ fn run(
             if smoke {
                 std::thread::spawn(|| {
                     std::thread::sleep(smoke_timeout());
-                    eprintln!("yellowcode: smoke timeout");
+                    eprintln!("yellowcode-desktop: smoke timeout");
                     std::process::exit(1);
                 });
             }
             if let Some(path) = source
                 && let Err(e) = start_load(app.handle(), path)
             {
-                eprintln!("yellowcode: {e}");
+                eprintln!("yellowcode-desktop: {e}");
             }
             Ok(())
         })

@@ -59,7 +59,7 @@ pub(crate) struct Args {
         long,
         allow_hyphen_values = true,
         help = "Бюджет памяти для DT и EPF/ERF <-> XML: auto или целое число байт с суффиксом B/KiB/MiB/GiB \
-                (как у query и serve; переменная YELLOWCODE_MEMORY_LIMIT)"
+                (как у yellowcode ib query и yellowcode ib serve; переменная YELLOWCODE_MEMORY_LIMIT)"
     )]
     memory_limit: Option<String>,
     #[arg(

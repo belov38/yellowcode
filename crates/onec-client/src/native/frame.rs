@@ -1,7 +1,7 @@
 use brace::Guid;
 use brace::binary::{Atom, AtomValue, BinNode, ReadLimits, Reader, Writer};
 
-use super::{IFACE_VRS, NativeError, T_HTTP, T_TICKET};
+use super::{EXC_RETRY_CONNECT, IFACE_VRS, NativeError, T_HTTP, T_TICKET};
 use crate::transport::Response;
 
 pub const HTTP_CHUNK: usize = 16 * 1024;
@@ -173,9 +173,15 @@ fn answer_list(nodes: &[BinNode]) -> Result<&[BinNode], NativeError> {
     };
     match top.first().and_then(atom_int) {
         Some(1) => Ok(top),
-        Some(2) => Err(NativeError::Server(
-            first_text(&top[1..]).unwrap_or_else(|| "exception without a text".into()),
-        )),
+        Some(2) => {
+            let text = first_text(&top[1..]).unwrap_or_else(|| "exception without a text".into());
+            let retry = matches!(top.get(1), Some(BinNode::Atom(a)) if a.as_guid() == Some(guid(EXC_RETRY_CONNECT)));
+            Err(if retry {
+                NativeError::Retry(text)
+            } else {
+                NativeError::Server(text)
+            })
+        }
         _ => Err(NativeError::Malformed(
             "answer frame does not start with 1 or 2".into(),
         )),

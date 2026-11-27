@@ -1,0 +1,70 @@
+exit 0
+--- stdout
+Выполнить запрос к информационной базе (только чтение)
+
+Usage: yellowcode ib query [OPTIONS] <--text <TEXT>|--file <FILE>|--stdin> <BASE>
+
+Arguments:
+  <BASE>  Каталог информационной базы или её файл 1Cv8.1CD (открывается только для чтения)
+
+Options:
+      --memory-limit <MEMORY_LIMIT>
+          Общий бюджет памяти: auto или целое число байт с суффиксом B/KiB/MiB/GiB. Без лимита контейнера — 1GiB; конфигурациям уровня УНФ нужно --memory-limit не меньше 1792MiB, уровня ERP — около 3GiB
+      --platform-build <BUILD>
+          Точная версия эмулируемой платформы (не режим совместимости конфигурации) [default: 8.5.1.1529]
+      --cache-limit <CACHE_LIMIT>
+          Предел кэша страниц; 0 отключает кэш
+      --progress <MODE>
+          Ход работы в stderr: auto — строка на терминале, always — строки для журнала, never — без него (по умолчанию переменная YELLOWCODE_PROGRESS, иначе auto) [possible values: auto, always, never]
+      --query-memory-limit <QUERY_MEMORY_LIMIT>
+          Предел памяти на компиляцию, выполнение, пакет и временные таблицы запроса
+      --result-memory-limit <RESULT_MEMORY_LIMIT>
+          Предел памяти на хранимые результаты всех операторов запроса
+      --response-limit <RESPONSE_LIMIT>
+          Предел размера всего ответа, включая экранирование и схему
+      --text <TEXT>
+          Текст запроса
+      --file <FILE>
+          Файл с текстом запроса в UTF-8 (BOM в начале допускается)
+      --stdin
+          Прочитать текст запроса из стандартного ввода
+      --param <NAME=REPR>
+          Параметр запроса: Имя=Значение; повторить для каждого параметра
+      --params-file <PARAMS_FILE>
+          JSON-файл (UTF-8) с массивом параметров вида {"name": "P", "repr": "42"}
+      --format <FORMAT>
+          Формат вывода; по умолчанию таблица в терминале и JSON при перенаправлении [possible values: table, json, csv]
+      --lang <LANG>
+          Язык сеанса запроса (представления, имена типов, сообщения); по умолчанию язык базы [possible values: ru, en]
+      --timeout <TIMEOUT>
+          Предел времени выполнения запроса в секундах; открытие базы в него не входит [default: 60]
+      --max-rows <MAX_ROWS>
+          Сколько строк каждого результата выводить; пределы памяти и строк движка действуют независимо [default: 10000]
+      --schema-notes
+          Все замечания о расхождении схемы базы с правилами вместо одной итоговой строки (stderr)
+  -h, --help
+          Print help
+
+Значения параметров записываются как в языке запросов: числа 42 и 12.5, строки "текст" в кавычках,
+даты '2024-01-15T00:00:00', Истина/Ложь, NULL, Неопределено, ссылки СправочникСсылка.Товары(<UUID>).
+
+Примеры:
+  # Простой запрос, результат таблицей в терминале
+  yellowcode ib query base --text "ВЫБРАТЬ ПЕРВЫЕ 10 Наименование, ИНН ИЗ Справочник.Контрагенты"
+
+  # Параметр-число, результат в JSON
+  yellowcode ib query base --text "ВЫБРАТЬ &Число * 2 КАК Ответ" --param Число=21 --format json
+
+  # Параметр-дата
+  yellowcode ib query base --text "ВЫБРАТЬ Номер, Дата ИЗ Документ.Счет ГДЕ Дата >= &Начало" --param "Начало='2024-01-01T00:00:00'"
+
+  # Запрос из файла, параметры из JSON-файла, результат в CSV
+  # params.json: [{"name": "Имя", "repr": "\"ООО Ромашка\""}]
+  yellowcode ib query base --file query.txt --params-file params.json --format csv > result.csv
+
+  # Запрос из стандартного ввода
+  echo "ВЫБРАТЬ 1 КАК Один" | yellowcode ib query base --stdin
+
+  # Не больше 100 строк, до 5 минут, 2 ГиБ памяти (конфигурации уровня УНФ)
+  yellowcode ib query base --file query.txt --max-rows 100 --timeout 300 --memory-limit 2GiB
+--- stderr

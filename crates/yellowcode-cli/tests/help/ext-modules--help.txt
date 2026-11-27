@@ -1,0 +1,17 @@
+exit 0
+--- stdout
+Модули объектов расширения CFE (только чтение)
+
+Usage: yellowcode ext modules [OPTIONS] <SOURCE>
+
+Arguments:
+  <SOURCE>  Файл расширения CFE
+
+Options:
+      --format <FORMAT>         Формат списка [default: json] [possible values: json, text]
+      --platform-build <BUILD>  Точная версия эмулируемой платформы (не режим совместимости конфигурации) [default: 8.5.1.1529]
+      --entry-id <ENTRY_ID>     UUID записи объекта из поля entryId списка
+      --progress <MODE>         Ход работы в stderr: auto — строка на терминале, always — строки для журнала, never — без него (по умолчанию переменная YELLOWCODE_PROGRESS, иначе auto) [possible values: auto, always, never]
+      --module <KIND>           Вид модуля из поля moduleKind списка. Выводит исходные байты BSL
+  -h, --help                    Print help
+--- stderr

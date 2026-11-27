@@ -3,6 +3,6 @@ exit 2
 --- stderr
 error: the argument '--lt <VALUE>' cannot be used with '--lte <VALUE>'
 
-Usage: yellowcode table --index <INDEX> --lt <VALUE> <BASE> <KIND> <NAME>
+Usage: yellowcode ib table --index <INDEX> --lt <VALUE> <BASE> <KIND> <NAME>
 
 For more information, try '--help'.

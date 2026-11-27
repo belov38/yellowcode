@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Yellowcode",
-  "mainBinaryName": "yellowcode",
-  "version": "0.1.0-alpha.29",
+  "mainBinaryName": "yellowcode-desktop",
+  "version": "0.1.0-alpha.30",
   "identifier": "nz.belov.yellowcode",
   "build": {
     "frontendDist": "dist"
@@ -41,7 +41,7 @@
     },
     "macOS": {
       "minimumSystemVersion": "11.0",
-      "bundleVersion": "29",
+      "bundleVersion": "30",
       "signingIdentity": "Developer ID Application: Ilia Belov (KR47N9QMVY)",
       "hardenedRuntime": true
     }

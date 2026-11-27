@@ -1,6 +1,6 @@
 exit 0
 --- stdout
-Открыть конфигурацию или информационную базу в установленном приложении
+Открыть источник в окне приложения (yellowcode-desktop)
 
 Usage: yellowcode open [OPTIONS] [SOURCE]
 

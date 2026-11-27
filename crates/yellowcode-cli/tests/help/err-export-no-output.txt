@@ -4,6 +4,6 @@ exit 2
 error: the following required arguments were not provided:
   --output <DIR>
 
-Usage: yellowcode export --output <DIR> <SOURCE>
+Usage: yellowcode config export --output <DIR> <SOURCE>
 
 For more information, try '--help'.

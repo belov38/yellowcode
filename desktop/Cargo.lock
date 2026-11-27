@@ -2881,7 +2881,7 @@ dependencies = [
 
 [[package]]
 name = "onec-desktop"
-version = "0.1.0-alpha.29"
+version = "0.1.0-alpha.30"
 dependencies = [
  "cf-fixtures",
  "dunce",
@@ -2895,8 +2895,6 @@ dependencies = [
  "tauri-plugin-dialog",
  "tempfile",
  "ui-style",
- "windows-sys 0.61.2",
- "yellowcode-cli",
  "yellowcode-core",
  "yellowcode-http",
  "yellowcode-testkit",
@@ -5998,6 +5996,13 @@ dependencies = [
  "thiserror 2.0.21",
  "v8users",
  "yellowcode-core",
+]
+
+[[package]]
+name = "yellowcode-sidecar"
+version = "0.1.0"
+dependencies = [
+ "yellowcode-cli",
 ]
 
 [[package]]

@@ -1,6 +1,6 @@
 exit 0
 --- stdout
-Преобразовать конфигурацию или выгрузить информационную базу; исходный файл не меняется
+Преобразовать файл в другой формат; исходный файл не меняется
 
 Usage: yellowcode convert [OPTIONS] --to <TO> --output <OUTPUT> <SOURCE>
 
@@ -13,7 +13,7 @@ Options:
       --output <OUTPUT>              Путь к новому файлу или новому каталогу XML; родительский каталог должен существовать, результат не перезаписывается
       --progress <MODE>              Ход работы в stderr: auto — строка на терминале, always — строки для журнала, never — без него (по умолчанию переменная YELLOWCODE_PROGRESS, иначе auto) [possible values: auto, always, never]
       --users-layout <USERS_LAYOUT>  Формат таблицы пользователей в DT при выгрузке 1CD -> DT (обязателен, сам не выбирается): users8 — таблица Users из 8 колонок, users-spr11 — таблица UsersSpr из 11 колонок (пользователи разделены по областям данных) [possible values: users8, users-spr11]
-      --memory-limit <MEMORY_LIMIT>  Бюджет памяти для DT и EPF/ERF <-> XML: auto или целое число байт с суффиксом B/KiB/MiB/GiB (как у query и serve; переменная YELLOWCODE_MEMORY_LIMIT)
+      --memory-limit <MEMORY_LIMIT>  Бюджет памяти для DT и EPF/ERF <-> XML: auto или целое число байт с суффиксом B/KiB/MiB/GiB (как у yellowcode ib query и yellowcode ib serve; переменная YELLOWCODE_MEMORY_LIMIT)
       --without-users                Только DT -> 1CD: загрузить базу без пользователей (если их нельзя перенести как есть). Такая база открывается без входа, с полными правами
   -h, --help                         Print help
 

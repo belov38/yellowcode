@@ -3,6 +3,6 @@ exit 2
 --- stderr
 error: the argument '--list-indexes' cannot be used with '--cursor <CURSOR>'
 
-Usage: yellowcode table --list-indexes <BASE> <KIND> <NAME>
+Usage: yellowcode ib table --list-indexes <BASE> <KIND> <NAME>
 
 For more information, try '--help'.

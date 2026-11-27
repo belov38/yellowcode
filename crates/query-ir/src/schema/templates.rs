@@ -285,6 +285,9 @@ fn fixed_cond(tkey: &str, ru: &str, meta: Option<&ObjMeta>) -> Cond {
     match kind {
         "InformationRegister" => match (last, ru) {
             ("*", "Период") => Cond::If(m.periodic),
+            ("SliceLast", "НомерСтроки" | "Активность") => {
+                Cond::If(m.subordinate && !m.slice_last)
+            }
             ("*" | "SliceLast" | "SliceFirst", "Регистратор" | "НомерСтроки" | "Активность") => {
                 Cond::If(m.subordinate)
             }

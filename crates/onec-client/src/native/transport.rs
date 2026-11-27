@@ -6,6 +6,7 @@ use brace::{Guid, Node};
 
 use super::call::{self, ClientInfo, MANAGER_CONTEXT};
 use super::keyx::{self, ClientKey};
+use super::liveness::Liveness;
 use super::stream::MessageStream;
 use super::{IFACE_REGMNGR, IFACE_VRS, NULL_GUID, NativeError, frame, ntlm};
 use crate::session::{SessionError, VERSION};
@@ -16,11 +17,31 @@ pub const DEFAULT_PORT: u16 = 1541;
 const TIMEOUT: Duration = Duration::from_secs(60);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
+const RETRY_PAUSES: [Duration; 3] = [
+    Duration::from_millis(200),
+    Duration::from_millis(1000),
+    Duration::from_millis(3000),
+];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Server {
+    pub host: String,
+    pub port: u16,
+}
+
+impl Server {
+    pub fn authority(&self) -> String {
+        if self.host.contains(':') {
+            format!("[{}]:{}", self.host, self.port)
+        } else {
+            format!("{}:{}", self.host, self.port)
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeTarget {
-    pub host: String,
-    pub port: u16,
+    pub servers: Vec<Server>,
     pub ib: String,
 }
 
@@ -58,32 +79,70 @@ impl NativeTarget {
         Self::from_parts(address, server, ib)
     }
 
-    fn from_parts(address: &str, server: &str, ib: &str) -> Result<Self, String> {
-        if server.contains(',') {
-            return Err(format!(
-                "{address:?}: several servers in one address are not supported"
-            ));
-        }
+    fn from_parts(address: &str, servers: &str, ib: &str) -> Result<Self, String> {
         if ib.is_empty() {
             return Err(format!("{address:?}: no infobase name"));
         }
-        let (host, port) = split_host_port(server)
-            .ok_or_else(|| format!("{address:?}: bad server {server:?}, expected host[:port]"))?;
+        let servers = servers
+            .split(',')
+            .map(|server| {
+                split_host_port(server)
+                    .map(|(host, port)| Server { host, port })
+                    .ok_or_else(|| {
+                        format!("{address:?}: bad server {server:?}, expected host[:port]")
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(Self {
-            host,
-            port,
+            servers,
             ib: ib.to_string(),
         })
     }
 
     pub fn authority(&self) -> String {
-        if self.host.contains(':') {
-            format!("[{}]:{}", self.host, self.port)
-        } else {
-            format!("{}:{}", self.host, self.port)
-        }
+        self.servers
+            .iter()
+            .map(Server::authority)
+            .collect::<Vec<_>>()
+            .join(",")
     }
 }
+
+fn percent_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
+            out.push(char::from(b));
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+fn idle_connection_closed(tcp: &TcpStream) -> bool {
+    if tcp.set_nonblocking(true).is_err() {
+        return true;
+    }
+    let mut b = [0u8; 1];
+    let closed = match tcp.peek(&mut b) {
+        Ok(0) => true,
+        Ok(_) => false,
+        Err(e) => e.kind() != io::ErrorKind::WouldBlock,
+    };
+    tcp.set_nonblocking(false).is_err() || closed
+}
+
+fn fails_over(e: &NativeError) -> bool {
+    match e {
+        NativeError::Server(m) => server_build_of(m).is_none(),
+        NativeError::Random(_) => false,
+        _ => true,
+    }
+}
+
+const LOOKUP_ROUNDS: usize = 3;
+const LOOKUP_PAUSE: Duration = Duration::from_millis(1500);
 
 fn initial_seq(r: u16) -> u32 {
     1000 + u32::from(r) % 29_000
@@ -205,6 +264,7 @@ struct Channel {
     session: Guid,
     frames: u64,
     cookie: u64,
+    _liveness: Option<Liveness>,
 }
 
 pub struct NativeTransport {
@@ -214,7 +274,10 @@ pub struct NativeTransport {
     client_id: Option<[u8; 16]>,
     seq: u32,
     channel: Option<Channel>,
-    broken: bool,
+    liveness: bool,
+    server_build: Option<String>,
+    channels: u32,
+    lookup_sleep: fn(Duration),
 }
 
 impl NativeTransport {
@@ -230,12 +293,23 @@ impl NativeTransport {
             client_id: None,
             seq: 0,
             channel: None,
-            broken: false,
+            liveness: true,
+            server_build: None,
+            channels: 0,
+            lookup_sleep: std::thread::sleep,
         }
     }
 
     pub fn target(&self) -> &NativeTarget {
         &self.target
+    }
+
+    pub fn set_liveness(&mut self, on: bool) {
+        self.liveness = on;
+    }
+
+    pub fn channels(&self) -> u32 {
+        self.channels
     }
 
     pub fn set_worker(&mut self, worker: Option<(String, u16)>) {
@@ -245,8 +319,12 @@ impl NativeTransport {
     pub fn base_location(&self) -> String {
         format!(
             "e1c://server/{}/{}",
-            self.target.authority(),
-            self.target.ib
+            self.target
+                .servers
+                .first()
+                .map(Server::authority)
+                .unwrap_or_default(),
+            percent_encode(&self.target.ib)
         )
     }
 
@@ -350,8 +428,42 @@ impl NativeTransport {
     }
 
     fn lookup(&mut self) -> Result<(String, u16), NativeError> {
-        let (host, port) = (self.target.host.clone(), self.target.port);
-        let mut m = self.open(&host, port)?;
+        let mut servers = self.target.servers.clone();
+        servers.sort_by_key(Server::authority);
+        servers.dedup();
+        if let [one] = servers.as_slice() {
+            return self.lookup_on(&one.clone());
+        }
+        let mut failed = Vec::new();
+        for round in 0..LOOKUP_ROUNDS {
+            failed.clear();
+            for (i, server) in servers.iter().enumerate() {
+                if round > 0 || i > 0 {
+                    (self.lookup_sleep)(LOOKUP_PAUSE);
+                }
+                match self.lookup_on(server) {
+                    Err(e) if fails_over(&e) => failed.push(e),
+                    other => return other,
+                }
+            }
+        }
+        let texts = failed.iter().map(ToString::to_string).collect::<Vec<_>>();
+        let text = format!(
+            "no server of {} answered: {}",
+            self.target.authority(),
+            texts.join("; ")
+        );
+        Err(
+            if !failed.is_empty() && failed.iter().all(|e| matches!(e, NativeError::Server(_))) {
+                NativeError::Server(text)
+            } else {
+                NativeError::Io(io::Error::new(io::ErrorKind::NotConnected, text))
+            },
+        )
+    }
+
+    fn lookup_on(&mut self, server: &Server) -> Result<(String, u16), NativeError> {
+        let mut m = self.open(&server.host, server.port)?;
         let (ctx, ctx_id) = MANAGER_CONTEXT;
         let first =
             call::create_instance(self.next_seq(), &self.client(), ctx, ctx_id, b"", NULL_GUID);
@@ -414,12 +526,55 @@ impl NativeTransport {
         let session = Guid::parse(&session)
             .ok_or_else(|| NativeError::Malformed(format!("bad session object {session:?}")))?;
         let cookie = frame::COOKIE_HIGH | u64::from(u32::from_le_bytes(self.rand::<4>()?));
+        let liveness = match (self.liveness, self.client_id, w.get_ref().peer_addr()) {
+            (true, Some(id), Ok(peer)) => Liveness::start(peer, id).ok(),
+            _ => None,
+        };
         Ok(Channel {
             stream: w,
             session,
             frames: 0,
             cookie,
+            _liveness: liveness,
         })
+    }
+
+    fn ensure_channel(&mut self) -> Result<&mut Channel, NativeError> {
+        if self.channel.is_none() {
+            let channel = match self.connect() {
+                Err(NativeError::Server(m)) if self.opts.auto_version => {
+                    match server_build_of(&m).filter(|b| *b != self.opts.version) {
+                        Some(build) => {
+                            self.opts.version = build.clone();
+                            self.opts.auto_version = false;
+                            self.server_build = Some(build);
+                            self.connect()?
+                        }
+                        None => return Err(NativeError::Server(m)),
+                    }
+                }
+                other => other?,
+            };
+            self.channels += 1;
+            self.channel = Some(channel);
+        }
+        self.channel
+            .as_mut()
+            .ok_or_else(|| NativeError::Malformed("no channel after connect".into()))
+    }
+
+    fn round_trip(&mut self, http: &[u8]) -> Result<Response, NativeError> {
+        self.ensure_channel()?;
+        let seq = self.next_seq();
+        let ch = self
+            .channel
+            .as_mut()
+            .ok_or_else(|| NativeError::Malformed("no channel after connect".into()))?;
+        let request = frame::request(&ch.session, seq, ch.frames == 0, ch.cookie, http)?;
+        ch.stream.send_message(&request)?;
+        let answer = ch.stream.read_message()?;
+        ch.frames += 1;
+        frame::parse_http(&frame::response_http(&answer, MAX_RESPONSE_BODY)?)
     }
 
     fn send(
@@ -428,41 +583,34 @@ impl NativeTransport {
         path: &str,
         headers: &[(String, String)],
         body: &[u8],
+        once: bool,
     ) -> Result<Response, NativeError> {
-        if self.broken {
-            return Err(NativeError::Broken);
-        }
-        if self.channel.is_none() {
-            let channel = match self.connect() {
-                Err(NativeError::Server(m)) if self.opts.auto_version => {
-                    match server_build_of(&m).filter(|b| *b != self.opts.version) {
-                        Some(build) => {
-                            self.opts.version = build;
-                            self.opts.auto_version = false;
-                            self.connect()?
-                        }
-                        None => return Err(NativeError::Server(m)),
-                    }
-                }
-                other => other?,
-            };
-            self.channel = Some(channel);
-        }
         let mut h = Vec::with_capacity(headers.len() + 2);
         h.push(("1C-BaseLocation".to_string(), self.base_location()));
         h.extend(headers.iter().cloned());
         h.push(("1C-ConnectString".to_string(), self.connect_string()));
         let http = frame::http_request(method, path, &h, body);
-        let seq = self.next_seq();
-        let ch = self
-            .channel
-            .as_mut()
-            .ok_or_else(|| NativeError::Malformed("no channel after connect".into()))?;
-        let request = frame::request(&ch.session, seq, ch.frames == 0, ch.cookie, &http)?;
-        ch.stream.send_message(&request)?;
-        let answer = ch.stream.read_message()?;
-        ch.frames += 1;
-        frame::parse_http(&frame::response_http(&answer, MAX_RESPONSE_BODY)?)
+        let mut retries = RETRY_PAUSES.iter();
+        loop {
+            if self
+                .channel
+                .as_ref()
+                .is_some_and(|ch| idle_connection_closed(ch.stream.get_ref()))
+            {
+                self.channel = None;
+            }
+            let e = match self.round_trip(&http) {
+                Ok(r) => return Ok(r),
+                Err(e) => e,
+            };
+            self.channel = None;
+            match retries.next() {
+                Some(pause) if !once && matches!(e, NativeError::Retry(_)) => {
+                    std::thread::sleep(*pause)
+                }
+                _ => return Err(e),
+            }
+        }
     }
 
     pub fn close(&mut self) -> Result<(), NativeError> {
@@ -485,20 +633,27 @@ impl Wire for NativeTransport {
         headers: &[(String, String)],
         body: &[u8],
     ) -> Result<Response, SessionError> {
-        match self.send(method, path, headers, body) {
-            Ok(r) => Ok(r),
-            Err(e) => {
-                if self.channel.take().is_some() {
-                    self.broken = true;
-                }
-                Err(e.into())
-            }
-        }
+        Ok(self.send(method, path, headers, body, false)?)
+    }
+
+    fn exchange_once(
+        &mut self,
+        method: &str,
+        path: &str,
+        headers: &[(String, String)],
+        body: &[u8],
+    ) -> Result<Response, SessionError> {
+        Ok(self.send(method, path, headers, body, true)?)
     }
 
     fn set_version(&mut self, build: &str) {
         self.opts.version = build.to_string();
         self.opts.auto_version = false;
+    }
+
+    fn connect_build(&mut self) -> Result<Option<String>, SessionError> {
+        self.ensure_channel()?;
+        Ok(self.server_build.clone())
     }
 }
 

@@ -63,7 +63,7 @@ impl Service {
     pub fn start_env(bin: &str, base: &Path, flags: &[&str], env: &[(&str, &str)]) -> Self {
         let mut command = command(bin);
         command
-            .arg("serve")
+            .args(["ib", "serve"])
             .arg(base)
             .args(["--listen", "127.0.0.1:0"])
             .args(flags)

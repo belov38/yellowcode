@@ -244,6 +244,47 @@ pub struct Session<R: RandomSource = OsRandom> {
     pub(crate) version: String,
     auto_version: bool,
     sleep: fn(std::time::Duration),
+    relogin: Option<Relogin>,
+    relogins: u32,
+    logging_in: bool,
+}
+
+#[derive(Clone)]
+enum Relogin {
+    Plain {
+        query: String,
+    },
+    Cred {
+        query: String,
+        user: String,
+        password: String,
+        strong: bool,
+    },
+}
+
+const MAX_RELOGINS: u32 = 3;
+
+pub const EXC_SESSION_ABSENT: &str = "60c686dc-798f-4d17-aadb-a90156a16eb8";
+
+fn session_absent(resp: &Response) -> bool {
+    let attr = format!("clsid=\"{EXC_SESSION_ABSENT}\"");
+    matches!(resp.status, 404 | 500)
+        && body::decode(&resp.body, resp.header("content-encoding")).is_ok_and(|b| {
+            b.windows(attr.len())
+                .any(|w| w.eq_ignore_ascii_case(attr.as_bytes()))
+        })
+}
+
+fn with_vrs(headers: &[(String, String)], vrs: Option<&str>) -> Vec<(String, String)> {
+    let mut h: Vec<(String, String)> = headers
+        .iter()
+        .filter(|(k, _)| !k.eq_ignore_ascii_case("vrs-session"))
+        .cloned()
+        .collect();
+    if let Some(v) = vrs {
+        h.push(("vrs-session".into(), v.to_string()));
+    }
+    h
 }
 
 pub(crate) struct Prologue {
@@ -275,7 +316,14 @@ impl<R: RandomSource> Session<R> {
             version: VERSION.to_string(),
             auto_version: true,
             sleep: std::thread::sleep,
+            relogin: None,
+            relogins: 0,
+            logging_in: false,
         }
+    }
+
+    pub fn relogins(&self) -> u32 {
+        self.relogins
     }
 
     pub fn set_sleep(&mut self, sleep: fn(std::time::Duration)) {
@@ -351,6 +399,78 @@ impl<R: RandomSource> Session<R> {
     }
 
     fn step_raw(
+        &mut self,
+        name: &'static str,
+        method: &str,
+        path: &str,
+        headers: &[(String, String)],
+        body: &[u8],
+        accept: &[u16],
+    ) -> Result<Response, SessionError> {
+        let resp = self.exchange_step(name, method, path, headers, body, accept)?;
+        let changes_state = headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("pragma"));
+        if name == "logout" || changes_state || !session_absent(&resp) || !self.can_relogin() {
+            return Ok(resp);
+        }
+        self.relogin()?;
+        let headers = with_vrs(headers, self.vrs.as_deref());
+        self.exchange_step(name, method, path, &headers, body, accept)
+    }
+
+    fn can_relogin(&self) -> bool {
+        self.relogin.is_some() && !self.logging_in && self.relogins < MAX_RELOGINS
+    }
+
+    fn relogin(&mut self) -> Result<(), SessionError> {
+        let Some(how) = self.relogin.clone() else {
+            return Err(SessionError::Protocol("no login to repeat".into()));
+        };
+        self.relogins += 1;
+        let types = self.types.take();
+        let enum_texts = std::mem::take(&mut self.enum_texts);
+        let key = self.info.as_ref().and_then(|i| i.types.clone());
+        let (vrs, info, login_body) = (
+            self.vrs.take(),
+            self.info.clone(),
+            std::mem::take(&mut self.login_body),
+        );
+        let done = match &how {
+            Relogin::Plain { query } => self.login_plain(query),
+            Relogin::Cred {
+                query,
+                user,
+                password,
+                strong,
+            } => self.cred_login(
+                query,
+                &Credentials {
+                    user,
+                    password,
+                    strong: *strong,
+                },
+            ),
+        };
+        match done {
+            Ok(()) => {
+                if self.info.as_ref().and_then(|i| i.types.clone()) == key {
+                    self.types = types;
+                    self.enum_texts = enum_texts;
+                }
+                self.sync = 0;
+                Ok(())
+            }
+            Err(e) => {
+                (self.vrs, self.info, self.login_body) = (vrs, info, login_body);
+                self.types = types;
+                self.enum_texts = enum_texts;
+                Err(e)
+            }
+        }
+    }
+
+    fn exchange_step(
         &mut self,
         name: &'static str,
         method: &str,
@@ -460,6 +580,21 @@ impl<R: RandomSource> Session<R> {
     }
 
     pub fn cred_login(&mut self, query: &str, c: &Credentials) -> Result<(), SessionError> {
+        let was = std::mem::replace(&mut self.logging_in, true);
+        let done = self.cred_login_once(query, c);
+        self.logging_in = was;
+        if done.is_ok() {
+            self.relogin = Some(Relogin::Cred {
+                query: query.to_string(),
+                user: c.user.to_string(),
+                password: c.password.to_string(),
+                strong: c.strong,
+            });
+        }
+        done
+    }
+
+    fn cred_login_once(&mut self, query: &str, c: &Credentials) -> Result<(), SessionError> {
         self.forget_types();
         let (resp, query) = self.first_login("login/cred1", query, |s| {
             let noise: [u8; 16] = s.rand()?;
@@ -512,6 +647,18 @@ impl<R: RandomSource> Session<R> {
     }
 
     pub fn login_plain(&mut self, query: &str) -> Result<(), SessionError> {
+        let was = std::mem::replace(&mut self.logging_in, true);
+        let done = self.login_plain_once(query);
+        self.logging_in = was;
+        if done.is_ok() {
+            self.relogin = Some(Relogin::Plain {
+                query: query.to_string(),
+            });
+        }
+        done
+    }
+
+    fn login_plain_once(&mut self, query: &str) -> Result<(), SessionError> {
         self.forget_types();
         let (resp, _) = self.first_login("login", query, |s| {
             let mut h = s.headers("*/*", false, false);
@@ -531,6 +678,18 @@ impl<R: RandomSource> Session<R> {
         query: &str,
         mut request: impl FnMut(&mut Self) -> Result<(Vec<(String, String)>, Vec<u8>), SessionError>,
     ) -> Result<(Response, String), SessionError> {
+        match self.tr.connect_build() {
+            Ok(Some(build)) if self.auto_version => self.version = build,
+            Ok(_) => {}
+            Err(e) => {
+                self.steps.push(Step {
+                    name,
+                    status: 0,
+                    ok: false,
+                });
+                return Err(e);
+            }
+        }
         let q = with_version(query, &self.version);
         let (h, b) = request(self)?;
         let resp = self.step_raw(name, "POST", &format!("/e1cib/login?{q}"), &h, &b, &[200])?;

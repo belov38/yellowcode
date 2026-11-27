@@ -21,6 +21,10 @@ pub trait Wire: Send {
     }
 
     fn set_version(&mut self, _build: &str) {}
+
+    fn connect_build(&mut self) -> Result<Option<String>, SessionError> {
+        Ok(None)
+    }
 }
 
 impl Wire for HttpTransport {
@@ -70,5 +74,9 @@ impl<W: Wire + ?Sized> Wire for Box<W> {
 
     fn set_version(&mut self, build: &str) {
         (**self).set_version(build)
+    }
+
+    fn connect_build(&mut self) -> Result<Option<String>, SessionError> {
+        (**self).connect_build()
     }
 }
