@@ -33,6 +33,18 @@ pub fn escape(payload: &[u8]) -> Vec<u8> {
     out
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Next {
+    Message {
+        payload: Vec<u8>,
+        pings: u64,
+        signals: u64,
+    },
+    Closed,
+    Silent,
+    Failed(String),
+}
+
 pub struct MessageStream<S> {
     io: S,
     buf: Vec<u8>,
@@ -147,6 +159,38 @@ impl<S: Read + Write> MessageStream<S> {
                 return Err(NativeError::TooLarge("pings and signals", MAX_CONTROL));
             }
         }
+    }
+
+    pub fn trail(&mut self, max: usize) -> Vec<Next> {
+        let mut out = Vec::new();
+        while out.len() < max {
+            let (pings, signals) = (self.pings, self.signals);
+            match self.read_message() {
+                Ok(m) => out.push(Next::Message {
+                    payload: m,
+                    pings: self.pings - pings,
+                    signals: self.signals - signals,
+                }),
+                Err(NativeError::Closed) => {
+                    out.push(Next::Closed);
+                    break;
+                }
+                Err(NativeError::Io(e))
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    out.push(Next::Silent);
+                    break;
+                }
+                Err(e) => {
+                    out.push(Next::Failed(e.to_string()));
+                    break;
+                }
+            }
+        }
+        out
     }
 
     fn need(&mut self, n: usize) -> Result<(), NativeError> {

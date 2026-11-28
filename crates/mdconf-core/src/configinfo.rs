@@ -6,10 +6,7 @@ const STORED_LIMIT: usize = 1 << 20;
 const INPUT_LIMIT: usize = 4 << 20;
 const WORKING_LIMIT: u64 = 64 << 20;
 const CATEGORY: Category = Category::ReaderWorking;
-const ROOT_PAYLOAD_BYTES: usize = 64;
-const ROOT_FOLD_COLUMN: usize = 64;
-const ROOT_FOLD: &[u8] = b"\r\r\n";
-const ROOT_BASE64_BYTES: usize = ROOT_PAYLOAD_BYTES.div_ceil(3) * 4;
+const ROOT_FOLDS: [&[u8]; 3] = [b"\r\r\n", b"\r\n", b"\n"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigInfoEntry {
@@ -47,8 +44,8 @@ pub enum ConfigInfoError {
 }
 type Result<T> = std::result::Result<T, ConfigInfoError>;
 
-const CONTEXT_BYTES: usize = 32;
-const CONTEXT_ATOM: usize = 24;
+const CONTEXT_TOKENS: usize = 12;
+const CONTEXT_DIGITS: usize = 6;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BraceContext(String);
@@ -57,72 +54,59 @@ impl BraceContext {
     pub fn new(input: &[u8], offset: usize) -> Self {
         use std::fmt::Write as _;
         let offset = offset.min(input.len());
-        let start = offset.saturating_sub(CONTEXT_BYTES);
-        let end = offset.saturating_add(CONTEXT_BYTES).min(input.len());
+        let tokens = || {
+            let mut at = 0;
+            std::iter::from_fn(move || {
+                let rest = input.get(at..).filter(|rest| !rest.is_empty())?;
+                let (len, kind) = token(rest);
+                at += len;
+                Some((at - len, at, kind))
+            })
+        };
+        let (here, found) = tokens()
+            .enumerate()
+            .find(|(_, (_, end, _))| offset < *end)
+            .map_or_else(
+                || (tokens().count(), None),
+                |(index, (.., kind))| (index, Some(kind)),
+            );
+        let first = here.saturating_sub(CONTEXT_TOKENS);
         let mut window = String::new();
-        let mut quoted = false;
-        let mut bytes = input.get(..end).unwrap_or_default().iter().enumerate();
-        if start > 0 {
+        if first > 0 {
             window.push('…');
         }
-        while let Some((index, &byte)) = bytes.next() {
-            let shown = index >= start;
-            if index == start && start > 0 && quoted {
-                window.push_str("\"…");
+        let mut more = false;
+        for (index, (start, end, kind)) in tokens().enumerate().skip(first) {
+            if index > here + CONTEXT_TOKENS {
+                more = true;
+                break;
             }
-            if index == offset {
+            if index == here {
                 window.push_str("<<HERE>>");
             }
-            if quoted {
-                if byte == b'"' {
-                    if input.get(index + 1) == Some(&b'"') {
-                        bytes.next();
-                        continue;
-                    }
-                    quoted = false;
-                    if shown {
-                        window.push('"');
-                    }
-                }
-                continue;
-            }
-            if byte == b'"' {
-                quoted = true;
-                if shown {
-                    window.push_str("\"…");
-                }
-                continue;
-            }
-            if shown {
-                escape_byte(&mut window, byte);
+            match kind {
+                Token::Byte(byte) => escape_byte(&mut window, byte),
+                _ => window.push_str(&describe(input.get(start..end).unwrap_or_default(), kind)),
             }
         }
-        if offset == end {
+        if found.is_none() {
             window.push_str("<<HERE>>");
         }
-        if end < input.len() {
+        if more {
             window.push('…');
         }
-        let token = match input.get(offset) {
+        let token = match found {
             None => "end of input".to_owned(),
-            Some(b'"') => "a quoted string".to_owned(),
-            Some(&byte @ (b'{' | b'}' | b',')) => format!("'{}'", byte as char),
-            Some(&byte) if brace_space(byte) => "whitespace".to_owned(),
-            Some(_) => {
-                let atom = input
-                    .get(offset..)
-                    .unwrap_or_default()
-                    .iter()
-                    .take_while(|&&byte| !brace_space(byte) && !b"{},\"".contains(&byte));
-                let mut text = String::new();
-                for (count, &byte) in atom.enumerate() {
-                    if count == CONTEXT_ATOM {
-                        text.push('…');
-                        break;
-                    }
-                    escape_byte(&mut text, byte);
-                }
-                format!("atom `{text}`")
+            Some(Token::Quoted) => "a quoted string".to_owned(),
+            Some(Token::Byte(byte @ (b'{' | b'}' | b','))) => format!("'{}'", byte as char),
+            Some(Token::Byte(_)) => "whitespace".to_owned(),
+            Some(kind @ Token::Atom) => {
+                let atom = input.get(offset..).unwrap_or_default();
+                let len = token(atom).0;
+                format!(
+                    "atom `{}`",
+                    describe(atom.get(..len).unwrap_or_default(), kind)
+                )
             }
         };
         let mut out = String::new();
@@ -137,16 +121,69 @@ impl std::fmt::Display for BraceContext {
     }
 }
 
+#[derive(Clone, Copy)]
+enum Token {
+    Byte(u8),
+    Quoted,
+    Atom,
+}
+
+fn token(input: &[u8]) -> (usize, Token) {
+    let Some(&first) = input.first() else {
+        return (1, Token::Byte(0));
+    };
+    if first == b'"' {
+        let mut index = 1;
+        while let Some(&byte) = input.get(index) {
+            index += 1;
+            if byte == b'"' {
+                if input.get(index) != Some(&b'"') {
+                    return (index, Token::Quoted);
+                }
+                index += 1;
+            }
+        }
+        return (input.len(), Token::Quoted);
+    }
+    if brace_space(first) || b"{},".contains(&first) {
+        return (1, Token::Byte(first));
+    }
+    let len = input
+        .iter()
+        .take_while(|&&byte| !brace_space(byte) && !b"{},\"".contains(&byte))
+        .count();
+    (len, Token::Atom)
+}
+
+fn describe(text: &[u8], kind: Token) -> String {
+    if let Token::Quoted = kind {
+        let closed = text.len() > 1 && text.ends_with(b"\"");
+        return if closed { "\"…\"" } else { "\"…" }.to_owned();
+    }
+    if text.len() <= CONTEXT_DIGITS && text.iter().all(u8::is_ascii_digit) {
+        return String::from_utf8_lossy(text).into_owned();
+    }
+    if std::str::from_utf8(text)
+        .ok()
+        .and_then(Guid::parse)
+        .is_some()
+    {
+        return "<uuid>".to_owned();
+    }
+    let class = if text.iter().copied().all(base64_char) {
+        "b64"
+    } else {
+        "atom"
+    };
+    format!("<{class}:{}>", text.len())
+}
+
 fn escape_byte(out: &mut String, byte: u8) {
     use std::fmt::Write as _;
     match byte {
         b'\r' => out.push_str("\\r"),
         b'\n' => out.push_str("\\n"),
         b'\t' => out.push_str("\\t"),
-        b'`' | b'\\' => {
-            out.push('\\');
-            out.push(byte as char);
-        }
         0x20..=0x7e => out.push(byte as char),
         _ => {
             let _ = write!(out, "\\x{byte:02x}");
@@ -251,7 +288,7 @@ pub(crate) fn check_manifest_input(input: &[u8]) -> Result<&[u8]> {
     Ok(body)
 }
 
-fn root_payload_fold(body: &[u8]) -> Option<(usize, usize)> {
+fn root_descriptor(body: &[u8]) -> Option<(usize, usize)> {
     let version = skip_space(body).strip_prefix(b"{")?;
     let mut depth = 1usize;
     let end = version
@@ -272,19 +309,61 @@ fn root_payload_fold(body: &[u8]) -> Option<(usize, usize)> {
     let root = root.get(..close)?;
     let payload = skip_space(root.splitn(3, |&byte| byte == b',').nth(2)?);
     let start = root_start + root.len() - payload.len();
-    let end = ROOT_BASE64_BYTES + ROOT_FOLD.len();
-    let (payload, trailing) = payload.split_at_checked(end)?;
-    let (first, folded) = payload.split_at(ROOT_FOLD_COLUMN);
-    let last = folded.strip_prefix(ROOT_FOLD)?;
-    if !trailing.iter().copied().all(brace_space)
-        || !first
+    Some((start, root_start + close))
+}
+
+fn base64_char(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'=')
+}
+
+fn folded_descriptor(body: &[u8]) -> Option<(usize, usize)> {
+    let (start, end) = root_descriptor(body)?;
+    let region = body.get(start..end)?;
+    let text = region.trim_ascii_end();
+    if !text.iter().any(|&byte| brace_space(byte))
+        || !text
             .iter()
-            .chain(last)
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'='))
+            .all(|&byte| base64_char(byte) || brace_space(byte))
     {
         return None;
     }
-    Some((start + ROOT_FOLD_COLUMN, start + end))
+    let mut rest = text;
+    let (mut width, mut fold) = (None, None);
+    loop {
+        let line_len = rest
+            .iter()
+            .position(|&byte| brace_space(byte))
+            .unwrap_or(rest.len());
+        let (line, tail) = rest.split_at(line_len);
+        if tail.is_empty() {
+            return (!line.is_empty() && line.len() <= width?).then_some((start, end));
+        }
+        if line.is_empty()
+            || !line.len().is_multiple_of(4)
+            || *width.get_or_insert(line.len()) != line.len()
+        {
+            return None;
+        }
+        let this = ROOT_FOLDS.into_iter().find(|fold| tail.starts_with(fold))?;
+        if *fold.get_or_insert(this) != this {
+            return None;
+        }
+        rest = tail.get(this.len()..)?;
+    }
+}
+
+fn canonical_base64(atom: &str) -> bool {
+    const CHUNK: usize = 1024;
+    let bytes = atom.as_bytes();
+    let padding = bytes.iter().rev().take_while(|&&byte| byte == b'=').count();
+    let data = bytes.get(..bytes.len() - padding).unwrap_or_default();
+    if !bytes.len().is_multiple_of(4) || padding > 2 || data.contains(&b'=') {
+        return false;
+    }
+    let mut output = [0; CHUNK / 4 * 3];
+    bytes
+        .chunks(CHUNK)
+        .all(|chunk| STANDARD.decode_slice(chunk, &mut output).is_ok())
 }
 
 fn budget() -> Result<MemoryBudget> {
@@ -437,26 +516,22 @@ impl ConfigInfo {
             body.len().checked_add(2).ok_or(BudgetError::Overflow)?,
         )?;
         wrapped.try_push(b'{')?;
-        let folded = folded_descriptor(body);
-        if let Some(locator) = &folded {
-            let encoded = locator
-                .encoded
-                .get(..locator.len)
-                .ok_or(BudgetError::Overflow)?;
-            wrapped.try_extend_from_slice(locator.prefix)?;
-            wrapped.try_extend_from_slice(encoded)?;
-            wrapped.try_extend_from_slice(locator.padding)?;
-            wrapped.try_extend_from_slice(locator.suffix)?;
+        if let Some((start, end)) = folded_descriptor(body) {
+            let region = body.get(start..end).ok_or(BudgetError::Overflow)?;
+            wrapped.try_extend_from_slice(body.get(..start).ok_or(BudgetError::Overflow)?)?;
+            let mut joined = 0;
+            for line in region.split(|&byte| brace_space(byte)) {
+                wrapped.try_extend_from_slice(line)?;
+                joined += line.len();
+            }
+            for _ in joined..region.len() {
+                wrapped.try_push(b' ')?;
+            }
+            wrapped.try_extend_from_slice(body.get(end..).ok_or(BudgetError::Overflow)?)?;
         } else {
             wrapped.try_extend_from_slice(body)?;
         }
         wrapped.try_push(b'}')?;
-        if let Some((fold, end)) = root_payload_fold(body).filter(|_| folded.is_none()) {
-            let suffix = wrapped
-                .get_mut(fold + 1..end + 1)
-                .ok_or_else(|| invalid("root payload fold within the manifest"))?;
-            suffix.rotate_left(ROOT_FOLD.len());
-        }
         let tree =
             brace::parse_bytes_budgeted(&wrapped, budget, CATEGORY).map_err(
                 |error| match error {
@@ -492,19 +567,12 @@ impl ConfigInfo {
         if uint(root_version)? != 2 {
             return Err(invalid("version-2 root"));
         }
-        let descriptor = descriptor.as_atom();
-        let legacy = folded.is_some() && descriptor.is_some_and(|atom| !atom.is_empty());
-        let payload = |atom: &str| {
-            atom.is_empty()
-                || (atom.len() == ROOT_BASE64_BYTES
-                    && STANDARD.decode_slice(atom, &mut [0; ROOT_PAYLOAD_BYTES])
-                        == Ok(ROOT_PAYLOAD_BYTES))
-        };
-        if !legacy && !descriptor.is_some_and(payload) {
-            return Err(invalid(match descriptor {
-                None => "root payload atom",
-                Some(_) => "supported root descriptor",
-            }));
+        match descriptor.as_atom() {
+            None => return Err(invalid("root payload atom")),
+            Some(atom) if !canonical_base64(atom) => {
+                return Err(invalid("supported root descriptor"));
+            }
+            Some(_) => {}
         }
         let root_id = root_id
             .as_atom()
@@ -568,62 +636,6 @@ impl ConfigInfo {
             _hold: output_hold,
         })
     }
-}
-
-struct FoldedDescriptor<'a> {
-    prefix: &'a [u8],
-    suffix: &'a [u8],
-    padding: &'static [u8],
-    encoded: [u8; 256],
-    len: usize,
-}
-
-fn folded_descriptor(body: &[u8]) -> Option<FoldedDescriptor<'_>> {
-    let mut rest = body.get(body.iter().position(|&b| b == b'}')?..)?;
-    for &marker in b"}}},{2," {
-        rest = rest.trim_ascii_start().strip_prefix(&[marker])?;
-    }
-    rest = rest.trim_ascii_start();
-    let id = std::str::from_utf8(rest.get(..36)?)
-        .ok()
-        .and_then(Guid::parse)?;
-    if id.is_nil() {
-        return None;
-    }
-    rest = rest.get(36..)?.trim_ascii_start().strip_prefix(b",")?;
-    let start = body.len().checked_sub(rest.len())?;
-    let raw_len = rest.iter().take(269).position(|&b| b == b'}')?;
-    let (lines, trailing, decoded): (&[usize], bool, usize) = match raw_len {
-        178 => (&[64, 64, 44], false, 128),
-        268 => (&[64, 64, 64, 64], true, 192),
-        _ => return None,
-    };
-    let mut encoded = [0; 256];
-    let mut output = 0;
-    for (index, &width) in lines.iter().enumerate() {
-        let (line, tail) = rest.split_at_checked(width)?;
-        encoded
-            .get_mut(output..output + width)?
-            .copy_from_slice(line);
-        output += width;
-        rest = if index + 1 < lines.len() || trailing {
-            tail.strip_prefix(b"\r\r\n")?
-        } else {
-            tail
-        };
-    }
-    if rest.first() != Some(&b'}')
-        || STANDARD.decode_slice(encoded.get(..output)?, &mut [0; 192]) != Ok(decoded)
-    {
-        return None;
-    }
-    Some(FoldedDescriptor {
-        prefix: body.get(..start)?,
-        suffix: body.get(start.checked_add(raw_len)?..)?,
-        padding: b"            ".get(..raw_len.checked_sub(output)?)?,
-        encoded,
-        len: output,
-    })
 }
 
 impl crate::CfFile {

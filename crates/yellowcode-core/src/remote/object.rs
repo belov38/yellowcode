@@ -5,8 +5,7 @@ use onec_client::{Cell, ObjectData, Ref, Session, SessionError, Value};
 use serde_json::{Value as Json, json};
 
 use super::{
-    Shown, enum_presentation_json, open_session, presentation_json, show, steps_line, users_hint,
-    values,
+    Shown, enum_presentation_json, open_session, presentation_json, show, steps_line, values,
 };
 use crate::Result;
 use crate::output::Out;
@@ -30,6 +29,7 @@ pub struct ObjectRequest {
     pub reference: ObjectRef,
     pub json: bool,
     pub presentations: bool,
+    pub init: Option<super::InitCall>,
 }
 
 pub(super) fn run(
@@ -38,23 +38,33 @@ pub(super) fn run(
     err: &mut dyn Write,
     input: &mut dyn BufRead,
 ) -> Result<i32> {
-    let (mut session, login) = open_session(&r.login, input)?;
-    let outcome = login.and_then(|()| session.read_object(&r.reference.0));
-    let shown = match &outcome {
-        Ok(o) if r.presentations => Some(ask(&mut session, o).map_err(|e| e.to_string())),
-        _ => None,
-    };
-    let _ = session.logout();
-    let object = match outcome {
+    let (session, login) = open_session(&r.login, input)?;
+    let (init, reference, presentations) = (r.init.clone(), r.reference.0.clone(), r.presentations);
+    let (session, outcome, shown) = super::on_value_stack(move || {
+        let mut session = session;
+        let outcome = super::start(&mut session, login, init.as_ref())
+            .and_then(|init| Ok((init, session.read_object(&reference)?)));
+        let shown = match &outcome {
+            Ok((_, o)) if presentations => Some(ask(&mut session, o).map_err(|e| e.to_string())),
+            _ => None,
+        };
+        let _ = session.logout();
+        (session, outcome, shown)
+    })?;
+    let (init, object) = match outcome {
         Ok(o) => o,
-        Err(e) => {
-            users_hint(&r.login.user, &e, out)?;
-            writeln!(out, "RESULT FAIL {}", steps_line(&session))?;
-            return Err(e.into());
-        }
+        Err(e) => return super::session_failed(&r.login.user, e, &session, r.json, out, err),
     };
+    if let Some(c) = &init
+        && !r.json
+    {
+        writeln!(out, "{}", super::init_line(c))?;
+    }
     if r.json {
-        let j = object_json(&object, shown.as_ref(), &session);
+        let mut j = object_json(&object, shown.as_ref(), &session);
+        if let (Some(c), Some(o)) = (&init, j.as_object_mut()) {
+            o.insert("init".into(), super::init_json(c));
+        }
         writeln!(out, "{}", serde_json::to_string_pretty(&j)?)?;
         return Ok(0);
     }

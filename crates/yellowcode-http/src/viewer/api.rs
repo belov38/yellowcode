@@ -344,6 +344,9 @@ fn check_module(state: &State, req: &Request) -> Response {
             drop(answers);
             reply(200, v.as_ref())
         }
+        Err(e) if e.downcast_ref::<check::NamesUnavailable>().is_some() => {
+            error(422, &e.to_string())
+        }
         Err(e) => error(500, &e.to_string()),
     }
 }

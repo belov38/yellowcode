@@ -1,17 +1,26 @@
 use roxmltree::{Document, Node};
 
+use std::collections::HashMap;
+
 use crate::answer::{NS_MODULES, NS_VRS, NS_WS, attr, boolean};
 use crate::body;
-use crate::formdescr::{FormData, FormField, NS_UO, Slot};
+use crate::dcs;
+use crate::formdescr::{FormData, FormField, FormTable, NS_UO, Slot, collection_columns};
 use crate::info::MemberKind;
 use crate::metadata::MdType;
 use crate::modules::{FormMethod, ModuleId, ModulesError, parse_form_module_ids};
-use crate::object::{Cell, ObjectError, cell, form_key, implied_type, uo_children};
-use crate::report::{self, FormAttribute};
+use crate::object::{Cell, ObjectError, ObjectTable, cell, form_key, implied_type, uo_children};
+use crate::report::{self, FormAttribute, OpenedForm};
 use crate::session::{RandomSource, Session, SessionError};
-use crate::value::{Ref, Value};
-use crate::write::{Assign, UserMessage, field_value, named, same_name, settable, value_xml};
+use crate::tabular::ValueList;
+use crate::value::{NS_CORE, Ref, TypeName, Value};
+use crate::write::{
+    Input, ObjectChange, UserMessage, field_value, named, same_name, settable, table_xml, value_xml,
+};
 use crate::xml::{self, escape_attr};
+
+mod state;
+use state::{FormState, Kind, Place};
 
 const NS_LF: &str = "http://v8.1c.ru/8.2/managed-application/logform";
 
@@ -23,16 +32,20 @@ pub enum FormTarget {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum FormAction {
-    Show,
     Command(String),
     Call { name: String, params: Vec<Value> },
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct FormStep {
+    pub change: ObjectChange,
+    pub action: FormAction,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct FormRequest {
     pub target: FormTarget,
-    pub set: Vec<Assign>,
-    pub action: FormAction,
+    pub steps: Vec<FormStep>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,12 +90,39 @@ pub struct FormCommand {
     pub run: CommandRun,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Period {
+    pub variant: String,
+    pub start: Option<String>,
+    pub end: Option<String>,
+}
+
+impl std::fmt::Display for Period {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match (&self.start, &self.end) {
+            (Some(s), Some(e)) => write!(f, "{s}..{e}"),
+            _ => f.write_str(&self.variant),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum FormValue {
+    Cell(Cell),
+    Period(Period),
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum AttrValue {
     Cell(Cell),
+    Period(Period),
     Object {
         fields: Vec<(FormField, Cell)>,
         tables: Vec<(FormField, Vec<FormField>, Vec<Vec<Cell>>)>,
+    },
+    Rows {
+        columns: Vec<FormField>,
+        rows: Vec<Vec<Cell>>,
     },
     Sheet,
     Other(String),
@@ -99,8 +139,8 @@ pub struct FormAttr {
 pub enum Changed {
     Value {
         path: String,
-        old: Option<Cell>,
-        new: Cell,
+        old: Option<FormValue>,
+        new: FormValue,
     },
     Rows {
         path: String,
@@ -119,8 +159,8 @@ pub enum Changed {
 #[derive(Debug, Clone, PartialEq)]
 pub struct SetValue {
     pub path: String,
-    pub old: Option<Cell>,
-    pub new: Value,
+    pub old: Option<FormValue>,
+    pub new: Option<FormValue>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -132,7 +172,9 @@ pub enum CallOutcome {
     Failed {
         reason: Option<String>,
         text: String,
+        changed: Vec<Changed>,
     },
+    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -140,6 +182,7 @@ pub struct Called {
     pub method: String,
     pub place: MethodPlace,
     pub command: Option<String>,
+    pub set: Vec<SetValue>,
     pub outcome: CallOutcome,
     pub messages: Vec<UserMessage>,
 }
@@ -153,9 +196,10 @@ pub struct FormView {
     pub attributes: Vec<FormAttr>,
     pub methods: Vec<ServerMethod>,
     pub commands: Vec<FormCommand>,
-    pub set: Vec<SetValue>,
     pub opening_messages: Vec<UserMessage>,
-    pub called: Option<Called>,
+    pub calls: Vec<Called>,
+    pub refused: Option<String>,
+    pub not_run: Vec<String>,
     pub warnings: Vec<String>,
 }
 
@@ -165,10 +209,6 @@ pub enum FormError {
     Refused(String),
     #[error("{answer}: {what}")]
     Shape { answer: &'static str, what: String },
-    #[error(
-        "the call was sent and its outcome is not known ({0}); the method may have run on the server"
-    )]
-    Sent(String),
 }
 
 fn shape(answer: &'static str, what: impl Into<String>) -> FormError {
@@ -511,14 +551,18 @@ fn read_opened(body: &[u8]) -> Result<Opened, FormError> {
     })
 }
 
-fn props_of<'a, 'i>(root: Node<'a, 'i>, properties: usize) -> Result<Vec<Node<'a, 'i>>, FormError> {
+fn props_of<'a, 'i>(
+    root: Node<'a, 'i>,
+    properties: usize,
+    what: &'static str,
+) -> Result<Vec<Node<'a, 'i>>, FormError> {
     let values: Vec<Node> = match ws_children(root, "props").next() {
         Some(props) => uo_children(props).collect(),
         None => Vec::new(),
     };
     if values.len() != properties {
         return Err(shape(
-            QUERY,
+            what,
             format!(
                 "props has {} values for {} attributes (property)",
                 values.len(),
@@ -630,53 +674,73 @@ fn main_value(n: Node, data: &FormData, types: &[MdType]) -> AttrValue {
 struct Described {
     attributes: Vec<FormAttribute>,
     data: Option<FormData>,
+    collections: HashMap<String, Vec<FormField>>,
 }
 
-fn described(descr: &[u8]) -> Result<Described, SessionError> {
+fn described(descr: &[u8], main_id: Option<&str>) -> Result<Described, SessionError> {
     let attributes = report::read_attributes(descr)?;
-    let data = FormData::from_answer(descr, &mut Vec::new()).ok();
-    Ok(Described { attributes, data })
+    let data = match main_id {
+        Some(id) => FormData::from_answer_main(descr, id).ok(),
+        None => FormData::from_answer(descr, &mut Vec::new()).ok(),
+    };
+    let collections = collection_columns(descr).map_err(ObjectError::from)?;
+    Ok(Described {
+        attributes,
+        data,
+        collections,
+    })
 }
 
-fn attributes_of(
+fn state_of(
     answer: &[u8],
-    opened: &Opened,
+    what: &'static str,
+    properties: &[(String, bool)],
     d: &Described,
     types: &[MdType],
-) -> Result<Vec<FormAttr>, FormError> {
+) -> Result<FormState, FormError> {
     let text = xml::value_text(answer);
-    let doc = Document::parse(&text).map_err(|e| shape(QUERY, e.to_string()))?;
-    let values = props_of(doc.root_element(), opened.properties.len())?;
-    let mut out = Vec::new();
-    for a in &d.attributes {
-        let at = opened
-            .properties
-            .iter()
-            .position(|(id, _)| *id == a.field.id);
-        let main = at.is_some_and(|i| opened.properties[i].1);
-        let value = match at {
-            None => AttrValue::Other(String::new()),
-            Some(i) => match (&d.data, main) {
-                (Some(data), true) => main_value(values[i], data, types),
-                _ => own_value(values[i], a, types),
-            },
+    let doc = Document::parse(&text).map_err(|e| shape(what, e.to_string()))?;
+    let root = doc.root_element();
+    let (values, properties): (Vec<Node>, Vec<(String, bool)>) =
+        if properties.is_empty() && !d.attributes.is_empty() {
+            let values = props_of(root, d.attributes.len(), what)?;
+            let main = d.data.as_ref().map(|data| data.object.clone());
+            let properties = d
+                .attributes
+                .iter()
+                .map(|a| {
+                    (
+                        a.field.id.clone(),
+                        main.as_deref() == a.field.name.as_deref(),
+                    )
+                })
+                .collect();
+            (values, properties)
+        } else {
+            (props_of(root, properties.len(), what)?, properties.to_vec())
         };
-        out.push(FormAttr {
+    let mut attrs = Vec::new();
+    let mut nodes = Vec::new();
+    for a in &d.attributes {
+        let at = properties.iter().position(|(id, _)| *id == a.field.id);
+        attrs.push(FormAttr {
             attribute: a.clone(),
-            main,
-            value,
+            main: at.is_some_and(|i| properties[i].1),
+            value: AttrValue::Other(String::new()),
         });
+        nodes.push(at.map(|i| values[i]));
     }
-    Ok(out)
+    Ok(FormState::from_values(attrs, &nodes, d, types))
 }
 
 type Target<'a> = (usize, Option<(usize, &'a FormField)>, &'a FormField);
 
 fn target_of<'a>(
     name: &str,
-    attrs: &'a [FormAttr],
+    st: &'a FormState,
     data: Option<&'a FormData>,
 ) -> Result<Target<'a>, FormError> {
+    let attrs = &st.attrs;
     let main = attrs.iter().position(|a| a.main);
     let in_main = |field: &str| -> Result<Target<'a>, FormError> {
         let (Some(at), Some(data)) = (main, data) else {
@@ -694,7 +758,7 @@ fn target_of<'a>(
                 Ok((at, Some((p, &data.fields[i])), &data.fields[i]))
             }
             None if data.tables.iter().any(|t| named(&t.field, field)) => Err(refused(format!(
-                "{name}: a tabular section is not set by remote form (not implemented)"
+                "{name}: a tabular section is changed by its rows ({name}[N].Поле=…, --delete-row, --clear-table)"
             ))),
             None => Err(refused(format!(
                 "{name}: no such field of the main attribute"
@@ -716,45 +780,161 @@ fn target_of<'a>(
                 "{name}: the main attribute is set by its fields ({name}.Поле)"
             )));
         }
-        if a.attribute.object.is_some() || a.attribute.is_spreadsheet() {
-            return Err(refused(format!(
+        return match st.kinds[i] {
+            Kind::Rows(_) => Err(refused(format!(
+                "{name}: a value table is changed by its rows ({name}[N].Колонка=…, --delete-row, --clear-table)"
+            ))),
+            Kind::Value | Kind::Period if a.attribute.object.is_none() => {
+                Ok((i, None, &a.attribute.field))
+            }
+            _ => Err(refused(format!(
                 "{name}: an attribute of this type is not set (not implemented)"
-            )));
+            ))),
+        };
+    }
+    in_main(name)
+}
+
+fn is_period(f: &FormField) -> bool {
+    matches!(f.ty.ids.as_slice(), [one] if one.eq_ignore_ascii_case(state::PERIOD))
+}
+
+fn form_value(
+    input: &Input,
+    field: &FormField,
+    types: &[MdType],
+) -> Result<(FormValue, String), String> {
+    if is_period(field) {
+        let Input::Text(t) = input else {
+            return Err(
+                "a standard period is set by its text: ГГГГ-ММ-ДД..ГГГГ-ММ-ДД or a variant (ThisYear…)"
+                    .to_string(),
+            );
+        };
+        let (variant, dates) = dcs::period_parts(t)?;
+        let inner = dcs::period(t)?;
+        let (start, end) = dates.unzip();
+        return Ok((
+            FormValue::Period(Period {
+                variant: variant.to_string(),
+                start,
+                end,
+            }),
+            format!("<uo:v>{inner}</uo:v>"),
+        ));
+    }
+    let implied = implied_type(&field.ty, types);
+    let list = TypeName::new(NS_CORE, "ValueListType");
+    if implied.as_ref() == Some(&list) {
+        let v = match input {
+            Input::Value(v @ Value::ValueList(_)) => v.clone(),
+            Input::Text(t) if t.is_empty() => Value::ValueList(ValueList::default()),
+            _ => {
+                return Err(
+                    "a value list is set by its typed JSON (--set-json Имя='{\"vl\":{\"items\":[…]}}'), an empty text clears it"
+                        .to_string(),
+                );
+            }
+        };
+        let x = xml::value_element_as("uo:v", &v, Some(&list)).map_err(|e| e.to_string())?;
+        return Ok((FormValue::Cell(Cell::Value(v)), x));
+    }
+    let v = field_value(input, field, types)?;
+    let x = value_xml(&v, implied.is_none()).map_err(|e| e.to_string())?;
+    Ok((FormValue::Cell(Cell::Value(v)), x))
+}
+
+fn value_now(st: &FormState, at: usize, f: Option<&FormField>) -> Option<FormValue> {
+    match (&st.attrs[at].value, f) {
+        (AttrValue::Cell(c), None) => Some(FormValue::Cell(c.clone())),
+        (AttrValue::Period(p), None) => Some(FormValue::Period(p.clone())),
+        (AttrValue::Object { fields, .. }, Some(f)) => fields
+            .iter()
+            .find(|(x, _)| x.id == f.id)
+            .map(|(_, c)| FormValue::Cell(c.clone())),
+        _ => None,
+    }
+}
+
+fn table_of(
+    name: &str,
+    st: &FormState,
+    data: Option<&FormData>,
+) -> Result<(Place, FormTable, String), FormError> {
+    let main = st.attrs.iter().position(|a| a.main);
+    let in_main = |t: &str| -> Result<(Place, FormTable, String), FormError> {
+        let (Some(at), Some(data)) = (main, data) else {
+            return Err(refused(format!("{name}: no such table of the form")));
+        };
+        let ti = data
+            .tables
+            .iter()
+            .position(|x| named(&x.field, t))
+            .ok_or_else(|| {
+                refused(format!(
+                    "{name}: no such tabular section of the main attribute"
+                ))
+            })?;
+        let path = format!(
+            "{}.{}",
+            st.attrs[at].attribute.field.display_name(),
+            data.tables[ti].field.display_name()
+        );
+        Ok(((at, Some(ti)), data.tables[ti].clone(), path))
+    };
+    if let Some((head, t)) = name.split_once('.') {
+        if main.is_some_and(|m| named(&st.attrs[m].attribute.field, head)) {
+            return in_main(t);
         }
-        return Ok((i, None, &a.attribute.field));
+        return Err(refused(format!(
+            "{name}: only the tabular sections of the main attribute are named by a path"
+        )));
+    }
+    if let Some(i) = st
+        .attrs
+        .iter()
+        .position(|a| named(&a.attribute.field, name))
+    {
+        return match &st.kinds[i] {
+            Kind::Rows(columns) => Ok((
+                (i, None),
+                FormTable {
+                    field: st.attrs[i].attribute.field.clone(),
+                    columns: columns.clone(),
+                },
+                st.attrs[i].attribute.field.display_name().to_string(),
+            )),
+            _ => Err(refused(format!(
+                "{name}: the attribute is not a value table"
+            ))),
+        };
     }
     in_main(name)
 }
 
 fn pchs_of(
-    set: &[Assign],
-    attrs: &[FormAttr],
-    data: Option<&FormData>,
+    change: &ObjectChange,
+    st: &FormState,
+    d: &Described,
     types: &[MdType],
-) -> Result<(String, Vec<SetValue>, Vec<FormAttr>), FormError> {
-    if set.is_empty() {
-        return Ok((report::EMPTY_PCHS.to_string(), Vec::new(), attrs.to_vec()));
+) -> Result<(String, Vec<SetValue>), FormError> {
+    if change.set.is_empty() && change.tables.is_empty() {
+        return Ok((report::EMPTY_PCHS.to_string(), Vec::new()));
     }
-    let mut after = attrs.to_vec();
+    let data = d.data.as_ref();
+    let attrs = &st.attrs;
     let mut own: Vec<(usize, String)> = Vec::new();
     let mut main: Vec<(usize, String)> = Vec::new();
     let mut main_at = None;
     let mut applied = Vec::new();
-    for a in set {
-        let (at, in_main, field) = target_of(&a.name, attrs, data)?;
-        settable(field, &a.name).map_err(|e| refused(e.to_string()))?;
-        let v =
-            field_value(&a.input, field, types).map_err(|e| refused(format!("{}: {e}", a.name)))?;
-        let x = value_xml(&v, implied_type(&field.ty, types).is_none())
-            .map_err(|e| refused(e.to_string()))?;
-        let old = match (&attrs[at].value, in_main) {
-            (AttrValue::Cell(c), None) => Some(c.clone()),
-            (AttrValue::Object { fields, .. }, Some((_, f))) => fields
-                .iter()
-                .find(|(x, _)| x.id == f.id)
-                .map(|(_, c)| c.clone()),
-            _ => None,
-        };
+    for a in &change.set {
+        let (at, in_main, field) = target_of(&a.name, st, data)?;
+        settable(field, &a.name).map_err(|e| match e {
+            ObjectError::Change(m) => refused(m),
+            e => refused(e.to_string()),
+        })?;
+        let (new, x) =
+            form_value(&a.input, field, types).map_err(|e| refused(format!("{}: {e}", a.name)))?;
         let path = match in_main {
             Some((_, f)) => format!(
                 "{}.{}",
@@ -777,16 +957,63 @@ fn pchs_of(
             Some((p, _)) => main.push((p, x)),
             None => own.push((at, x)),
         }
-        match (&mut after[at].value, in_main) {
-            (AttrValue::Cell(c), None) => *c = Cell::Value(v.clone()),
-            (AttrValue::Object { fields, .. }, Some((_, f))) => {
-                if let Some((_, c)) = fields.iter_mut().find(|(x, _)| x.id == f.id) {
-                    *c = Cell::Value(v.clone());
-                }
-            }
-            _ => {}
+        applied.push(SetValue {
+            path,
+            old: value_now(st, at, in_main.map(|(_, f)| f)),
+            new: Some(new),
+        });
+    }
+    let mut ops = 0usize;
+    let mut seen: Vec<Place> = Vec::new();
+    for t in &change.tables {
+        let (place, table, path) = table_of(&t.name, st, data)?;
+        if seen.contains(&place) {
+            return Err(refused(format!("{}: the table is given twice", t.name)));
         }
-        applied.push(SetValue { path, old, new: v });
+        seen.push(place);
+        settable(&table.field, &t.name).map_err(|e| match e {
+            ObjectError::Change(m) => refused(m),
+            e => refused(e.to_string()),
+        })?;
+        let rows = st.rows(place).ok_or_else(|| {
+            refused(format!(
+                "{}: the rows of the table are not known after an earlier answer",
+                t.name
+            ))
+        })?;
+        let read = ObjectTable {
+            field: table.field.clone(),
+            columns: table.columns.clone(),
+            rows: rows.cells(),
+        };
+        let raw = rows.raw_table(&table.columns, types);
+        let mut edit = t.clone();
+        edit.name = table.field.display_name().to_string();
+        let (x, n, changes) =
+            table_xml(&raw, &table, Some(&read), Some(&edit), types).map_err(|e| match e {
+                ObjectError::Change(m) => refused(m),
+                e => refused(e.to_string()),
+            })?;
+        ops += n;
+        let short = table.field.display_name();
+        applied.extend(changes.into_iter().map(|c| SetValue {
+            path: match c.path.strip_prefix(short) {
+                Some(rest) => format!("{path}{rest}"),
+                None => c.path,
+            },
+            old: c.old.map(FormValue::Cell),
+            new: c.new.map(|v| FormValue::Cell(Cell::Value(v))),
+        }));
+        match place {
+            (at, Some(ti)) => {
+                main_at = Some(at);
+                let slot = data
+                    .and_then(|d| d.layout.iter().position(|s| *s == Slot::Table(ti)))
+                    .ok_or_else(|| refused(format!("{}: no slot of the table", t.name)))?;
+                main.push((slot, x));
+            }
+            (at, None) => own.push((at, x)),
+        }
     }
     let mut values: Vec<(usize, String)> = own;
     if let Some(at) = main_at {
@@ -806,12 +1033,16 @@ fn pchs_of(
     } else {
         String::new()
     };
+    let (sin, seq) = if ops > 0 {
+        (st.sin + 1, st.seq + ops as u64)
+    } else {
+        (st.sin, st.seq)
+    };
     Ok((
         format!(
-            "<pchs sinDesc=\"0\" sin=\"0\" seq=\"0\"><uo:structure{fields}>{body}</uo:structure></pchs>"
+            "<pchs sinDesc=\"0\" sin=\"{sin}\" seq=\"{seq}\"><uo:structure{fields}>{body}</uo:structure></pchs>"
         ),
         applied,
-        after,
     ))
 }
 
@@ -919,6 +1150,29 @@ fn changes_of(
             (AttrValue::Object { fields, .. }, Some(data), true) => {
                 main_changes(v, &name, fields, data, types, &mut out)?;
             }
+            (AttrValue::Rows { columns, .. }, _, _) => {
+                if table_changed(v) {
+                    let (count, rows) = rows_of(v, columns, types);
+                    out.push(Changed::Rows {
+                        path: name,
+                        count: count.unwrap_or(rows.len()),
+                        columns: columns.clone(),
+                        rows,
+                    });
+                }
+            }
+            (AttrValue::Period(old), _, _) => {
+                let new = state::period_of(v);
+                match new {
+                    Some(p) if p == *old => {}
+                    Some(p) => out.push(Changed::Value {
+                        path: name,
+                        old: Some(FormValue::Period(old.clone())),
+                        new: FormValue::Period(p),
+                    }),
+                    None => out.push(Changed::Other { path: name }),
+                }
+            }
             _ if a.attribute.is_spreadsheet() => {
                 let changed = v
                     .children()
@@ -942,8 +1196,8 @@ fn changes_of(
                     if old.as_ref() != Some(&new) {
                         out.push(Changed::Value {
                             path: name,
-                            old,
-                            new,
+                            old: old.map(FormValue::Cell),
+                            new: FormValue::Cell(new),
                         });
                     }
                 }
@@ -961,6 +1215,62 @@ fn table_changed(n: Node) -> bool {
             "item" => true,
             _ => false,
         })
+}
+
+fn diff(before: &[FormAttr], after: &[FormAttr]) -> Vec<Changed> {
+    let mut out = Vec::new();
+    let rows = |path: String, columns: &[FormField], rows: &[Vec<Cell>]| Changed::Rows {
+        path,
+        count: rows.len(),
+        columns: columns.to_vec(),
+        rows: rows.iter().cloned().enumerate().collect(),
+    };
+    for (b, a) in before.iter().zip(after) {
+        let name = a.attribute.field.display_name().to_string();
+        match (&b.value, &a.value) {
+            (x, y) if x == y => {}
+            (AttrValue::Cell(x), AttrValue::Cell(y)) => out.push(Changed::Value {
+                path: name,
+                old: Some(FormValue::Cell(x.clone())),
+                new: FormValue::Cell(y.clone()),
+            }),
+            (AttrValue::Period(x), AttrValue::Period(y)) => out.push(Changed::Value {
+                path: name,
+                old: Some(FormValue::Period(x.clone())),
+                new: FormValue::Period(y.clone()),
+            }),
+            (AttrValue::Rows { .. }, AttrValue::Rows { columns, rows: r }) => {
+                out.push(rows(name, columns, r));
+            }
+            (
+                AttrValue::Object {
+                    fields: bf,
+                    tables: bt,
+                },
+                AttrValue::Object { fields, tables },
+            ) => {
+                for (f, c) in fields {
+                    let old = bf.iter().find(|(g, _)| g.id == f.id).map(|(_, c)| c);
+                    if old != Some(c) {
+                        out.push(Changed::Value {
+                            path: format!("{name}.{}", f.display_name()),
+                            old: old.cloned().map(FormValue::Cell),
+                            new: FormValue::Cell(c.clone()),
+                        });
+                    }
+                }
+                for (t, columns, r) in tables {
+                    let old = bt.iter().find(|(g, _, _)| g.id == t.id).map(|(_, _, r)| r);
+                    if old != Some(r) {
+                        out.push(rows(format!("{name}.{}", t.display_name()), columns, r));
+                    }
+                }
+            }
+            (_, AttrValue::Sheet) => {}
+            _ => out.push(Changed::Other { path: name }),
+        }
+    }
+    out
 }
 
 fn positions(n: Node, count: usize, answer: &'static str) -> Result<Vec<usize>, FormError> {
@@ -1007,8 +1317,8 @@ fn main_changes(
                 if old.as_ref() != Some(&new) {
                     out.push(Changed::Value {
                         path: format!("{name}.{}", f.display_name()),
-                        old,
-                        new,
+                        old: old.map(FormValue::Cell),
+                        new: FormValue::Cell(new),
                     });
                 }
             }
@@ -1045,9 +1355,8 @@ fn method_of(
     methods: &[ServerMethod],
     commands: &[FormCommand],
     has_module: bool,
-) -> Result<Option<Planned>, FormError> {
+) -> Result<Planned, FormError> {
     match action {
-        FormAction::Show => Ok(None),
         FormAction::Call { name, params } => {
             let m = match find_method(methods, name) {
                 Some(m) => m.clone(),
@@ -1081,7 +1390,7 @@ fn method_of(
                     m.required
                 )));
             }
-            Ok(Some((m, params.clone(), None)))
+            Ok((m, params.clone(), None))
         }
         FormAction::Command(name) => {
             let c = commands
@@ -1118,16 +1427,46 @@ fn method_of(
             let m = find_method(methods, method)
                 .cloned()
                 .ok_or_else(|| refused(format!("{method}: not a server method of the form")))?;
-            Ok(Some((m, Vec::new(), Some(c.name.clone()))))
+            Ok((m, Vec::new(), Some(c.name.clone())))
         }
+    }
+}
+
+fn synch_request(key: &str) -> Vec<u8> {
+    format!(
+        "\u{feff}<?xml version=\"1.0\" encoding=\"UTF-8\"?><request xmlns=\"{NS_WS}\" \
+         xmlns:xs=\"http://www.w3.org/2001/XMLSchema\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\">\
+         <key>{}</key></request>",
+        xml::escape_text(key)
+    )
+    .into_bytes()
+}
+
+const SYNCH: &str = "logForm/synchException";
+
+fn synch_counters(answer: &[u8]) -> Result<(u64, u64), FormError> {
+    let text = xml::value_text(answer);
+    let doc = Document::parse(&text).map_err(|e| shape(SYNCH, e.to_string()))?;
+    let d = ws_children(doc.root_element(), "descriptions")
+        .next()
+        .ok_or_else(|| shape(SYNCH, "no descriptions"))?;
+    let counter = |name: &str| {
+        d.attribute(name)
+            .and_then(|v| v.parse::<u64>().ok())
+            .ok_or_else(|| shape(SYNCH, format!("descriptions without {name}")))
+    };
+    Ok((counter("sinUo")?, counter("seqUo")?))
+}
+
+fn step_text(a: &FormAction) -> String {
+    match a {
+        FormAction::Command(c) => format!("command {c}"),
+        FormAction::Call { name, .. } => format!("call {name}"),
     }
 }
 
 impl<R: RandomSource> Session<R> {
     pub fn run_form(&mut self, req: &FormRequest) -> Result<FormView, SessionError> {
-        if !req.set.is_empty() && matches!(req.action, FormAction::Show) {
-            return Err(refused("attributes are set only for a call (--command or --call)").into());
-        }
         let conf = self.prologue(true)?.conf;
         let types = self.session_types("the types of the values of the form")?;
         let (key, reference) = match &req.target {
@@ -1141,22 +1480,13 @@ impl<R: RandomSource> Session<R> {
             ),
         };
         let (fid, answer) = self.open_form(&key, reference)?;
-        let mut view = None;
-        let work = self.form_in(&conf, &answer, &types, req, reference, &mut view);
+        let work = self.form_in(&conf, &answer, &types, req, reference);
         match work {
-            Ok(()) => {
-                let mut v = view.ok_or_else(|| SessionError::Protocol("no view".into()))?;
+            Ok(mut v) => {
                 if let Err(e) = self.close_form(&fid) {
                     v.warnings.push(format!("the form was not closed: {e}"));
                 }
                 Ok(v)
-            }
-            Err(SessionError::Form(FormError::Sent(m))) => {
-                let m = match self.close_form(&fid) {
-                    Ok(()) => m,
-                    Err(c) => format!("{m}; the form was not closed either: {c}"),
-                };
-                Err(FormError::Sent(m).into())
             }
             Err(e) => self.closing(&fid, Err(e)),
         }
@@ -1169,13 +1499,17 @@ impl<R: RandomSource> Session<R> {
         types: &[MdType],
         req: &FormRequest,
         reference: Option<&Ref>,
-        view: &mut Option<FormView>,
-    ) -> Result<(), SessionError> {
+    ) -> Result<FormView, SessionError> {
         let opened = read_opened(answer)?;
         let form = report::read_opened(answer)?;
         let descr = self.form_description(conf, answer)?;
-        let d = described(&descr)?;
-        let attributes = attributes_of(answer, &opened, &d, types)?;
+        let main_id = opened
+            .properties
+            .iter()
+            .find(|(_, m)| *m)
+            .map(|(id, _)| id.as_str());
+        let d = described(&descr, main_id)?;
+        let mut st = state_of(answer, QUERY, &opened.properties, &d, types)?;
         let (methods, client_id) = read_methods(answer)?;
         let mut warnings = Vec::new();
         let names = read_commands(answer)?;
@@ -1195,9 +1529,14 @@ impl<R: RandomSource> Session<R> {
         };
         let client_text = client.as_ref().map(|b| xml::value_text(b));
         let commands = commands_of(answer, &methods, client_text.as_deref())?;
-        if let Some((r, attr)) = reference.zip(attributes.iter().find(|a| a.main)) {
+        if let Some((r, attr)) = reference.zip(st.attrs.iter().find(|a| a.main)) {
             check_reference(r, attr)?;
         }
+        let planned = req
+            .steps
+            .iter()
+            .map(|s| method_of(&s.action, &methods, &commands, client_id.is_some()))
+            .collect::<Result<Vec<_>, _>>()?;
         let opening_messages = match self.user_messages() {
             Ok(m) => m,
             Err(e) => {
@@ -1210,39 +1549,125 @@ impl<R: RandomSource> Session<R> {
             names: form.names.clone(),
             title: opened.title.clone(),
             read_only: opened.read_only,
-            attributes,
+            attributes: st.attrs.clone(),
             methods,
             commands,
-            set: Vec::new(),
             opening_messages,
-            called: None,
+            calls: Vec::new(),
+            refused: None,
+            not_run: Vec::new(),
             warnings,
         };
-        let Some((method, params, command)) =
-            method_of(&req.action, &v.methods, &v.commands, client_id.is_some())?
-        else {
-            *view = Some(v);
-            return Ok(());
-        };
-        let mut before = v.attributes.clone();
-        let body = match method.place {
+        for (k, (step, (method, params, command))) in req.steps.iter().zip(planned).enumerate() {
+            let later = || {
+                req.steps[k + 1..]
+                    .iter()
+                    .map(|s| step_text(&s.action))
+                    .collect()
+            };
+            let prepared = self.prepare_call(
+                &form,
+                &opened,
+                &d,
+                types,
+                &mut st,
+                step,
+                &method,
+                &params,
+                &mut v.warnings,
+            );
+            let (body, set) = match prepared {
+                Ok(p) => p,
+                Err(e) if k == 0 => return Err(e),
+                Err(e) => {
+                    let text = match e {
+                        SessionError::Form(FormError::Refused(m)) => m,
+                        e => e.to_string(),
+                    };
+                    v.refused = Some(format!("{}: {text}", step_text(&step.action)));
+                    v.not_run = req.steps[k..]
+                        .iter()
+                        .map(|s| step_text(&s.action))
+                        .collect();
+                    break;
+                }
+            };
+            let outcome = self.send_call(&form, &d, types, &mut st, &method, body, &mut v.warnings);
+            let messages = match self.user_messages() {
+                Ok(m) => m,
+                Err(e) => {
+                    v.warnings
+                        .push(format!("the messages to the user were not read: {e}"));
+                    Vec::new()
+                }
+            };
+            let stop = !matches!(outcome, CallOutcome::Done { .. });
+            v.calls.push(Called {
+                method: method.name,
+                place: method.place,
+                command,
+                set,
+                outcome,
+                messages,
+            });
+            if stop {
+                v.not_run = later();
+                break;
+            }
+        }
+        Ok(v)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_call(
+        &mut self,
+        form: &OpenedForm,
+        opened: &Opened,
+        d: &Described,
+        types: &[MdType],
+        st: &mut FormState,
+        step: &FormStep,
+        method: &ServerMethod,
+        params: &[Value],
+        warnings: &mut Vec<String>,
+    ) -> Result<(Vec<u8>, Vec<SetValue>), SessionError> {
+        Ok(match method.place {
             MethodPlace::Server => {
-                let (pchs, set, after) = pchs_of(&req.set, &v.attributes, d.data.as_ref(), types)?;
-                v.set = set;
-                before = after;
-                report::call_request_with(&form, &method.name, &params, &pchs)?
+                let (pchs, set) = pchs_of(&step.change, st, d, types)?;
+                if pchs != report::EMPTY_PCHS {
+                    st.apply(&state::request_doc(&pchs), d, types, warnings)?;
+                }
+                let body =
+                    report::call_request_dd(form, &method.name, params, &pchs, st.dd.as_deref())?;
+                (body, set)
             }
             MethodPlace::ServerWithoutContext => {
-                if !req.set.is_empty() {
+                if !(step.change.set.is_empty() && step.change.tables.is_empty()) {
                     return Err(refused(format!(
                         "{} is a server method without context: it does not see the attributes of the form, they are not set",
                         method.name
                     ))
                     .into());
                 }
-                call_without_context_request(&form.id, &opened.fid, &method.name, &params)?
+                (
+                    call_without_context_request(&form.id, &opened.fid, &method.name, params)?,
+                    Vec::new(),
+                )
             }
-        };
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn send_call(
+        &mut self,
+        form: &OpenedForm,
+        d: &Described,
+        types: &[MdType],
+        st: &mut FormState,
+        method: &ServerMethod,
+        body: Vec<u8>,
+        warnings: &mut Vec<String>,
+    ) -> CallOutcome {
         let (step, path) = match method.place {
             MethodPlace::Server => ("logForm/call", "/e1cib/logForm?cmd=call"),
             MethodPlace::ServerWithoutContext => {
@@ -1251,36 +1676,81 @@ impl<R: RandomSource> Session<R> {
         };
         let req_body = body::zstd_compress(&body);
         let h = self.headers("application/xml", true, true);
-        let sent = |e: String| SessionError::from(FormError::Sent(e));
-        let resp = self
-            .step_once(step, "POST", path, &h, &req_body, &[200, 400, 500])
-            .map_err(|e| sent(e.to_string()))?;
-        let decoded = Self::decoded(&resp).map_err(|e| sent(e.to_string()))?;
-        let outcome = match read_answer(resp.status, &decoded).map_err(|e| sent(e.to_string()))? {
-            Answer::Done { ret } => CallOutcome::Done {
-                ret,
-                changed: changes_of(&decoded, &before, d.data.as_ref(), types)
-                    .map_err(|e| sent(e.to_string()))?,
-            },
-            Answer::Failed { reason, text } => CallOutcome::Failed { reason, text },
+        let resp = match self.step_once(step, "POST", path, &h, &req_body, &[200, 400, 500]) {
+            Ok(r) => r,
+            Err(e) => return CallOutcome::Unknown(e.to_string()),
         };
-        let messages = match self.user_messages() {
-            Ok(m) => m,
-            Err(e) => {
-                v.warnings
-                    .push(format!("the messages to the user were not read: {e}"));
-                Vec::new()
+        let decoded = match Self::decoded(&resp) {
+            Ok(b) => b,
+            Err(e) => return CallOutcome::Unknown(e.to_string()),
+        };
+        match read_answer(resp.status, &decoded) {
+            Err(e) => CallOutcome::Unknown(e.to_string()),
+            Ok(Answer::Done { ret }) => {
+                let changed = match changes_of(&decoded, &st.attrs, d.data.as_ref(), types) {
+                    Ok(c) => c,
+                    Err(e) => return CallOutcome::Unknown(e.to_string()),
+                };
+                if method.place == MethodPlace::Server
+                    && let Err(e) = st.apply(&xml::value_text(&decoded), d, types, warnings)
+                {
+                    warnings.push(format!(
+                        "the data of the form are not followed after the call: {e}"
+                    ));
+                }
+                CallOutcome::Done { ret, changed }
             }
-        };
-        v.called = Some(Called {
-            method: method.name,
-            place: method.place,
-            command,
-            outcome,
-            messages,
-        });
-        *view = Some(v);
-        Ok(())
+            Ok(Answer::Failed { reason, text }) => {
+                let changed = if method.place == MethodPlace::Server {
+                    match self.synch(&form.remote_key, d, types) {
+                        Ok(mut after) => {
+                            let changed = diff(&st.attrs, &after.attrs);
+                            if after.dd.is_none() {
+                                after.dd = st.dd.take();
+                            }
+                            *st = after;
+                            changed
+                        }
+                        Err(e) => {
+                            warnings.push(format!(
+                                "the data of the form after the exception were not read: {e}"
+                            ));
+                            Vec::new()
+                        }
+                    }
+                } else {
+                    Vec::new()
+                };
+                CallOutcome::Failed {
+                    reason,
+                    text,
+                    changed,
+                }
+            }
+        }
+    }
+
+    fn synch(
+        &mut self,
+        key: &str,
+        d: &Described,
+        types: &[MdType],
+    ) -> Result<FormState, SessionError> {
+        let req = body::zstd_compress(&synch_request(key));
+        let h = self.headers("application/xml", true, true);
+        let resp = self.step(
+            SYNCH,
+            "POST",
+            "/e1cib/logForm?cmd=synchException",
+            &h,
+            &req,
+            &[200],
+        )?;
+        let answer = Self::decoded(&resp)?;
+        let mut st = state_of(&answer, SYNCH, &[], d, types)?;
+        st.apply(&xml::value_text(&answer), d, types, &mut Vec::new())?;
+        (st.sin, st.seq) = synch_counters(&answer)?;
+        Ok(st)
     }
 }
 

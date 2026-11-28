@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     io::{BufWriter, Read, Seek, SeekFrom, Write},
 };
 
@@ -180,28 +180,90 @@ pub enum SpoolError {
     Frame(#[from] crate::sql_rows::Error),
     #[error("binary storage staging file: {0}")]
     Io(#[from] std::io::Error),
+    #[error("binary storage index: {0}")]
+    Budget(#[from] memory_budget::BudgetError),
 }
 
+#[derive(Clone, Copy)]
 struct Stored {
+    key: [u8; 16],
     offset: u64,
     number: u64,
     at: u64,
     len: u64,
 }
 
+pub fn index_bytes(rows: u64) -> Option<u64> {
+    let entries = rows.checked_mul(std::mem::size_of::<Stored>() as u64)?;
+    entries.checked_add(rows.div_ceil(64).checked_mul(8)?)
+}
+
+#[derive(Debug)]
+pub struct IndexRefusal {
+    pub rows: u64,
+    pub need: u64,
+    pub budget: u64,
+    pub fallback: bool,
+}
+
+impl IndexRefusal {
+    pub fn limit_for(budget: u64) -> u64 {
+        budget / 2
+    }
+    pub fn suggested_mib(&self) -> u64 {
+        self.need.saturating_mul(2).div_ceil(1 << 20).max(1)
+    }
+}
+
+impl std::fmt::Display for IndexRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mib = |bytes: u64| bytes.div_ceil(1 << 20);
+        write!(
+            f,
+            "SQL binary storage memory limit: the storage table has {} rows, their index needs {} MiB, more than half of the memory budget of {} MiB",
+            self.rows,
+            mib(self.need),
+            mib(self.budget)
+        )?;
+        if self.fallback {
+            write!(
+                f,
+                "; the memory of this machine was not determined, so the budget is the fixed fallback: set --memory-limit {}MiB or more",
+                self.suggested_mib()
+            )
+        } else {
+            write!(
+                f,
+                "; repeat with --memory-limit {}MiB or more",
+                self.suggested_mib()
+            )
+        }
+    }
+}
+
+impl std::error::Error for IndexRefusal {}
+
 pub struct Spool {
     file: std::fs::File,
-    index: HashMap<[u8; 16], Vec<Stored>>,
+    index: memory_budget::BudgetedVec<Stored>,
+    resolved: memory_budget::BudgetedVec<u64>,
     rows: u64,
 }
 
 pub fn read_spool(
     input: impl Read,
     directory: &std::path::Path,
-    max_rows: u64,
+    expected: u64,
+    budget: &memory_budget::MemoryBudget,
 ) -> Result<Spool, SpoolError> {
+    let capacity = usize::try_from(expected).map_err(|_| Error("storage row count overflow"))?;
+    let words =
+        usize::try_from(expected.div_ceil(64)).map_err(|_| Error("storage row count overflow"))?;
+    let category = memory_budget::Category::Metadata;
+    let mut index = memory_budget::BudgetedVec::try_with_capacity(budget, category, capacity)?;
+    let mut resolved = memory_budget::BudgetedVec::try_with_capacity(budget, category, words)?;
+    resolved.try_resize(words, 0)?;
     let mut file = tempfile::tempfile_in(directory)?;
-    let mut index: HashMap<[u8; 16], Vec<Stored>> = HashMap::new();
     let mut frames = crate::sql_rows::Frames::new(input);
     crate::sql_batch::begin(&mut frames, 1)?;
     let max_row = MAX_BLOB_BYTES
@@ -211,23 +273,24 @@ pub fn read_spool(
         .ok_or(Error("row limit overflow"))?;
     let mut writer = BufWriter::new(&mut file);
     let mut at = 0_u64;
-    let mut kept = 0_u64;
     let rows = frames.rows(max_row, |row| {
-        if kept >= max_rows {
-            return Err(Error("storage key limit exceeded").to_string());
+        if index.len() >= capacity {
+            return Err(Error("more storage rows than the storage count").to_string());
         }
-        kept += 1;
         let part = wire_part(row)?;
         let len = u64::try_from(part.data.len()).map_err(|_| "payload size overflow")?;
         writer
             .write_all(&part.data)
             .map_err(|e| format!("binary storage staging file: {e}"))?;
-        index.entry(part.key).or_default().push(Stored {
-            offset: part.offset,
-            number: part.number,
-            at,
-            len,
-        });
+        index
+            .try_push(Stored {
+                key: part.key,
+                offset: part.offset,
+                number: part.number,
+                at,
+                len,
+            })
+            .map_err(|e| e.to_string())?;
         at += len;
         Ok(())
     })?;
@@ -235,7 +298,15 @@ pub fn read_spool(
     frames.end()?;
     writer.flush()?;
     drop(writer);
-    Ok(Spool { file, index, rows })
+    index
+        .as_mut_slice()
+        .sort_unstable_by_key(|stored| (stored.key, stored.at));
+    Ok(Spool {
+        file,
+        index,
+        resolved,
+        rows,
+    })
 }
 
 impl Spool {
@@ -243,12 +314,24 @@ impl Spool {
         self.rows
     }
 
+    fn range(&self, key: &[u8; 16]) -> std::ops::Range<usize> {
+        let index = self.index.as_slice();
+        let start = index.partition_point(|stored| stored.key < *key);
+        let end = start
+            + index
+                .get(start..)
+                .unwrap_or_default()
+                .partition_point(|stored| stored.key == *key);
+        start..end
+    }
+
     pub fn parts(&mut self, reference: &StorageRef) -> Result<Vec<BlobPart>, SpoolError> {
         if reference.size > MAX_BLOB_BYTES {
             return Err(Error("payload limit exceeded").into());
         }
         let mut parts = Vec::new();
-        for stored in self.index.get(&reference.key).into_iter().flatten() {
+        let range = self.range(&reference.key);
+        for &stored in self.index.get(range).unwrap_or_default() {
             let mut data =
                 vec![0; usize::try_from(stored.len).map_err(|_| Error("payload limit exceeded"))?];
             self.file.seek(SeekFrom::Start(stored.at))?;
@@ -261,5 +344,29 @@ impl Spool {
             });
         }
         Ok(parts)
+    }
+
+    pub fn resolve(&mut self, reference: &StorageRef) -> Result<Vec<u8>, SpoolError> {
+        let parts = self.parts(reference)?;
+        let data = resolve_single_part(reference, parts)?;
+        let position = self.range(&reference.key).start;
+        let word = self
+            .resolved
+            .get_mut(position / 64)
+            .ok_or(Error("storage row outside the index"))?;
+        *word |= 1 << (position % 64);
+        Ok(data)
+    }
+
+    pub fn finish(&self, source_rows: u64) -> Result<(), Error> {
+        let resolved: u64 = self
+            .resolved
+            .iter()
+            .map(|word| u64::from(word.count_ones()))
+            .sum();
+        if self.rows != source_rows || resolved != source_rows {
+            return Err(Error("unaccounted binary storage rows"));
+        }
+        Ok(())
     }
 }

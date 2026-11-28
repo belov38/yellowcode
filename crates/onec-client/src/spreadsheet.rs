@@ -80,7 +80,11 @@ pub struct Sheet {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SheetChanges {
     Full(Sheet),
-    WithoutContent { key: String, sheet: Sheet },
+    WithoutContent {
+        key: String,
+        sheet: Sheet,
+        rows: Vec<u32>,
+    },
 }
 
 impl Sheet {
@@ -221,16 +225,23 @@ pub fn read_document(
             rows: child(m, "h").map_or(Ok(0), |n| number(n, "merge h"))?,
         });
     }
-    let inline = items.iter().any(|item| {
+    let has_cells = |item: &Node| {
         child(*item, "row").is_some_and(|row| {
             row.children()
                 .any(|n| n.is_element() && n.tag_name().name() == "c")
         })
-    });
-    if !full && !inline {
-        let key = key.ok_or(SheetError::Missing("distributedKey"))?;
-        return Ok(SheetChanges::WithoutContent { key, sheet });
+    };
+    let mut inline = std::collections::BTreeSet::new();
+    for item in items.iter().filter(|i| has_cells(i)) {
+        let (from, to) = rows_of(*item)?;
+        inline.extend(from..=to);
     }
+    let asked = !full && (inline.is_empty() || (inline.len() as u64) < u64::from(sheet.height));
+    let key = match (asked, key) {
+        (false, _) => None,
+        (true, Some(key)) => Some(key),
+        (true, None) => return Err(SheetError::Missing("distributedKey")),
+    };
     for item in items {
         let Some(row) = child(item, "row") else {
             continue;
@@ -250,6 +261,10 @@ pub fn read_document(
                 });
             }
         }
+    }
+    if let Some(key) = key {
+        let rows = (0..sheet.height).filter(|r| !inline.contains(r)).collect();
+        return Ok(SheetChanges::WithoutContent { key, sheet, rows });
     }
     sheet.settle(limits)?;
     Ok(SheetChanges::Full(sheet))

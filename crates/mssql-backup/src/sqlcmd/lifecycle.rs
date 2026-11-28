@@ -141,6 +141,7 @@ struct Control {
     interrupted: AtomicBool,
     cleaning: Option<(String, u64)>,
     done: AtomicU8,
+    answer_ended: AtomicBool,
     work_deadline: Instant,
     deadline: Instant,
 }
@@ -262,7 +263,12 @@ impl Read for Reader {
             match self.pipe.read(bytes) {
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => thread::sleep(POLL),
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-                result => return self.tap.seen(result, bytes),
+                result => {
+                    if !matches!(result, Ok(n) if n > 0) {
+                        self.control.answer_ended.store(true, Ordering::Release);
+                    }
+                    return self.tap.seen(result, bytes);
+                }
             }
         }
     }
@@ -393,6 +399,7 @@ pub(super) fn exchange<T>(
         interrupted: AtomicBool::new(false),
         cleaning,
         done: AtomicU8::new(0),
+        answer_ended: AtomicBool::new(false),
         work_deadline: deadline - reserve,
         deadline,
     });
@@ -466,6 +473,9 @@ pub(super) fn exchange<T>(
                 tap: Arc::clone(&tap),
             })
         }));
+        let refused = matches!(parsed, Ok(Err(_)))
+            && !control.stop.load(Ordering::Acquire)
+            && !control.answer_ended.load(Ordering::Acquire);
         if !matches!(parsed, Ok(Ok(_))) {
             control.abort();
         }
@@ -473,9 +483,9 @@ pub(super) fn exchange<T>(
         let sent = writer.join();
         let diagnostics = diagnostics.join();
         let status = monitor.join();
-        Ok((parsed, sent, diagnostics, status))
+        Ok((parsed, sent, diagnostics, status, refused))
     });
-    let (parsed, sent, mut diagnostics, status) =
+    let (parsed, sent, mut diagnostics, status, refused) =
         exchange.inspect_err(|error| watch.set_started(error.started))?;
     watch.joined(
         &status,
@@ -501,6 +511,12 @@ pub(super) fn exchange<T>(
             "interrupted by {}; SQL client exchange uncertain; server-side completion/cancellation unproven",
             kind.name()
         )));
+    }
+    if refused
+        && !control.expired.load(Ordering::Acquire)
+        && let Some(message) = consumer_refusal(&parsed, &sent, &diagnostics, &status)
+    {
+        return Err(failure(message));
     }
     let mut errors = Vec::new();
     let value = match parsed {
@@ -560,6 +576,37 @@ pub(super) fn exchange<T>(
     errors
         .push("SQL client exchange uncertain; server-side completion/cancellation unproven".into());
     Err(failure(diagnostic(errors.join("; ").as_bytes(), true)))
+}
+
+pub(super) const STOPPED_BY_REFUSAL: &str =
+    "the SQL client was stopped at this refusal, before the end of its answer";
+pub(super) const STOPPED_UNPROVEN: &str = "server-side completion/cancellation unproven";
+
+fn consumer_refusal<T>(
+    parsed: &Result<T, String>,
+    sent: &thread::Result<io::Result<()>>,
+    diagnostics: &thread::Result<(Retained, Option<Unread>)>,
+    status: &thread::Result<Result<ExitStatus, String>>,
+) -> Option<String> {
+    let Err(refusal) = parsed else {
+        return None;
+    };
+    if sent.is_err() || !matches!(status, Ok(Ok(_))) {
+        return None;
+    }
+    let Ok((kept, unread)) = diagnostics else {
+        return None;
+    };
+    if matches!(unread, Some(Unread::Failed(_))) {
+        return None;
+    }
+    let mut message = refusal.clone();
+    let detail = kept.render(&super::password_bytes());
+    if !detail.is_empty() {
+        message.push_str(&format!("; sqlcmd diagnostics: {detail}"));
+    }
+    message.push_str(&format!("; {STOPPED_BY_REFUSAL}; {STOPPED_UNPROVEN}"));
+    Some(diagnostic(message.as_bytes(), true))
 }
 
 #[cfg(all(test, unix))]

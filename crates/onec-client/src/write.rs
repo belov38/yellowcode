@@ -114,18 +114,15 @@ pub struct WriteResult {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
-    Catalog,
+    Plain,
     Document,
 }
 
-fn kind_of(r: &Ref) -> Result<Kind, ObjectError> {
-    match r.type_name().local().split_once('.').map(|(k, _)| k) {
-        Some("CatalogRef") => Ok(Kind::Catalog),
-        Some("DocumentRef") => Ok(Kind::Document),
-        _ => Err(ObjectError::Change(format!(
-            "writing an object of the type {} is not implemented (catalogs and documents only)",
-            r.type_name()
-        ))),
+fn kind_of(r: &Ref) -> Kind {
+    if r.type_name().local().starts_with("DocumentRef.") {
+        Kind::Document
+    } else {
+        Kind::Plain
     }
 }
 
@@ -144,6 +141,15 @@ pub fn new_object_ref(name: &str) -> Result<Ref, String> {
         None => {
             let (kind, rest) = name.split_once('.').ok_or_else(bad)?;
             let kind = MdKind::of_ru(kind).unwrap_or_else(|| MdKind::of_stem(kind));
+            if matches!(
+                kind,
+                MdKind::InformationRegister | MdKind::AccumulationRegister
+            ) || matches!(&kind, MdKind::Other(k) if k.ends_with("Register") || k.starts_with("Регистр"))
+            {
+                return Err(format!(
+                    "{name}: writing records of registers is not implemented (objects with a reference only)"
+                ));
+            }
             format!("{}Ref.{rest}", kind.en())
         }
     };
@@ -164,16 +170,16 @@ struct RawForm {
 }
 
 #[derive(Debug, Clone)]
-struct RawTable {
-    last_id: i64,
-    rows: Vec<RawRow>,
-    columns: Vec<String>,
+pub(crate) struct RawTable {
+    pub(crate) last_id: i64,
+    pub(crate) rows: Vec<RawRow>,
+    pub(crate) columns: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
-struct RawRow {
-    id: String,
-    cells: Vec<String>,
+pub(crate) struct RawRow {
+    pub(crate) id: String,
+    pub(crate) cells: Vec<String>,
 }
 
 fn shape(what: impl Into<String>) -> ObjectError {
@@ -370,6 +376,12 @@ fn single_text(t: &str, ty: &TypeName) -> Result<Value, String> {
             Uuid::parse(t).map(Value::Uuid).map_err(|e| e.to_string())
         };
     }
+    if ty.ns() == NS_CORE {
+        return Err(format!(
+            "a value of v8:{} is not read from a text",
+            ty.local()
+        ));
+    }
     if is_enum(ty) {
         return EnumRef::new(ty.clone(), t)
             .map(Value::EnumRef)
@@ -415,6 +427,50 @@ fn prefixed_text(t: &str) -> Result<Value, String> {
 
 fn of_type(v: &Value, ty: &TypeName) -> bool {
     v.type_name().is_some_and(|t| same_type(&t, ty))
+}
+
+const PLATFORM_ENUMS: &[(&str, &[(&str, &str)])] = &[(
+    "872f7198-7083-4e3e-b57e-a2a9802c769e",
+    &[
+        ("Active", "Активный"),
+        ("Passive", "Пассивный"),
+        ("ActivePassive", "АктивноПассивный"),
+    ],
+)];
+
+fn platform_enum_value(
+    input: &Input,
+    field: &FormField,
+) -> Option<Result<(Value, String), String>> {
+    let [id] = field.ty.ids.as_slice() else {
+        return None;
+    };
+    let (_, names) = PLATFORM_ENUMS
+        .iter()
+        .find(|(t, _)| t.eq_ignore_ascii_case(id))?;
+    let Input::Text(t) = input else {
+        return Some(Err(
+            "the value of a platform enumeration is given by its name".to_string(),
+        ));
+    };
+    Some(
+        names
+            .iter()
+            .find(|(en, ru)| same_name(en, t) || same_name(ru, t))
+            .map(|(en, _)| {
+                (
+                    Value::String((*en).to_string()),
+                    format!("<uo:v>{en}</uo:v>"),
+                )
+            })
+            .ok_or_else(|| {
+                let all: Vec<&str> = names.iter().map(|(en, _)| *en).collect();
+                format!(
+                    "{t:?} is not a value of the enumeration ({})",
+                    all.join(", ")
+                )
+            }),
+    )
 }
 
 pub(crate) fn field_value(
@@ -570,9 +626,11 @@ pub(crate) fn settable(f: &FormField, path: &str) -> Result<(), ObjectError> {
     Ok(())
 }
 
-const LINE_NUMBER: &str = "-2";
+fn is_line_number(c: &FormField) -> bool {
+    c.name.as_deref() == Some("LineNumber") && c.id.starts_with('-')
+}
 
-fn table_xml(
+pub(crate) fn table_xml(
     raw: &RawTable,
     table: &FormTable,
     read: Option<&crate::object::ObjectTable>,
@@ -620,6 +678,12 @@ fn table_xml(
             .enumerate()
             .find(|(_, c)| named(c, &cell.name))
             .ok_or_else(|| change_error(path, format!("no column {:?}", cell.name)))?;
+        if is_line_number(col) {
+            return Err(change_error(
+                path,
+                "the line number is given by the order of the rows",
+            ));
+        }
         settable(col, path)?;
         let v = field_value(&cell.input, col, types).map_err(|e| change_error(path, e))?;
         Ok((ci, v))
@@ -752,7 +816,7 @@ fn table_xml(
             .and_then(|p| i64::try_from(p).ok())
             .unwrap_or(-1)
     };
-    let line_col = table.columns.iter().position(|c| c.id == LINE_NUMBER);
+    let line_col = table.columns.iter().position(is_line_number);
     let mut items = String::new();
     for (i, r) in rows.iter_mut().enumerate() {
         if !(r.changed || r.added) {
@@ -777,9 +841,98 @@ fn table_xml(
     if !items.is_empty() {
         x.push_str(&format!("<uo:items>{items}</uo:items>"));
     }
-    x.push_str(&raw.columns.concat());
+    let cells: Vec<&[String]> = rows.iter().map(|r| r.cells.as_slice()).collect();
+    x.push_str(&column_totals(&raw.columns, table, &cells));
     x.push_str("</uo:v>");
     Ok((x, ops.len(), applied))
+}
+
+fn number_of(cell: &str) -> Option<&str> {
+    let inner = cell.strip_prefix("<uo:v")?;
+    if inner.ends_with("/>") {
+        return Some("0");
+    }
+    let start = inner.find('>')? + 1;
+    let text = inner[start..].strip_suffix("</uo:v>")?;
+    Decimal::parse(text).ok().map(|_| text)
+}
+
+fn decimal_sum<'a>(texts: impl IntoIterator<Item = &'a str>) -> Option<String> {
+    let texts: Vec<&str> = texts.into_iter().collect();
+    let scale = texts
+        .iter()
+        .map(|t| t.split_once('.').map_or(0, |(_, f)| f.len()))
+        .max()
+        .unwrap_or(0);
+    let mut sum: i128 = 0;
+    for t in &texts {
+        let (negative, body) = match t.strip_prefix('-') {
+            Some(b) => (true, b),
+            None => (false, *t),
+        };
+        let (int, frac) = body.split_once('.').unwrap_or((body, ""));
+        let digits = format!("{int}{frac}{}", "0".repeat(scale - frac.len()));
+        let v: i128 = digits.parse().ok()?;
+        sum = if negative {
+            sum.checked_sub(v)?
+        } else {
+            sum.checked_add(v)?
+        };
+    }
+    let negative = sum < 0;
+    let digits = sum.unsigned_abs().to_string();
+    let digits = format!(
+        "{}{digits}",
+        "0".repeat((scale + 1).saturating_sub(digits.len()))
+    );
+    let (int, frac) = digits.split_at(digits.len() - scale);
+    let frac = frac.trim_end_matches('0');
+    let text = if frac.is_empty() {
+        int.to_string()
+    } else {
+        format!("{int}.{frac}")
+    };
+    Some(if negative && text != "0" {
+        format!("-{text}")
+    } else {
+        text
+    })
+}
+
+const NUMBER: &str = "b0be78f2-0ee6-4d31-a3bb-77dd32ba5bec";
+
+fn column_id(raw: &str) -> Option<&str> {
+    raw.split_once("id=\"")
+        .and_then(|(_, r)| r.split_once('"'))
+        .map(|(id, _)| id)
+}
+
+fn column_totals(given: &[String], table: &FormTable, rows: &[&[String]]) -> String {
+    let mut out = String::new();
+    for (ci, c) in table.columns.iter().enumerate() {
+        if !matches!(c.ty.ids.as_slice(), [one] if one.eq_ignore_ascii_case(NUMBER)) {
+            continue;
+        }
+        let id = xml::escape_attr(&c.id);
+        let old = given.iter().find(|g| column_id(g) == Some(id.as_str()));
+        let service = matches!(c.name.as_deref(), Some("LineNumber" | "SourceLineNumber"));
+        let sum = if service {
+            None
+        } else {
+            rows.iter()
+                .map(|r| r.get(ci).and_then(|v| number_of(v)))
+                .collect::<Option<Vec<&str>>>()
+                .and_then(decimal_sum)
+        };
+        match (sum, old) {
+            (Some(total), _) => {
+                out.push_str(&format!("<uo:column id=\"{id}\" total=\"{total}\"/>"))
+            }
+            (None, Some(old)) => out.push_str(old),
+            (None, None) => out.push_str(&format!("<uo:column id=\"{id}\" total=\"0\"/>")),
+        }
+    }
+    out
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -823,8 +976,8 @@ fn document_mode(
         f.field.name.as_deref() == Some("Posted") && f.value == Cell::Value(Value::Bool(true))
     });
     Ok(match (kind, mode) {
-        (Kind::Catalog, WriteMode::Default) => None,
-        (Kind::Catalog, _) => {
+        (Kind::Plain, WriteMode::Default) => None,
+        (Kind::Plain, _) => {
             return Err(ObjectError::Change(
                 "only a document is posted or unposted".to_string(),
             ));
@@ -877,9 +1030,16 @@ fn plan(
         if values[at].is_some() {
             return Err(change_error(&a.name, "the field is set twice"));
         }
-        let v = field_value(&a.input, f, types).map_err(|e| change_error(&a.name, e))?;
+        let (v, x) = match platform_enum_value(&a.input, f) {
+            Some(r) => r.map_err(|e| change_error(&a.name, e))?,
+            None => {
+                let v = field_value(&a.input, f, types).map_err(|e| change_error(&a.name, e))?;
+                let x = value_xml(&v, implied_type(&f.ty, types).is_none())?;
+                (v, x)
+            }
+        };
         marked |= f.name.as_deref() == Some("DeletionMark") && v == Value::Bool(true);
-        values[at] = Some(value_xml(&v, implied_type(&f.ty, types).is_none())?);
+        values[at] = Some(x);
         changes.push(Applied {
             path: f.display_name().to_string(),
             old: if new {
@@ -894,7 +1054,7 @@ fn plan(
             new: Some(v),
         });
     }
-    let mut ops = (0, 0);
+    let mut ops = 0;
     let mut seen = BTreeSet::new();
     for t in &change.tables {
         let at = data
@@ -915,10 +1075,7 @@ fn plan(
             .ok_or_else(|| shape("no rows of a tabular section"))?;
         let read = object.tables.iter().find(|x| x.field.id == table.field.id);
         let (x, n, applied) = table_xml(raw_t, table, read, Some(t), types)?;
-        if n > 0 {
-            ops.0 += 1;
-            ops.1 += n;
-        }
+        ops += n;
         values[at] = Some(x);
         changes.extend(applied);
     }
@@ -992,8 +1149,8 @@ fn plan(
         escape_text(&raw.form_id),
         escape_text(&raw.fid),
         params_xml(document_mode),
-        ops.0,
-        ops.1,
+        usize::from(ops > 0),
+        ops,
         raw.prms,
         raw.dd,
     );
@@ -1192,8 +1349,8 @@ impl<R: RandomSource> Session<R> {
             Target::New(name) => (new_object_ref(name).map_err(ObjectError::Change)?, true),
             Target::Existing(r) => (r.clone(), false),
         };
-        let kind = kind_of(&r)?;
-        if kind == Kind::Catalog && w.mode != WriteMode::Default {
+        let kind = kind_of(&r);
+        if kind == Kind::Plain && w.mode != WriteMode::Default {
             return Err(
                 ObjectError::Change("only a document is posted or unposted".to_string()).into(),
             );

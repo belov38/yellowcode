@@ -74,7 +74,9 @@ pub(crate) enum Command {
 построенный по этим правилам, совпал с выгрузкой Конфигуратора (/DumpIB) той же копии по содержимому таблиц, и платформа \
 его загрузила; приёмка текущей сборки не закончена, поэтому ответ DT и 1CD помечен \"experimental\": true. 1CD — загрузка \
 того же DT в новую файловую базу; загрузка открывает базу для проверки под бюджетом --memory-limit, и проверочному \
-открытию базам уровня УНФ нужно около 1792 МиБ, уровня ERP около 3 ГиБ.
+открытию базам уровня УНФ нужно около 1792 МиБ, уровня ERP около 3 ГиБ. При выгрузке DT и 1CD из SQL Server индекс \
+двоичного хранилища (около 48 байт на строку таблицы BINARYDATA, данные — во временном файле) занимает не больше половины \
+бюджета --memory-limit; если строк больше, отказ приходит сразу после восстановления и называет нужный --memory-limit.
   Пользователи переносятся. Адреса почты пользователей не переносятся, как и в выгрузке платформы: результат пишется, \
 в stderr — предупреждение с числом пользователей с адресом, в ответе — usersWithEmail. В 1CD пользователи конфигурации \
 без разделения пользователей пересобираются при загрузке DT; вход таких пользователей платформой ещё не принят.
@@ -155,7 +157,7 @@ yellowcode-bak-failure-<время UTC>.log: имена в нём заменен
         #[arg(
             long,
             allow_hyphen_values = true,
-            help = "Только для 1CD: бюджет памяти восстановления DT (auto или B/KiB/MiB/GiB); не ограничивает MS SQL Server"
+            help = "Только для DT и 1CD: бюджет памяти (auto или B/KiB/MiB/GiB) для индекса двоичного хранилища при выгрузке из SQL Server и, у 1CD, для восстановления DT; не ограничивает MS SQL Server"
         )]
         memory_limit: Option<String>,
         #[arg(
@@ -306,8 +308,8 @@ pub(crate) fn run(
             strict,
             ignore_extra_tables,
         } => {
-            if memory_limit.is_some() && !matches!(to, Format::Onecd) {
-                return Err("--memory-limit is only for 1CD conversion".into());
+            if memory_limit.is_some() && matches!(to, Format::Cf) {
+                return Err("--memory-limit is only for DT and 1CD conversion".into());
             }
             let cf_options = yellowcode_core::plain::bak::CfOptions {
                 view: if raw {
@@ -346,8 +348,13 @@ pub(crate) fn run(
                     out,
                     err,
                 ),
-                Format::Dt => yellowcode_core::plain::bak::convert_dt_with_options(
-                    request, backup_set, dt_options, out, err,
+                Format::Dt => yellowcode_core::plain::bak::convert_dt_with_memory(
+                    request,
+                    memory_limit,
+                    backup_set,
+                    dt_options,
+                    out,
+                    err,
                 ),
                 Format::Onecd => yellowcode_core::plain::bak::convert_onecd_with_options(
                     request,

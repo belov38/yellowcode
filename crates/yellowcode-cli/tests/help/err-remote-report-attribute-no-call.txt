@@ -2,8 +2,8 @@ exit 2
 --- stdout
 --- stderr
 error: the following required arguments were not provided:
-  <--call <ПРОЦЕДУРА>|--generate|--set <ПАРАМЕТР=ЗНАЧЕНИЕ>|--filter <ПОЛЕ ОП ЗНАЧЕНИЕ>|--off <НАСТРОЙКА>|--details>
+  <--call <ПРОЦЕДУРА>|--generate|--set <ПАРАМЕТР=ЗНАЧЕНИЕ>|--filter <ПОЛЕ ОП ЗНАЧЕНИЕ>|--off <НАСТРОЙКА>|--on <НАСТРОЙКА>|--field <[+|-]ПОЛЕ>|--order <ПОЛЕ [asc|desc]>|--drilldown <ЯЧЕЙКА>|--details>
 
-Usage: yellowcode remote report --attribute <РЕКВИЗИТ> <--form <ИМЯ_ФОРМЫ>|--report <ОТЧЕТ>> <--call <ПРОЦЕДУРА>|--generate|--set <ПАРАМЕТР=ЗНАЧЕНИЕ>|--filter <ПОЛЕ ОП ЗНАЧЕНИЕ>|--off <НАСТРОЙКА>|--details> <URL>
+Usage: yellowcode remote report --attribute <РЕКВИЗИТ> <--form <ИМЯ_ФОРМЫ>|--report <ОТЧЕТ>> <--call <ПРОЦЕДУРА>|--generate|--set <ПАРАМЕТР=ЗНАЧЕНИЕ>|--filter <ПОЛЕ ОП ЗНАЧЕНИЕ>|--off <НАСТРОЙКА>|--on <НАСТРОЙКА>|--field <[+|-]ПОЛЕ>|--order <ПОЛЕ [asc|desc]>|--drilldown <ЯЧЕЙКА>|--details> <URL>
 
 For more information, try '--help'.

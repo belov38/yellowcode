@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use onec_client::auth::printable;
-use onec_client::dcs::{DcsForm, DetailsItem, SettingKind, UserSetting, Variant};
+use onec_client::dcs::{DcsForm, DetailsItem, FieldItem, SettingKind, UserSetting, Variant};
 use onec_client::formdescr::platform_type;
 use onec_client::spreadsheet::Cell;
 use onec_client::{FormAttribute, ReportSheet, ReportView, Sheet, Step};
@@ -125,6 +125,9 @@ fn text_lines(view: &ReportView, sheets: &[&ReportSheet]) -> Vec<String> {
     }
     if let Some(d) = &view.dcs {
         l.extend(settings_lines(&d.form));
+        if let Some(dd) = &d.drilldown {
+            l.push(format!("drilldown: #{} by {}", dd.id, printable(&dd.field)));
+        }
     }
     for c in view.init.iter().chain(&view.calls) {
         l.push(format!(
@@ -216,12 +219,25 @@ fn settings_lines(f: &DcsForm) -> Vec<String> {
 
 fn setting_text(s: &UserSetting) -> String {
     let name = match &s.title {
-        Some(t) if t != s.name() => format!("{} ({})", printable(s.name()), printable(t)),
-        _ => printable(s.name()),
+        Some(t) if t != s.label() => format!("{} ({})", printable(s.label()), printable(t)),
+        _ => printable(s.label()),
     };
     let kind = match &s.kind {
         SettingKind::Parameter { .. } => "parameter".to_string(),
         SettingKind::Filter { comparison, .. } => format!("filter {}", printable(comparison)),
+        SettingKind::Selection { items } => {
+            return format!("{name}: selection: {}", items_text(items));
+        }
+        SettingKind::Order { items } => return format!("{name}: order: {}", items_text(items)),
+        SettingKind::Filters => return format!("{name}: filter as a whole (--filter adds to it)"),
+        SettingKind::Group { fields } => format!(
+            "grouping {}",
+            fields
+                .iter()
+                .map(|f| printable(f))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
         SettingKind::Other(t) => return format!("{name}: {} (not changed here)", printable(t)),
     };
     let used = if s.used { "used" } else { "not used" };
@@ -235,6 +251,28 @@ fn setting_text(s: &UserSetting) -> String {
         ),
         None => format!("{name}: {kind}, {used}"),
     }
+}
+
+fn items_text(items: &[FieldItem]) -> String {
+    if items.is_empty() {
+        return "-".into();
+    }
+    items
+        .iter()
+        .map(|i| match &i.field {
+            Some(f) => format!(
+                "{}{}{}",
+                if i.used { "" } else { "-" },
+                printable(f),
+                i.direction.as_deref().map_or_else(String::new, |d| format!(
+                    " {}",
+                    printable(&d.to_lowercase())
+                ))
+            ),
+            None => "(auto)".into(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn details_line(c: &Cell, id: u32, items: &HashMap<u32, &DetailsItem>) -> String {
@@ -289,12 +327,26 @@ fn dcs_json(f: &DcsForm, details: &[DetailsItem]) -> Json {
         "variant": f.variant.as_ref().map(variant),
         "variants": f.variants.iter().map(variant).collect::<Vec<_>>(),
         "settings": f.settings.iter().map(|s| {
-            let (kind, comparison) = match &s.kind {
-                SettingKind::Parameter { .. } => ("parameter".to_string(), None),
-                SettingKind::Filter { comparison, .. } => ("filter".to_string(), Some(comparison.clone())),
-                SettingKind::Other(t) => (t.clone(), None),
+            let items_json = |items: &[FieldItem]| {
+                items
+                    .iter()
+                    .map(|i| json!({"field": i.field, "used": i.used, "direction": i.direction}))
+                    .collect::<Vec<_>>()
             };
-            json!({
+            let (kind, comparison, items, fields) = match &s.kind {
+                SettingKind::Parameter { .. } => ("parameter".to_string(), None, None, None),
+                SettingKind::Filter { comparison, .. } => {
+                    ("filter".to_string(), Some(comparison.clone()), None, None)
+                }
+                SettingKind::Selection { items } => ("Selection".to_string(), None, Some(items_json(items)), None),
+                SettingKind::Order { items } => ("Order".to_string(), None, Some(items_json(items)), None),
+                SettingKind::Filters => ("Filter".to_string(), None, None, None),
+                SettingKind::Group { fields } => {
+                    ("StructureItemGroup".to_string(), None, None, Some(fields.clone()))
+                }
+                SettingKind::Other(t) => (t.clone(), None, None, None),
+            };
+            let mut o = json!({
                 "id": s.id,
                 "kind": kind,
                 "name": s.name(),
@@ -302,7 +354,16 @@ fn dcs_json(f: &DcsForm, details: &[DetailsItem]) -> Json {
                 "used": s.used,
                 "comparison": comparison,
                 "value": s.value.as_ref().map(|v| json!({"type": v.type_name, "text": v.text})),
-            })
+            });
+            if let Some(m) = o.as_object_mut() {
+                if let Some(items) = items {
+                    m.insert("items".into(), Json::from(items));
+                }
+                if let Some(fields) = fields {
+                    m.insert("fields".into(), json!(fields));
+                }
+            }
+            o
         }).collect::<Vec<_>>(),
         "parameters": f.parameters.iter().map(|p| json!({
             "name": p.name, "title": p.title, "types": p.types, "visible": p.visible,
@@ -378,6 +439,19 @@ fn report_json(view: &ReportView, sheets: &[&ReportSheet], steps: &[Step]) -> Js
     };
     if let Some(d) = &view.dcs {
         o.insert("dcs".into(), dcs_json(&d.form, &d.details));
+        if let (Some(dd), Some(dcs)) =
+            (&d.drilldown, o.get_mut("dcs").and_then(Json::as_object_mut))
+        {
+            dcs.insert(
+                "drilldown".into(),
+                json!({
+                    "id": dd.id,
+                    "field": dd.field,
+                    "main_action": dd.menu.main_action,
+                    "restricted": dd.menu.restricted,
+                }),
+            );
+        }
     }
     let call_json = |c: &onec_client::FormCall| {
         json!({

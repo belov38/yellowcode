@@ -2,7 +2,7 @@ use super::allocation::Owned;
 use super::allocation::{Allocation, Vector};
 use super::context::Lookup;
 use super::moxel::MoxelError;
-use super::moxel_view::MoxelView;
+use super::moxel_view::{MoxelView, Revision};
 use super::mxltables::{self as t, Codec, FormatSlot, ViewKind};
 use crate::graph::{
     lstr::{Grammar, LocalStrings},
@@ -206,6 +206,7 @@ fn take_with<'n>(
 pub(crate) fn split_cell_with<'n>(
     c: &'n Node,
     read: crate::graph::read::Read<'_>,
+    revision: Revision,
 ) -> crate::graph::read::R<Cell<'n>> {
     let c = read.list(c)?;
     let m = read.plain_int(read.index(c, 0)?)?;
@@ -240,7 +241,7 @@ pub(crate) fn split_cell_with<'n>(
         out.note = Some((read.index(c, p)?, read.index(c, p + 2)?));
         p += 3;
     }
-    if m & 16 != 0 {
+    if m & 16 != 0 && revision.cell_text_flag {
         if is(read.index(c, p)?, "1") {
             out.ftext = Some(read.index(c, p + 1)?);
             p += 1;
@@ -285,6 +286,7 @@ pub(crate) struct Writer<'a> {
     default_index: Option<usize>,
     hook: Option<&'a dyn DrawingHook>,
     row_coverage: RowCoverage,
+    pub(crate) revision: Revision,
 }
 
 impl<'a> Writer<'a> {
@@ -302,6 +304,9 @@ impl<'a> Writer<'a> {
         if !d.embedded.is_empty() {
             return Err(read.invalid("embedded table"));
         }
+        let revision = d
+            .revision()
+            .ok_or_else(|| read.invalid("spreadsheet version"))?;
         Ok(Writer {
             cfg,
             read,
@@ -316,6 +321,7 @@ impl<'a> Writer<'a> {
             default_index: None,
             hook: None,
             row_coverage: RowCoverage::FullHeight,
+            revision,
         })
     }
 
@@ -387,7 +393,7 @@ impl<'a> Writer<'a> {
         for (_, fmt, cells) in d.rows.iter() {
             self.ref_fmt(fmt, false)?;
             for (_, c) in cells.iter() {
-                let p = split_cell_with(c, read)?;
+                let p = split_cell_with(c, read, self.revision)?;
                 self.ref_fmt(p.fmt, false)?;
                 if let Some((_, nd)) = p.note {
                     let f =
@@ -613,7 +619,7 @@ impl<'a> Writer<'a> {
             rc.push(row, column)?;
         }
         rc.sort();
-        let spans = rows::spans(&d, &rc, read, self.row_coverage)?;
+        let spans = rows::spans(&d, &rc, read, self.row_coverage, self.revision)?;
         let mut rows = spans.iter().copied().peekable();
         while let Some(rows::RowSpan {
             begin: idx,
@@ -731,7 +737,7 @@ impl<'a> Writer<'a> {
 
     fn w_cell(&mut self, tag: &str, c: &Node) -> F<()> {
         let read = self.read;
-        let p = split_cell_with(c, read)?;
+        let p = split_cell_with(c, read, self.revision)?;
         self.w.open(tag, [])?;
         let x = self.xf_with(p.fmt)?;
         leaf_number(&mut self.w, "f", x)?;
@@ -795,7 +801,7 @@ impl<'a> Writer<'a> {
                 format!("drawing type {kind} (chart objects are not decoded)")
             }));
         };
-        let p = split_cell_with(read.index(dr, 0)?, read)?;
+        let p = split_cell_with(read.index(dr, 0)?, read, self.revision)?;
         self.w.open(tag, [])?;
         leaf(&mut self.w, "drawingType", name)?;
         leaf(&mut self.w, "id", read.scalar(read.index(dr, 10)?)?)?;

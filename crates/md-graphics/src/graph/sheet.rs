@@ -58,7 +58,7 @@ fn chart_drawing(w: &mut Writer<'_>, tag: &str, dr: &[Node], zorder: Option<usiz
             )
         }));
     }
-    let p = split_cell_with(read.at(dr, 0)?, read)?;
+    let p = split_cell_with(read.at(dr, 0)?, read, w.revision)?;
     w.w.open(tag, []).map_err(ReadError::from)?;
     leaf(w, "drawingType", "Chart")?;
     leaf(w, "id", read.scalar(read.at(dr, 10)?)?)?;

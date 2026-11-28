@@ -18,6 +18,7 @@ const NS_XSI: &str = "http://www.w3.org/2001/XMLSchema-instance";
 pub const COMPOSE_RESULT: &str = "controller::composeResult";
 pub const VARIANT_PARAM: &str = "КлючВарианта";
 const COMPOSER_FIELD: &str = "SettingsComposer";
+const REPORT_TYPE_FIELD: &str = "ReportObjectTypeID";
 
 const PROP_VARIANT_KEY: u32 = 13;
 const PROP_VARIANTS: u32 = 17;
@@ -104,6 +105,38 @@ pub enum DcsError {
     },
     #[error("{name:?} names {count} user settings of the report; name one by its title or its id")]
     Ambiguous { name: String, count: usize },
+    #[error("{name:?} is not an available field of the report (for the {what}); they are: {known}")]
+    NoField {
+        name: String,
+        what: &'static str,
+        known: String,
+    },
+    #[error(
+        "{name:?} is a field of the report and the name or title of {count} filters on other fields; name the filter \
+         by its id (`--format json`)"
+    )]
+    FilterTitle { name: String, count: usize },
+    #[error("{name:?} is the title of {count} fields of the report; name the field by its path")]
+    AmbiguousField { name: String, count: usize },
+    #[error(
+        "{name}: the field has no filter of its own, and the report has {count} filters as a whole the user may change \
+         (of several groupings); which one is meant is not known"
+    )]
+    SeveralFilters { name: String, count: usize },
+    #[error("the report has no {what} the user may change (no such user setting)")]
+    NoCollection { what: &'static str },
+    #[error(
+        "the details of the cell offer no «Расшифровать» (the menu of the cell has no drill down)"
+    )]
+    NoDrillDown,
+    #[error(
+        "the result has no details data (its address is not in the answer); the report has no details"
+    )]
+    NoDetailsData,
+    #[error("the report has no object type (ReportObjectTypeID) in the data of its form")]
+    NoReportType,
+    #[error("the report is still being generated after {seconds} s")]
+    GenerationTimeout { seconds: u64 },
     #[error("the user setting {name:?} is changed twice")]
     Twice { name: String },
     #[error("{name}: {reason}")]
@@ -111,7 +144,8 @@ pub enum DcsError {
     #[error("{name}: the value of the type {ty} is not implemented")]
     NotImplemented { name: String, ty: String },
     #[error(
-        "{name}: the setting has the types {types}; a value of a composite type is not implemented"
+        "{name}: the setting has the types {types}; name the type before the value, e.g. 'decimal:5' or \
+         'CatalogRef.<Имя>:<представление>'"
     )]
     Composite { name: String, types: String },
     #[error(
@@ -151,7 +185,25 @@ pub enum SettingKind {
         field: Option<String>,
         comparison: String,
     },
+    Selection {
+        items: Vec<FieldItem>,
+    },
+    Order {
+        items: Vec<FieldItem>,
+    },
+    Filters,
+    Group {
+        fields: Vec<String>,
+    },
     Other(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FieldItem {
+    pub field: Option<String>,
+    pub used: bool,
+    pub direction: Option<String>,
+    raw: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -169,6 +221,7 @@ pub struct UserSetting {
     pub title: Option<String>,
     raw: String,
     raw_value: Option<String>,
+    raw_items: Vec<String>,
 }
 
 impl UserSetting {
@@ -179,6 +232,17 @@ impl UserSetting {
                 field: Some(field), ..
             } => field,
             _ => self.title.as_deref().unwrap_or(&self.id),
+        }
+    }
+
+    pub fn label(&self) -> &str {
+        match &self.kind {
+            _ if self.title.is_some() => self.name(),
+            SettingKind::Group { fields } if !fields.is_empty() => &fields[0],
+            SettingKind::Selection { .. } => "Выбранные поля",
+            SettingKind::Order { .. } => "Сортировка",
+            SettingKind::Filters => "Отбор",
+            _ => self.name(),
         }
     }
 }
@@ -197,6 +261,7 @@ struct ComposerPlace {
     attribute: usize,
     field: usize,
     raw_fields: Vec<String>,
+    counters: (u64, u64, u64),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -206,6 +271,7 @@ pub struct DcsForm {
     pub settings: Vec<UserSetting>,
     pub parameters: Vec<Available>,
     pub fields: Vec<Available>,
+    pub report_type: Option<String>,
     place: ComposerPlace,
 }
 
@@ -221,7 +287,7 @@ pub fn read_form(
     attributes: &[FormAttribute],
 ) -> Result<DcsForm, DcsError> {
     const ANSWER: &str = "logForm/query";
-    let (attribute, field, fields) = composer_of(descr, attributes)?;
+    let (attribute, field, fields, type_field) = composer_of(descr, attributes)?;
     let text = utf8(query);
     let doc = parse(ANSWER, &text)?;
     let root = doc.root_element();
@@ -244,6 +310,11 @@ pub fn read_form(
         .into());
     }
     let raw_fields = values.iter().map(|v| raw(&text, *v)).collect();
+    let report_type = type_field
+        .and_then(|i| values.get(i))
+        .and_then(|v| v.text())
+        .map(str::to_string)
+        .filter(|t| !t.is_empty());
     let composer = values[field];
     if !composer
         .children()
@@ -260,10 +331,12 @@ pub fn read_form(
         settings,
         parameters,
         fields,
+        report_type,
         place: ComposerPlace {
             attribute,
             field,
             raw_fields,
+            counters: opening_counters(root),
         },
     })
 }
@@ -279,9 +352,11 @@ impl DcsForm {
         }
         let mut items = String::new();
         for (i, s) in self.settings.iter().enumerate() {
-            match edits.iter().find(|e| e.setting == i) {
-                Some(e) => items.push_str(&item_xml(s, e)?),
-                None => items.push_str(&s.raw),
+            let mine: Vec<&Edit> = edits.iter().filter(|e| e.setting == i).collect();
+            if mine.is_empty() {
+                items.push_str(&s.raw);
+            } else {
+                items.push_str(&item_xml(s, &mine)?);
             }
         }
         let mut object = String::new();
@@ -295,8 +370,9 @@ impl DcsForm {
                 object.push_str(r);
             }
         }
+        let (desc, sin, seq) = self.place.counters;
         Ok(format!(
-            "<pchs sinDesc=\"0\" sin=\"0\" seq=\"0\"><uo:structure fields=\"{}\"><uo:v>{object}</uo:v>\
+            "<pchs sinDesc=\"{desc}\" sin=\"{sin}\" seq=\"{seq}\"><uo:structure fields=\"{}\"><uo:v>{object}</uo:v>\
 </uo:structure></pchs>",
             self.place.attribute
         ))
@@ -331,10 +407,34 @@ fn variant_list(v: &[Variant]) -> String {
         .join(", ")
 }
 
-pub fn compose_params() -> [crate::value::Value; 5] {
+pub fn compose_params(rows: u32) -> [crate::value::Value; 5] {
     use crate::value::Value;
     let n = |v: i64| Value::Number(Decimal::from_i64(v));
-    [n(18), n(2), n(0), n(0), Value::Bool(false)]
+    [n(i64::from(rows)), n(2), n(0), n(0), Value::Bool(false)]
+}
+
+pub const CHECK_BACKGROUND: &str = "controller::checkBackgroundExecution";
+
+pub fn generating(answer: &[u8]) -> bool {
+    let text = utf8(answer);
+    let Ok(doc) = Document::parse(text.trim_start_matches('\u{feff}')) else {
+        return false;
+    };
+    doc.root_element()
+        .children()
+        .filter(|n| n.is_element() && n.tag_name().name() == "dd")
+        .flat_map(|dd| {
+            dd.children()
+                .filter(|n| n.is_element() && n.tag_name().name() == "m")
+        })
+        .flat_map(|m| {
+            m.children()
+                .filter(|n| n.is_element() && n.tag_name().name() == "jobs")
+        })
+        .any(|j| {
+            j.text()
+                .is_some_and(|t| t.split_whitespace().any(|w| w == "reportGeneration"))
+        })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -342,6 +442,9 @@ pub enum Change {
     Set { name: String, value: String },
     Filter(Filter),
     Off { name: String },
+    On { name: String },
+    Field { field: String, used: bool },
+    Order { field: String, desc: bool },
 }
 
 impl Change {
@@ -354,10 +457,43 @@ impl Change {
         })
     }
 
+    pub fn parse_field(s: &str) -> Option<Change> {
+        let s = s.trim();
+        if s.starts_with("--") {
+            return None;
+        }
+        let (used, field) = match s.strip_prefix('-') {
+            Some(rest) => (false, rest),
+            None => (true, s.strip_prefix('+').unwrap_or(s)),
+        };
+        let field = field.trim();
+        (!field.is_empty()).then(|| Change::Field {
+            field: field.to_string(),
+            used,
+        })
+    }
+
+    pub fn parse_order(s: &str) -> Option<Change> {
+        let s = s.trim();
+        let (field, desc) = match s.rsplit_once(char::is_whitespace) {
+            Some((f, d)) => match fold_key(d).as_str() {
+                "asc" | "возр" => (f.trim(), false),
+                "desc" | "убыв" => (f.trim(), true),
+                _ => (s, false),
+            },
+            None => (s, false),
+        };
+        (!field.is_empty()).then(|| Change::Order {
+            field: field.to_string(),
+            desc,
+        })
+    }
+
     fn name(&self) -> &str {
         match self {
-            Change::Set { name, .. } | Change::Off { name } => name,
+            Change::Set { name, .. } | Change::Off { name } | Change::On { name } => name,
             Change::Filter(f) => &f.field,
+            Change::Field { field, .. } | Change::Order { field, .. } => field,
         }
     }
 }
@@ -375,12 +511,14 @@ pub enum Typed {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Edit {
     pub setting: usize,
     pub used: bool,
     pub comparison: Option<&'static str>,
     pub value: Option<Typed>,
+    pub added: Option<String>,
+    pub items: Option<Vec<FieldItem>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -409,54 +547,284 @@ pub fn resolve(
     types: &RefTypes,
 ) -> Result<Vec<Edit>, DcsError> {
     let mut edits: Vec<Edit> = Vec::new();
+    let mut selection: Option<(usize, Vec<FieldItem>)> = None;
+    let mut order: Option<(usize, Vec<FieldItem>)> = None;
     for c in changes {
-        let index = find_setting(form, c)?;
-        if edits.iter().any(|e| e.setting == index) {
-            return Err(DcsError::Twice {
-                name: c.name().to_string(),
-            });
-        }
-        let s = &form.settings[index];
-        let edit = match c {
-            Change::Off { .. } => Edit {
-                setting: index,
-                used: false,
-                comparison: None,
-                value: None,
-            },
-            Change::Set { value, .. } => Edit {
-                setting: index,
-                used: true,
-                comparison: None,
-                value: Some(typed(form, s, value, types)?),
-            },
-            Change::Filter(f) if matches!(f.op, Comparison::Contains | Comparison::NotContains) => {
-                if setting_types(form, s) != ["xs:string"] {
-                    return Err(DcsError::Value {
-                        name: s.name().to_string(),
-                        reason: "~ and !~ compare strings; the field is not a string".into(),
-                    });
+        match c {
+            Change::Field { field, used } => {
+                let (_, items) = match &mut selection {
+                    Some(s) => s,
+                    None => selection.insert(collection(form, "selection")?),
+                };
+                set_field(form, items, field, *used)?;
+                continue;
+            }
+            Change::Order { field, desc } => {
+                let (_, items) = match &mut order {
+                    Some(o) => o,
+                    None => {
+                        let (i, _) = collection(form, "order")?;
+                        order.insert((i, Vec::new()))
+                    }
+                };
+                let name = available_field(form, field, "order")?;
+                if items.iter().any(|i| {
+                    i.field
+                        .as_deref()
+                        .is_some_and(|f| fold_key(f) == fold_key(&name))
+                }) {
+                    return Err(DcsError::Twice { name });
                 }
+                items.push(FieldItem {
+                    field: Some(name),
+                    used: true,
+                    direction: Some(if *desc { "Desc" } else { "Asc" }.into()),
+                    raw: String::new(),
+                });
+                continue;
+            }
+            _ => {}
+        }
+        let edit = match (c, find_setting(form, c)) {
+            (Change::Filter(f), Err(e @ DcsError::NoSetting { .. })) => {
+                let wholes: Vec<usize> = form
+                    .settings
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, s)| s.kind == SettingKind::Filters)
+                    .map(|(i, _)| i)
+                    .collect();
+                let index = match wholes.as_slice() {
+                    [] => return Err(e),
+                    [i] => *i,
+                    many => {
+                        return Err(DcsError::SeveralFilters {
+                            name: f.field.clone(),
+                            count: many.len(),
+                        });
+                    }
+                };
+                let field = available_field(form, &f.field, "filter")?;
+                if edits.iter().any(|e| {
+                    e.added
+                        .as_deref()
+                        .is_some_and(|a| fold_key(a) == fold_key(&field))
+                }) {
+                    return Err(DcsError::Twice { name: field });
+                }
+                let ty = form
+                    .fields
+                    .iter()
+                    .find(|a| a.name == field)
+                    .map(|a| a.types.clone())
+                    .unwrap_or_default();
                 Edit {
                     setting: index,
                     used: true,
                     comparison: Some(comparison_xml(f.op)),
-                    value: Some(Typed::Xml {
-                        type_name: "xs:string".into(),
-                        inner: escape_text(&f.value),
-                    }),
+                    value: Some(filter_value(&field, &ty, f, types)?),
+                    added: Some(field),
+                    items: None,
                 }
             }
-            Change::Filter(f) => Edit {
-                setting: index,
-                used: true,
-                comparison: Some(comparison_xml(f.op)),
-                value: Some(typed(form, s, &f.value, types)?),
-            },
+            (_, Err(e)) => return Err(e),
+            (c, Ok(index)) => {
+                if edits
+                    .iter()
+                    .any(|e| e.setting == index && e.added.is_none())
+                {
+                    return Err(DcsError::Twice {
+                        name: c.name().to_string(),
+                    });
+                }
+                let s = &form.settings[index];
+                match c {
+                    Change::Off { .. } | Change::On { .. } => Edit {
+                        setting: index,
+                        used: matches!(c, Change::On { .. }),
+                        ..Edit::default()
+                    },
+                    Change::Set { value, .. } => Edit {
+                        setting: index,
+                        used: true,
+                        value: Some(typed(form, s, value, types)?),
+                        ..Edit::default()
+                    },
+                    Change::Filter(f) => Edit {
+                        setting: index,
+                        used: true,
+                        comparison: Some(comparison_xml(f.op)),
+                        value: Some(filter_value(s.name(), &setting_types(form, s), f, types)?),
+                        ..Edit::default()
+                    },
+                    Change::Field { .. } | Change::Order { .. } => unreachable!("handled above"),
+                }
+            }
         };
         edits.push(edit);
     }
+    for (index, items) in selection.into_iter().chain(order) {
+        edits.push(Edit {
+            setting: index,
+            items: Some(items),
+            ..Edit::default()
+        });
+    }
     Ok(edits)
+}
+
+fn filter_value(
+    name: &str,
+    ty: &[String],
+    f: &Filter,
+    types: &RefTypes,
+) -> Result<Typed, DcsError> {
+    if matches!(f.op, Comparison::Contains | Comparison::NotContains) {
+        if ty != ["xs:string"] {
+            return Err(DcsError::Value {
+                name: name.to_string(),
+                reason: "~ and !~ compare strings; the field is not a string".into(),
+            });
+        }
+        return Ok(Typed::Xml {
+            type_name: "xs:string".into(),
+            inner: escape_text(&f.value),
+        });
+    }
+    typed_as(name, ty, &f.value, types)
+}
+
+fn collection(form: &DcsForm, what: &'static str) -> Result<(usize, Vec<FieldItem>), DcsError> {
+    let found: Vec<(usize, &Vec<FieldItem>)> = form
+        .settings
+        .iter()
+        .enumerate()
+        .filter_map(|(i, s)| match (&s.kind, what) {
+            (SettingKind::Selection { items }, "selection")
+            | (SettingKind::Order { items }, "order") => Some((i, items)),
+            _ => None,
+        })
+        .collect();
+    match found.as_slice() {
+        [(i, items)] => Ok((*i, (*items).clone())),
+        [] => Err(DcsError::NoCollection { what }),
+        many => Err(DcsError::Ambiguous {
+            name: what.to_string(),
+            count: many.len(),
+        }),
+    }
+}
+
+pub(crate) fn available_field(
+    form: &DcsForm,
+    name: &str,
+    what: &'static str,
+) -> Result<String, DcsError> {
+    let k = fold_key(name.trim());
+    let fields = || form.fields.iter().filter(|f| !f.folder);
+    let mut by_title: Vec<&str> = Vec::new();
+    for f in fields().filter(|f| f.title.as_deref().is_some_and(|t| fold_key(t) == k)) {
+        if !by_title.contains(&f.name.as_str()) {
+            by_title.push(&f.name);
+        }
+    }
+    if by_title.len() > 1 && !fields().any(|f| fold_key(&f.name) == k) {
+        return Err(DcsError::AmbiguousField {
+            name: name.to_string(),
+            count: by_title.len(),
+        });
+    }
+    fields()
+        .find(|f| fold_key(&f.name) == k)
+        .map(|f| f.name.clone())
+        .or_else(|| by_title.first().map(|n| n.to_string()))
+        .ok_or_else(|| DcsError::NoField {
+            name: name.to_string(),
+            what,
+            known: {
+                let mut names: Vec<&str> = Vec::new();
+                for f in form.fields.iter().filter(|f| !f.folder) {
+                    if !names.contains(&f.name.as_str()) {
+                        names.push(&f.name);
+                    }
+                }
+                if names.is_empty() {
+                    "none".into()
+                } else {
+                    names.join(", ")
+                }
+            },
+        })
+}
+
+fn set_field(
+    form: &DcsForm,
+    items: &mut Vec<FieldItem>,
+    name: &str,
+    used: bool,
+) -> Result<(), DcsError> {
+    let k = fold_key(name.trim());
+    let title_of = |f: &str| {
+        form.fields
+            .iter()
+            .find(|a| a.name == f)
+            .and_then(|a| a.title.as_deref())
+            .is_some_and(|t| fold_key(t) == k)
+    };
+    let mut at = items
+        .iter()
+        .position(|i| i.field.as_deref().is_some_and(|f| fold_key(f) == k));
+    let a_path = form
+        .fields
+        .iter()
+        .any(|a| !a.folder && fold_key(&a.name) == k);
+    if at.is_none() && !a_path {
+        let by_title: Vec<usize> = items
+            .iter()
+            .enumerate()
+            .filter(|(_, i)| i.field.as_deref().is_some_and(title_of))
+            .map(|(n, _)| n)
+            .collect();
+        match by_title.as_slice() {
+            [] => {}
+            [n] => at = Some(*n),
+            many => {
+                return Err(DcsError::AmbiguousField {
+                    name: name.to_string(),
+                    count: many.len(),
+                });
+            }
+        }
+    }
+    if let Some(item) = at.map(|n| &mut items[n]) {
+        if item.used != used {
+            item.used = used;
+            item.raw.clear();
+        }
+        return Ok(());
+    }
+    if !used {
+        return Err(DcsError::NoSetting {
+            name: name.to_string(),
+            what: "field of the selection",
+            known: {
+                let names: Vec<&str> = items.iter().filter_map(|i| i.field.as_deref()).collect();
+                if names.is_empty() {
+                    "none".into()
+                } else {
+                    names.join(", ")
+                }
+            },
+        });
+    }
+    let field = available_field(form, name, "selection")?;
+    items.push(FieldItem {
+        field: Some(field),
+        used: true,
+        direction: None,
+        raw: String::new(),
+    });
+    Ok(())
 }
 
 fn find_setting(form: &DcsForm, c: &Change) -> Result<usize, DcsError> {
@@ -465,10 +833,12 @@ fn find_setting(form: &DcsForm, c: &Change) -> Result<usize, DcsError> {
     let (what, fits): (&'static str, fn(&SettingKind) -> bool) = match c {
         Change::Set { .. } => ("parameter", |k| matches!(k, SettingKind::Parameter { .. })),
         Change::Filter(_) => ("filter", |k| matches!(k, SettingKind::Filter { .. })),
-        Change::Off { .. } => ("parameter or filter", |k| {
+        _ => ("parameter, filter or grouping", |k| {
             matches!(
                 k,
-                SettingKind::Parameter { .. } | SettingKind::Filter { .. }
+                SettingKind::Parameter { .. }
+                    | SettingKind::Filter { .. }
+                    | SettingKind::Group { .. }
             )
         }),
     };
@@ -481,13 +851,81 @@ fn find_setting(form: &DcsForm, c: &Change) -> Result<usize, DcsError> {
             .map(|(i, _)| i)
             .collect()
     };
-    let mut found = by(&|s| Some(s.name().to_string()));
-    if found.is_empty() {
-        found = by(&|s| s.title.clone());
+    match by(&|s| Some(s.id.clone())).as_slice() {
+        [] => {}
+        [i] => return Ok(*i),
+        many => {
+            return Err(DcsError::Ambiguous {
+                name: name.to_string(),
+                count: many.len(),
+            });
+        }
     }
-    if found.is_empty() {
-        found = by(&|s| Some(s.id.clone()));
-    }
+    let schema_field = match c {
+        Change::Filter(_) => match available_field(form, name, "filter") {
+            Ok(path) => Some(path),
+            Err(e @ DcsError::AmbiguousField { .. }) => return Err(e),
+            Err(_) => None,
+        },
+        _ => None,
+    };
+    let found: Vec<usize> = if let Some(path) = &schema_field {
+        let p = fold_key(path);
+        let on_field = by(&|s| match &s.kind {
+            SettingKind::Filter { field, .. } => field
+                .clone()
+                .filter(|f| fold_key(f) == p)
+                .map(|_| name.to_string()),
+            _ => None,
+        });
+        let titled_other: Vec<usize> = by(&|s| s.title.clone())
+            .into_iter()
+            .chain(by(&|s| Some(s.name().to_string())))
+            .filter(|i| !on_field.contains(i))
+            .collect();
+        if !titled_other.is_empty() {
+            let mut others: Vec<usize> = Vec::new();
+            for i in titled_other {
+                if !others.contains(&i) {
+                    others.push(i);
+                }
+            }
+            return Err(DcsError::FilterTitle {
+                name: name.to_string(),
+                count: others.len(),
+            });
+        }
+        on_field
+    } else {
+        let mut all: Vec<usize> = Vec::new();
+        for i in by(&|s| Some(s.name().to_string()))
+            .into_iter()
+            .chain(by(&|s| s.title.clone()))
+            .chain(by(&|s| Some(s.label().to_string())))
+            .chain(by(&|s| match &s.kind {
+                SettingKind::Group { fields } => Some(fields.join(", ")),
+                _ => None,
+            }))
+            .chain(
+                form.settings
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, s)| match &s.kind {
+                        SettingKind::Group { fields }
+                            if fits(s) && fields.iter().any(|f| fold_key(f) == k) =>
+                        {
+                            Some(i)
+                        }
+                        _ => None,
+                    }),
+            )
+        {
+            if !all.contains(&i) {
+                all.push(i);
+            }
+        }
+        all
+    };
     match found.as_slice() {
         [i] => Ok(*i),
         [] => Err(DcsError::NoSetting {
@@ -531,17 +969,23 @@ fn comparison_xml(c: Comparison) -> &'static str {
 }
 
 fn typed(form: &DcsForm, s: &UserSetting, text: &str, types: &RefTypes) -> Result<Typed, DcsError> {
-    let name = s.name().to_string();
-    let ty = setting_types(form, s);
-    let t = match ty.as_slice() {
+    typed_as(s.name(), &setting_types(form, s), text, types)
+}
+
+fn typed_as(name: &str, ty: &[String], text: &str, types: &RefTypes) -> Result<Typed, DcsError> {
+    let name = name.to_string();
+    let (t, text) = match ty {
         [] => return Err(DcsError::NoType { name }),
-        [t] => t.clone(),
-        many => {
-            return Err(DcsError::Composite {
-                name,
-                types: many.join(", "),
-            });
-        }
+        [t] => (t.clone(), text),
+        many => match composite_part(many, text) {
+            Some((t, rest)) => (t.to_string(), rest),
+            None => {
+                return Err(DcsError::Composite {
+                    name,
+                    types: many.join(", "),
+                });
+            }
+        },
     };
     let err = |reason: String| DcsError::Value {
         name: name.clone(),
@@ -604,6 +1048,28 @@ fn typed(form: &DcsForm, s: &UserSetting, text: &str, types: &RefTypes) -> Resul
     })
 }
 
+fn composite_part<'t, 'v>(types: &'t [String], text: &'v str) -> Option<(&'t str, &'v str)> {
+    let lead = text.trim_start();
+    types.iter().find_map(|t| {
+        let local = t.split_once(':').map_or(t.as_str(), |(_, l)| l);
+        let russian = match t.as_str() {
+            "xs:string" => Some("строка"),
+            "xs:decimal" => Some("число"),
+            "xs:boolean" => Some("булево"),
+            "xs:dateTime" => Some("дата"),
+            _ => None,
+        };
+        [Some(t.as_str()), Some(local), russian]
+            .into_iter()
+            .flatten()
+            .find_map(|name| {
+                let head = lead.get(..name.len())?;
+                let rest = lead[name.len()..].strip_prefix(':')?;
+                (fold_key(head) == fold_key(name)).then_some((t.as_str(), rest))
+            })
+    })
+}
+
 fn setting_types(form: &DcsForm, s: &UserSetting) -> Vec<String> {
     let schema = match &s.kind {
         SettingKind::Parameter { name } => form.parameters.iter().find(|p| &p.name == name),
@@ -630,12 +1096,25 @@ fn date(v: &str, end: bool) -> Result<String, String> {
         .map_err(|e| e.to_string())
 }
 
-fn period(v: &str) -> Result<String, String> {
-    if let Some((from, to)) = v.split_once("..") {
-        let (from, to) = (date(from.trim(), false)?, date(to.trim(), true)?);
-        return Ok(format!(
+pub(crate) fn period(v: &str) -> Result<String, String> {
+    Ok(match period_parts(v)? {
+        (_, Some((from, to))) => format!(
             "<v8:variant xsi:type=\"v8:StandardPeriodVariant\">Custom</v8:variant><v8:startDate>{from}</v8:startDate>\
 <v8:endDate>{to}</v8:endDate>"
+        ),
+        (variant, None) => {
+            format!("<v8:variant xsi:type=\"v8:StandardPeriodVariant\">{variant}</v8:variant>")
+        }
+    })
+}
+
+pub(crate) type PeriodDates = Option<(String, String)>;
+
+pub(crate) fn period_parts(v: &str) -> Result<(&'static str, PeriodDates), String> {
+    if let Some((from, to)) = v.split_once("..") {
+        return Ok((
+            "Custom",
+            Some((date(from.trim(), false)?, date(to.trim(), true)?)),
         ));
     }
     let k = fold_key(v);
@@ -648,13 +1127,11 @@ fn period(v: &str) -> Result<String, String> {
                  ThisYear, LastMonth)"
             )
         })?;
-    Ok(format!(
-        "<v8:variant xsi:type=\"v8:StandardPeriodVariant\">{variant}</v8:variant>"
-    ))
+    Ok((variant, None))
 }
 
-fn item_xml(s: &UserSetting, e: &Edit) -> Result<String, DcsError> {
-    let value = |tag: &str| -> Result<String, DcsError> {
+fn item_xml(s: &UserSetting, edits: &[&Edit]) -> Result<String, DcsError> {
+    let value = |e: &Edit, tag: &str| -> Result<String, DcsError> {
         Ok(match &e.value {
             Some(Typed::Xml { type_name, inner }) => format!(
                 "<{tag} xsi:type=\"{}\">{inner}</{tag}>",
@@ -662,7 +1139,7 @@ fn item_xml(s: &UserSetting, e: &Edit) -> Result<String, DcsError> {
             ),
             Some(Typed::Search { text, .. }) => {
                 return Err(DcsError::Value {
-                    name: s.name().to_string(),
+                    name: e.added.clone().unwrap_or_else(|| s.name().to_string()),
                     reason: format!("the reference {text:?} is not found yet"),
                 });
             }
@@ -670,25 +1147,76 @@ fn item_xml(s: &UserSetting, e: &Edit) -> Result<String, DcsError> {
         })
     };
     let id = escape_text(&s.id);
+    let use_of = |e: &Edit, prefix: &str| {
+        if e.used {
+            String::new()
+        } else {
+            format!("<{prefix}use>false</{prefix}use>")
+        }
+    };
+    let e = edits[0];
     Ok(match &s.kind {
         SettingKind::Parameter { name } => format!(
             "<item xsi:type=\"SettingsParameterValue\">{}<dcscor:parameter>{}</dcscor:parameter>{}\
 <userSettingID>{id}</userSettingID></item>",
-            if e.used {
-                ""
-            } else {
-                "<dcscor:use>false</dcscor:use>"
-            },
+            use_of(e, "dcscor:"),
             escape_text(name),
-            value("dcscor:value")?
+            value(e, "dcscor:value")?
         ),
         SettingKind::Filter { comparison, .. } => format!(
             "<item xsi:type=\"FilterItemComparison\">{}<comparisonType>{}</comparisonType>{}\
 <userSettingID>{id}</userSettingID></item>",
-            if e.used { "" } else { "<use>false</use>" },
+            use_of(e, ""),
             escape_text(e.comparison.unwrap_or(comparison)),
-            value("right")?
+            value(e, "right")?
         ),
+        SettingKind::Group { .. } => format!(
+            "<item xsi:type=\"StructureItemGroup\">{}<userSettingID>{id}</userSettingID></item>",
+            use_of(e, "")
+        ),
+        SettingKind::Selection { items } | SettingKind::Order { items } => {
+            let (ty, item_ty) = match &s.kind {
+                SettingKind::Selection { .. } => ("Selection", "SelectedItemField"),
+                _ => ("Order", "OrderItemField"),
+            };
+            let mut out = format!("<item xsi:type=\"{ty}\">");
+            for i in e.items.as_deref().unwrap_or(items) {
+                match &i.field {
+                    Some(f) if i.raw.is_empty() => out.push_str(&format!(
+                        "<item xsi:type=\"{item_ty}\">{}<field>{}</field>{}</item>",
+                        if i.used { "" } else { "<use>false</use>" },
+                        escape_text(f),
+                        i.direction.as_deref().map_or_else(String::new, |d| format!(
+                            "<orderType>{}</orderType>",
+                            escape_text(d)
+                        ))
+                    )),
+                    _ => out.push_str(&i.raw),
+                }
+            }
+            out.push_str(&format!("<userSettingID>{id}</userSettingID></item>"));
+            out
+        }
+        SettingKind::Filters => {
+            let mut out = String::from("<item xsi:type=\"Filter\">");
+            for r in &s.raw_items {
+                out.push_str(r);
+            }
+            for e in edits {
+                let Some(field) = &e.added else {
+                    continue;
+                };
+                out.push_str(&format!(
+                    "<item xsi:type=\"FilterItemComparison\"><left xsi:type=\"dcscor:Field\">{}</left>\
+<comparisonType>{}</comparisonType>{}</item>",
+                    escape_text(field),
+                    e.comparison.unwrap_or("Equal"),
+                    value(e, "right")?
+                ));
+            }
+            out.push_str(&format!("<userSettingID>{id}</userSettingID></item>"));
+            out
+        }
         SettingKind::Other(_) => s.raw.clone(),
     })
 }
@@ -696,7 +1224,7 @@ fn item_xml(s: &UserSetting, e: &Edit) -> Result<String, DcsError> {
 fn composer_of(
     descr: &[u8],
     attributes: &[FormAttribute],
-) -> Result<(usize, usize, usize), DcsError> {
+) -> Result<(usize, usize, usize, Option<usize>), DcsError> {
     const ANSWER: &str = "logForm/dataDescrWMethods";
     let text = utf8(descr);
     let doc = parse(ANSWER, &text)?;
@@ -719,10 +1247,21 @@ fn composer_of(
             .iter()
             .position(|f| f.attribute("name") == Some(COMPOSER_FIELD))
         {
-            return Ok((a.position, i, fields.len()));
+            let type_field = fields
+                .iter()
+                .position(|f| f.attribute("name") == Some(REPORT_TYPE_FIELD));
+            return Ok((a.position, i, fields.len(), type_field));
         }
     }
     Err(DcsError::NoComposer)
+}
+
+fn opening_counters(root: Node) -> (u64, u64, u64) {
+    let Some(p) = root.children().find(|n| is(*n, NS_WS, "pdchs")) else {
+        return (0, 0, 0);
+    };
+    let c = |name: &str| p.attribute(name).and_then(|v| v.parse().ok()).unwrap_or(0);
+    (c("sin"), c("sinUo"), c("seqUo"))
 }
 
 fn variants_of(root: Node) -> (Option<Variant>, Vec<Variant>) {
@@ -915,7 +1454,34 @@ fn settings_of(
                     title,
                 )
             }
+            "Selection" | "Order" => {
+                let items = setting_items(item).map(|i| field_item(text, i)).collect();
+                let kind = if ty == "Selection" {
+                    SettingKind::Selection { items }
+                } else {
+                    SettingKind::Order { items }
+                };
+                (kind, None, None)
+            }
+            "Filter" => (SettingKind::Filters, None, None),
+            "StructureItemGroup" => {
+                let fields = variant_item
+                    .and_then(|n| child_any(n, "groupItems"))
+                    .map(|g| {
+                        setting_items(g)
+                            .filter_map(|i| child_any(i, "field").and_then(|f| f.text()))
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                (SettingKind::Group { fields }, None, None)
+            }
             _ => (SettingKind::Other(ty.clone()), None, None),
+        };
+        let raw_items = if kind == SettingKind::Filters {
+            setting_items(item).map(|i| raw(text, i)).collect()
+        } else {
+            Vec::new()
         };
         out.push(UserSetting {
             id,
@@ -925,9 +1491,36 @@ fn settings_of(
             title: presentation.or(title),
             raw: raw(text, item),
             raw_value: value_node.map(|v| raw(text, v)),
+            raw_items,
         });
     }
     Ok(out)
+}
+
+fn setting_items<'a, 'i>(n: Node<'a, 'i>) -> impl Iterator<Item = Node<'a, 'i>> {
+    n.children().filter(|c| is(*c, NS_SETTINGS, "item"))
+}
+
+fn field_item(text: &str, i: Node) -> FieldItem {
+    let ty = i
+        .attribute((NS_XSI, "type"))
+        .map(|t| t.rsplit(':').next().unwrap_or(t))
+        .unwrap_or_default();
+    let field = matches!(ty, "SelectedItemField" | "OrderItemField")
+        .then(|| child_any(i, "field").and_then(|f| f.text()))
+        .flatten()
+        .map(str::to_string);
+    FieldItem {
+        field,
+        used: child_any(i, "use")
+            .and_then(|u| u.text())
+            .and_then(boolean)
+            .unwrap_or(true),
+        direction: child_any(i, "orderType")
+            .and_then(|d| d.text())
+            .map(str::to_string),
+        raw: raw(text, i),
+    }
 }
 
 fn value_of(v: Node) -> SettingValue {
@@ -1080,10 +1673,11 @@ pub fn settle_searches(
             continue;
         };
         let (ty, clsid, text) = (type_name.clone(), *clsid, text.clone());
-        let name = form
-            .settings
-            .get(e.setting)
-            .map_or_else(|| e.setting.to_string(), |s| s.name().to_string());
+        let name = e.added.clone().unwrap_or_else(|| {
+            form.settings
+                .get(e.setting)
+                .map_or_else(|| e.setting.to_string(), |s| s.name().to_string())
+        });
         let found = find(clsid, &text)?;
         match found.as_slice() {
             [one] => {

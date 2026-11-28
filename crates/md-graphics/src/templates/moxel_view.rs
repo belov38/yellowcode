@@ -227,13 +227,6 @@ pub(crate) struct MoxelView<'a> {
         )
     )]
     pub head: [u8; 6],
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "C9 source sections retained for owned-model roundtrip parity"
-        )
-    )]
     pub version: &'a [Node],
     pub lang: &'a Node,
     pub default_format: &'a Node,
@@ -310,6 +303,26 @@ pub(crate) struct MoxelView<'a> {
     )]
     pub tail: &'a [Node],
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Revision {
+    pub cell_text_flag: bool,
+    pub implicit_first_row: bool,
+}
+impl Revision {
+    pub(crate) const CURRENT: Self = Self {
+        cell_text_flag: true,
+        implicit_first_row: false,
+    };
+    pub(crate) fn of(version: i64) -> Self {
+        if !(9..12).contains(&version) {
+            return Self::CURRENT;
+        }
+        Self {
+            cell_text_flag: version > 9,
+            implicit_first_row: true,
+        }
+    }
+}
 struct Cursor<'a> {
     items: &'a [Node],
     at: usize,
@@ -348,6 +361,13 @@ impl<'a> Cursor<'a> {
     }
 }
 impl<'a> MoxelView<'a> {
+    pub(crate) fn revision(&self) -> Option<Revision> {
+        self.version.get(2).and_then(integer).map(Revision::of)
+    }
+    pub(crate) fn no_rows(&self) -> Option<bool> {
+        let revision = self.revision()?;
+        Some(self.rows.is_empty() && !revision.implicit_first_row)
+    }
     pub(crate) fn read(items: &'a [Node], head: [u8; 6]) -> Result<Self, ViewError> {
         let mut c = Cursor { items, at: 0 };
         let version = c.list(3)?;

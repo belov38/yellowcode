@@ -1,4 +1,4 @@
 exit 1
 --- stdout
 --- stderr
-yellowcode: --set needs --command or --call
+yellowcode: --set, --set-json, --delete-row and --clear-table need --command or --call after them

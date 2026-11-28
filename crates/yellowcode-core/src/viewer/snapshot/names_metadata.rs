@@ -39,6 +39,8 @@ pub enum ManagedNamesMetadataError<E> {
     Canceled,
     #[error("inconsistent names metadata inventory")]
     Inventory,
+    #[error("cannot check the modules: the configuration properties are not decoded ({0})")]
+    ConfigurationNotDecoded(String),
 }
 type Result<T, E> = std::result::Result<T, ManagedNamesMetadataError<E>>;
 
@@ -902,6 +904,20 @@ impl<S: ManagedEntrySource> ManagedSnapshot<S> {
                 Some((*id, name))
             }))
     }
+    pub(super) fn check_names_configuration(&self) -> Result<(), S::Error> {
+        let settings = self.open.context().read_configuration()?;
+        if settings.props.is_empty() {
+            return Err(ManagedNamesMetadataError::ConfigurationNotDecoded(
+                crate::viewer::check::configuration_misses(
+                    settings
+                        .diagnostics
+                        .iter()
+                        .filter_map(|(key, _)| key.strip_prefix("configuration:")),
+                ),
+            ));
+        }
+        Ok(())
+    }
     pub fn visit_names_metadata(
         &self,
         canceled: &dyn NamesCancellation,
@@ -934,6 +950,14 @@ impl<S: ManagedEntrySource> ManagedSnapshot<S> {
             document_limit,
         )? {
             emit(canceled, visit, "Configuration.xml", &body)?;
+        } else {
+            let why = crate::viewer::check::configuration_misses(
+                settings
+                    .diagnostics
+                    .iter()
+                    .filter_map(|(key, _)| key.strip_prefix("configuration:")),
+            );
+            return Err(ManagedNamesMetadataError::ConfigurationNotDecoded(why));
         }
         check(canceled)
     }

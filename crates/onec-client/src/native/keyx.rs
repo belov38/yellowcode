@@ -3,6 +3,7 @@ use des::TdesEde3;
 use des::cipher::{BlockDecrypt, KeyInit};
 
 use super::rsa::{Fill, RsaKey};
+use super::stream::{Next, hex};
 use super::{BOM, NativeError};
 
 pub const MAX_KEY_BLOCK: usize = 8192;
@@ -61,6 +62,88 @@ pub fn split_answer(answer: &[u8]) -> Result<(Vec<u8>, &[u8]), NativeError> {
         return Err(bad("expected one {#base64:…} in the key block"));
     };
     Ok((decode_b64(block)?, tail))
+}
+
+pub fn is_empty_answer(answer: &[u8]) -> bool {
+    answer.len() < 2
+}
+
+pub struct EmptyAnswer<'a> {
+    pub answer: &'a [u8],
+    pub pings: u64,
+    pub signals: u64,
+    pub last_signal: Option<[u8; 16]>,
+    pub after: &'a [Next],
+}
+
+pub fn empty_answer_error(e: &EmptyAnswer<'_>) -> NativeError {
+    let mut text = format!(
+        "key answer: the server answered the key message with {} ({} bytes{}; with it {})",
+        if e.answer.is_empty() {
+            "an empty message"
+        } else {
+            "a message shorter than its length"
+        },
+        e.answer.len(),
+        if e.answer.is_empty() {
+            String::new()
+        } else {
+            format!(" {}", hex(e.answer))
+        },
+        controls(e.pings, e.signals)
+    );
+    if let Some(id) = e.last_signal.filter(|_| e.signals > 0) {
+        text.push_str(&format!(", last signal {}", hex(&id)));
+    }
+    let after = e.after.iter().map(next_text).collect::<Vec<_>>();
+    text.push_str("; after it: ");
+    text.push_str(&if after.is_empty() {
+        "not read".to_string()
+    } else {
+        after.join(", then ")
+    });
+    NativeError::Malformed(text)
+}
+
+fn controls(pings: u64, signals: u64) -> String {
+    format!(
+        "{pings} ping{}, {signals} signal{}",
+        if pings == 1 { "" } else { "s" },
+        if signals == 1 { "" } else { "s" }
+    )
+}
+
+const HEAD: usize = 16;
+const TEXT_HEAD: usize = 160;
+
+fn next_text(n: &Next) -> String {
+    match n {
+        Next::Message {
+            payload,
+            pings,
+            signals,
+        } => {
+            let mut t = format!("a message of {} bytes", payload.len());
+            if !payload.is_empty() {
+                t.push_str(&format!(
+                    " starting {}",
+                    hex(&payload[..payload.len().min(HEAD)])
+                ));
+            }
+            if let Some(body) = payload.strip_prefix(BOM) {
+                let s = String::from_utf8_lossy(body);
+                let s: String = s.chars().take(TEXT_HEAD).collect();
+                t.push_str(&format!(" (text {:?})", s.replace("\r\n", " ")));
+            }
+            if pings + signals > 0 {
+                t.push_str(&format!(" with {}", controls(*pings, *signals)));
+            }
+            t
+        }
+        Next::Closed => "the connection closed".into(),
+        Next::Silent => "nothing within the wait".into(),
+        Next::Failed(e) => format!("a read error ({e})"),
+    }
 }
 
 fn base64_items(text: &str) -> Vec<String> {

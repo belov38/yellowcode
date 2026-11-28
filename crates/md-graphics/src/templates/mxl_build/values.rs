@@ -352,7 +352,9 @@ pub(super) fn font(e: X<'_, '_>, cx: Cx<'_>, lookup: &dyn InverseLookup) -> R<N>
                     return Err(BuildError::Invalid("font namespace"));
                 }
                 cx.list([cx.atom(
-                    tables::inverse("sys_fonts", name).ok_or(BuildError::Invalid("system font"))?,
+                    tables::inverse("sys_fonts", name)
+                        .or_else(|| crate::graph::font::unlearned_sys_font_code(name))
+                        .ok_or(BuildError::Invalid("system font"))?,
                 )?])?
             }
             _ => return Err(BuildError::Unsupported("font kind")),

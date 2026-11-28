@@ -37,6 +37,9 @@ pub fn serve(answer: impl Fn(&str) -> Answer + Send + 'static) -> u16 {
                 let _ = r.read_exact(&mut body);
                 let path = start.split_whitespace().nth(1).unwrap_or("");
                 let a = answer(path);
+                if a.status == 0 {
+                    break;
+                }
                 let mut head = format!(
                     "HTTP/1.1 {} X\r\nConnection: Keep-Alive\r\nContent-Length: {}\r\n",
                     a.status,

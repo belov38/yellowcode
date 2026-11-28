@@ -103,14 +103,26 @@ fn simple_spec(name: &str) -> Option<StaticPropSpec> {
     })
 }
 const ROOT_VERSION: i64 = 76;
+const COMPLETE_FUNCTIONALITIES: i64 = 68;
 
 enum OldRoot<'a> {
     At(Option<&'a Node>),
     Value(Node),
 }
 
-fn old_root<'a>(budget: &MemoryBudget, name: &str, alt: &V, body: &'a Node) -> R<OldRoot<'a>> {
+fn old_root<'a>(
+    budget: &MemoryBudget,
+    name: &str,
+    alt: &V,
+    body: &'a Node,
+    version: i64,
+) -> R<Option<OldRoot<'a>>> {
     let why = [name, ":old_root"];
+    if let Some(before) = alt.get("before")
+        && version >= required(before.as_i64(), budget, &why)?
+    {
+        return Ok(None);
+    }
     if let Some(path) = alt.get("path").and_then(V::as_array) {
         let mut node = Some(body);
         for at in path {
@@ -121,14 +133,14 @@ fn old_root<'a>(budget: &MemoryBudget, name: &str, alt: &V, body: &'a Node) -> R
             )?;
             node = node.and_then(|n| n.at(at));
         }
-        return Ok(OldRoot::At(node));
+        return Ok(Some(OldRoot::At(node)));
     }
     let text = required(alt.get("value").and_then(V::as_str), budget, &why)?;
-    Ok(OldRoot::Value(required(
+    Ok(Some(OldRoot::Value(required(
         brace::parse(text).ok(),
         budget,
         &why,
-    )?))
+    )?)))
 }
 
 impl ManagedValueContext<'_> {
@@ -136,6 +148,7 @@ impl ManagedValueContext<'_> {
         &self,
         spec: StaticConfigProp,
         node: Option<&Node>,
+        partial: bool,
     ) -> R<Option<Charged<Prop>>> {
         let budget = self.memory_budget();
         let name = spec.name();
@@ -227,7 +240,30 @@ impl ManagedValueContext<'_> {
                 let list = required(node.and_then(Node::as_list), budget, &[name, ":value"])?;
                 let n = required(list.get(1).and_then(count), budget, &[name, ":value"])?;
                 let items = slice(list, 2, n);
-                let mut root = Xml::new(budget, name, 0, items.len())?;
+                let map = spec
+                    .extra()
+                    .get("map")
+                    .and_then(V::as_object)
+                    .unwrap_or_default();
+                let is_stored = |id: &str| {
+                    items.iter().any(|item| {
+                        item.as_list().and_then(|l| l.first()).and_then(Node::text) == Some(id)
+                    })
+                };
+                let mut missing = 0usize;
+                if partial && items.len() == n {
+                    for (id, _) in map {
+                        if !is_stored(id) {
+                            required(
+                                id.parse::<u64>().ok(),
+                                budget,
+                                &[name, ":functionality:", id],
+                            )?;
+                            missing += 1;
+                        }
+                    }
+                }
+                let mut root = Xml::new(budget, name, 0, items.len().saturating_add(missing))?;
                 for item in items {
                     let item = required(item.as_list(), budget, &[name, ":value"])?;
                     let id =
@@ -252,6 +288,23 @@ impl ManagedValueContext<'_> {
                                 0,
                             )?)?,
                     )?;
+                }
+                let mut after: Option<u64> = None;
+                for _ in 0..missing {
+                    let next = map
+                        .iter()
+                        .filter(|(id, _)| !is_stored(id))
+                        .filter_map(|(id, f)| Some((id.parse::<u64>().ok()?, f)))
+                        .filter(|(code, _)| after.is_none_or(|a| *code > a))
+                        .min_by_key(|(code, _)| *code);
+                    let (code, f) = required(next, budget, &[name, ":map"])?;
+                    let f = required(f.as_str(), budget, &[name, ":map"])?;
+                    root = root.child(
+                        Xml::new(budget, "app:functionality", 0, 2)?
+                            .child(Xml::leaf(budget, "app:functionality", f, 0)?)?
+                            .child(Xml::leaf(budget, "app:use", "false", 0)?)?,
+                    )?;
+                    after = Some(code);
                 }
                 (Codec::Unknown, root.into_charged().map(Value::Xml))
             }
@@ -322,11 +375,12 @@ impl ManagedValueContext<'_> {
                 )?;
             }
         }
-        let old = body
+        let version = body
             .at(0)
             .and_then(Node::text)
-            .and_then(|v| v.parse::<i64>().ok())
-            .is_some_and(|v| v < ROOT_VERSION);
+            .and_then(|v| v.parse::<i64>().ok());
+        let old = version.is_some_and(|v| v < ROOT_VERSION);
+        let partial = version.is_some_and(|v| v < COMPLETE_FUNCTIONALITIES);
         for spec in mdschema::static_schema().config_props() {
             let parsed: Node;
             let node = match spec.path() {
@@ -334,12 +388,19 @@ impl ManagedValueContext<'_> {
                     match path.iter().try_fold(body, |node, at| node.at(at)) {
                         Some(node) => Some(Some(node)),
                         None if old => match spec.extra().get("old_root") {
-                            Some(alt) => match old_root(budget, spec.name(), alt, body)? {
-                                OldRoot::At(node) => Some(node),
-                                OldRoot::Value(node) => {
+                            Some(alt) => match old_root(
+                                budget,
+                                spec.name(),
+                                alt,
+                                body,
+                                version.unwrap_or(ROOT_VERSION),
+                            )? {
+                                Some(OldRoot::At(node)) => Some(node),
+                                Some(OldRoot::Value(node)) => {
                                     parsed = node;
                                     Some(Some(&parsed))
                                 }
+                                None => Some(None),
                             },
                             None => Some(None),
                         },
@@ -353,7 +414,7 @@ impl ManagedValueContext<'_> {
                 Some(value) => Some(required(value, budget, &[spec.name(), ":no_value"])?),
                 None => None,
             };
-            if let Some(value) = self.config_value(spec, node)? {
+            if let Some(value) = self.config_value(spec, node, partial)? {
                 props = append(props, value)?;
             }
         }

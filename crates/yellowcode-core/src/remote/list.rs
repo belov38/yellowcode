@@ -1,11 +1,15 @@
 use std::io::{BufRead, Write};
 
 use onec_client::auth::printable;
-use onec_client::dlist::{Cell, Filter, ListQuery, ListView, Order, Row};
+use onec_client::dlist::{
+    Cell, Filter, GroupKey, ListQuery, ListView, Order, RecordKey, Row, RowKey, TablePeriod,
+};
 use onec_client::{Date, EnumPresentation, Presentation, Session, Uuid, Value};
 use serde_json::{Value as Json, json};
 
-use super::{Login, open_session, steps_line, users_hint, values};
+use super::{
+    InitCall, Login, init_json, init_line, open_session, session_failed, start, steps_line, values,
+};
 use crate::Result;
 use crate::output::Out;
 
@@ -25,6 +29,8 @@ pub struct ListRequest {
     pub all: bool,
     pub limit: usize,
     pub presentations: bool,
+    pub period: Option<TablePeriod>,
+    pub init: Option<InitCall>,
     pub json: bool,
 }
 
@@ -48,6 +54,7 @@ impl ListRequest {
             take,
             limit: self.limit,
             presentations: self.presentations,
+            period: self.period.clone(),
         }
     }
 }
@@ -61,32 +68,40 @@ pub(super) fn run(
     if r.page == 0 || r.page_size == 0 {
         return Err("--page and --page-size start at 1".into());
     }
-    let (mut session, login) = open_session(&r.login, input)?;
+    let (session, login) = open_session(&r.login, input)?;
     let q = r.query();
-    let outcome = login.and_then(|()| session.run_list(&q));
-    let _ = session.logout();
+    let init = r.init.clone();
+    let (session, outcome) = super::on_value_stack(move || {
+        let mut session = session;
+        let outcome = start(&mut session, login, init.as_ref())
+            .and_then(|init| Ok((init, session.run_list(&q)?)));
+        let _ = session.logout();
+        (session, outcome)
+    })?;
+    let q = r.query();
     match outcome {
-        Ok(view) => {
+        Ok((init, view)) => {
             for w in warnings(&view) {
                 writeln!(err, "warning: {}", printable(&w))?;
             }
             let lines = if r.json {
-                vec![serde_json::to_string_pretty(&list_json(
-                    &view, &r, q.skip, &session,
-                ))?]
+                let mut j = list_json(&view, &r, q.skip, &session);
+                if let (Some(c), Some(o)) = (&init, j.as_object_mut()) {
+                    o.insert("init".into(), init_json(c));
+                }
+                vec![serde_json::to_string_pretty(&j)?]
             } else {
-                list_lines(&view, &r, q.skip, &steps_line(&session))
+                init.iter()
+                    .map(init_line)
+                    .chain(list_lines(&view, &r, q.skip, &steps_line(&session)))
+                    .collect()
             };
             for line in lines {
                 writeln!(out, "{line}")?;
             }
             Ok(0)
         }
-        Err(e) => {
-            users_hint(&r.login.user, &e, out)?;
-            writeln!(out, "RESULT FAIL {}", steps_line(&session))?;
-            Err(e.into())
-        }
+        Err(e) => session_failed(&r.login.user, e, &session, r.json, out, err),
     }
 }
 
@@ -128,13 +143,65 @@ fn cell_text(v: &ListView, c: &Cell) -> String {
             _ => e.name().to_string(),
         },
         Cell::Value(other) => other.lexical().unwrap_or_default(),
-        Cell::RecordKey => "<ключ записи>".into(),
+        Cell::RecordKey(k) => record_text(v, k),
+        Cell::Group(g) => cell_text(v, &Cell::Value(g.value.clone())),
+        Cell::Absent => String::new(),
         Cell::UnknownRef { clsid, uuid } => format!("<ссылка {clsid}:{uuid}>"),
         Cell::Unsupported(raw) => format!("<? {raw}>"),
     }
 }
 
+fn record_text(v: &ListView, k: &RecordKey) -> String {
+    k.parts
+        .iter()
+        .map(|p| {
+            let text = cell_text(v, &Cell::Value(p.value.clone()));
+            match p.name_ru() {
+                Some(n) => format!("{n}={text}"),
+                None => text,
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn record_json(k: &RecordKey) -> Json {
+    Json::Array(
+        k.parts
+            .iter()
+            .map(|p| json!({"name": p.name_ru(), "value": values::to_json(&p.value)}))
+            .collect(),
+    )
+}
+
+fn ref_arg(r: &onec_client::Ref) -> String {
+    format!("{}({})", r.type_name(), r.uuid())
+}
+
+fn key_column(v: &ListView) -> Option<(&'static str, Vec<String>)> {
+    let keys: Vec<Option<RowKey>> = v.rows.iter().map(|r| v.key(r)).collect();
+    let title = if keys.iter().any(|k| matches!(k, Some(RowKey::Ref(_)))) {
+        "Ссылка (--ref)"
+    } else if keys.iter().any(|k| matches!(k, Some(RowKey::Record(_)))) {
+        "Ключ записи"
+    } else {
+        return None;
+    };
+    let cells = keys
+        .into_iter()
+        .map(|k| match k {
+            Some(RowKey::Ref(r)) => ref_arg(r),
+            Some(RowKey::Record(k)) => record_text(v, k),
+            Some(RowKey::Group(_)) | None => String::new(),
+        })
+        .collect();
+    Some((title, cells))
+}
+
 fn flag(v: &ListView, row: &Row, role: Option<&str>) -> Option<bool> {
+    if row.group.is_some() {
+        return None;
+    }
     match row.cells.get(v.role(role)?) {
         Some(Cell::Value(Value::Bool(b))) => Some(*b),
         _ => None,
@@ -142,8 +209,11 @@ fn flag(v: &ListView, row: &Row, role: Option<&str>) -> Option<bool> {
 }
 
 fn marks(v: &ListView, row: &Row) -> String {
-    let roles = &v.form.roles;
-    let mut m = String::new();
+    let roles = &v.roles;
+    let mut m = "  ".repeat(row.level);
+    if let Some(g) = &row.group {
+        m.push_str(&format!("[группировка {}] ", g.field_ru));
+    }
     if flag(v, row, roles.folder.as_deref()) == Some(true) {
         m.push_str("[группа] ");
     }
@@ -177,20 +247,23 @@ fn heading(v: &ListView, r: &ListRequest, skip: usize) -> String {
     } else {
         ""
     };
-    format!("{title}: {range}{more}")
+    let period = match &v.period {
+        Some(p) if !p.is_none() => format!(", период {p}"),
+        _ => String::new(),
+    };
+    format!("{title}{period}: {range}{more}")
 }
 
 fn list_lines(v: &ListView, r: &ListRequest, skip: usize, steps: &str) -> Vec<String> {
     let mut l = vec![heading(v, r, skip)];
-    l.push(
-        v.columns
-            .iter()
-            .map(|c| printable(&c.1))
-            .collect::<Vec<_>>()
-            .join(" | "),
-    );
-    for row in &v.rows {
-        let cells: Vec<String> = v
+    let key = key_column(v);
+    let mut titles: Vec<String> = v.columns.iter().map(|c| printable(&c.1)).collect();
+    if let Some((t, _)) = &key {
+        titles.push((*t).to_string());
+    }
+    l.push(titles.join(" | "));
+    for (n, row) in v.rows.iter().enumerate() {
+        let mut cells: Vec<String> = v
             .columns
             .iter()
             .map(|(i, _)| {
@@ -199,6 +272,9 @@ fn list_lines(v: &ListView, r: &ListRequest, skip: usize, steps: &str) -> Vec<St
                     .unwrap_or_default()
             })
             .collect();
+        if let Some(k) = key.as_ref().and_then(|(_, keys)| keys.get(n)) {
+            cells.push(printable(k));
+        }
         l.push(format!("{}{}", marks(v, row), cells.join(" | ")));
     }
     l.push(format!("RESULT OK {steps}"));
@@ -208,7 +284,12 @@ fn list_lines(v: &ListView, r: &ListRequest, skip: usize, steps: &str) -> Vec<St
 fn cell_json(v: &ListView, c: &Cell) -> Json {
     match c {
         Cell::Value(x) => json!({"value": values::to_json(x), "text": cell_text(v, c)}),
-        Cell::RecordKey => json!({"record_key": true}),
+        Cell::RecordKey(k) => json!({
+            "record_key": record_json(k),
+            "text": cell_text(v, c),
+        }),
+        Cell::Group(g) => json!({"group": group_json(v, g), "text": cell_text(v, c)}),
+        Cell::Absent => Json::Null,
         Cell::UnknownRef { clsid, uuid } => {
             json!({"unknown_ref": [clsid.to_string(), uuid.to_string()]})
         }
@@ -216,8 +297,17 @@ fn cell_json(v: &ListView, c: &Cell) -> Json {
     }
 }
 
+fn group_json(v: &ListView, g: &GroupKey) -> Json {
+    json!({
+        "field": g.field_ru,
+        "value": values::to_json(&g.value),
+        "text": cell_text(v, &Cell::Value(g.value.clone())),
+        "parent": g.parent.as_deref().map(|p| group_json(v, p)),
+    })
+}
+
 fn list_json(v: &ListView, r: &ListRequest, skip: usize, session: &Session) -> Json {
-    let roles = &v.form.roles;
+    let roles = &v.roles;
     let rows: Vec<Json> = v
         .rows
         .iter()
@@ -232,6 +322,21 @@ fn list_json(v: &ListView, r: &ListRequest, skip: usize, session: &Session) -> J
                 })
                 .collect();
             o.insert("cells".into(), Json::Array(cells));
+            if v.grouped {
+                o.insert("level".into(), json!(row.level));
+            }
+            match v.key(row) {
+                Some(RowKey::Ref(x)) => {
+                    o.insert("ref".into(), json!(ref_arg(x)));
+                }
+                Some(RowKey::Record(x)) => {
+                    o.insert("record_key".into(), record_json(x));
+                }
+                Some(RowKey::Group(g)) => {
+                    o.insert("group".into(), group_json(v, g));
+                }
+                None => {}
+            }
             if let Some(c) = v.role(roles.key.as_deref()).and_then(|i| row.cells.get(i)) {
                 o.insert("key".into(), cell_json(v, c));
             }
@@ -258,6 +363,14 @@ fn list_json(v: &ListView, r: &ListRequest, skip: usize, session: &Session) -> J
         o.insert("page_size".into(), json!(r.page_size));
     }
     o.insert("first_row".into(), json!(skip + 1));
+    o.insert(
+        "period".into(),
+        match &v.period {
+            Some(p) if !p.is_none() => json!({"start": p.start, "end": p.end}),
+            _ => Json::Null,
+        },
+    );
+    o.insert("grouped".into(), json!(v.grouped));
     o.insert("more".into(), json!(v.more));
     o.insert(
         "columns".into(),
@@ -266,7 +379,7 @@ fn list_json(v: &ListView, r: &ListRequest, skip: usize, session: &Session) -> J
                 .iter()
                 .map(|(i, t)| {
                     let field = i
-                        .and_then(|i| v.form.descr.fields.get(i))
+                        .and_then(|i| v.descr.fields.get(i))
                         .map(|f| f.name_ru.as_str());
                     json!({"field": field, "title": t})
                 })

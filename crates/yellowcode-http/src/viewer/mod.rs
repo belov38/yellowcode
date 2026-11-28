@@ -543,6 +543,7 @@ fn unavailable(req: &Request, u: state::Unavailable) -> Response {
             }),
             true,
         ),
+        Unavailable::Unprocessable { error } => (422, serde_json::json!({ "error": error }), false),
         Unavailable::Changed => (
             409,
             serde_json::json!({ "error": "the source changed since it was opened; reopen it" }),

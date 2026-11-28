@@ -705,6 +705,28 @@ fn cleanup_after_success(request: &Request, plan: &SqlPlan) -> Result<(), RunErr
     cleanup_with(request, plan)
 }
 
+fn confirmed_gone(export: Error, plan: &SqlPlan) -> Error {
+    let open = format!(
+        "{}; {}",
+        lifecycle::STOPPED_BY_REFUSAL,
+        lifecycle::STOPPED_UNPROVEN
+    );
+    if !export.message.contains(&open) {
+        return export;
+    }
+    Error {
+        message: export.message.replace(
+            &open,
+            &format!(
+                "{}; temporary database {} (cleanup confirmed that it is gone)",
+                lifecycle::STOPPED_BY_REFUSAL,
+                plan.database_name()
+            ),
+        ),
+        interrupted: export.interrupted,
+    }
+}
+
 fn final_cleanup(
     request: &Request,
     plan: &SqlPlan,
@@ -1040,7 +1062,7 @@ pub fn convert_cf_with_options(
             },
         ));
     }
-    let report = result?;
+    let report = result.map_err(|export| confirmed_gone(export, &plan))?;
     output
         .as_file()
         .sync_all()
@@ -1069,6 +1091,22 @@ pub fn convert_dt_with_options(
     options: DtOptions,
     progress: &mut dyn Write,
 ) -> Result<DtReport, Error> {
+    convert_dt_with_memory(
+        request,
+        backup_set,
+        options,
+        &SqlMemory::library(),
+        progress,
+    )
+}
+
+pub fn convert_dt_with_memory(
+    request: &Request,
+    backup_set: u32,
+    options: DtOptions,
+    memory: &SqlMemory,
+    progress: &mut dyn Write,
+) -> Result<DtReport, Error> {
     convert_dt_inner_owned(
         request,
         progress,
@@ -1078,7 +1116,26 @@ pub fn convert_dt_with_options(
         backup_set,
         None,
         SqlCleanup::Automatic,
+        Some(memory),
     )
+}
+
+#[derive(Clone, Debug)]
+pub struct SqlMemory {
+    pub ledger: memory_budget::MemoryBudget,
+    pub budget: u64,
+    pub fallback: bool,
+}
+
+impl SqlMemory {
+    pub fn library() -> Self {
+        const BUDGET: u64 = 1 << 30;
+        Self {
+            ledger: memory_budget::MemoryBudget::new(memory_budget::Limits::new(BUDGET)),
+            budget: BUDGET,
+            fallback: false,
+        }
+    }
 }
 
 pub fn convert_dt_framed_research(
@@ -1147,6 +1204,7 @@ pub fn convert_dt_for_owned_legacy_framed(
         1,
         None,
         SqlCleanup::Automatic,
+        None,
     )
 }
 
@@ -1167,6 +1225,7 @@ pub fn convert_dt_for_owned_legacy_framed_with_incomplete(
         1,
         Some(incomplete),
         SqlCleanup::Automatic,
+        None,
     )
 }
 
@@ -1187,6 +1246,7 @@ pub fn convert_dt_for_owned_legacy_framed_keep_sql(
         1,
         Some(incomplete),
         SqlCleanup::CallerOwned,
+        None,
     )
 }
 
@@ -1270,6 +1330,7 @@ fn convert_dt_inner(
         1,
         None,
         SqlCleanup::Automatic,
+        None,
     )
 }
 
@@ -1283,6 +1344,7 @@ fn convert_dt_inner_owned(
     backup_set: u32,
     incomplete: Option<&Path>,
     cleanup_policy: SqlCleanup,
+    memory: Option<&SqlMemory>,
 ) -> Result<DtReport, Error> {
     use crate::{
         sql_blob, sql_catalog, sql_dt, sql_folder, sql_inventory, sql_metadata, sql_schema_storage,
@@ -1330,6 +1392,7 @@ fn convert_dt_inner_owned(
     if task_token.is_none() {
         restore_or_explain(request, &plan, backup_set, progress)?;
     }
+    let memory = memory.cloned().unwrap_or_else(SqlMemory::library);
     let result = (|| {
         let legacy = matches!(mode, DtMode::Legacy(_) | DtMode::LegacyFramed(_));
         let framed = matches!(mode, DtMode::LegacyFramed(_) | DtMode::StrictFramed);
@@ -1364,6 +1427,27 @@ fn convert_dt_inner_owned(
                 .map_err(|e| e.to_string())
         })
         .map_err(|e| err(format!("SQL inventory export failed: {}", e.message)))?;
+        let storage_count = if legacy {
+            None
+        } else {
+            let count = run(request, &plan.blob_count_script(), |out| {
+                sql_blob::read_storage_count(out).map_err(|e| e.to_string())
+            })
+            .map_err(|e| err(format!("SQL binary storage count failed: {}", e.message)))?;
+            let need = sql_blob::index_bytes(count).ok_or_else(|| {
+                err("SQL binary storage count failed: storage row count overflow")
+            })?;
+            if need > sql_blob::IndexRefusal::limit_for(memory.budget) {
+                return Err(err(sql_blob::IndexRefusal {
+                    rows: count,
+                    need,
+                    budget: memory.budget,
+                    fallback: memory.fallback,
+                }
+                .to_string()));
+            }
+            Some(count)
+        };
         let extension_storage = if strict
             && inventory
                 .iter()
@@ -1673,20 +1757,15 @@ fn convert_dt_inner_owned(
             let ext_catalogs = all_catalogs.split_off(heads.len());
             Some((storage.columns, all_catalogs, ext_catalogs))
         };
-        let mut accounting = sql_blob::StorageAccounting::new(100_000);
         let mut storage = None;
-        let storage_rows = match &tables {
-            Some((storage_catalog, _, _)) => {
-                let count = run(request, &plan.blob_count_script(), |out| {
-                    sql_blob::read_storage_count(out).map_err(|e| e.to_string())
-                })
-                .map_err(|e| err(format!("SQL binary storage count failed: {}", e.message)))?;
+        let storage_rows = match (&tables, storage_count) {
+            (Some((storage_catalog, _, _)), Some(count)) => {
                 if count != 0 {
                     let script = plan
                         .blob_spool_script(storage_catalog)
                         .map_err(|e| err(e.to_string()))?;
                     let spool = run(request, &script, |out| {
-                        sql_blob::read_spool(out, parent(&request.output), 100_000)
+                        sql_blob::read_spool(out, parent(&request.output), count, &memory.ledger)
                             .map_err(|e| e.to_string())
                     })
                     .map_err(|e| {
@@ -1704,7 +1783,7 @@ fn convert_dt_inner_owned(
                 }
                 Some(count)
             }
-            None => None,
+            _ => None,
         };
         let mut buffered = BufWriter::new(output.as_file_mut());
         let mut dt = DtWriter::new(
@@ -1844,13 +1923,11 @@ fn convert_dt_inner_owned(
             .map_err(|e| err(e.to_string()))?;
         let mut rows = 0_u64;
         let mut resolve = |reference: &sql_blob::StorageRef| {
-            let parts = match storage.as_mut() {
-                Some(spool) => spool.parts(reference).map_err(|e| e.to_string())?,
-                None => Vec::new(),
+            let data = match storage.as_mut() {
+                Some(spool) => spool.resolve(reference).map_err(|e| e.to_string())?,
+                None => sql_blob::resolve_single_part(reference, Vec::new())
+                    .map_err(|e| e.to_string())?,
             };
-            let data = accounting
-                .resolve(reference, parts)
-                .map_err(|e| e.to_string())?;
             Ok(vec![sql_blob::BlobPart {
                 key: reference.key,
                 offset: 0,
@@ -2106,7 +2183,11 @@ fn convert_dt_inner_owned(
         dt.end_database().map_err(|e| err(e.to_string()))?;
         drop(resolve);
         if let Some(count) = storage_rows {
-            accounting.finish(count).map_err(|e| err(e.to_string()))?;
+            match &storage {
+                Some(spool) => spool.finish(count).map_err(|e| err(e.to_string()))?,
+                None if count == 0 => {}
+                None => return Err(err("SQL data export failed: binary storage: no spool")),
+            }
         }
         dt.finish().map_err(|e| err(e.to_string()))?;
         buffered
@@ -2150,7 +2231,7 @@ fn convert_dt_inner_owned(
                             plan.database_name()
                         ),
                     )),
-                    (None, result) => result,
+                    (None, result) => result.map_err(|export| confirmed_gone(export, &plan)),
                 },
                 Err(failure) => {
                     let cleanup = format!(

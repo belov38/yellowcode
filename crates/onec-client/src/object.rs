@@ -179,6 +179,11 @@ pub(crate) fn type_of_id(id: &str, types: &[MdType]) -> Option<TypeName> {
         ("5d4125ad-f6e7-4313-be32-f71d0ab60915", NS_XS, "boolean"),
         ("aae38c48-a877-411c-a6d3-fbaa1f83c4bd", NS_XS, "dateTime"),
         ("fc01b5df-97fe-449b-83d4-218a090e681e", NS_CORE, "UUID"),
+        (
+            "4772b3b4-f4a3-49c0-a1a5-8cb5961511a3",
+            NS_CORE,
+            "ValueListType",
+        ),
     ];
     if let Some((_, ns, local)) = platform.iter().find(|(g, _, _)| g.eq_ignore_ascii_case(id)) {
         return Some(TypeName::new(ns, local));
@@ -224,6 +229,22 @@ pub(crate) fn cell(
     }
 }
 
+fn object_cell(
+    n: Node,
+    field: &FormField,
+    implied: Option<&TypeName>,
+) -> Result<Cell, ObjectError> {
+    if implied.is_some() || xml::has_xsi_type(n) || !n.children().any(|c| c.is_element()) {
+        return cell(n, field, implied);
+    }
+    let whole = &n.document().input_text()[n.range()];
+    let start = n
+        .first_child()
+        .map_or(0, |c| c.range().start - n.range().start);
+    let end = whole.rfind("</").unwrap_or(whole.len());
+    Ok(Cell::Raw(whole[start..end].to_string()))
+}
+
 pub(crate) fn uo_children<'a, 'i>(n: Node<'a, 'i>) -> impl Iterator<Item = Node<'a, 'i>> {
     n.children()
         .filter(|c| c.is_element() && c.tag_name().namespace() == Some(NS_UO))
@@ -264,7 +285,7 @@ fn table_rows(
                 let row = values
                     .iter()
                     .zip(table.columns.iter().zip(&implied))
-                    .map(|(v, (col, ty))| cell(*v, col, ty.as_ref()))
+                    .map(|(v, (col, ty))| object_cell(*v, col, ty.as_ref()))
                     .collect::<Result<Vec<_>, _>>()?;
                 rows.push(row);
             }
@@ -384,7 +405,7 @@ fn read_object(
                 let f = &data.fields[i];
                 fields.push(ObjectField {
                     field: f.clone(),
-                    value: cell(*v, f, implied_type(&f.ty, types).as_ref())?,
+                    value: object_cell(*v, f, implied_type(&f.ty, types).as_ref())?,
                 });
             }
             Slot::Table(i) => {

@@ -11,7 +11,7 @@ mod report;
 mod values;
 mod write;
 
-pub use form::{FormCommandRequest, FormRun, FormSet};
+pub use form::{FormCall, FormCommandRequest, FormEdit, FormRun};
 pub use object::{ObjectRef, ObjectRequest};
 pub use onec_client::WriteMode;
 pub use report::ReportFormat;
@@ -33,7 +33,7 @@ use crate::output::Out;
 
 pub use list::{DEFAULT_LIMIT, DEFAULT_PAGE_SIZE, ListRequest};
 pub use onec_client::dcs::Change as DcsChange;
-pub use onec_client::dlist::{Filter, ListError, Order};
+pub use onec_client::dlist::{Filter, ListError, Order, TablePeriod};
 
 #[derive(Clone, PartialEq, Eq)]
 pub enum Password {
@@ -74,6 +74,75 @@ impl Param {
     pub fn parse_json(arg: &str) -> std::result::Result<Param, String> {
         parse_param_json(arg).map(Param)
     }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct InitCall {
+    pub call: String,
+    pub params: Vec<Param>,
+}
+
+fn start(
+    session: &mut Session,
+    login: std::result::Result<(), SessionError>,
+    init: Option<&InitCall>,
+) -> std::result::Result<Option<onec_client::FormCall>, SessionError> {
+    login?;
+    let Some(i) = init else {
+        return Ok(None);
+    };
+    let params: Vec<Value> = i.params.iter().map(|Param(v)| v.clone()).collect();
+    session.start_call(&i.call, &params).map(Some)
+}
+
+fn init_line(c: &onec_client::FormCall) -> String {
+    format!(
+        "init: {} -> {}",
+        printable(&c.procedure),
+        c.returned.as_ref().map_or_else(
+            || "-".to_string(),
+            |v| printable(&values::to_json(v).to_string())
+        )
+    )
+}
+
+fn init_json(c: &onec_client::FormCall) -> serde_json::Value {
+    serde_json::json!({
+        "procedure": c.procedure,
+        "returned": c.returned.as_ref().map(values::to_json),
+    })
+}
+
+fn session_failed(
+    user: &Option<String>,
+    e: SessionError,
+    session: &Session,
+    json: bool,
+    out: &mut Out,
+    err: &mut dyn Write,
+) -> Result<i32> {
+    if let SessionError::Sent { .. } = e {
+        let text = printable(&e.to_string());
+        let line = format!("RESULT UNKNOWN {}", steps_line(session));
+        if json {
+            let j = serde_json::json!({
+                "outcome": { "unknown": { "text": e.to_string() } },
+                "steps": session.steps().iter()
+                    .map(|s| serde_json::json!({ "name": s.name, "status": s.status }))
+                    .collect::<Vec<_>>(),
+            });
+            writeln!(out, "{}", serde_json::to_string_pretty(&j)?)?;
+            writeln!(err, "{line}")?;
+        } else {
+            writeln!(out, "unknown: {text}")?;
+            writeln!(out, "{line}")?;
+        }
+        writeln!(err, "yellowcode: {text}")?;
+        return Ok(form::UNKNOWN_EXIT);
+    }
+    users_hint(user, &e, out)?;
+    writeln!(out, "RESULT FAIL {}", steps_line(session))?;
+    Err(e.into())
 }
 
 #[derive(Debug, Clone)]
@@ -199,7 +268,7 @@ pub struct ReportRequest {
     pub login: Login,
     pub form: String,
     pub open_params: Vec<FormParam>,
-    pub init: Option<(String, Vec<Param>)>,
+    pub init: Option<InitCall>,
     pub attributes: Vec<(String, String)>,
     pub before: Vec<String>,
     pub call: Option<String>,
@@ -223,6 +292,7 @@ pub struct DcsRequest {
     pub changes: Vec<DcsChange>,
     pub generate: bool,
     pub details: bool,
+    pub drilldown: Option<(String, String)>,
 }
 
 #[derive(Debug, Clone)]
@@ -270,7 +340,7 @@ fn run_report(
     let (before, poll) = (r.before, r.poll);
     let init: Option<(String, Vec<Value>)> = r
         .init
-        .map(|(c, p)| (c, p.into_iter().map(|Param(v)| v).collect()));
+        .map(|i| (i.call, i.params.into_iter().map(|Param(v)| v).collect()));
     let attributes: Vec<Assign> = r
         .attributes
         .into_iter()
@@ -300,6 +370,10 @@ fn run_report(
                     changes: &d.changes,
                     generate: d.generate,
                     details: d.details && format != ReportFormat::Csv,
+                    drilldown: d
+                        .drilldown
+                        .as_ref()
+                        .map(|(cell, field)| onec_client::DrillDownOptions { cell, field }),
                 }),
             })
         });
@@ -324,6 +398,29 @@ fn run_report(
                     Err(e.into())
                 }
             }
+        }
+        Err(e @ SessionError::Sent { .. }) => {
+            let text = printable(&e.to_string());
+            let line = format!("RESULT UNKNOWN {}", steps_line(&session));
+            match format {
+                ReportFormat::Text => {
+                    writeln!(out, "unknown: {text}")?;
+                    writeln!(out, "{line}")?;
+                }
+                ReportFormat::Json => {
+                    let j = serde_json::json!({
+                        "outcome": { "unknown": { "text": e.to_string() } },
+                        "steps": session.steps().iter()
+                            .map(|s| serde_json::json!({ "name": s.name, "status": s.status }))
+                            .collect::<Vec<_>>(),
+                    });
+                    writeln!(out, "{}", serde_json::to_string_pretty(&j)?)?;
+                    writeln!(err, "{line}")?;
+                }
+                ReportFormat::Csv => writeln!(err, "{line}")?,
+            }
+            writeln!(err, "yellowcode: {text}")?;
+            Ok(form::UNKNOWN_EXIT)
         }
         Err(e) => {
             if format == ReportFormat::Text {

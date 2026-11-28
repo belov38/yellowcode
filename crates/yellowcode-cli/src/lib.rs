@@ -192,7 +192,7 @@ pub fn run_with_terminals(
                 .map(|cli| (cli, matches))
                 .map_err(|error| error.format(&mut cli_command()))
         });
-    let (cli, matches) = match parsed {
+    let (mut cli, matches) = match parsed {
         Ok(parsed) => parsed,
         Err(error) => {
             if error.use_stderr() {
@@ -235,6 +235,11 @@ pub fn run_with_terminals(
             }
         }
         Ok(false) => {}
+    }
+    if let Some(Command::Remote(command)) = &mut cli.command
+        && let Some(("remote", m)) = matches.subcommand()
+    {
+        remote::with_order(command, m);
     }
     if let Some(Command::Bak(command)) = &cli.command
         && let Some(error) = command.usage_error()

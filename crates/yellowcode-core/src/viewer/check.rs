@@ -397,7 +397,7 @@ fn sha256_of(p: &Path) -> crate::Result<String> {
 const DONE: &str = ".onec-done";
 const FORMS_WARNING: &str = "forms contexts are incomplete, give --names";
 
-const DUMP_FORMAT: u32 = 2;
+const DUMP_FORMAT: u32 = 3;
 
 pub fn names_dir(
     cfg: &Configuration,
@@ -549,8 +549,17 @@ impl CheckCache {
         if let Some(n) = names {
             return Ok(Some((n.to_path_buf(), Vec::new())));
         }
-        if let Some(v) = lock(&self.names).as_ref() {
-            return Ok(Some(v.clone()));
+        {
+            let mut stored = lock(&self.names);
+            if let Some(v) = stored.as_ref() {
+                if v.0.join("Configuration.xml").is_file() {
+                    return Ok(Some(v.clone()));
+                }
+                if v.0.exists() {
+                    return Err(incomplete(&v.0));
+                }
+                *stored = None;
+            }
         }
         let found = find_cached(&self.cache()?, &self.key(source)?)?;
         if let Some(v) = &found {
@@ -580,6 +589,11 @@ impl CheckCache {
     }
 }
 
+fn read_complete(dir: &Path) -> Option<Vec<String>> {
+    let warnings = read_done(dir)?;
+    dir.join("Configuration.xml").is_file().then_some(warnings)
+}
+
 fn read_done(dir: &Path) -> Option<Vec<String>> {
     use std::io::Read;
     let file = std::fs::File::open(dir.join(DONE)).ok()?;
@@ -595,11 +609,52 @@ fn read_done(dir: &Path) -> Option<Vec<String>> {
     Some(text.lines().map(String::from).collect())
 }
 
+#[derive(Debug)]
+pub struct NamesUnavailable(String);
+impl std::fmt::Display for NamesUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for NamesUnavailable {}
+
+pub(crate) const MISSES_LIMIT: usize = 512;
+
+pub(crate) fn configuration_misses<'a>(misses: impl Iterator<Item = &'a str>) -> String {
+    let mut why = String::new();
+    let mut len = 0usize;
+    for (i, miss) in misses.enumerate() {
+        for part in [if i == 0 { "" } else { ", " }, miss] {
+            for c in part.chars() {
+                if len == MISSES_LIMIT {
+                    return why;
+                }
+                why.push(c);
+                len += 1;
+            }
+        }
+    }
+    if why.is_empty() {
+        why.push_str("no properties");
+    }
+    why
+}
+
+fn no_configuration_xml(cfg: &Configuration) -> String {
+    let why = configuration_misses(
+        cfg.diagnostics
+            .misses
+            .keys()
+            .filter_map(|k| k.strip_prefix("configuration:")),
+    );
+    format!("cannot check the modules: the configuration properties are not decoded ({why})")
+}
+
 fn incomplete(dir: &Path) -> crate::Error {
-    format!(
+    std::io::Error::other(format!(
         "{}: the cached dump is incomplete (an interrupted run?), remove this directory and retry",
         dir.display()
-    )
+    ))
     .into()
 }
 
@@ -633,7 +688,7 @@ fn find_cached_with_exists(
     if !exists(&dir) {
         return Ok(None);
     }
-    if let Some(w) = read_done(&dir) {
+    if let Some(w) = read_complete(&dir) {
         return Ok(Some((dir, w)));
     }
     Err(incomplete(&dir))
@@ -646,6 +701,9 @@ fn write_cached(
 ) -> crate::Result<(PathBuf, Vec<String>)> {
     if let Some(found) = find_cached(cache, key)? {
         return Ok(found);
+    }
+    if cfg.props.is_empty() {
+        return Err(NamesUnavailable(no_configuration_xml(cfg)).into());
     }
     let dir = cache.join(key);
     let nanos = std::time::SystemTime::now()
@@ -664,7 +722,7 @@ fn write_cached(
         Ok(()) => Ok((dir, warnings)),
         Err(e) => {
             let _ = std::fs::remove_dir_all(&tmp);
-            match read_done(&dir) {
+            match read_complete(&dir) {
                 Some(w) => Ok((dir, w)),
                 None if dir.exists() => Err(incomplete(&dir)),
                 None => Err(format!("{}: {e}", dir.display()).into()),
@@ -683,6 +741,9 @@ fn write_dump(cfg: &Configuration, dir: &Path) -> crate::Result<Vec<String>> {
     ]);
     let r = mdconf::xml_out::dump(cfg, dir, &opts)
         .map_err(|e| format!("cannot dump the names of the configuration: {e}"))?;
+    if !dir.join("Configuration.xml").is_file() {
+        return Err(NamesUnavailable(no_configuration_xml(cfg)).into());
+    }
     let mut warnings = Vec::new();
     if r.not_written.contains(&Part::Forms) {
         warnings.push(FORMS_WARNING.to_string());

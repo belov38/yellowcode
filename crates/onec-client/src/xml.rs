@@ -454,6 +454,15 @@ fn collection_of(n: Node, local: &str, depth: usize) -> Result<Value, XmlError> 
     })
 }
 
+pub(crate) fn is_exception(body: &[u8]) -> bool {
+    let text = value_text(body);
+    roxmltree::Document::parse(&text).is_ok_and(|d| {
+        let r = d.root_element();
+        r.tag_name().name() == "exception"
+            && r.tag_name().namespace() == Some(crate::answer::NS_VRS)
+    })
+}
+
 pub fn parse_exception(body: &[u8]) -> String {
     let text = String::from_utf8_lossy(strip_bom(body));
     let doc = match Document::parse(&text) {
@@ -515,6 +524,19 @@ pub(crate) fn value_element(elem: &str, v: &Value) -> Result<String, XmlError> {
     }
     let mut r = String::new();
     push_value(&mut r, elem, v);
+    Ok(r)
+}
+
+pub(crate) fn value_element_as(
+    elem: &str,
+    v: &Value,
+    implied: Option<&TypeName>,
+) -> Result<String, XmlError> {
+    if !fits_depth(v) {
+        return Err(XmlError::TooDeep);
+    }
+    let mut r = String::new();
+    push_value_as(&mut r, elem, v, implied);
     Ok(r)
 }
 

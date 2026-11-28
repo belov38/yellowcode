@@ -410,6 +410,9 @@ pub enum Unavailable {
         error: String,
         retry_in: Option<Duration>,
     },
+    Unprocessable {
+        error: String,
+    },
 }
 
 pub struct Viewer {
@@ -437,6 +440,7 @@ struct Failure {
     target: Stages,
     error: String,
     retry_at: Option<Instant>,
+    unprocessable: bool,
 }
 
 #[derive(Default)]
@@ -688,6 +692,11 @@ impl Viewer {
             if need == Need::CheckNames {
                 if let Some(f) = &g.names_failure {
                     match f.retry_at {
+                        None if f.unprocessable => {
+                            return Err(Unavailable::Unprocessable {
+                                error: f.error.clone(),
+                            });
+                        }
                         None => {
                             return Err(Unavailable::Failed {
                                 what: "names".into(),
@@ -861,6 +870,7 @@ impl Inner {
                                     target: Stages::ALL,
                                     error: f.error.clone(),
                                     retry_at: None,
+                                    unprocessable: false,
                                 });
                             }
                         }
@@ -981,6 +991,7 @@ impl Inner {
                             target: t,
                             error: e.clone(),
                             retry_at: Some(now + delay),
+                            unprocessable: false,
                         });
                     }
                     g.loading = None;
@@ -996,12 +1007,14 @@ impl Inner {
                             target,
                             error: e.clone(),
                             retry_at: None,
+                            unprocessable: false,
                         });
                         if write_names {
                             g.names_failure = Some(Failure {
                                 target: Stages::ALL,
                                 error: e.clone(),
                                 retry_at: None,
+                                unprocessable: false,
                             });
                         }
                     }
@@ -1037,6 +1050,7 @@ impl Inner {
             target: Stages::ALL,
             error: e.to_string(),
             retry_at,
+            unprocessable: e.downcast_ref::<super::check::NamesUnavailable>().is_some(),
         });
     }
 

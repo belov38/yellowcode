@@ -84,6 +84,17 @@ impl Edit {
         })
     }
 
+    pub fn parse_clear_path(arg: &str) -> std::result::Result<Edit, String> {
+        if arg.is_empty()
+            || arg.contains(['[', ']', '='])
+            || arg.starts_with('.')
+            || arg.ends_with('.')
+        {
+            return Err(format!("not a table: {arg:?}"));
+        }
+        Ok(Edit::ClearTable(arg.to_string()))
+    }
+
     pub fn parse_clear(arg: &str) -> std::result::Result<Edit, String> {
         if arg.is_empty() || arg.contains(['[', ']', '.', '=']) {
             return Err(format!("not a tabular section: {arg:?}"));
@@ -234,7 +245,7 @@ fn table_mut<'a>(tables: &'a mut Vec<TableEdit>, name: &str) -> Option<&'a mut T
     tables.iter_mut().find(|t| same(t))
 }
 
-fn add_edits(
+pub(super) fn add_edits(
     change: &mut ObjectChange,
     edits: &[Edit],
     deletion_mark: Option<bool>,

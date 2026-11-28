@@ -124,6 +124,16 @@ pub fn query_request_with(key: &str, params: &[(&str, &str)]) -> Vec<u8> {
     .into_bytes()
 }
 
+pub fn query_request_raw(key: &str, prms: &str) -> Vec<u8> {
+    format!(
+        "\u{feff}<?xml version=\"1.0\" encoding=\"UTF-8\"?><request {}><key>{}</key>{prms}<mw>0</mw><mh>0</mh>\
+         <pres>false</pres><trdata>false</trdata></request>",
+        namespaces(&[]),
+        xml::escape_text(key)
+    )
+    .into_bytes()
+}
+
 pub fn query_request_values(key: &str, params: &[(String, Value)]) -> Result<Vec<u8>, ReportError> {
     let mut prms = String::new();
     if !params.is_empty() {
@@ -369,6 +379,16 @@ pub fn call_request_with(
     params: &[Value],
     pchs: &str,
 ) -> Result<Vec<u8>, ReportError> {
+    call_request_dd(form, procedure, params, pchs, None)
+}
+
+pub(crate) fn call_request_dd(
+    form: &OpenedForm,
+    procedure: &str,
+    params: &[Value],
+    pchs: &str,
+    dd: Option<&str>,
+) -> Result<Vec<u8>, ReportError> {
     if let Some((p, uri)) = form
         .namespaces
         .iter()
@@ -400,7 +420,7 @@ pub fn call_request_with(
     ));
     r.push_str(pchs);
     r.push_str(form.prms.as_deref().unwrap_or(""));
-    r.push_str(form.dd.as_deref().unwrap_or(""));
+    r.push_str(dd.or(form.dd.as_deref()).unwrap_or(""));
     r.push_str("</request>");
     Ok(r.into_bytes())
 }

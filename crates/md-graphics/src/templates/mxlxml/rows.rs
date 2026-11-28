@@ -1,5 +1,5 @@
 use super::{F, MoxelView, Read, RowCoverage, SourceMap, Vector};
-use crate::templates::moxel_view::Cells;
+use crate::templates::moxel_view::{Cells, Revision};
 #[derive(Clone, Copy)]
 pub(super) struct RowSpan<'a> {
     pub begin: i64,
@@ -43,13 +43,19 @@ pub(super) fn spans<'a>(
     columns: &SourceMap<i64, i64>,
     read: Read<'_>,
     coverage: RowCoverage,
+    revision: Revision,
 ) -> F<Vector<RowSpan<'a>>> {
     if document.height < 0 {
         return Err(read.invalid("height"));
     }
     let mut out = read.allocation.vector(0)?;
     let mut next = Some(0);
-    for (index, format, cells) in document.rows.iter() {
+    let implicit = (revision.implicit_first_row && document.rows.is_empty()).then_some((
+        0,
+        0,
+        Cells::Flat(&[]),
+    ));
+    for (index, format, cells) in document.rows.iter().chain(implicit) {
         let first = next.ok_or_else(|| read.invalid("row index order"))?;
         if index < first {
             return Err(read.invalid("row index order"));

@@ -5,6 +5,22 @@ use crate::xml_out::semantic::SemanticEmit;
 use brace::{Guid, Node};
 use std::fmt::Write;
 const SYS: &str = "http://v8.1c.ru/8.1/data/ui/fonts/system";
+
+const UNLEARNED_SYS_FONTS: [(&str, &str); 1] = [("3", "ANSIVariableFont")];
+
+fn unlearned_sys_font(key: &str) -> Option<&'static str> {
+    UNLEARNED_SYS_FONTS
+        .iter()
+        .find(|(k, _)| *k == key)
+        .map(|(_, name)| *name)
+}
+
+pub(crate) fn unlearned_sys_font_code(name: &str) -> Option<&'static str> {
+    UNLEARNED_SYS_FONTS
+        .iter()
+        .find(|(_, n)| *n == name)
+        .map(|(code, _)| *code)
+}
 #[derive(Clone, Copy)]
 pub(crate) enum Grammar {
     Graph,
@@ -211,11 +227,11 @@ impl<'a> Font<'a> {
                         "0" => Some("DefaultGUIFont"),
                         "1" => Some("OEMFixedFont"),
                         "2" => Some("ANSIFixedFont"),
-                        _ => None,
+                        _ => unlearned_sys_font(key),
                     }),
                     Grammar::Spreadsheet => {
                         if context::has_mxl_object("sys_fonts") {
-                            context::mxl("sys_fonts", key)
+                            context::mxl("sys_fonts", key).or_else(|| unlearned_sys_font(key))
                         } else {
                             (key == "0").then_some("DefaultGUIFont")
                         }

@@ -95,12 +95,23 @@ impl FormData {
             NS_WS,
             &[],
             unrecognized,
-            form_data,
+            |r| form_data(r, None),
+        )
+    }
+
+    pub(crate) fn from_answer_main(body: &[u8], main_id: &str) -> Result<FormData, AnswerError> {
+        read(
+            "logForm/dataDescrWMethods",
+            body,
+            NS_WS,
+            &[],
+            &mut Vec::new(),
+            |r| form_data(r, Some(main_id)),
         )
     }
 }
 
-fn form_data(r: &Reader) -> Result<FormData, AnswerError> {
+fn form_data(r: &Reader, main_id: Option<&str>) -> Result<FormData, AnswerError> {
     let descr = r.one(NS_WS, "descr")?.ok_or_else(|| r.missing("descr"))?;
     let mut structures: HashMap<String, Structure> = HashMap::new();
     let mut collections: HashMap<String, String> = HashMap::new();
@@ -140,6 +151,7 @@ fn form_data(r: &Reader) -> Result<FormData, AnswerError> {
     let (object, main) = root
         .fields
         .iter()
+        .filter(|f| main_id.is_none_or(|id| f.attribute("id") == Some(id)))
         .find_map(|f| object_of(*f).map(|s| (attr(*f, "name"), s)))
         .ok_or_else(|| r.missing("object field of root"))?;
     let object = object.ok_or_else(|| r.missing("name of the object field of root"))?;
@@ -180,6 +192,45 @@ fn form_data(r: &Reader) -> Result<FormData, AnswerError> {
         }
     }
     Ok(data)
+}
+
+pub(crate) fn collection_columns(
+    body: &[u8],
+) -> Result<HashMap<String, Vec<FormField>>, AnswerError> {
+    read(
+        "logForm/dataDescrWMethods",
+        body,
+        NS_WS,
+        &[],
+        &mut Vec::new(),
+        |r| {
+            let descr = r.one(NS_WS, "descr")?.ok_or_else(|| r.missing("descr"))?;
+            let uo = |n: &Node, local: &str| {
+                n.is_element()
+                    && n.tag_name().namespace() == Some(NS_UO)
+                    && n.tag_name().name() == local
+            };
+            let mut out = HashMap::new();
+            for c in descr.children().filter(|n| uo(n, "collection")) {
+                let (Some(name), Some(item)) = (attr(c, "name"), attr(c, "itemType")) else {
+                    continue;
+                };
+                let Some(s) = descr
+                    .children()
+                    .find(|n| uo(n, "structure") && n.attribute("name") == Some(item.as_str()))
+                else {
+                    continue;
+                };
+                let columns = s
+                    .children()
+                    .filter(|f| uo(f, "field") && object_of(*f).is_none())
+                    .map(|f| field(r, f))
+                    .collect::<Result<Vec<_>, _>>()?;
+                out.insert(name, columns);
+            }
+            Ok(out)
+        },
+    )
 }
 
 fn type_of<'a, 'i>(f: Node<'a, 'i>) -> Option<Node<'a, 'i>> {

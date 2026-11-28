@@ -53,9 +53,30 @@ impl Command {
             Command::Remote(command) => match command {
                 remote::Command::Info { .. }
                 | remote::Command::Metadata { .. }
-                | remote::Command::Modules { .. }
-                | remote::Command::Object { .. }
-                | remote::Command::List { .. } => Effect::Read,
+                | remote::Command::Modules { .. } => Effect::Read,
+                remote::Command::Object {
+                    login: _,
+                    init,
+                    reference: _,
+                    json: _,
+                    no_presentations: _,
+                } => change_if(init.is_set()),
+                remote::Command::List {
+                    login: _,
+                    init,
+                    object: _,
+                    form: _,
+                    parent: _,
+                    filters: _,
+                    orders: _,
+                    page: _,
+                    page_size: _,
+                    all: _,
+                    limit: _,
+                    no_presentations: _,
+                    period: _,
+                    json: _,
+                } => change_if(init.is_set()),
                 remote::Command::Call { .. } => Effect::Change,
                 remote::Command::Report {
                     login: _,
@@ -64,8 +85,7 @@ impl Command {
                     call,
                     params: _,
                     params_json: _,
-                    init_call,
-                    init_params: _,
+                    init,
                     attrs: _,
                     before,
                     poll: _,
@@ -76,14 +96,12 @@ impl Command {
                     sets: _,
                     filters: _,
                     offs: _,
+                    more: _,
                     details: _,
                     attribute: _,
                     format: _,
                 } => change_if(
-                    call.is_some()
-                        || init_call.is_some()
-                        || !before.is_empty()
-                        || variant.is_some(),
+                    call.is_some() || init.is_set() || !before.is_empty() || variant.is_some(),
                 ),
                 remote::Command::Print {
                     login: _,
@@ -91,11 +109,10 @@ impl Command {
                     params: _,
                     params_json: _,
                     refs: _,
-                    init_call,
-                    init_params: _,
+                    init,
                     attribute: _,
                     format: _,
-                } => change_if(init_call.is_some()),
+                } => change_if(init.is_set()),
                 remote::Command::Create {
                     login: _,
                     set: _,
@@ -124,16 +141,22 @@ impl Command {
                 } => change_if(!*dry_run),
                 remote::Command::Form {
                     login: _,
+                    init,
                     form: _,
                     reference: _,
                     set: _,
+                    set_json: _,
+                    delete_rows: _,
+                    clear_tables: _,
                     command,
                     call,
                     params: _,
                     params_json: _,
                     list: _,
                     json: _,
-                } => change_if(command.is_some() || call.is_some()),
+                    no_presentations: _,
+                    order: _,
+                } => change_if(!command.is_empty() || !call.is_empty() || init.is_set()),
             },
         }
     }

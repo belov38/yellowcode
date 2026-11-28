@@ -17,6 +17,8 @@ pub const DEFAULT_PORT: u16 = 1541;
 const TIMEOUT: Duration = Duration::from_secs(60);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
+const TRAIL_WAIT: Duration = Duration::from_secs(2);
+const TRAIL_MESSAGES: usize = 4;
 const RETRY_PAUSES: [Duration; 3] = [
     Duration::from_millis(200),
     Duration::from_millis(1000),
@@ -414,7 +416,20 @@ impl NativeTransport {
         let fill = &mut self.fill;
         let key = ClientKey::generate(&mut |b: &mut [u8]| fill(b))?;
         stream.send_message(&keyx::request(&key.modulus(), first_call))?;
+        let (pings, signals) = (stream.pings(), stream.signals());
         let answer = stream.read_message()?;
+        if keyx::is_empty_answer(&answer) {
+            let (pings, signals) = (stream.pings() - pings, stream.signals() - signals);
+            stream.get_ref().set_read_timeout(Some(TRAIL_WAIT))?;
+            let after = stream.trail(TRAIL_MESSAGES);
+            return Err(keyx::empty_answer_error(&keyx::EmptyAnswer {
+                answer: &answer,
+                pings,
+                signals,
+                last_signal: stream.last_signal(),
+                after: &after,
+            }));
+        }
         let (_, reply) = key.open_answer(&answer)?;
         call::parse_answer(&reply)
     }

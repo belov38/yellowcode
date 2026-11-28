@@ -370,8 +370,33 @@ pub fn convert_dt_with_options(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Result<()> {
+    convert_dt_with_memory(request, None, backup_set, options, out, err)
+}
+
+fn sql_memory(memory_limit: Option<String>) -> Result<mssql_backup::sqlcmd::SqlMemory> {
+    let (context, _reserve) =
+        crate::service::memory::Settings::memory_only(memory_limit).resolve()?;
+    let (budget, mode, ledger) = context.restore_budget();
+    Ok(mssql_backup::sqlcmd::SqlMemory {
+        ledger,
+        budget,
+        fallback: mode == "fallback",
+    })
+}
+
+pub fn convert_dt_with_memory(
+    request: SqlConvertRequest,
+    memory_limit: Option<String>,
+    backup_set: u32,
+    options: DtOptions,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> Result<()> {
+    mssql_backup::sql_server::validate_backup_set(backup_set)?;
+    let memory = sql_memory(memory_limit)?;
     let _watch = watch_interrupts(err);
-    let report = mssql_backup::sqlcmd::convert_dt_with_options(&request, backup_set, options, err)?;
+    let report =
+        mssql_backup::sqlcmd::convert_dt_with_memory(&request, backup_set, options, &memory, err)?;
     let mut status = serde_json::json!({"schemaVersion": 1, "output": request.output, "format": "dt", "tables": report.tables, "rows": report.rows, "files": report.files, "complete": true, "experimental": true});
     note_users_email(report.users_with_email, &mut status, err);
     note_extension_tables(report.extension_tables, &mut status);
@@ -432,7 +457,7 @@ pub fn convert_onecd_with_options(
     err: &mut dyn Write,
 ) -> Result<()> {
     mssql_backup::sql_server::validate_backup_set(backup_set)?;
-    let _ = crate::service::memory::Settings::memory_only(memory_limit.clone()).resolve()?;
+    let memory = sql_memory(memory_limit.clone())?;
     match std::fs::symlink_metadata(&request.output) {
         Ok(_) => return Err("output already exists".into()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -449,8 +474,9 @@ pub fn convert_onecd_with_options(
     request.output = staging.path().join("source.dt");
     let report = {
         let _watch = watch_interrupts(err);
-        mssql_backup::sqlcmd::convert_dt_with_options(&request, backup_set, options, err)?
+        mssql_backup::sqlcmd::convert_dt_with_memory(&request, backup_set, options, &memory, err)?
     };
+    drop(memory);
     let mut result = Vec::new();
     let code = crate::plain::convert::run(
         crate::plain::convert::Request {

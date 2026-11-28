@@ -74,6 +74,15 @@ pub(crate) const ADDCOL: &str = "5bdad865-f2c5-434b-8041-ba4aad3b6687";
 pub(crate) const DL_SPECIAL: [(&str, &str); 1] = [("10000000", "DefaultPicture")];
 const SYS_ANY: [(&str, &str); 1] = [("100000000", "RowsCount")];
 const SYS_EXTRA: [(&str, &str); 1] = [("v8:StandardPeriod|0", "Variant")];
+const STD_EXTRA: [(&str, &str); 3] = [
+    ("cfg:ChartOfAccountsObject|-12", "ExtDimensionTypes"),
+    ("ChartOfAccountsExtDimensionTypes|-13", "ExtDimensionType"),
+    ("ChartOfAccountsExtDimensionTypes|-15", "TurnoversOnly"),
+];
+const STD_TABLES: [(&str, &str); 1] = [(
+    "cfg:ChartOfAccountsObject|-12",
+    "ChartOfAccountsExtDimensionTypes",
+)];
 pub(crate) const SET_CATEGORIES: [&str; 2] = ["DefinedType", "Characteristic"];
 const ITEM_CHAIN_MAX: usize = 490;
 
@@ -544,6 +553,9 @@ impl<'a> FormInfo<'a> {
         {
             return Some(nm.to_string());
         }
+        if let Some(nm) = lookup(&STD_EXTRA, &k) {
+            return Some(nm.to_string());
+        }
         let kind = kind_of(&key)?;
         self.schema.std_attr(kind, n).map(String::from)
     }
@@ -821,7 +833,9 @@ impl<'a> FormInfo<'a> {
             let Some(nm) = self.std_name(node, &k) else {
                 return Ok(None);
             };
-            let n = PathNode::new(NodeKind::Std, chain(&nm), apath(&nm));
+            let table = lookup(&STD_TABLES, &format!("{}|{k}", node_type_key(Some(node))));
+            let n = PathNode::new(NodeKind::Std, chain(&nm), apath(&nm))
+                .with_tname(table.map(String::from));
             return Ok(Some((format!("{text}.{nm}"), n)));
         }
         let col = node
@@ -937,7 +951,10 @@ impl<'a> FormInfo<'a> {
                 .map(|m| m.keys().map(String::from).collect::<Vec<String>>())
                 .unwrap_or_default()
         };
-        for k in section("std") {
+        let std_keys = section("std")
+            .into_iter()
+            .chain(STD_EXTRA.iter().map(|(k, _)| k.to_string()));
+        for k in std_keys {
             let (t, n) = rpartition(&k);
             if t == key {
                 ids.insert(n.to_string());

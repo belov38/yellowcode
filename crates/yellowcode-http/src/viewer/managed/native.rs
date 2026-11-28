@@ -197,6 +197,9 @@ where
                     Err(ManagedNamesMetadataError::FormProjection(SelectedFormError::Native(
                         AnalysisError::Memory(error),
                     ))) => return Err(error.into()),
+                    Err(error @ ManagedNamesMetadataError::ConfigurationNotDecoded(_)) => {
+                        return message(budget, limit, 422, &format_args!("{error}"));
+                    }
                     Err(error) => {
                         return message(
                             budget,

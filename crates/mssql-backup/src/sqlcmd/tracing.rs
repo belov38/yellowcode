@@ -462,6 +462,11 @@ pub fn failure_kind(message: &str) -> (&'static str, &'static str) {
         ),
         ("SQL data export failed", "data_export_failed", "data_table"),
         (
+            "SQL binary storage memory limit",
+            "storage_memory_limit",
+            "blob_count",
+        ),
+        (
             "SQL binary storage count failed",
             "blob_count_failed",
             "blob_count",

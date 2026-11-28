@@ -182,6 +182,7 @@ impl<S: ManagedEntrySource> ManagedSnapshot<S> {
         {
             return Err(BudgetError::Overflow.into());
         }
+        self.check_names_configuration()?;
         let journal = Journal::new(spill_dir)?;
         let mut directory = tempfile::Builder::new()
             .prefix("names-")

@@ -10,6 +10,7 @@ pub(crate) const CHART_TYPE: &str = "3543ef08-3316-4f7e-9447-0cd0a1cbf1d5";
 pub(crate) const SHEET_TYPE: &str = "e603103e-a318-4edc-a014-b1c6cf94d49f";
 const CHART_NS: &str = "http://v8.1c.ru/8.2/data/chart";
 const MXL_NS: &str = "http://v8.1c.ru/8.2/data/spreadsheet";
+const SYS_FONT: &str = "\t<font xmlns:sys=\"http://v8.1c.ru/8.1/data/ui/fonts/system\" ";
 
 pub(crate) fn kind(value: &Node) -> Option<&'static str> {
     let v = value.as_list()?;
@@ -68,7 +69,10 @@ fn sheet_lines(cfg: &dyn Lookup, value: &Node, depth: usize) -> R<Vec<String>> {
     if is(at(doc.u13, 0)?, "0") {
         body.retain(|x| *x != "\t<templateMode>true</templateMode>");
     }
-    if doc.rows.is_empty() && doc.height == 0 {
+    let no_rows = doc
+        .no_rows()
+        .ok_or_else(|| GraphError("spreadsheet version".into()))?;
+    if no_rows && doc.height == 0 {
         body.retain(|x| *x != "\t<vgRows>0</vgRows>");
     }
     let ind = "\t".repeat(depth);
@@ -76,7 +80,11 @@ fn sheet_lines(cfg: &dyn Lookup, value: &Node, depth: usize) -> R<Vec<String>> {
         "{ind}<Settings xmlns:mxl=\"{MXL_NS}\" xsi:type=\"mxl:SpreadsheetDocument\">"
     )];
     for ln in body {
-        out.push(format!("{ind}{}", named_items(&mxl_tags(ln))));
+        let ln = match ln.strip_prefix(SYS_FONT) {
+            Some(rest) => format!("\t<font {rest}"),
+            None => ln.to_string(),
+        };
+        out.push(format!("{ind}{}", named_items(&mxl_tags(&ln))));
     }
     out.push(format!("{ind}</Settings>"));
     Ok(out)

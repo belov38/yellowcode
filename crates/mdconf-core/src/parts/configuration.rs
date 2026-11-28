@@ -80,18 +80,22 @@ fn simple(ctx: &Ctx, tag: &str, codec: Codec, v: Option<&Node>) -> Option<Value>
     codecs::decode(ctx, tag, &spec, v?, None, None)
 }
 
-fn functionalities(spec: &ConfigPropSpec, v: Option<&Node>) -> R<Value> {
+const COMPLETE_FUNCTIONALITIES: i64 = 68;
+
+fn functionalities(spec: &ConfigPropSpec, v: Option<&Node>, partial: bool) -> R<Value> {
     let name = spec.name.as_str();
     let bad = |why: &str| format!("{name}:{why}");
     let l = v.and_then(Node::as_list).ok_or_else(|| bad("value"))?;
     let n = l.get(1).and_then(uint).ok_or_else(|| bad("value"))?;
     let mut e = XmlElem::new(name);
+    let mut stored = Vec::new();
     for it in slice(l, 2, n) {
         let it = it.as_list().ok_or_else(|| bad("value"))?;
         let id = it
             .first()
             .and_then(Node::text)
             .ok_or_else(|| bad("value"))?;
+        stored.push(id);
         let use_ = it.get(1).ok_or_else(|| bad("value"))?.text() == Some("1");
         let f = spec
             .extra
@@ -107,6 +111,27 @@ fn functionalities(spec: &ConfigPropSpec, v: Option<&Node>) -> R<Value> {
                     if use_ { "true" } else { "false" },
                 )),
         );
+    }
+    if partial && stored.len() == n {
+        let map = spec.extra.get("map").and_then(|m| m.object());
+        let mut rest: Vec<(u64, &str)> = Vec::new();
+        for (id, f) in map.into_iter().flat_map(|m| m.iter()) {
+            if stored.contains(&id) {
+                continue;
+            }
+            let code = id
+                .parse()
+                .map_err(|_| bad(&format!("functionality:{id}")))?;
+            rest.push((code, f.as_str().ok_or_else(|| bad("map"))?));
+        }
+        rest.sort_unstable();
+        for (_, f) in rest {
+            e = e.child(
+                XmlElem::new("app:functionality")
+                    .child(XmlElem::leaf("app:functionality", f))
+                    .child(XmlElem::leaf("app:use", "false")),
+            );
+        }
     }
     Ok(Value::Xml(e))
 }
@@ -127,7 +152,7 @@ fn strlist(name: &str, v: Option<&Node>) -> R<Value> {
     Ok(Value::Xml(e))
 }
 
-fn value(ctx: &Ctx, spec: &ConfigPropSpec, v: Option<&Node>) -> R<Option<Prop>> {
+fn value(ctx: &Ctx, spec: &ConfigPropSpec, v: Option<&Node>, partial: bool) -> R<Option<Prop>> {
     let name = spec.name.as_str();
     let codec_miss = || format!("{name}:{}", spec.codec);
     if let Some(codec) = simple_codec(&spec.codec) {
@@ -167,7 +192,7 @@ fn value(ctx: &Ctx, spec: &ConfigPropSpec, v: Option<&Node>) -> R<Option<Prop>> 
                 Value::Text(CompatibilityMode(n).xml_name()),
             )
         }
-        "functionalities" => prop(name, Codec::Unknown, functionalities(spec, v)?),
+        "functionalities" => prop(name, Codec::Unknown, functionalities(spec, v, partial)?),
         "empty" => prop(name, Codec::Unknown, Value::Xml(XmlElem::new(name))),
         "strlist" => prop(name, Codec::Unknown, strlist(name, v)?),
         other => return Err(format!("{name}:codec:{other}")),
@@ -182,11 +207,16 @@ enum OldRoot<'a> {
     Value(Node),
 }
 
-fn old_root<'a>(spec: &ConfigPropSpec, body: &'a Node) -> R<Option<OldRoot<'a>>> {
+fn old_root<'a>(spec: &ConfigPropSpec, body: &'a Node, version: i64) -> R<Option<OldRoot<'a>>> {
     let Some(alt) = spec.extra.get("old_root") else {
         return Ok(None);
     };
     let bad = || format!("{}:old_root", spec.name);
+    if let Some(before) = alt.get("before")
+        && version >= before.as_i64().ok_or_else(bad)?
+    {
+        return Ok(None);
+    }
     if let Some(path) = alt.get("path").and_then(|p| p.as_array()) {
         let path = path
             .iter()
@@ -226,13 +256,15 @@ fn decode(
         None => misses.push("Synonym:lstr".into()),
     }
     props.push(prop("Comment", Codec::Str, Value::Text(text_at(4)?)));
-    let old = body.at(0).and_then(int).is_some_and(|v| v < ROOT_VERSION);
+    let version = body.at(0).and_then(int);
+    let old = version.is_some_and(|v| v < ROOT_VERSION);
+    let partial = version.is_some_and(|v| v < COMPLETE_FUNCTIONALITIES);
     for spec in schema.config_props() {
         let parsed: Node;
         let v = match &spec.path {
             Some(ConfigPath::Body(p)) => match body.get(p) {
                 Some(n) => Some(Some(n)),
-                None if old => match old_root(spec, body)? {
+                None if old => match old_root(spec, body, version.unwrap_or(ROOT_VERSION))? {
                     Some(OldRoot::At(n)) => Some(n),
                     Some(OldRoot::Value(n)) => {
                         parsed = n;
@@ -250,7 +282,7 @@ fn decode(
             Some(v) => v,
             None => None,
         };
-        if let Some(p) = value(&ctx, spec, v)? {
+        if let Some(p) = value(&ctx, spec, v, partial)? {
             props.push(p);
         }
     }

@@ -40,6 +40,43 @@ pub enum ListError {
     Limit(usize),
     #[error("the page ends at row {end}, past the limit of {limit} rows: give a larger --limit")]
     PageLimit { end: usize, limit: usize },
+    #[error(
+        "not a period (expected START..END, dates ГГГГ-ММ-ДД[Tчч:мм:сс], either side may be empty): {0}"
+    )]
+    Period(String),
+    #[error(
+        "the form {0} has no main attribute: it is not the list form of a dynamic list (reading the lists of such a \
+form is not implemented)"
+    )]
+    NoMainList(String),
+    #[error(
+        "the form {0} did not give the rows of its list when it opened (its code fills the list otherwise): reading \
+such a list is not implemented"
+    )]
+    NoRows(String),
+}
+
+impl ListError {
+    fn of_form(key: &str, e: &AnswerError) -> Option<ListError> {
+        match e {
+            AnswerError::Missing { field, .. } if field == "property main" => {
+                Some(ListError::NoMainList(key.to_string()))
+            }
+            AnswerError::Missing { field, .. }
+                if field == "dataDescrData" || field.starts_with("dsfd") =>
+            {
+                Some(ListError::NoRows(key.to_string()))
+            }
+            _ => None,
+        }
+    }
+}
+
+fn answer_fid(body: &[u8]) -> Option<String> {
+    let text = body_text(body);
+    let doc = parse_doc("logForm/query", &text).ok()?;
+    let root = response("logForm/query", &doc).ok()?;
+    child_text(root, NS_WS, "fid")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,17 +121,62 @@ impl RowDescr {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Cell {
     Value(Value),
     UnknownRef { clsid: Uuid, uuid: Uuid },
-    RecordKey,
+    RecordKey(RecordKey),
+    Group(GroupKey),
+    Absent,
     Unsupported(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RecordKey {
+    pub type_name: Option<String>,
+    pub parts: Vec<KeyPart>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct KeyPart {
+    pub name: Option<String>,
+    pub value: Value,
+}
+
+impl KeyPart {
+    pub fn name_ru(&self) -> Option<&str> {
+        self.name.as_deref().map(|n| match n {
+            "Period" => "Период",
+            "Recorder" => "Регистратор",
+            "LineNumber" => "НомерСтроки",
+            other => other,
+        })
+    }
+}
+
+impl RecordKey {
+    pub fn values(&self) -> impl Iterator<Item = &Value> {
+        self.parts.iter().map(|p| &p.value)
+    }
+
+    pub fn named(&self) -> bool {
+        self.type_name.is_some() && self.parts.iter().all(|p| p.name.is_some())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct GroupKey {
+    pub field: String,
+    pub field_ru: String,
+    pub value: Value,
+    pub parent: Option<Box<GroupKey>>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Row {
     pub cells: Vec<Cell>,
+    pub group: Option<GroupKey>,
+    pub level: usize,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -141,7 +223,117 @@ pub struct ListForm {
     pub descr: RowDescr,
     pub roles: Roles,
     pub ref_type: Option<TypeName>,
+    pub period: Option<TablePeriod>,
     pub first: Portion,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TablePeriod {
+    pub variant: String,
+    pub start: String,
+    pub end: String,
+}
+
+impl TablePeriod {
+    pub fn none() -> TablePeriod {
+        TablePeriod {
+            variant: "Custom".into(),
+            start: EMPTY_DATE.into(),
+            end: EMPTY_DATE.into(),
+        }
+    }
+
+    pub fn is_none(&self) -> bool {
+        self.start == EMPTY_DATE && self.end == EMPTY_DATE
+    }
+
+    pub fn parse(s: &str) -> Result<TablePeriod, ListError> {
+        let bad = |reason: &str| ListError::Period(format!("{s:?}: {reason}"));
+        let (a, b) = s
+            .split_once("..")
+            .ok_or_else(|| bad("expected START..END"))?;
+        let date = |v: &str, end: bool| -> Result<String, ListError> {
+            let v = v.trim();
+            if v.is_empty() {
+                return Ok(EMPTY_DATE.into());
+            }
+            let full = match (v.len(), end) {
+                (10, false) => format!("{v}T00:00:00"),
+                (10, true) => format!("{v}T23:59:59"),
+                _ => v.to_string(),
+            };
+            Date::parse(&full)
+                .map(|d| d.to_string())
+                .map_err(|e| bad(&e.to_string()))
+        };
+        let (start, end) = (date(a, false)?, date(b, true)?);
+        if start != EMPTY_DATE && end != EMPTY_DATE && start > end {
+            return Err(bad("the start is after the end"));
+        }
+        Ok(TablePeriod {
+            variant: "Custom".into(),
+            start,
+            end,
+        })
+    }
+
+    fn xml(&self) -> String {
+        format!(
+            "<period><v8:variant xsi:type=\"v8:StandardPeriodVariant\">{}</v8:variant><v8:startDate>{}</v8:startDate>\
+<v8:endDate>{}</v8:endDate></period>",
+            escape_text(&self.variant),
+            escape_text(&self.start),
+            escape_text(&self.end)
+        )
+    }
+}
+
+impl std::fmt::Display for TablePeriod {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let side = |d: &str| {
+            if d == EMPTY_DATE {
+                String::new()
+            } else {
+                d.to_string()
+            }
+        };
+        write!(f, "{}..{}", side(&self.start), side(&self.end))
+    }
+}
+
+const EMPTY_DATE: &str = "0001-01-01T00:00:00";
+
+fn standard_period(n: Node) -> Option<TablePeriod> {
+    if n.attribute((NS_XSI, "type"))
+        .is_none_or(|t| !t.ends_with(":StandardPeriod"))
+    {
+        return None;
+    }
+    const NS_V8: &str = "http://v8.1c.ru/8.1/data/core";
+    Some(TablePeriod {
+        variant: child_text(n, NS_V8, "variant")?,
+        start: child_text(n, NS_V8, "startDate")?,
+        end: child_text(n, NS_V8, "endDate")?,
+    })
+}
+
+fn table_period(root: Node, table_id: u32) -> Option<TablePeriod> {
+    root.descendants()
+        .filter(|n| {
+            (is(*n, NS_LF, "elemcs") || is(*n, NS_LF, "table"))
+                && n.attribute("id").and_then(unsigned) == Some(table_id)
+        })
+        .flat_map(|n| n.descendants().filter(|t| is(*t, NS_LF, "table")).take(1))
+        .flat_map(|t| t.children().filter(|c| is(*c, NS_LF, "addProps")))
+        .flat_map(|a| a.children().filter(|c| is(*c, NS_LF, "prop")))
+        .flat_map(|p| p.children().filter(|c| is(*c, NS_LF, "val")))
+        .find_map(standard_period)
+}
+
+pub fn parse_elements_period(body: &[u8], table_id: u32) -> Option<TablePeriod> {
+    let text = body_text(body);
+    let doc = Document::parse(&text).ok()?;
+    table_period(doc.root_element(), table_id)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -154,6 +346,14 @@ pub struct Column {
 #[derive(Debug, Clone, Default)]
 pub struct TypeIndex {
     by_clsid: HashMap<Uuid, Indexed>,
+    registers: HashMap<Uuid, Register>,
+}
+
+#[derive(Debug, Clone)]
+struct Register {
+    type_name: String,
+    periodic: bool,
+    dims: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -168,10 +368,27 @@ enum Indexed {
 impl TypeIndex {
     pub fn new(types: &[MdType]) -> TypeIndex {
         let mut by_clsid = HashMap::new();
+        let mut registers = HashMap::new();
         for t in types {
             let Ok(clsid) = Uuid::parse(&t.type_id) else {
                 continue;
             };
+            let register = match &t.kind {
+                MdKind::InformationRegister | MdKind::AccumulationRegister => true,
+                MdKind::Other(k) => k.ends_with("Register"),
+                _ => false,
+            };
+            if register {
+                registers.insert(
+                    clsid,
+                    Register {
+                        type_name: format!("{}RecordKey.{}", t.kind.en(), t.name),
+                        periodic: t.periodic == Some(true),
+                        dims: t.dims.iter().map(|d| d.name.clone()).collect(),
+                    },
+                );
+                continue;
+            }
             let entry = if t.kind == MdKind::Enum {
                 let values = t
                     .values
@@ -191,7 +408,10 @@ impl TypeIndex {
             };
             by_clsid.insert(clsid, entry);
         }
-        TypeIndex { by_clsid }
+        TypeIndex {
+            by_clsid,
+            registers,
+        }
     }
 
     fn clsid_of(&self, ty: &TypeName) -> Option<Uuid> {
@@ -360,6 +580,11 @@ pub fn parse_rows(
     let top = blob(A, A, text)?;
     let shape = || bad(A, "shape", top.iter().map(show).collect::<String>());
     let root = top.first().and_then(list).ok_or_else(shape)?;
+    let wrapped = match root.first().and_then(int) {
+        Some(0) => false,
+        Some(1) => true,
+        _ => return Err(shape()),
+    };
     let count = root.get(1).and_then(int).ok_or_else(shape)?;
     let items = root.get(2..).unwrap_or(&[]);
     if top.len() != 1 || usize::try_from(count).ok() != Some(items.len()) {
@@ -376,10 +601,124 @@ pub fn parse_rows(
             ));
         }
         rows.push(Row {
-            cells: cells.iter().map(|c| cell(c, types)).collect(),
+            cells: cells
+                .iter()
+                .map(|c| {
+                    if wrapped {
+                        wrapped_cell(c, types)
+                    } else {
+                        cell(c, types)
+                    }
+                })
+                .collect(),
+            group: None,
+            level: 0,
         });
     }
     Ok(rows)
+}
+
+fn wrapped_cell(n: &BinNode, types: &TypeIndex) -> Cell {
+    let unsupported = || Cell::Unsupported(show(n));
+    match list(n) {
+        Some([flag, inner]) if int(flag) == Some(0) => cell(inner, types),
+        Some(_) => group_key(n, types).map_or_else(unsupported, Cell::Group),
+        None => unsupported(),
+    }
+}
+
+fn group_key(n: &BinNode, types: &TypeIndex) -> Option<GroupKey> {
+    let [flag, _clsid, body] = list(n)? else {
+        return None;
+    };
+    if int(flag) != Some(1) {
+        return None;
+    }
+    let [_, value, name, name_ru, parent, ..] = list(body)? else {
+        return None;
+    };
+    let Cell::Value(value) = cell(value, types) else {
+        return None;
+    };
+    let parent = match cell(parent, types) {
+        Cell::Value(Value::Undefined) => None,
+        _ => Some(Box::new(group_key(parent, types)?)),
+    };
+    Some(GroupKey {
+        field: text(name)?,
+        field_ru: text(name_ru)?,
+        value,
+        parent,
+    })
+}
+
+fn number(n: u64) -> Value {
+    Decimal::parse(&n.to_string()).map_or_else(|_| Value::String(n.to_string()), Value::Number)
+}
+
+fn record_key(clsid: Option<Uuid>, key: &[BinNode], types: &TypeIndex) -> RecordKey {
+    let value = |n: &BinNode| match cell(n, types) {
+        Cell::Value(v) => (v, true),
+        Cell::UnknownRef { clsid, uuid } => (Value::String(format!("<? {clsid}:{uuid}>")), false),
+        _ => (Value::String(format!("<? {}>", show(n))), false),
+    };
+    let int = |n: &BinNode| {
+        atom(n)
+            .and_then(Atom::as_decimal)
+            .and_then(|t| t.parse::<u64>().ok())
+    };
+    let part = |name: Option<&str>, (value, known): (Value, bool)| KeyPart {
+        name: name.filter(|_| known).map(str::to_string),
+        value,
+    };
+    let reg = clsid.and_then(|c| types.registers.get(&c));
+    let kind = key.first().and_then(int);
+    let parts = match (kind, key.get(1..).unwrap_or(&[])) {
+        (Some(0), [recorder, line]) if list(recorder).is_some() && int(line).is_some() => vec![
+            part(Some("Recorder"), value(recorder)),
+            part(Some("LineNumber"), (number(int(line).unwrap_or(0)), true)),
+        ],
+        (Some(2), [period, recorder, line, n, rest @ ..])
+            if int(n).is_some_and(|n| usize::try_from(n).is_ok_and(|n| n <= rest.len()))
+                && rest
+                    .iter()
+                    .take(int(n).unwrap_or(0) as usize)
+                    .all(|d| list(d).is_some()) =>
+        {
+            let n = int(n).unwrap_or(0) as usize;
+            let mut parts = Vec::new();
+            let periodic = reg.is_some_and(|r| r.periodic);
+            if list(period).is_some() {
+                match value(period) {
+                    (Value::Date(d), true) if !periodic && reg.is_some() && d.is_empty() => {}
+                    v => parts.push(part(periodic.then_some("Period"), v)),
+                }
+            }
+            if list(recorder).is_some() {
+                parts.push(part(Some("Recorder"), value(recorder)));
+            }
+            if let Some(l) = int(line).filter(|l| *l != 0) {
+                parts.push(part(Some("LineNumber"), (number(l), true)));
+            }
+            let names = reg.map(|r| r.dims.as_slice()).filter(|d| d.len() == n);
+            for (i, d) in rest.iter().take(n).enumerate() {
+                parts.push(part(names.map(|x| x[i].as_str()), value(d)));
+            }
+            for d in rest.iter().skip(n).filter(|d| list(d).is_some()) {
+                parts.push(part(None, value(d)));
+            }
+            parts
+        }
+        _ => key
+            .iter()
+            .filter(|n| list(n).is_some())
+            .map(|n| part(None, value(n)))
+            .collect(),
+    };
+    RecordKey {
+        type_name: reg.map(|r| r.type_name.clone()),
+        parts,
+    }
 }
 
 fn cell(n: &BinNode, types: &TypeIndex) -> Cell {
@@ -395,7 +734,10 @@ fn cell(n: &BinNode, types: &TypeIndex) -> Cell {
             (Some(clsid), Some(uuid)) => types.cell(clsid, uuid),
             _ => unsupported(),
         },
-        ('#', [_, key]) if list(key).is_some() => Cell::RecordKey,
+        ('#', [clsid, key]) if list(key).is_some() => {
+            Cell::RecordKey(record_key(guid(clsid), list(key).unwrap_or(&[]), types))
+        }
+        ('U', []) => Cell::Value(Value::Undefined),
         ('B', [v]) => match atom(v).and_then(Atom::as_bool) {
             Some(b) => Cell::Value(Value::Bool(b)),
             None => unsupported(),
@@ -568,7 +910,14 @@ fn part(
         main_field: attr(p, "mainField"),
     });
     let parent = match child(p, NS_WS, "rowsParent") {
-        Some(n) if n.attribute((NS_XSI, "nil")) != Some("true") => Some(ref_of(answer, n)?),
+        Some(n)
+            if n.attribute((NS_XSI, "nil")) != Some("true")
+                && !n
+                    .attribute((NS_XSI, "type"))
+                    .is_some_and(|t| t.ends_with(":DynamicalListGroupRow")) =>
+        {
+            Some(ref_of(answer, n)?)
+        }
         _ => None,
     };
     let rows = match child_text(p, NS_WS, "rowsData") {
@@ -688,6 +1037,7 @@ pub fn parse_form(body: &[u8], types: &TypeIndex) -> Result<ListForm, AnswerErro
         field: "dataDescrData".into(),
     })?;
     let ref_type = list_ref_type(&first, &descr, &roles);
+    let period = table_period(root, table_id);
     Ok(ListForm {
         form_id,
         fid,
@@ -701,6 +1051,7 @@ pub fn parse_form(body: &[u8], types: &TypeIndex) -> Result<ListForm, AnswerErro
         descr,
         roles,
         ref_type,
+        period,
         first,
     })
 }
@@ -809,6 +1160,15 @@ pub enum Position {
     At(Ref),
     Parent(Ref),
     Root(Ref),
+    Group(GroupKey),
+    GroupAt(GroupKey, Ref),
+    After(After),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum After {
+    Record(RecordKey),
+    Group(GroupKey),
 }
 
 #[derive(Debug, Clone)]
@@ -819,6 +1179,55 @@ pub struct DlistQuery<'a> {
     pub page: u32,
     pub position: Position,
     pub settings: Option<(&'a str, u64)>,
+    pub period: Option<&'a TablePeriod>,
+    pub refresh: bool,
+}
+
+fn group_xml(tag: &str, g: &GroupKey) -> String {
+    let value = match (g.value.lexical(), g.value.type_name()) {
+        (Some(t), Some(ty)) if ty.known_prefix().is_some() => format!(
+            "<dl:GroupValue xsi:type=\"{}\">{}</dl:GroupValue>",
+            escape_attr(&ty.to_string()),
+            escape_text(&t)
+        ),
+        _ => "<dl:GroupValue xsi:nil=\"true\"/>".to_string(),
+    };
+    let parent = match &g.parent {
+        Some(p) => group_xml("dl:Parent", p),
+        None => "<dl:Parent xsi:nil=\"true\"/>".to_string(),
+    };
+    format!(
+        "<{tag} xsi:type=\"dl:DynamicalListGroupRow\">{value}<dl:GroupName>{}</dl:GroupName>{parent}</{tag}>",
+        escape_text(&g.field)
+    )
+}
+
+fn typed_xml(tag: &str, v: &Value) -> String {
+    match (v.lexical(), v.type_name()) {
+        (Some(t), Some(ty)) => format!(
+            "<{tag} xsi:type=\"{}\">{}</{tag}>",
+            escape_attr(&ty.to_string()),
+            escape_text(&t)
+        ),
+        _ => format!("<{tag} xsi:nil=\"true\"/>"),
+    }
+}
+
+fn record_xml(tag: &str, k: &RecordKey) -> String {
+    let parts: String = k
+        .parts
+        .iter()
+        .map(|p| {
+            typed_xml(
+                &format!("cfg:{}", p.name.as_deref().unwrap_or_default()),
+                &p.value,
+            )
+        })
+        .collect();
+    format!(
+        "<{tag} xsi:type=\"cfg:{}\">{parts}</{tag}>",
+        escape_attr(k.type_name.as_deref().unwrap_or_default())
+    )
 }
 
 fn ref_xml(tag: &str, r: &Ref) -> String {
@@ -837,7 +1246,7 @@ pub fn dlist_query(q: &DlistQuery) -> Vec<u8> {
         f.table_id,
         escape_attr(&f.fid)
     );
-    if q.settings.is_some() {
+    if q.settings.is_some() || q.refresh {
         a.push_str(" refresh=\"true\"");
     }
     if q.forward {
@@ -846,18 +1255,23 @@ pub fn dlist_query(q: &DlistQuery) -> Vec<u8> {
     if q.backward {
         a.push_str(" backward=\"true\"");
     }
-    a.push_str(&format!(
-        " autopos=\"true\" page=\"{}\" source=\"1\"",
-        q.page
-    ));
-    if matches!(q.position, Position::Parent(_)) {
-        a.push_str(" level=\"0\"");
-    } else {
-        a.push_str(" autoParent=\"true\" level=\"-1\" autoLevel=\"true\"");
+    if !matches!(q.position, Position::Group(_) | Position::After(_)) {
+        a.push_str(" autopos=\"true\"");
+    }
+    a.push_str(&format!(" page=\"{}\" source=\"1\"", q.page));
+    match q.position {
+        Position::Parent(_) => a.push_str(" level=\"0\""),
+        Position::Group(_) | Position::GroupAt(..) => a.push_str(" showTree=\"true\" level=\"0\""),
+        Position::After(After::Group(_)) => a.push_str(" showTree=\"true\" level=\"-1\""),
+        Position::After(After::Record(_)) => a.push_str(" level=\"-1\""),
+        _ => a.push_str(" autoParent=\"true\" level=\"-1\" autoLevel=\"true\""),
     }
     a.push_str(" presents=\"true\"");
+    let group = matches!(q.position, Position::Group(_) | Position::GroupAt(..));
     match (&q.settings, &f.descr.digest) {
-        (None, Some(d)) => a.push_str(&format!(" dataDescrDigest=\"{}\"", escape_attr(d))),
+        (None, Some(d)) if !group => {
+            a.push_str(&format!(" dataDescrDigest=\"{}\"", escape_attr(d)))
+        }
         _ => a.push_str(" needDataDescr=\"true\""),
     }
     let (state, composer, version) = match q.settings {
@@ -873,20 +1287,21 @@ pub fn dlist_query(q: &DlistQuery) -> Vec<u8> {
 <dl:ChangesVersion>{version}</dl:ChangesVersion></list>",
         f.data_path
     );
-    if let Position::Parent(r) = &q.position {
-        b.push_str(&ref_xml("parent", r));
-    }
-    b.push_str(
-        "<period><v8:variant xsi:type=\"v8:StandardPeriodVariant\">Custom</v8:variant>\
-<v8:startDate>0001-01-01T00:00:00</v8:startDate><v8:endDate>0001-01-01T00:00:00</v8:endDate></period>",
-    );
     match &q.position {
-        Position::At(r) => {
+        Position::Parent(r) => b.push_str(&ref_xml("parent", r)),
+        Position::Group(g) | Position::GroupAt(g, _) => b.push_str(&group_xml("parent", g)),
+        Position::After(After::Record(k)) => b.push_str(&record_xml("current", k)),
+        Position::After(After::Group(g)) => b.push_str(&group_xml("current", g)),
+        _ => {}
+    }
+    b.push_str(&q.period.cloned().unwrap_or_else(TablePeriod::none).xml());
+    match &q.position {
+        Position::At(r) | Position::GroupAt(_, r) => {
             b.push_str(&ref_xml("checkSL", r));
             b.push_str(&ref_xml("checkC", r));
         }
         Position::Root(r) => b.push_str(&ref_xml("checkCP", r)),
-        Position::Top | Position::Parent(_) => {}
+        Position::Top | Position::Parent(_) | Position::Group(_) | Position::After(_) => {}
     }
     format!(
         "{REQUEST_HEAD}<request xmlns=\"http://v8.1c.ru/8.2/mngsrv/ws\" \
@@ -1112,6 +1527,7 @@ pub struct ListQuery {
     pub take: Option<usize>,
     pub limit: usize,
     pub presentations: bool,
+    pub period: Option<TablePeriod>,
 }
 
 #[derive(Debug, Clone)]
@@ -1119,8 +1535,12 @@ pub struct ListView {
     pub form: ListForm,
     pub columns: Vec<(Option<usize>, String)>,
     pub columns_warning: Option<String>,
+    pub descr: RowDescr,
+    pub roles: Roles,
     pub rows: Vec<Row>,
     pub more: bool,
+    pub period: Option<TablePeriod>,
+    pub grouped: bool,
     pub refs: Presentations,
     pub enums: EnumPresentations,
     pub presentations_error: Option<String>,
@@ -1129,7 +1549,18 @@ pub struct ListView {
 
 impl ListView {
     pub fn role(&self, name: Option<&str>) -> Option<usize> {
-        self.form.descr.field(name?)
+        self.descr.field(name?)
+    }
+
+    pub fn key<'a>(&self, row: &'a Row) -> Option<RowKey<'a>> {
+        if let Some(g) = &row.group {
+            return Some(RowKey::Group(g));
+        }
+        match row.cells.get(self.role(self.roles.key.as_deref())?)? {
+            Cell::Value(Value::Ref(r)) if !r.is_empty() => Some(RowKey::Ref(r)),
+            Cell::RecordKey(v) => Some(RowKey::Record(v)),
+            _ => None,
+        }
     }
 }
 
@@ -1183,19 +1614,165 @@ fn form_key(q: &ListQuery) -> Result<String, ListError> {
     if parts.len() != 2 || parts.iter().any(|p| p.trim().is_empty()) {
         return Err(ListError::Object(q.object.clone()));
     }
-    Ok(format!(
-        "{}.{}",
-        q.object,
-        q.form.as_deref().unwrap_or("ФормаСписка")
-    ))
+    let form = q.form.as_deref().unwrap_or("ФормаСписка");
+    const STANDARD: [&str; 6] = [
+        "ФормаСписка",
+        "ФормаВыбора",
+        "ФормаВыбораГруппы",
+        "ListForm",
+        "ChoiceForm",
+        "FolderChoiceForm",
+    ];
+    let k = fold_key(form);
+    if form.contains('.') || STANDARD.iter().any(|s| fold_key(s) == k) {
+        Ok(format!("{}.{form}", q.object))
+    } else {
+        Ok(format!("{}.Форма.{form}", q.object))
+    }
 }
 
-fn row_key(form: &ListForm, row: &Row) -> Option<Ref> {
-    let i = form.descr.field(form.roles.key.as_deref()?)?;
+fn key_ref(descr: &RowDescr, roles: &Roles, row: &Row) -> Option<Ref> {
+    let i = descr.field(roles.key.as_deref()?)?;
     match row.cells.get(i) {
         Some(Cell::Value(Value::Ref(r))) => Some(r.clone()),
         _ => None,
     }
+}
+
+fn key_cell<'r>(descr: &RowDescr, roles: &Roles, row: &'r Row) -> Option<&'r Cell> {
+    row.cells.get(descr.field(roles.key.as_deref()?)?)
+}
+
+fn next_position(form: &ListForm, row: &Row) -> Option<Position> {
+    match key_cell(&form.descr, &form.roles, row)? {
+        Cell::Value(Value::Ref(r)) => Some(Position::At(r.clone())),
+        Cell::RecordKey(k) if k.named() => Some(Position::After(After::Record(k.clone()))),
+        Cell::Group(g) if g.parent.is_none() => Some(Position::After(After::Group(g.clone()))),
+        _ => None,
+    }
+}
+
+fn row_group(descr: &RowDescr, roles: &Roles, row: &Row) -> Option<GroupKey> {
+    let i = descr.field(roles.key.as_deref()?)?;
+    match row.cells.get(i) {
+        Some(Cell::Group(g)) => Some(g.clone()),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowKey<'a> {
+    Ref(&'a Ref),
+    Record(&'a RecordKey),
+    Group(&'a GroupKey),
+}
+
+fn row_values(rows: &[Row]) -> Vec<&Value> {
+    let mut values: Vec<&Value> = Vec::new();
+    for r in rows {
+        let groups = r.group.iter().chain(r.cells.iter().filter_map(|c| match c {
+            Cell::Group(g) => Some(g),
+            _ => None,
+        }));
+        for g in groups {
+            let mut k = Some(g);
+            while let Some(x) = k {
+                values.push(&x.value);
+                k = x.parent.as_deref();
+            }
+        }
+        for c in &r.cells {
+            match c {
+                Cell::Value(v) => values.push(v),
+                Cell::RecordKey(k) => values.extend(k.values()),
+                _ => {}
+            }
+        }
+    }
+    values
+}
+
+fn readable(g: &GroupKey) -> Result<(), SessionError> {
+    let mut up = Some(g);
+    while let Some(k) = up {
+        let typed = matches!(k.value, Value::Undefined)
+            || (k.value.lexical().is_some()
+                && k.value
+                    .type_name()
+                    .is_some_and(|t| t.known_prefix().is_some()));
+        if !typed {
+            return Err(SessionError::Protocol(format!(
+                "a group by {} of a value of this kind cannot be read: not implemented",
+                k.field_ru
+            )));
+        }
+        up = k.parent.as_deref();
+    }
+    Ok(())
+}
+
+struct Tree {
+    descrs: Vec<(RowDescr, Roles)>,
+    rows: Vec<(Row, usize)>,
+}
+
+impl Tree {
+    fn descr(&mut self, d: RowDescr, r: Roles) -> usize {
+        match self.descrs.iter().position(|(x, _)| x.fields == d.fields) {
+            Some(i) => i,
+            None => {
+                self.descrs.push((d, r));
+                self.descrs.len() - 1
+            }
+        }
+    }
+
+    fn flatten(self, top: (RowDescr, Roles)) -> (RowDescr, Roles, Vec<Row>) {
+        let data = self
+            .rows
+            .iter()
+            .find(|(r, _)| r.group.is_none())
+            .map(|(_, d)| *d);
+        let (descr, roles) = match data {
+            Some(d) => self.descrs[d].clone(),
+            None => top,
+        };
+        let rows = self
+            .rows
+            .into_iter()
+            .map(|(row, d)| {
+                let (from, _) = &self.descrs[d];
+                if from.fields == descr.fields {
+                    return row;
+                }
+                let cells = descr
+                    .fields
+                    .iter()
+                    .map(|f| {
+                        from.fields
+                            .iter()
+                            .position(|x| x.id == f.id)
+                            .and_then(|i| row.cells.get(i).cloned())
+                            .unwrap_or(Cell::Absent)
+                    })
+                    .collect();
+                Row { cells, ..row }
+            })
+            .collect();
+        (descr, roles, rows)
+    }
+}
+
+struct Read {
+    columns: Columns,
+    columns_warning: Option<String>,
+    descr: RowDescr,
+    roles: Roles,
+    rows: Vec<Row>,
+    more: bool,
+    refs: HashMap<(Uuid, Uuid), Presentation>,
+    period: Option<TablePeriod>,
+    grouped: bool,
 }
 
 impl<R: RandomSource> Session<R> {
@@ -1239,33 +1816,45 @@ impl<R: RandomSource> Session<R> {
             &req,
             &[200],
         )?;
-        let form = parse_form(&Self::decoded(&resp)?, &types)?;
-        let rows = self.list_rows(&form, q, &types, &conf, &roles);
+        let body = Self::decoded(&resp)?;
+        let form = match parse_form(&body, &types) {
+            Ok(f) => f,
+            Err(e) => {
+                if let Some(fid) = answer_fid(&body) {
+                    let _ = self.close_form(&fid);
+                }
+                return Err(match ListError::of_form(&key, &e) {
+                    Some(l) => l.into(),
+                    None => e.into(),
+                });
+            }
+        };
+        let read = self.list_rows(&form, q, &types, &conf, &roles);
         let close_error = self.close_form(&form.fid).err().map(|e| e.to_string());
-        let (columns, columns_warning, rows, more, refs) = rows?;
+        let read = read?;
         let mut view = ListView {
             form,
-            columns,
-            columns_warning,
-            rows,
-            more,
+            columns: read.columns,
+            columns_warning: read.columns_warning,
+            descr: read.descr,
+            roles: read.roles,
+            rows: read.rows,
+            more: read.more,
+            period: read.period,
+            grouped: read.grouped,
             refs: Presentations::new(Vec::new(), Vec::new()),
             enums: EnumPresentations::new(Vec::new()),
             presentations_error: None,
             close_error,
         };
         if q.presentations
-            && let Err(e) = self.present(&mut view, &refs)
+            && let Err(e) = self.present(&mut view, &read.refs)
         {
             view.presentations_error = Some(e.to_string());
         }
         Ok(view)
     }
 
-    #[allow(
-        clippy::type_complexity,
-        reason = "one tuple of the parts of the view, used once"
-    )]
     fn list_rows(
         &mut self,
         form: &ListForm,
@@ -1273,51 +1862,34 @@ impl<R: RandomSource> Session<R> {
         types: &TypeIndex,
         conf: &str,
         roles: &str,
-    ) -> Result<
-        (
-            Columns,
-            Option<String>,
-            Vec<Row>,
-            bool,
-            HashMap<(Uuid, Uuid), Presentation>,
-        ),
-        SessionError,
-    > {
+    ) -> Result<Read, SessionError> {
         let sysver = self.version.clone();
         let h = self.headers("application/xml", false, false);
-        let elements = self.step(
-            "logForm/elements",
-            "GET",
-            &format!(
-                "/e1cib/logForm?sysver={sysver}&cmd=elements&clang=ru&formId={}&confver={conf}&rolesId={roles}\
+        let elements = self
+            .step(
+                "logForm/elements",
+                "GET",
+                &format!(
+                    "/e1cib/logForm?sysver={sysver}&cmd=elements&clang=ru&formId={}&confver={conf}&rolesId={roles}\
 &iweb=16",
-                form.form_id
-            ),
-            &h,
-            &[],
-            &[200],
-        );
-        let (columns, columns_warning) = match elements
+                    form.form_id
+                ),
+                &h,
+                &[],
+                &[200],
+            )
             .and_then(|r| Self::decoded(&r))
-            .map_err(|e| e.to_string())
-            .and_then(|b| {
-                parse_columns(&b, form.table_id, form.data_path).map_err(|e| e.to_string())
-            })
-            .and_then(|c| map_columns(&c, &form.descr))
-        {
-            Ok((c, missing)) if missing.is_empty() => (c, None),
-            Ok((c, missing)) => (
-                c,
-                Some(format!(
-                    "columns of the form whose field is not in the rows are shown empty: {}",
-                    missing.join(", ")
-                )),
-            ),
-            Err(e) => (
-                descr_columns(&form.descr),
-                Some(format!(
-                    "the columns of the form are not known ({e}): the fields of the rows are shown"
-                )),
+            .map_err(|e| e.to_string());
+        let (period, refresh) = match &q.period {
+            Some(p) => (Some(p.clone()), true),
+            None => (
+                form.period.clone().or_else(|| {
+                    elements
+                        .as_ref()
+                        .ok()
+                        .and_then(|b| parse_elements_period(b, form.table_id))
+                }),
+                false,
             ),
         };
 
@@ -1339,28 +1911,27 @@ impl<R: RandomSource> Session<R> {
         let page = q.take.map_or(PAGE, |t| {
             u32::try_from(t).unwrap_or(u32::MAX).clamp(PAGE, MAX_PAGE)
         });
+        let query = |position: Position, settings, refresh| DlistQuery {
+            form,
+            forward: true,
+            backward: false,
+            page,
+            position,
+            settings,
+            period: period.as_ref(),
+            refresh,
+        };
         let mut refs = form.first.refs.clone();
         let rows: Vec<Row>;
         let last: bool;
         let start_position = match &parent {
             Some(p) => Some(Position::Parent(p.clone())),
-            None if settings.is_some() => Some(Position::Top),
+            None if settings.is_some() || refresh => Some(Position::Top),
             None => None,
         };
         match start_position {
             Some(position) => {
-                let p = self.dlist(
-                    &DlistQuery {
-                        form,
-                        forward: true,
-                        backward: false,
-                        page,
-                        position,
-                        settings,
-                    },
-                    types,
-                )?;
-                let mut p = p;
+                let mut p = self.dlist(&query(position, settings, refresh), types)?;
                 refs.extend(std::mem::take(&mut p.refs));
                 (rows, last) = opening(forward_of(&mut p, form)?);
             }
@@ -1368,18 +1939,7 @@ impl<R: RandomSource> Session<R> {
                 let mut first = form.first.clone();
                 let f = forward_of(&mut first, form)?;
                 if !(f.first && form.first.not_found) {
-                    let p = self.dlist(
-                        &DlistQuery {
-                            form,
-                            forward: true,
-                            backward: false,
-                            page,
-                            position: Position::Top,
-                            settings: None,
-                        },
-                        types,
-                    )?;
-                    let mut p = p;
+                    let mut p = self.dlist(&query(Position::Top, None, false), types)?;
                     refs.extend(std::mem::take(&mut p.refs));
                     (rows, last) = opening(forward_of(&mut p, form)?);
                 } else {
@@ -1388,60 +1948,238 @@ impl<R: RandomSource> Session<R> {
             }
         }
         let (mut rows, mut last) = (rows, last);
+        let grouped = rows
+            .iter()
+            .any(|r| row_group(&form.descr, &form.roles, r).is_some());
         let need = q.take.map(|t| q.skip.saturating_add(t));
         let cap = need.unwrap_or(q.limit);
-        let mut seen: std::collections::HashSet<Ref> =
-            rows.iter().filter_map(|r| row_key(form, r)).collect();
-        while !last && rows.len() <= cap {
-            let Some(at) = rows.last().and_then(|r| row_key(form, r)) else {
-                return Err(SessionError::Protocol(
-                    "the rows of this list have no reference key: paging past the first portion is not \
-implemented"
-                        .into(),
-                ));
-            };
-            let p = self.dlist(
-                &DlistQuery {
-                    form,
-                    forward: true,
-                    backward: false,
-                    page,
-                    position: Position::At(at.clone()),
-                    settings: None,
-                },
-                types,
-            )?;
-            let mut p = p;
-            refs.extend(std::mem::take(&mut p.refs));
-            let f = forward_of(&mut p, form)?;
-            let mut new = f.rows;
-            if new.first().and_then(|r| row_key(form, r)).as_ref() == Some(&at) {
-                new.remove(0);
-            }
-            if new.is_empty() && !(f.last || f.empty) {
-                return Err(SessionError::Protocol(
-                    "dlist: a portion without new rows before the end of the list".into(),
-                ));
-            }
-            for r in &new {
-                if let Some(k) = row_key(form, r)
-                    && !seen.insert(k)
-                {
-                    return Err(SessionError::Protocol(
-                        "dlist: a row came again: the server does not advance from the position asked".into(),
-                    ));
-                }
-            }
-            last = f.last || f.empty;
+        let mut seen: std::collections::HashSet<Cell> = rows
+            .iter()
+            .filter_map(|r| key_cell(&form.descr, &form.roles, r).cloned())
+            .collect();
+        while !grouped && !last && rows.len() <= cap {
+            let (new, end) =
+                self.next_portion(form, rows.last(), &query, &mut seen, types, &mut refs)?;
+            last = end;
             rows.extend(new);
         }
-        if need.is_none() && rows.len() > q.limit {
+        let top = (form.descr.clone(), form.roles.clone());
+        let mut truncated = false;
+        let (descr, row_roles, mut rows) = if grouped {
+            let mut tree = Tree {
+                descrs: vec![top.clone()],
+                rows: Vec::new(),
+            };
+            let mut pending: std::collections::VecDeque<Row> = rows.into();
+            let mut last_top: Option<Row> = None;
+            loop {
+                if tree.rows.len() >= cap {
+                    truncated |= !(pending.is_empty() && last);
+                    break;
+                }
+                let Some(mut row) = pending.pop_front() else {
+                    if last {
+                        break;
+                    }
+                    if last_top
+                        .as_ref()
+                        .and_then(|r| row_group(&form.descr, &form.roles, r))
+                        .is_none()
+                    {
+                        return Err(SessionError::Protocol(
+                            "the top of this grouped list does not end with a group: paging it is not implemented"
+                                .into(),
+                        ));
+                    }
+                    let (new, end) = self.next_portion(
+                        form,
+                        last_top.as_ref(),
+                        &query,
+                        &mut seen,
+                        types,
+                        &mut refs,
+                    )?;
+                    last = end;
+                    pending.extend(new);
+                    continue;
+                };
+                last_top = Some(row.clone());
+                row.group = row_group(&form.descr, &form.roles, &row);
+                let group = row.group.clone();
+                tree.rows.push((row, 0));
+                if let Some(g) = group {
+                    truncated |= self.expand(&mut tree, &query, &g, 1, cap, types, &mut refs)?;
+                }
+            }
+            last &= !truncated;
+            tree.flatten(top)
+        } else {
+            (top.0, top.1, rows)
+        };
+        if need.is_none() && (rows.len() > q.limit || truncated) {
             return Err(ListError::Limit(q.limit).into());
         }
         let more = !last || need.is_some_and(|n| rows.len() > n);
         let end = need.unwrap_or(rows.len()).min(rows.len());
-        let rows = rows.drain(q.skip.min(end)..end).collect();
-        Ok((columns, columns_warning, rows, more, refs))
+        let rows: Vec<Row> = rows.drain(q.skip.min(end)..end).collect();
+
+        let (columns, columns_warning) = match elements
+            .and_then(|b| {
+                parse_columns(&b, form.table_id, form.data_path).map_err(|e| e.to_string())
+            })
+            .and_then(|c| map_columns(&c, &descr))
+        {
+            Ok((c, missing)) if missing.is_empty() => (c, None),
+            Ok((c, missing)) => (
+                c,
+                Some(format!(
+                    "columns of the form whose field is not in the rows are shown empty: {}",
+                    missing.join(", ")
+                )),
+            ),
+            Err(e) => (
+                descr_columns(&descr),
+                Some(format!(
+                    "the columns of the form are not known ({e}): the fields of the rows are shown"
+                )),
+            ),
+        };
+        Ok(Read {
+            columns,
+            columns_warning,
+            descr,
+            roles: row_roles,
+            rows,
+            more,
+            refs,
+            period,
+            grouped,
+        })
+    }
+
+    fn next_portion<'a>(
+        &mut self,
+        form: &ListForm,
+        prev: Option<&Row>,
+        query: &dyn Fn(Position, Option<(&'a str, u64)>, bool) -> DlistQuery<'a>,
+        seen: &mut std::collections::HashSet<Cell>,
+        types: &TypeIndex,
+        refs: &mut HashMap<(Uuid, Uuid), Presentation>,
+    ) -> Result<(Vec<Row>, bool), SessionError> {
+        let Some(position) = prev.and_then(|r| next_position(form, r)) else {
+            return Err(SessionError::Protocol(
+                "the rows of this list have no key to go on from (no reference, and no record key whose parts the \
+types of the session name): paging past the first portion is not implemented"
+                    .into(),
+            ));
+        };
+        let at = prev
+            .and_then(|r| key_cell(&form.descr, &form.roles, r))
+            .cloned();
+        let mut p = self.dlist(&query(position, None, false), types)?;
+        refs.extend(std::mem::take(&mut p.refs));
+        let f = forward_of(&mut p, form)?;
+        let mut new = f.rows;
+        if at.is_some()
+            && new
+                .first()
+                .and_then(|r| key_cell(&form.descr, &form.roles, r))
+                == at.as_ref()
+        {
+            new.remove(0);
+        }
+        if new.is_empty() && !(f.last || f.empty) {
+            return Err(SessionError::Protocol(
+                "dlist: a portion without new rows before the end of the list".into(),
+            ));
+        }
+        for r in &new {
+            if let Some(k) = key_cell(&form.descr, &form.roles, r)
+                && !seen.insert(k.clone())
+            {
+                return Err(SessionError::Protocol(
+                    "dlist: a row came again: the server does not advance from the position asked"
+                        .into(),
+                ));
+            }
+        }
+        Ok((new, f.last || f.empty))
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one recursive step of list_rows over its state"
+    )]
+    fn expand<'a>(
+        &mut self,
+        tree: &mut Tree,
+        query: &dyn Fn(Position, Option<(&'a str, u64)>, bool) -> DlistQuery<'a>,
+        g: &GroupKey,
+        level: usize,
+        cap: usize,
+        types: &TypeIndex,
+        refs: &mut HashMap<(Uuid, Uuid), Presentation>,
+    ) -> Result<bool, SessionError> {
+        let mut at: Option<Ref> = None;
+        readable(g)?;
+        loop {
+            let position = match &at {
+                None => Position::Group(g.clone()),
+                Some(r) => Position::GroupAt(g.clone(), r.clone()),
+            };
+            let mut p = self.dlist(&query(position, None, false), types)?;
+            refs.extend(std::mem::take(&mut p.refs));
+            let f = p.forward.take().ok_or_else(|| {
+                SessionError::Protocol("dlist: the answer has no forward part".into())
+            })?;
+            let descr = f.descr.clone().ok_or_else(|| {
+                SessionError::Protocol(
+                    "dlist: the rows of a group came without their description".into(),
+                )
+            })?;
+            let roles = f.roles.clone().unwrap_or_default();
+            let d = tree.descr(descr.clone(), roles.clone());
+            let mut new = f.rows;
+            if let Some(a) = &at
+                && new
+                    .first()
+                    .and_then(|r| key_ref(&descr, &roles, r))
+                    .as_ref()
+                    == Some(a)
+            {
+                new.remove(0);
+            }
+            let end = f.last || f.empty || new.is_empty();
+            let next = new.last().and_then(|r| key_ref(&descr, &roles, r));
+            for mut row in new {
+                if tree.rows.len() >= cap {
+                    return Ok(true);
+                }
+                row.level = level;
+                row.group = row_group(&descr, &roles, &row);
+                let sub = row.group.clone();
+                tree.rows.push((row, d));
+                if let Some(sub) = sub
+                    && self.expand(tree, query, &sub, level + 1, cap, types, refs)?
+                {
+                    return Ok(true);
+                }
+            }
+            if end {
+                return Ok(false);
+            }
+            if tree.rows.len() >= cap {
+                return Ok(true);
+            }
+            if next.is_none() || next == at {
+                return Err(SessionError::Protocol(
+                    "the rows of a group go on past a portion and have no reference key: paging them is not \
+implemented"
+                        .into(),
+                ));
+            }
+            at = next;
+        }
     }
 
     fn present(
@@ -1449,15 +2187,7 @@ implemented"
         view: &mut ListView,
         known: &HashMap<(Uuid, Uuid), Presentation>,
     ) -> Result<(), SessionError> {
-        let values: Vec<&Value> = view
-            .rows
-            .iter()
-            .flat_map(|r| r.cells.iter())
-            .filter_map(|c| match c {
-                Cell::Value(v) => Some(v),
-                _ => None,
-            })
-            .collect();
+        let values = row_values(&view.rows);
         let all = crate::refs::collect(values.iter().copied());
         let types = TypeIndex::new(&self.session_types("references")?);
         let mut items = Vec::with_capacity(all.len());

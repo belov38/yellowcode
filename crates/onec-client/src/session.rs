@@ -5,6 +5,7 @@ use crate::auth::{AuthSettings, AuthSettingsError};
 use crate::body::{self, ACCEPT_ENCODING};
 use crate::cred;
 use crate::dcs;
+use crate::drilldown;
 use crate::enums::{self, EnumPresentations, EnumType};
 use crate::formdescr::{FormData, FormKind};
 use crate::info::{Answers, InfoError, ServerInfo};
@@ -78,6 +79,10 @@ pub enum SessionError {
     Form(#[from] crate::formcall::FormError),
     #[error("{0}")]
     Protocol(String),
+    #[error(
+        "{step}: the call was sent and its outcome is not known ({error}); the procedure may have run on the server"
+    )]
+    Sent { step: &'static str, error: String },
 }
 
 pub trait RandomSource {
@@ -179,12 +184,20 @@ pub struct DcsOptions<'a> {
     pub changes: &'a [crate::dcs::Change],
     pub generate: bool,
     pub details: bool,
+    pub drilldown: Option<DrillDownOptions<'a>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct DrillDownOptions<'a> {
+    pub cell: &'a str,
+    pub field: &'a str,
 }
 
 #[derive(Debug, Clone)]
 pub struct DcsView {
     pub form: crate::dcs::DcsForm,
     pub details: Vec<crate::dcs::DetailsItem>,
+    pub drilldown: Option<crate::drilldown::DrillDown>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -228,8 +241,16 @@ const POLL_FIRST: std::time::Duration = std::time::Duration::from_secs(1);
 const POLL_FACTOR: f64 = 1.4;
 const POLL_MAX: std::time::Duration = std::time::Duration::from_secs(15);
 
+type ComposedReport = (
+    Vec<ReportSheet>,
+    Vec<dcs::DetailsItem>,
+    Option<drilldown::DrillDown>,
+);
+
 const ROWS_PER_REQUEST: usize = 1000;
 const DETAILS_PER_REQUEST: u32 = 1000;
+const GENERATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+const GENERATION_PAUSE_MAX: std::time::Duration = std::time::Duration::from_secs(20);
 
 pub struct Session<R: RandomSource = OsRandom> {
     tr: Box<dyn Wire>,
@@ -247,6 +268,8 @@ pub struct Session<R: RandomSource = OsRandom> {
     relogin: Option<Relogin>,
     relogins: u32,
     logging_in: bool,
+    started: Option<Prologue>,
+    start_sent: bool,
 }
 
 #[derive(Clone)]
@@ -319,6 +342,8 @@ impl<R: RandomSource> Session<R> {
             relogin: None,
             relogins: 0,
             logging_in: false,
+            started: None,
+            start_sent: false,
         }
     }
 
@@ -420,7 +445,10 @@ impl<R: RandomSource> Session<R> {
     }
 
     fn can_relogin(&self) -> bool {
-        self.relogin.is_some() && !self.logging_in && self.relogins < MAX_RELOGINS
+        self.relogin.is_some()
+            && !self.logging_in
+            && self.relogins < MAX_RELOGINS
+            && !self.start_sent
     }
 
     fn relogin(&mut self) -> Result<(), SessionError> {
@@ -428,6 +456,7 @@ impl<R: RandomSource> Session<R> {
             return Err(SessionError::Protocol("no login to repeat".into()));
         };
         self.relogins += 1;
+        self.started = None;
         let types = self.types.take();
         let enum_texts = std::mem::take(&mut self.enum_texts);
         let key = self.info.as_ref().and_then(|i| i.types.clone());
@@ -525,6 +554,37 @@ impl<R: RandomSource> Session<R> {
             ok: accept.contains(&resp.status),
         });
         Ok(resp)
+    }
+
+    pub(crate) fn call_once(
+        &mut self,
+        name: &'static str,
+        path: &str,
+        body: &[u8],
+    ) -> Result<Vec<u8>, SessionError> {
+        let sent = |e: SessionError| SessionError::Sent {
+            step: name,
+            error: e.to_string(),
+        };
+        let h = self.headers("application/xml", true, true);
+        let resp = self
+            .step_once(name, "POST", path, &h, body, &[200])
+            .map_err(sent)?;
+        let decoded = Self::decoded(&resp).map_err(sent)?;
+        if resp.status != 200 {
+            if !xml::is_exception(&decoded) {
+                return Err(SessionError::Sent {
+                    step: name,
+                    error: format!("HTTP {} without an exception of the server", resp.status),
+                });
+            }
+            return Err(SessionError::Step {
+                step: name,
+                status: resp.status,
+                message: xml::parse_exception(&decoded),
+            });
+        }
+        Ok(decoded)
     }
 
     fn accepted(
@@ -719,6 +779,9 @@ impl<R: RandomSource> Session<R> {
     }
 
     pub(crate) fn prologue(&mut self, with_types: bool) -> Result<Prologue, SessionError> {
+        if let Some(p) = self.started.take() {
+            return Ok(p);
+        }
         let info = self
             .info
             .clone()
@@ -944,9 +1007,20 @@ impl<R: RandomSource> Session<R> {
         cold: bool,
     ) -> Result<CallResult, SessionError> {
         let pro = self.prologue(cold)?;
-        let result = self.module_call(&pro, call, params)?;
+        let result = self.module_call(&pro, call, params, false)?;
         self.about()?;
         Ok(result)
+    }
+
+    pub fn start_call(&mut self, call: &str, params: &[Value]) -> Result<FormCall, SessionError> {
+        let pro = self.prologue(true)?;
+        self.start_sent = true;
+        let returned = self.module_call(&pro, call, params, true)?.ret;
+        self.started = Some(pro);
+        Ok(FormCall {
+            procedure: call.to_string(),
+            returned,
+        })
     }
 
     fn module_call(
@@ -954,6 +1028,7 @@ impl<R: RandomSource> Session<R> {
         pro: &Prologue,
         call: &str,
         params: &[Value],
+        once: bool,
     ) -> Result<CallResult, SessionError> {
         let conf = pro.conf.as_str();
         let modules = xml::parse_server_modules(&pro.defs)?;
@@ -978,16 +1053,18 @@ impl<R: RandomSource> Session<R> {
         let qid = percent_encode(&module_id);
 
         let call_body = body::zstd_compress(&xml::build_call_request(&func, params)?);
-        let h = self.headers("application/xml", true, true);
-        let resp = self.step(
-            "modules/call",
-            "POST",
-            &format!("/e1cib/modules/call?id={qid}"),
-            &h,
-            &call_body,
-            &[200],
-        )?;
-        let values = xml::parse_call_result(&Self::decoded(&resp)?)?;
+        let path = format!("/e1cib/modules/call?id={qid}");
+        let values = if once {
+            let answer = self.call_once("modules/call", &path, &call_body)?;
+            xml::parse_call_result(&answer).map_err(|e| SessionError::Sent {
+                step: "modules/call",
+                error: e.to_string(),
+            })?
+        } else {
+            let h = self.headers("application/xml", true, true);
+            let resp = self.step("modules/call", "POST", &path, &h, &call_body, &[200])?;
+            xml::parse_call_result(&Self::decoded(&resp)?)?
+        };
         let (ret, params) = (values.ret, values.params);
         Ok(CallResult {
             members,
@@ -1381,14 +1458,11 @@ impl<R: RandomSource> Session<R> {
     }
 
     pub fn run_report(&mut self, opts: ReportOptions) -> Result<ReportView, SessionError> {
-        let pro = self.prologue(true)?;
         let init = match opts.init {
-            Some((call, params)) => Some(FormCall {
-                procedure: call.to_string(),
-                returned: self.module_call(&pro, call, params)?.ret,
-            }),
+            Some((call, params)) => Some(self.start_call(call, params)?),
             None => None,
         };
+        let pro = self.prologue(true)?;
         let roles = self
             .info
             .as_ref()
@@ -1517,17 +1591,20 @@ impl<R: RandomSource> Session<R> {
                     dcs: Some(DcsView {
                         form: dcs_form,
                         details: Vec::new(),
+                        drilldown: None,
                     }),
                     ..Default::default()
                 });
             }
-            let (sheets, details) = self.compose(form, &dcs_form, d, opts.limits)?;
+            let (sheets, details, drilldown) =
+                self.compose(form, opts.form, &dcs_form, d, opts.limits)?;
             return Ok(ReportParts {
                 attributes,
                 sheets,
                 dcs: Some(DcsView {
                     form: dcs_form,
                     details,
+                    drilldown,
                 }),
                 ..Default::default()
             });
@@ -1651,17 +1728,16 @@ impl<R: RandomSource> Session<R> {
         states: &mut Vec<String>,
     ) -> Result<(Option<Value>, bool), SessionError> {
         let body = body::zstd_compress(&report::call_request_with(form, procedure, params, pchs)?);
-        let h = self.headers("application/xml", true, true);
-        let resp = self.step(
-            "logForm/call",
-            "POST",
-            "/e1cib/logForm?cmd=call",
-            &h,
-            &body,
-            &[200],
-        )?;
-        let answer = Self::decoded(&resp)?;
-        let returned = report::read_call_return(&answer)?;
+        let answer = self.call_once("logForm/call", "/e1cib/logForm?cmd=call", &body)?;
+        let returned = report::read_call_return(&answer).map_err(|e| match e {
+            e @ ReportError::Answer(crate::answer::AnswerError::Exception { .. }) => {
+                SessionError::from(e)
+            }
+            e => SessionError::Sent {
+                step: "logForm/call",
+                error: e.to_string(),
+            },
+        })?;
         *states = report::read_states(&answer);
         let changed = self.sheets_of(&answer, limits)?;
         let any = !changed.is_empty();
@@ -1724,16 +1800,21 @@ impl<R: RandomSource> Session<R> {
     fn compose(
         &mut self,
         form: &OpenedForm,
+        key: &str,
         dcs_form: &dcs::DcsForm,
         opts: DcsOptions,
         limits: SheetLimits,
-    ) -> Result<(Vec<ReportSheet>, Vec<dcs::DetailsItem>), SessionError> {
+    ) -> Result<ComposedReport, SessionError> {
         let types = if opts.changes.is_empty() {
             dcs::RefTypes::default()
         } else {
             dcs::RefTypes::new(&self.session_types("the values of the report settings")?)
         };
         let mut edits = dcs::resolve(dcs_form, opts.changes, &types)?;
+        if let Some(d) = opts.drilldown {
+            drilldown::parse_cell(d.cell)?;
+            dcs::available_field(dcs_form, d.field, "drill down")?;
+        }
         let mut failure = None;
         dcs::settle_searches(&mut edits, dcs_form, |clsid, text| {
             let body = body::zstd_compress(&dcs::search_request(clsid, text));
@@ -1756,35 +1837,38 @@ impl<R: RandomSource> Session<R> {
         })
         .map_err(|e| failure.take().unwrap_or(SessionError::Dcs(e)))?;
         let pchs = dcs_form.compose_pchs(&edits)?;
-        let body = body::zstd_compress(&report::call_request_with(
-            form,
-            dcs::COMPOSE_RESULT,
-            &dcs::compose_params(),
-            &pchs,
-        )?);
-        let h = self.headers("application/xml", true, true);
-        let resp = self.step(
-            "logForm/call",
-            "POST",
-            "/e1cib/logForm?cmd=call",
-            &h,
-            &body,
-            &[200],
-        )?;
-        let answer = Self::decoded(&resp)?;
-        let sheets = self.sheets_of(&answer, limits)?;
-        if sheets.is_empty() {
-            return Err(dcs::DcsError::NoDocument.into());
+        let (sheets, answer) = self.compose_result(form, &pchs, limits)?;
+        if let Some(d) = opts.drilldown {
+            return self.drill_down(
+                form,
+                key,
+                dcs_form,
+                (&sheets, &answer),
+                d,
+                opts.details,
+                limits,
+            );
         }
+        let details = if opts.details {
+            self.details_of(&sheets, &answer, limits)?
+        } else {
+            Vec::new()
+        };
+        Ok((sheets, details, None))
+    }
+
+    fn details_of(
+        &mut self,
+        sheets: &[ReportSheet],
+        answer: &[u8],
+        limits: SheetLimits,
+    ) -> Result<Vec<dcs::DetailsItem>, SessionError> {
         let mut details = std::collections::BTreeMap::new();
         let ids: Vec<u32> = sheets
             .iter()
             .flat_map(|s| s.sheet.cells.iter().filter_map(|c| c.details_id))
             .collect();
-        if let (true, Some(address)) = (
-            opts.details && !ids.is_empty(),
-            dcs::details_address(&answer)?,
-        ) {
+        if let (true, Some(address)) = (!ids.is_empty(), dcs::details_address(answer)?) {
             for (from, to) in dcs::details_intervals(ids, DETAILS_PER_REQUEST) {
                 let body = body::zstd_compress(&dcs::details_request(&address, from, to));
                 let h = self.headers("application/xml", true, true);
@@ -1802,8 +1886,112 @@ impl<R: RandomSource> Session<R> {
                 dcs::details_bound(details.len(), limits.cells)?;
             }
         }
-        let details = details.into_values().collect();
-        Ok((sheets, details))
+        Ok(details.into_values().collect())
+    }
+
+    fn compose_result(
+        &mut self,
+        form: &OpenedForm,
+        pchs: &str,
+        limits: SheetLimits,
+    ) -> Result<(Vec<ReportSheet>, Vec<u8>), SessionError> {
+        let body = body::zstd_compress(&report::call_request_with(
+            form,
+            dcs::COMPOSE_RESULT,
+            &dcs::compose_params(limits.rows),
+            pchs,
+        )?);
+        let mut answer = self.call_once("logForm/call", "/e1cib/logForm?cmd=call", &body)?;
+        let mut sheets = self.sheets_of(&answer, limits)?;
+        let started = std::time::Instant::now();
+        let mut waited = std::time::Duration::ZERO;
+        let mut pause = POLL_FIRST;
+        while sheets.is_empty() && dcs::generating(&answer) {
+            if waited.max(started.elapsed()) + pause > GENERATION_TIMEOUT {
+                return Err(dcs::DcsError::GenerationTimeout {
+                    seconds: GENERATION_TIMEOUT.as_secs(),
+                }
+                .into());
+            }
+            (self.sleep)(pause);
+            waited += pause;
+            pause = pause.mul_f64(POLL_FACTOR).min(GENERATION_PAUSE_MAX);
+            if started.elapsed() > GENERATION_TIMEOUT {
+                return Err(dcs::DcsError::GenerationTimeout {
+                    seconds: GENERATION_TIMEOUT.as_secs(),
+                }
+                .into());
+            }
+            let body = body::zstd_compress(&report::call_request_with(
+                form,
+                dcs::CHECK_BACKGROUND,
+                &[],
+                report::EMPTY_PCHS,
+            )?);
+            answer = self.call_once("logForm/call", "/e1cib/logForm?cmd=call", &body)?;
+            sheets = self.sheets_of(&answer, limits)?;
+        }
+        if sheets.is_empty() {
+            return Err(dcs::DcsError::NoDocument.into());
+        }
+        Ok((sheets, answer))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn drill_down(
+        &mut self,
+        form: &OpenedForm,
+        key: &str,
+        dcs_form: &dcs::DcsForm,
+        (sheets, answer): (&[ReportSheet], &[u8]),
+        d: DrillDownOptions,
+        details: bool,
+        limits: SheetLimits,
+    ) -> Result<ComposedReport, SessionError> {
+        let id = drilldown::details_id(sheets.iter().map(|s| &s.sheet), d.cell)?;
+        let field = dcs::available_field(dcs_form, d.field, "drill down")?;
+        let address = dcs::details_address(answer)?.ok_or(dcs::DcsError::NoDetailsData)?;
+        let report_type = dcs_form
+            .report_type
+            .as_deref()
+            .ok_or(dcs::DcsError::NoReportType)?;
+        let body = body::zstd_compress(&drilldown::start_request(
+            report_type,
+            &address,
+            id,
+            &form.fid,
+        ));
+        let h = self.headers("application/xml", true, true);
+        let resp = self.step(
+            "dcs/startDetailsProcessingExecute",
+            "POST",
+            drilldown::START,
+            &h,
+            &body,
+            &[200],
+        )?;
+        let menu = drilldown::read_start(&Self::decoded(&resp)?)?;
+        drilldown::check(&menu, &field)?;
+        let (details_form, _) =
+            self.open_form_with(&drilldown::open_request(key, &address, id, &field))?;
+        let outcome = self
+            .compose_result(&details_form, report::EMPTY_PCHS, limits)
+            .and_then(|(sheets, answer)| {
+                let items = if details {
+                    self.details_of(&sheets, &answer, limits)?
+                } else {
+                    Vec::new()
+                };
+                Ok((sheets, items))
+            });
+        let closed = self.close_form(&details_form.fid);
+        let (sheets, items) = outcome?;
+        closed?;
+        Ok((
+            sheets,
+            items,
+            Some(drilldown::DrillDown { id, field, menu }),
+        ))
     }
 
     fn sheets_of(
@@ -1826,8 +2014,11 @@ impl<R: RandomSource> Session<R> {
         for c in changed {
             let (sheet, rows_asked) = match c.changes {
                 SheetChanges::Full(sheet) => (sheet, false),
-                SheetChanges::WithoutContent { key, mut sheet } => {
-                    let rows: Vec<u32> = (0..sheet.height).collect();
+                SheetChanges::WithoutContent {
+                    key,
+                    mut sheet,
+                    rows,
+                } => {
                     for batch in rows.chunks(ROWS_PER_REQUEST) {
                         let body =
                             body::zstd_compress(&spreadsheet::row_contents_request(&key, batch));
